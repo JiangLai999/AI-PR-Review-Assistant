@@ -155,6 +155,16 @@ class StubChatProvider:
         return ["model-a", "model-b"]
 
 
+class ModelAwareChatProvider:
+    def __init__(self, config):
+        self.config = config
+
+    async def chat(self, messages, **kwargs):
+        from ai_pr_review.services.model_providers.base import ProviderResponse
+
+        return ProviderResponse(text=f"{self.config.model_name}: {messages[-1]['content']}")
+
+
 class FailingChatProvider:
     def __init__(self, config):
         self.config = config
@@ -796,6 +806,71 @@ def test_cli_chat_message_handles_provider_error(monkeypatch, tmp_path: Path):
     assert "模型服务不支持当前模型" in result.output
     assert "pr-review config model --name" in result.output
     assert "Traceback" not in result.output
+
+
+def test_cli_chat_slash_help_and_config(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(
+        cli_module, "create_model_provider", lambda config: StubChatProvider(config)
+    )
+    config = config_module.AppConfig.from_env()
+    config.ai_client = config_module.AIClientConfig(
+        provider="deepseek",
+        api_key="deepseek-key",
+        model="deepseek-chat",
+        base_url="https://api.deepseek.com/v1",
+        api_format="openai",
+    )
+    config.preferences = config_module.PreferencesConfig(
+        language="zh-CN",
+        ui_language="zh-CN",
+        chat_layout="plain",
+    )
+    config.save(config_path, save_key=True)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["chat", "--layout", "plain"], input="/help\n/config\n/exit\n")
+
+    assert result.exit_code == 0
+    assert "Chat Commands" in result.output
+    assert "/model <模型ID>" in result.output
+    assert "Chat Config" in result.output
+    assert '"model": "deepseek-chat"' in result.output
+
+
+def test_cli_chat_slash_model_switches_session_model(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(
+        cli_module, "create_model_provider", lambda config: ModelAwareChatProvider(config)
+    )
+    config = config_module.AppConfig.from_env()
+    config.ai_client = config_module.AIClientConfig(
+        provider="custom",
+        api_key="custom-key",
+        model="old-model",
+        base_url="https://example.com/v1",
+        api_format="openai",
+    )
+    config.provider = config_module.ProviderConfig.from_model_provider(
+        config.ai_client.model_provider
+    )
+    config.preferences = config_module.PreferencesConfig(chat_layout="plain")
+    config.save(config_path, save_key=True)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["chat", "--layout", "plain"],
+        input="/model new-model\nhello\n/exit\n",
+    )
+
+    assert result.exit_code == 0
+    assert "Active model set to: new-model" in result.output
+    assert "Assistant: new-model: hello" in result.output
 
 
 def test_cli_config_model_updates_active_model(monkeypatch, tmp_path: Path):
