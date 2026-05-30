@@ -9,6 +9,7 @@ import pytest
 
 from ai_pr_review.config import AIClientConfig, ConfigValidationError, ModelProviderConfig
 from ai_pr_review.services.ai_client import AIClient
+from ai_pr_review.services.exceptions import AIResponseFormatError
 from ai_pr_review.services.model_providers.anthropic import AnthropicProvider
 from ai_pr_review.services.model_providers.factory import create_model_provider
 from ai_pr_review.services.model_providers.openai import OpenAICompatibleProvider
@@ -132,3 +133,87 @@ def test_openai_compatible_provider_parses_response(monkeypatch):
     assert response.text == '{"summary":"ok","findings":[]}'
     assert response.input_tokens == 9
     assert response.output_tokens == 3
+
+
+def test_openai_compatible_provider_lists_models(monkeypatch):
+    provider = OpenAICompatibleProvider(
+        ModelProviderConfig.from_name(
+            "custom",
+            api_key="key",
+            base_url="https://example.com/v1",
+            model_name="custom-model",
+            api_format="openai",
+        )
+    )
+    requested_urls: list[str] = []
+
+    class DummyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "data": [
+                        {"id": "model-b"},
+                        {"id": "model-a"},
+                        {"id": "model-b"},
+                        "model-c",
+                    ]
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(req, **kwargs):
+        requested_urls.append(req.full_url)
+        return DummyResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    models = provider._list_models_sync(timeout_seconds=5)
+
+    assert requested_urls == ["https://example.com/v1/models"]
+    assert models == ["model-a", "model-b", "model-c"]
+
+
+def test_openai_compatible_provider_models_url_handles_chat_completions_base():
+    provider = OpenAICompatibleProvider(
+        ModelProviderConfig.from_name(
+            "custom",
+            api_key="key",
+            base_url="https://example.com/v1/chat/completions",
+            model_name="custom-model",
+            api_format="openai",
+        )
+    )
+
+    assert provider._models_url == "https://example.com/v1/models"
+
+
+def test_openai_compatible_provider_rejects_invalid_models_payload(monkeypatch):
+    provider = OpenAICompatibleProvider(
+        ModelProviderConfig.from_name(
+            "custom",
+            api_key="key",
+            base_url="https://example.com/v1",
+            model_name="custom-model",
+            api_format="openai",
+        )
+    )
+
+    class DummyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"object": "list"}).encode("utf-8")
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: DummyResponse())
+
+    with pytest.raises(AIResponseFormatError, match="data"):
+        provider._list_models_sync(timeout_seconds=5)
