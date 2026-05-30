@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path
 
 from ai_pr_review.config import ResultStoreConfig
@@ -200,10 +202,18 @@ class ResultStore:
                 """
             )
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self._db_path)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def _count_findings(self, result: ReviewResult) -> dict[str, int]:
         counts = {f"{severity}_findings": 0 for severity in SEVERITY_FIELDS}
