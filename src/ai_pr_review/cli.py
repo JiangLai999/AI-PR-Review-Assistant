@@ -918,6 +918,8 @@ def _chat_help_text() -> str:
     return (
         "/help - 显示可用聊天命令\n"
         "/config - 显示当前会话配置\n"
+        "/history - 显示最近 5 条审查历史\n"
+        "/stats - 显示审查统计\n"
         "/model <模型ID> - 仅本次会话切换模型\n"
         "/review <PR_URL> - 在当前会话中运行 PR 审查\n"
         "/clear - 清空当前会话历史\n"
@@ -955,6 +957,16 @@ def _handle_chat_slash_command(
         return True
     if command == "/config":
         console.print(Panel(_render_chat_config(config, layout), title="Chat Config", border_style="green"))
+        return True
+    if command == "/history":
+        store = ResultStore(config.result_store)
+        payload = {"runs": store.list_runs(limit=5)}
+        console.print(Panel(json.dumps(payload, ensure_ascii=False, indent=2), title="History", border_style="green"))
+        return True
+    if command == "/stats":
+        store = ResultStore(config.result_store)
+        payload = store.get_statistics()
+        console.print(Panel(json.dumps(payload, ensure_ascii=False, indent=2), title="Stats", border_style="green"))
         return True
     if command == "/clear":
         messages.clear()

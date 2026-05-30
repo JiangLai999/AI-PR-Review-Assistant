@@ -890,6 +890,32 @@ def test_cli_chat_slash_review_runs_pr_review(monkeypatch, tmp_path: Path):
     assert "Saved run " in result.output
 
 
+def test_cli_chat_slash_history_outputs_recent_runs(monkeypatch, tmp_path: Path):
+    install_success_stubs(monkeypatch)
+    configure_temp_app(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    runner.invoke(main, ["https://github.com/owner/repo/pull/42"])
+    result = runner.invoke(main, ["chat", "--layout", "plain"], input="/history\n/exit\n")
+
+    assert result.exit_code == 0
+    assert "History" in result.output
+    assert '"pr_url": "https://github.com/owner/repo/pull/42"' in result.output
+
+
+def test_cli_chat_slash_stats_outputs_aggregates(monkeypatch, tmp_path: Path):
+    install_success_stubs(monkeypatch)
+    configure_temp_app(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    runner.invoke(main, ["https://github.com/owner/repo/pull/42"])
+    result = runner.invoke(main, ["chat", "--layout", "plain"], input="/stats\n/exit\n")
+
+    assert result.exit_code == 0
+    assert "Stats" in result.output
+    assert '"total_runs": 1' in result.output
+
+
 def test_cli_config_model_updates_active_model(monkeypatch, tmp_path: Path):
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
