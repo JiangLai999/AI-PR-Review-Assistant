@@ -916,6 +916,60 @@ def test_cli_chat_slash_stats_outputs_aggregates(monkeypatch, tmp_path: Path):
     assert '"total_runs": 1' in result.output
 
 
+def test_cli_chat_persists_and_restores_session(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(
+        cli_module, "create_model_provider", lambda config: StubChatProvider(config)
+    )
+    config = config_module.AppConfig.from_env()
+    config.ai_client = config_module.AIClientConfig(
+        provider="deepseek",
+        api_key="deepseek-key",
+        model="deepseek-chat",
+        base_url="https://api.deepseek.com/v1",
+        api_format="openai",
+    )
+    config.preferences = config_module.PreferencesConfig(chat_layout="plain")
+    config.save(config_path, save_key=True)
+
+    runner = CliRunner()
+    first = runner.invoke(main, ["chat", "--layout", "plain"], input="你好\n/exit\n")
+    second = runner.invoke(main, ["chat", "--layout", "plain"], input="/exit\n")
+
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    assert "Restored 2 messages from the previous chat session." in second.output
+
+
+def test_cli_chat_clear_removes_persisted_session(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(
+        cli_module, "create_model_provider", lambda config: StubChatProvider(config)
+    )
+    config = config_module.AppConfig.from_env()
+    config.ai_client = config_module.AIClientConfig(
+        provider="deepseek",
+        api_key="deepseek-key",
+        model="deepseek-chat",
+        base_url="https://api.deepseek.com/v1",
+        api_format="openai",
+    )
+    config.preferences = config_module.PreferencesConfig(chat_layout="plain")
+    config.save(config_path, save_key=True)
+
+    runner = CliRunner()
+    runner.invoke(main, ["chat", "--layout", "plain"], input="你好\n/exit\n")
+    result = runner.invoke(main, ["chat", "--layout", "plain"], input="/clear\n/exit\n")
+
+    assert result.exit_code == 0
+    assert "Conversation cleared." in result.output
+    assert not (tmp_path / "chat_session.json").exists()
+
+
 def test_cli_config_model_updates_active_model(monkeypatch, tmp_path: Path):
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
