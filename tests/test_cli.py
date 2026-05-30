@@ -175,6 +175,16 @@ class FailingChatProvider:
         raise AIServiceError("模型供应商请求失败: HTTP 400 Not supported model bad-model")
 
 
+class FailingDiscoveryProvider:
+    def __init__(self, config):
+        self.config = config
+
+    async def list_models(self, **kwargs):
+        from ai_pr_review.services.exceptions import AIServiceError
+
+        raise AIServiceError("模型列表请求失败: HTTP 404 Not Found")
+
+
 def install_success_stubs(monkeypatch):
     monkeypatch.setattr("ai_pr_review.cli.PRFetcher", StubPRFetcher)
     monkeypatch.setattr("ai_pr_review.services.review_orchestrator.PRFetcher", StubPRFetcher)
@@ -1078,6 +1088,35 @@ def test_cli_config_models_discovers_and_sets_first(monkeypatch, tmp_path: Path)
     saved = config_module.AppConfig.load(config_path)
     assert saved.ai_client.model == "model-a"
     assert saved.provider.default_model == "model-a"
+
+
+def test_cli_config_models_failure_shows_fallback_hints(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(
+        cli_module, "create_model_provider", lambda config: FailingDiscoveryProvider(config)
+    )
+    config = config_module.AppConfig.from_env()
+    config.ai_client = config_module.AIClientConfig(
+        provider="custom",
+        api_key="custom-key",
+        model="mimo v2.5pro",
+        base_url="https://example.com/v1",
+        api_format="openai",
+    )
+    config.provider = config_module.ProviderConfig.from_model_provider(
+        config.ai_client.model_provider
+    )
+    config.save(config_path, save_key=True)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["config", "models"])
+
+    assert result.exit_code == 1
+    assert "Fallback 建议" in result.output
+    assert "pr-review config health --discover-models" in result.output
+    assert "pr-review config model --name" in result.output
 
 
 def test_cli_config_quick_wizard_saves_provider(monkeypatch, tmp_path: Path):
