@@ -17,6 +17,7 @@ from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 
 from ai_pr_review.chat_commands import handle_basic_chat_slash_command
+from ai_pr_review.chat_runtime import run_chat_session
 from ai_pr_review.chat_session import clear_chat_session, load_chat_session, save_chat_session
 from ai_pr_review.config_diagnostics import (
     build_health_check_output,
@@ -1526,43 +1527,34 @@ def chat_command(
     if model_name is not None:
         _set_active_model(config, model_name)
     active_layout = layout or getattr(config.preferences, "chat_layout", "compact")
-    messages = load_chat_session(config_path)
-    console.print(Panel("输入 /exit 退出。", title=_chat_title(config), border_style="cyan"))
-    if messages:
-        console.print(f"Restored {len(messages)} messages from the previous chat session.")
+    
+    def print_chat_message(local_console: Console, role: str, text: str) -> None:
+        _print_chat_message(local_console, role, text, layout=active_layout)
 
-    def send_once(user_text: str) -> None:
-        messages.append({"role": "user", "content": user_text})
-        _print_chat_message(console, "You", user_text, layout=active_layout)
+    def send_message(messages: list[dict[str, Any]], user_text: str) -> str | None:
         try:
             answer = asyncio.run(_send_chat_message(config, messages))
         except AIClientError as exc:
-            messages.pop()
             console.print(Panel(_format_chat_error(exc, config), title="Error", border_style="red"))
-            return
+            return None
         except click.ClickException as exc:
-            messages.pop()
             console.print(Panel(str(exc), title="Error", border_style="red"))
-            return
-        messages.append({"role": "assistant", "content": answer})
-        save_chat_session(config_path, messages)
-        _print_chat_message(console, "Assistant", answer, layout=active_layout)
+            return None
+        return answer
 
-    if message is not None:
-        send_once(message)
-        return
-
-    while True:
-        user_text = Prompt.ask("You", console=console).strip()
-        if user_text.lower() in {"/exit", "exit", "quit", "q"}:
-            break
-        if not user_text:
-            continue
-        if user_text.startswith("/") and _handle_chat_slash_command(
-            console, config, config_path, messages, user_text, active_layout
-        ):
-            continue
-        send_once(user_text)
+    run_chat_session(
+        console,
+        config=config,
+        config_path=config_path,
+        active_layout=active_layout,
+        message=message,
+        load_session=load_chat_session,
+        save_session=save_chat_session,
+        chat_title=_chat_title,
+        print_chat_message=print_chat_message,
+        slash_handler=_handle_chat_slash_command,
+        send_message=send_message,
+    )
 
 
 @main.command("stats")
