@@ -888,6 +888,28 @@ async def _discover_remote_models(config: AppConfig) -> list[str]:
     return await provider.list_models(timeout_seconds=config.ai_client.timeout_seconds)
 
 
+def _build_provider_health_payload(
+    config: AppConfig,
+    *,
+    config_path: Path | None,
+    discovered_models: list[str] | None = None,
+) -> dict[str, Any]:
+    provider = config.ai_client.model_provider
+    payload: dict[str, Any] = {
+        "config_path": str(resolve_config_path(config_path)),
+        "provider": provider.name,
+        "display_name": provider.display_name,
+        "model": provider.model_name,
+        "base_url": provider.base_url,
+        "api_format": provider.api_format,
+        "api_key_present": bool(provider.api_key),
+    }
+    if discovered_models is not None:
+        payload["discovered_model_count"] = len(discovered_models)
+        payload["discovered_models"] = discovered_models
+    return payload
+
+
 def _print_chat_message(console: Console, role: str, text: str, *, layout: str) -> None:
     """打印聊天消息，支持 plain/compact/split 三种布局。"""
     if layout == "plain":
@@ -1467,6 +1489,45 @@ def config_test(ctx: click.Context) -> None:
     click.echo(f"Default output format: {config.preferences.output_format}")
     if provider.risk_warning is not None:
         click.echo(provider.risk_warning)
+
+
+@config_command.command("health")
+@click.option(
+    "--discover-models",
+    is_flag=True,
+    help="Try provider model discovery through the remote /models endpoint.",
+)
+@click.pass_context
+def config_health(ctx: click.Context, discover_models: bool) -> None:
+    """Check whether the configured provider is ready to use."""
+    config_path = _config_path_from_context(ctx)
+    config = AppConfig.load(config_path)
+    provider = config.provider.to_model_provider()
+    try:
+        provider.validate()
+    except ConfigValidationError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not provider.api_key:
+        raise click.ClickException(_missing_api_key_message(provider.name))
+
+    discovered_models: list[str] | None = None
+    if discover_models:
+        try:
+            discovered_models = asyncio.run(_discover_remote_models(config))
+        except AIClientError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+    click.echo(
+        json.dumps(
+            _build_provider_health_payload(
+                config,
+                config_path=config_path,
+                discovered_models=discovered_models,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 @config_command.command("model")
