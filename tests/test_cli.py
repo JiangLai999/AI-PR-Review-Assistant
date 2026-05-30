@@ -873,6 +873,23 @@ def test_cli_chat_slash_model_switches_session_model(monkeypatch, tmp_path: Path
     assert "Assistant: new-model: hello" in result.output
 
 
+def test_cli_chat_slash_review_runs_pr_review(monkeypatch, tmp_path: Path):
+    install_success_stubs(monkeypatch)
+    config = configure_temp_app(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        ["chat", "--layout", "plain"],
+        input="/review https://github.com/owner/repo/pull/42\n/exit\n",
+    )
+
+    assert result.exit_code == 0
+    assert config.report_renderer.title in result.output
+    assert "Total Findings: 1" in result.output
+    assert "Saved run " in result.output
+
+
 def test_cli_config_model_updates_active_model(monkeypatch, tmp_path: Path):
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
