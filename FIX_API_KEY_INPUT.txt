@@ -1,0 +1,92 @@
+请修复 API Key 输入显示问题。
+
+## 问题
+
+用户输入 API Key 时没有任何显示反馈，不知道是否输入成功。
+
+## 修复要求
+
+1. 输入 API Key 时显示 * 号作为反馈
+2. 或者显示输入的字符数量
+3. 确保用户知道输入是否成功
+
+## 具体方案
+
+### 方案 1：显示 * 号
+
+```python
+import sys
+
+def input_with_mask(prompt: str) -> str:
+    """输入时显示 * 号"""
+    print(prompt, end='', flush=True)
+    password = []
+    while True:
+        ch = msvcrt.getch()
+        if ch == b'\r':  # Enter
+            print()
+            break
+        elif ch == b'\x08':  # Backspace
+            if password:
+                password.pop()
+                sys.stdout.write('\b \b')
+                sys.stdout.flush()
+        else:
+            password.append(ch.decode('utf-8'))
+            sys.stdout.write('*')
+            sys.stdout.flush()
+    return ''.join(password)
+```
+
+### 方案 2：显示输入长度
+
+```python
+def input_with_length(prompt: str) -> str:
+    """输入时显示长度"""
+    print(prompt, end='', flush=True)
+    password = []
+    while True:
+        ch = msvcrt.getch()
+        if ch == b'\r':  # Enter
+            print()
+            break
+        elif ch == b'\x08':  # Backspace
+            if password:
+                password.pop()
+                sys.stdout.write('\b \b')
+                sys.stdout.flush()
+        else:
+            password.append(ch.decode('utf-8'))
+            sys.stdout.write('*')
+            sys.stdout.flush()
+    print(f"已输入 {len(password)} 个字符")
+    return ''.join(password)
+```
+
+### 方案 3：使用 getpass 模块
+
+```python
+import getpass
+
+api_key = getpass.getpass("请输入 API Key: ")
+```
+
+### 方案 4：使用 click 的 hide_input 但添加反馈
+
+```python
+import click
+
+@click.command()
+def input_api_key():
+    api_key = click.prompt("请输入 API Key", hide_input=True)
+    click.echo(f"✓ 已输入 API Key（{len(api_key)} 个字符）")
+```
+
+## 推荐方案
+
+使用方案 4，因为：
+1. 保持安全性（隐藏输入）
+2. 提供反馈（显示长度）
+3. 使用标准库（click）
+
+请实现这个修复。

@@ -1,0 +1,49 @@
+请修复 AI PR Review 助手配置向导的两个问题。
+
+## 问题 1：输入 API Key 时无法粘贴
+
+当前使用 Rich 的 Prompt.ask() 输入 API Key，但在某些终端中无法粘贴。
+
+## 问题 2：删除模型供应商的价格列表
+
+用户不希望显示价格列表，需要简化供应商选择界面。
+
+## 修复要求
+
+1. 修复 API Key 输入，支持粘贴
+2. 简化供应商选择界面，删除价格列
+3. 保持界面美观
+
+## 具体修改
+
+### 1. 修复 API Key 输入
+
+使用 click.prompt() 替代 Rich 的 Prompt.ask()，或者使用 getpass 模块：
+
+```python
+import click
+
+api_key = click.prompt("请输入 API Key", hide_input=True)
+```
+
+或者：
+
+```python
+import getpass
+
+api_key = getpass.getpass("请输入 API Key: ")
+```
+
+### 2. 简化供应商表格
+
+删除价格列，只保留序号、供应商名称、类型、推荐度：
+
+```python
+table = Table(show_header=True, header_style="bold magenta")
+table.add_column("序号", style="dim")
+table.add_column("供应商", style="bold")
+table.add_column("类型")
+table.add_column("推荐")
+```
+
+请实现这些修复。

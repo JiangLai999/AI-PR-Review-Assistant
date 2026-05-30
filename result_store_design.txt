@@ -1,0 +1,83 @@
+请实现 AI PR Review 助手的 Result Store 模块。
+
+## 模块职责
+
+1. 存储 ReviewResult（JSON）
+2. run_history 表
+3. 查询和统计
+4. 支持 SQLite WAL 模式
+
+## 核心接口
+
+```python
+class ResultStore:
+    def __init__(self, config: ResultStoreConfig):
+        pass
+
+    def save_result(self, pr_url: str, result: ReviewResult) -> str:
+        """保存 Review 结果，返回 run_id"""
+        pass
+
+    def get_result(self, run_id: str) -> ReviewResult | None:
+        """获取 Review 结果"""
+        pass
+
+    def list_runs(self, pr_url: str | None = None, limit: int = 10) -> list[dict]:
+        """列出历史运行"""
+        pass
+
+    def get_statistics(self) -> dict:
+        """获取统计信息"""
+        pass
+```
+
+## 数据库设计
+
+### runs 表
+
+```sql
+CREATE TABLE runs (
+    id TEXT PRIMARY KEY,
+    pr_url TEXT NOT NULL,
+    pr_number INTEGER,
+    repo_owner TEXT,
+    repo_name TEXT,
+    head_sha TEXT,
+    total_files INTEGER,
+    included_files INTEGER,
+    excluded_files INTEGER,
+    total_findings INTEGER,
+    critical_findings INTEGER,
+    high_findings INTEGER,
+    medium_findings INTEGER,
+    low_findings INTEGER,
+    info_findings INTEGER,
+    total_cost REAL,
+    duration_seconds REAL,
+    model TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    result_json TEXT
+);
+```
+
+## 配置
+
+```python
+@dataclass
+class ResultStoreConfig:
+    db_path: str = "~/.ai_pr_review/results.db"
+    max_results: int = 1000  # 最大保存数量
+```
+
+## 要求
+
+1. 使用 SQLite WAL 模式
+2. 支持 JSON 存储
+3. 支持查询和统计
+4. 创建以下文件：
+   - src/ai_pr_review/services/result_store.py
+   - src/ai_pr_review/config.py（更新）
+   - tests/test_result_store.py
+5. 确保测试通过
+
+请开始实现！

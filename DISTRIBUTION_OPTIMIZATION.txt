@@ -1,0 +1,52 @@
+请设计 AI PR Review 助手的分发方案，让用户可以用一行命令下载和安装。
+
+## 当前需求
+
+项目需要上传到 GitHub，用户希望用一行命令下载和安装。
+
+## 可选方案
+
+### 方案 1：pip install 从 PyPI 安装
+```bash
+pip install ai-pr-review
+```
+
+### 方案 2：pip install 从 GitHub 安装
+```bash
+pip install git+https://github.com/JiangLai999/AI-PR-Review-.git
+```
+
+### 方案 3：curl 下载安装脚本
+```bash
+curl -sSL https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-/main/install.sh | bash
+```
+
+### 方案 4：gh CLI 安装
+```bash
+gh repo clone JiangLai999/AI-PR-Review-
+cd AI-PR-Review-
+./install.sh
+```
+
+### 方案 5：pipx 安装（推荐 CLI 工具）
+```bash
+pipx install ai-pr-review
+```
+
+## 需要创建的文件
+
+1. install.sh - Linux/Mac 安装脚本
+2. install.ps1 - Windows PowerShell 安装脚本
+3. pyproject.toml - 更新 PyPI 发布配置
+4. README.md - 添加多种安装方式
+5. .github/workflows/release.yml - 自动发布到 PyPI
+
+## 设计要求
+
+1. 支持多种安装方式
+2. 一行命令完成安装
+3. 自动检测操作系统
+4. 自动配置环境
+5. 支持 PyPI 和 GitHub 两种来源
+
+请设计最佳的分发方案，确保用户可以简单方便地安装使用。

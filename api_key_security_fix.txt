@@ -1,0 +1,31 @@
+请修复 AI PR Review 助手的 API Key 安全问题。
+
+## 问题描述
+
+1. API Key 明文保存到配置文件
+2. config show 明文输出 API Key
+3. 存在密钥泄露风险
+
+## 修复要求
+
+1. 默认不持久化 API Key，只从环境变量读取
+2. config show 必须掩码输出（如 sk-***abcd）
+3. 显式 --save-key 才允许保存到文件
+4. 保存文件前给出警告
+5. 补充相关测试
+
+## 需要修改的文件
+
+1. src/ai_pr_review/config.py - 配置保存逻辑
+2. src/ai_pr_review/cli.py - config show 命令
+3. tests/test_cli.py - 相关测试
+
+## 具体实现
+
+1. 添加 mask_api_key 函数
+2. 修改 AppConfig.save() 方法，添加 save_key 参数
+3. 修改 config show 命令，掩码输出 API Key
+4. 添加 --save-key 选项
+5. 补充测试
+
+请实现这些修改，并确保所有测试通过。

@@ -1,0 +1,38 @@
+name: General feedback
+description: Share feedback about review quality, usability, or workflow fit
+title: "[Feedback] "
+labels:
+  - feedback
+body:
+  - type: dropdown
+    id: category
+    attributes:
+      label: Feedback category
+      options:
+        - Review quality
+        - CLI usability
+        - Model/provider configuration
+        - Performance
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: Describe what you were trying to do.
+    validations:
+      required: true
+  - type: textarea
+    id: feedback
+    attributes:
+      label: Feedback
+      description: What worked well, and what should improve?
+    validations:
+      required: true
+  - type: textarea
+    id: examples
+    attributes:
+      label: Example output or screenshots
+      description: Optional supporting material.

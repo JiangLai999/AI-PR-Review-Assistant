@@ -1,0 +1,25 @@
+请修复 AI PR Review 助手的 GitHub Comment 渲染路径问题。
+
+## 问题描述
+
+专用渲染器存在但未使用：
+- report_renderer.py 有 render_github_comment 方法
+- 但 --publish-comment 实际用的是 Markdown 渲染
+
+## 修复要求
+
+1. 发布评论路径切到专用渲染器
+2. 补 CLI 测试
+
+## 需要修改的文件
+
+1. src/ai_pr_review/cli.py - 切换渲染路径
+2. tests/test_cli.py - 补测试
+
+## 具体修改
+
+1. 在 cli.py 的 publish_comment 逻辑中，调用 render_github_comment 而不是 render_markdown
+2. 补充测试验证 --publish-comment 使用正确的渲染器
+3. 确保渲染结果符合 GitHub Comment 格式
+
+请实现这些修改，并确保所有测试通过。

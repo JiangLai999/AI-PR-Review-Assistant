@@ -1,0 +1,6 @@
+{
+  "provider": {
+    "api_key": ""
+  },
+  "_note": "Do not commit this file after copying it to config.local.json. Recommended: set DEEPSEEK_API_KEY or AI_PR_REVIEW_API_KEY instead."
+}

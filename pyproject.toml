@@ -1,0 +1,72 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ai-pr-review"
+version = "0.1.0"
+description = "AI-powered GitHub PR review assistant"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+    { name = "AI PR Review Assistant Contributors" },
+]
+keywords = ["ai", "cli", "code-review", "github", "pull-request"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "PyGithub>=2.5",
+    "anthropic>=0.52.0",
+    "pydantic>=2.0",
+    "click>=8.0",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.2",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+    "black>=24.0",
+    "isort>=5.13",
+    "mypy>=1.10",
+    "twine>=5.1",
+]
+
+[project.urls]
+Documentation = "https://github.com/JiangLai999/AI-PR-Review-/blob/main/README.md"
+Changelog = "https://github.com/JiangLai999/AI-PR-Review-/blob/main/CHANGELOG.md"
+Issues = "https://github.com/JiangLai999/AI-PR-Review-/issues"
+
+[project.scripts]
+pr-review = "ai_pr_review.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_pr_review"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "--cov=ai_pr_review --cov-report=term-missing"
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true

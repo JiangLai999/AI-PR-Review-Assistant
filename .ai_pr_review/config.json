@@ -1,0 +1,31 @@
+{
+  "provider": {
+    "name": "deepseek",
+    "display_name": "DeepSeek",
+    "base_url": "https://api.deepseek.com/v1",
+    "api_format": "openai",
+    "models": {
+      "deepseek-chat": {
+        "name": "deepseek-chat",
+        "context_window": 32768,
+        "max_output": 4096
+      },
+      "deepseek-coder": {
+        "name": "deepseek-coder",
+        "context_window": 32768,
+        "max_output": 4096
+      },
+      "deepseek-v3": {
+        "name": "deepseek-v3",
+        "context_window": 65536,
+        "max_output": 8192
+      }
+    },
+    "default_model": "deepseek-chat"
+  },
+  "preferences": {
+    "output_format": "terminal",
+    "language": "zh-CN",
+    "auto_publish_comment": false
+  }
+}

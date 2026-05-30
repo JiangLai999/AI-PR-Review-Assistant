@@ -1,0 +1,46 @@
+请审查以下 AI PR Review 助手的 Filter Pipeline 模块设计方案。
+
+## 当前设计
+
+```python
+SKIP_PATTERNS = [
+    r"**/test/**", r"**/__test__/**", r"**/*.test.*", r"**/*.spec.*",
+    r"docs/**", r"**/*.md", r"**/*.rst",
+    r"**/.github/**",
+    r"**/CHANGELOG*", r"**/LICENSE*",
+    r"**/*.json", r"**/*.lock", r"**/*.yml", r"**/*.yaml",
+]
+
+def should_skip_file(file_path: str, diff_stats: dict) -> bool:
+    """判断是否跳过该文件"""
+    # 1. 匹配跳过模式
+    if any(fnmatch(file_path, pattern) for pattern in SKIP_PATTERNS):
+        return True
+
+    # 2. 纯删除文件
+    if diff_stats.get("deletions", 0) > 0 and diff_stats.get("additions", 0) == 0:
+        return True
+
+    # 3. 变更行数过多（可能是生成文件）
+    if diff_stats.get("changes", 0) > 500:
+        return True
+
+    return False
+```
+
+## 请你回答：
+
+1. **这个设计是否合理？** 有没有遗漏的重要过滤规则？
+
+2. **是否需要调整？** 比如：
+   - 是否应该支持白名单（强制包含某些文件）？
+   - 是否应该支持按语言过滤？
+   - 是否应该支持自定义规则？
+
+3. **实现细节** 这个设计应该如何实现为一个完整的类？
+
+4. **单元测试** 应该如何测试这个模块？
+
+5. **与 PR Fetcher 的集成** 如何与 PR Fetcher 模块集成？
+
+请给出你的审查意见和建议的改进方案。

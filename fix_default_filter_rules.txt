@@ -1,0 +1,29 @@
+请修复 AI PR Review 助手的默认过滤规则问题。
+
+## 问题描述
+
+默认过滤规则不完整：
+- tests/、test_*.py 未默认排除
+- 测试代码可能被送去 AI 审查，增加成本和噪音
+
+## 修复要求
+
+1. 扩展默认 pattern
+2. 补测试
+
+## 需要修改的文件
+
+1. src/ai_pr_review/config.py - 扩展默认规则
+2. tests/test_filter_pipeline.py - 补测试
+
+## 具体修改
+
+1. 在 DEFAULT_FILTER_EXCLUDE_PATTERNS 中添加：
+   - tests/**
+   - **/tests/**
+   - test_*.py
+   - **/test_*.py
+
+2. 补充测试验证这些规则生效
+
+请实现这些修改，并确保所有测试通过。

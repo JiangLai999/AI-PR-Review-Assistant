@@ -1,0 +1,28 @@
+请修复 AI PR Review 助手的重复 API 调用问题。
+
+## 问题描述
+
+PRFetcher._fetch_files() 文件列表拉取两次：
+1. 先调用 list(pr.get_files())
+2. 又调用 _paginate_files(pr)
+
+前者结果 raw_files 完全没被用到，等于文件列表完整拉了两次。
+
+## 修复要求
+
+1. 删除冗余请求
+2. 只保留一种分页策略
+3. 补调用次数测试
+
+## 需要修改的文件
+
+1. src/ai_pr_review/services/pr_fetcher.py - 删除冗余请求
+2. tests/test_pr_fetcher.py - 补调用次数测试
+
+## 具体修改
+
+1. 在 _fetch_files() 方法中，删除 raw_files 的获取
+2. 只保留 _paginate_files() 调用
+3. 补充测试验证 API 调用次数
+
+请实现这些修改，并确保所有测试通过。

@@ -1,0 +1,65 @@
+请实现 AI PR Review 助手的 Context Builder 模块。
+
+## 模块职责
+
+1. 构建文件上下文（diff + 前后 10 行）
+2. tree-sitter AST 提取（imports, functions, classes）
+3. 三级 fallback（tree-sitter → regex → 纯 diff）
+4. 支持多语言（Python, JavaScript, TypeScript）
+
+## 核心接口
+
+```python
+class ContextBuilder:
+    def __init__(self, config: ContextBuilderConfig):
+        pass
+
+    def build_context(self, file_path: str, diff: str, full_content: str) -> FileContext:
+        """构建文件上下文"""
+        pass
+
+    def extract_ast_context(self, file_path: str, content: str, language: str) -> ASTContext:
+        """tree-sitter 提取 AST 上下文（三级 fallback）"""
+        pass
+```
+
+## 数据模型
+
+```python
+class FileContext(BaseModel):
+    file_path: str
+    language: str
+    diff: str
+    diff_with_context: str
+    imports: list[str]
+    functions: list[FunctionInfo]
+    classes: list[ClassInfo]
+    parse_mode: str  # "tree_sitter" | "regex" | "fallback"
+
+class FunctionInfo(BaseModel):
+    name: str
+    start_line: int
+    end_line: int
+    parameters: list[str]
+    return_type: str | None
+    is_async: bool
+
+class ClassInfo(BaseModel):
+    name: str
+    start_line: int
+    end_line: int
+    methods: list[str]
+    parent_classes: list[str]
+```
+
+## 要求
+
+1. 实现完整的类设计
+2. 支持三级 fallback
+3. 创建以下文件：
+   - src/ai_pr_review/services/context_builder.py
+   - src/ai_pr_review/config.py（更新）
+   - tests/test_context_builder.py
+4. 确保测试通过
+
+请开始实现！

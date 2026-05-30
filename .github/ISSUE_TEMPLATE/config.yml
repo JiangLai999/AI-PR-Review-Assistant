@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Usage and release documentation
+    url: https://github.com/JiangLai999/AI-PR-Review-/blob/main/README.md
+    about: Check setup, CLI usage, and release guidance before opening an issue.

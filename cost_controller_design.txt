@@ -1,0 +1,79 @@
+请实现 AI PR Review 助手的 Cost Controller 模块。
+
+## 模块职责
+
+1. 全局硬上限（$5/run）
+2. 滑动窗口（24h 累计 ≤ $50）
+3. 实时 token 计数
+4. 接近上限提前终止
+5. 成本统计和报告
+
+## 核心接口
+
+```python
+class CostController:
+    def __init__(self, config: CostControllerConfig):
+        pass
+
+    def check_budget(self, estimated_cost: float) -> bool:
+        """检查是否有足够预算"""
+        pass
+
+    def record_usage(self, input_tokens: int, output_tokens: int, model: str):
+        """记录 API 使用量"""
+        pass
+
+    def get_total_cost(self) -> float:
+        """获取总成本"""
+        pass
+
+    def get_daily_cost(self) -> float:
+        """获取 24h 成本"""
+        pass
+
+    def reset(self):
+        """重置计数器"""
+        pass
+```
+
+## 成本计算
+
+### Claude Sonnet 价格
+- Input: $3/M tokens
+- Output: $15/M tokens
+
+### 预算限制
+- 单次运行：$5
+- 24h 滑动窗口：$50
+
+## 数据结构
+
+```python
+@dataclass
+class UsageRecord:
+    timestamp: float
+    input_tokens: int
+    output_tokens: int
+    model: str
+    cost: float
+
+@dataclass
+class CostControllerConfig:
+    run_limit: float = 5.0  # 单次运行上限
+    daily_limit: float = 50.0  # 24h 上限
+    warning_threshold: float = 0.8  # 80% 时警告
+```
+
+## 要求
+
+1. 实现完整的 CostController 类
+2. 支持滑动窗口（24h）
+3. 支持预算检查
+4. 支持成本统计
+5. 创建以下文件：
+   - src/ai_pr_review/services/cost_controller.py
+   - src/ai_pr_review/config.py（更新）
+   - tests/test_cost_controller.py
+6. 确保测试通过
+
+请开始实现！
