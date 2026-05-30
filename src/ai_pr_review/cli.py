@@ -914,6 +914,61 @@ def _active_config_has_saved_api_key(config_path: Path | None) -> bool:
     )
 
 
+def _chat_help_text() -> str:
+    return (
+        "/help - 显示可用聊天命令\n"
+        "/config - 显示当前会话配置\n"
+        "/model <模型ID> - 仅本次会话切换模型\n"
+        "/clear - 清空当前会话历史\n"
+        "/exit - 退出聊天"
+    )
+
+
+def _render_chat_config(config: AppConfig, layout: str) -> str:
+    return json.dumps(
+        {
+            "provider": config.ai_client.provider,
+            "model": config.ai_client.model,
+            "base_url": config.ai_client.base_url,
+            "response_language": config.preferences.language,
+            "layout": layout,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _handle_chat_slash_command(
+    console: Console,
+    config: AppConfig,
+    messages: list[dict[str, Any]],
+    command_text: str,
+    layout: str,
+) -> bool:
+    parts = command_text.split(maxsplit=1)
+    command = parts[0].lower()
+    argument = parts[1].strip() if len(parts) > 1 else ""
+
+    if command == "/help":
+        console.print(Panel(_chat_help_text(), title="Chat Commands", border_style="cyan"))
+        return True
+    if command == "/config":
+        console.print(Panel(_render_chat_config(config, layout), title="Chat Config", border_style="green"))
+        return True
+    if command == "/clear":
+        messages.clear()
+        console.print("Conversation cleared.")
+        return True
+    if command == "/model":
+        if not argument:
+            console.print("Usage: /model <模型ID>", style="bold red")
+            return True
+        _set_active_model(config, argument)
+        console.print(f"Active model set to: {config.ai_client.model}")
+        return True
+    return False
+
+
 def _build_project_config_payload(
     provider_name: str,
     *,
@@ -1579,6 +1634,10 @@ def chat_command(
         if user_text.lower() in {"/exit", "exit", "quit", "q"}:
             break
         if not user_text:
+            continue
+        if user_text.startswith("/") and _handle_chat_slash_command(
+            console, config, messages, user_text, active_layout
+        ):
             continue
         send_once(user_text)
 
