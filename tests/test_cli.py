@@ -766,7 +766,8 @@ def test_cli_config_health_can_discover_models(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(
-        cli_module, "create_model_provider", lambda config: StubChatProvider(config)
+        "ai_pr_review.provider_diagnostics.create_model_provider",
+        lambda config: StubChatProvider(config),
     )
     config = config_module.AppConfig.from_env()
     config.ai_client = config_module.AIClientConfig(
@@ -795,7 +796,8 @@ def test_cli_config_health_probe_reports_connectivity(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(
-        cli_module, "create_model_provider", lambda config: ProbeSuccessProvider(config)
+        "ai_pr_review.provider_diagnostics.create_model_provider",
+        lambda config: ProbeSuccessProvider(config),
     )
     config = config_module.AppConfig.from_env()
     config.ai_client = config_module.AIClientConfig(
@@ -824,7 +826,8 @@ def test_cli_config_health_probe_failure_returns_error(monkeypatch, tmp_path: Pa
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(
-        cli_module, "create_model_provider", lambda config: ProbeFailingProvider(config)
+        "ai_pr_review.provider_diagnostics.create_model_provider",
+        lambda config: ProbeFailingProvider(config),
     )
     config = config_module.AppConfig.from_env()
     config.ai_client = config_module.AIClientConfig(
@@ -890,9 +893,7 @@ def test_cli_chat_message_uses_configured_provider(monkeypatch, tmp_path: Path):
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
-    monkeypatch.setattr(
-        cli_module, "create_model_provider", lambda config: StubChatProvider(config)
-    )
+    monkeypatch.setattr(cli_module, "create_model_provider", lambda config: StubChatProvider(config))
     config = config_module.AppConfig.from_env()
     config.ai_client = config_module.AIClientConfig(
         provider="deepseek",
@@ -951,9 +952,7 @@ def test_cli_chat_slash_help_and_config(monkeypatch, tmp_path: Path):
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
-    monkeypatch.setattr(
-        cli_module, "create_model_provider", lambda config: StubChatProvider(config)
-    )
+    monkeypatch.setattr(cli_module, "create_model_provider", lambda config: StubChatProvider(config))
     config = config_module.AppConfig.from_env()
     config.ai_client = config_module.AIClientConfig(
         provider="deepseek",
@@ -1059,9 +1058,7 @@ def test_cli_chat_persists_and_restores_session(monkeypatch, tmp_path: Path):
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
-    monkeypatch.setattr(
-        cli_module, "create_model_provider", lambda config: StubChatProvider(config)
-    )
+    monkeypatch.setattr(cli_module, "create_model_provider", lambda config: StubChatProvider(config))
     config = config_module.AppConfig.from_env()
     config.ai_client = config_module.AIClientConfig(
         provider="deepseek",
@@ -1087,7 +1084,8 @@ def test_cli_chat_clear_removes_persisted_session(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(
-        cli_module, "create_model_provider", lambda config: StubChatProvider(config)
+        "ai_pr_review.provider_diagnostics.create_model_provider",
+        lambda config: StubChatProvider(config),
     )
     config = config_module.AppConfig.from_env()
     config.ai_client = config_module.AIClientConfig(
@@ -1141,7 +1139,8 @@ def test_cli_config_models_discovers_and_sets_first(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(
-        cli_module, "create_model_provider", lambda config: StubChatProvider(config)
+        "ai_pr_review.provider_diagnostics.create_model_provider",
+        lambda config: StubChatProvider(config),
     )
     config = config_module.AppConfig.from_env()
     config.ai_client = config_module.AIClientConfig(
@@ -1171,7 +1170,8 @@ def test_cli_config_models_failure_shows_fallback_hints(monkeypatch, tmp_path: P
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(
-        cli_module, "create_model_provider", lambda config: FailingDiscoveryProvider(config)
+        "ai_pr_review.provider_diagnostics.create_model_provider",
+        lambda config: FailingDiscoveryProvider(config),
     )
     config = config_module.AppConfig.from_env()
     config.ai_client = config_module.AIClientConfig(

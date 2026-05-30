@@ -34,6 +34,12 @@ from ai_pr_review.config import (
     mask_api_key,
     resolve_config_path,
 )
+from ai_pr_review.provider_diagnostics import (
+    build_model_discovery_fallback_message,
+    build_provider_health_payload,
+    discover_remote_models,
+    probe_provider_connection,
+)
 from ai_pr_review.services.exceptions import AIClientError, PRFetcherError
 from ai_pr_review.services.model_providers.factory import create_model_provider
 from ai_pr_review.services.pr_fetcher import PRFetcher
@@ -879,66 +885,6 @@ async def _send_chat_message(config: AppConfig, messages: list[dict[str, Any]]) 
     return response.text
 
 
-async def _discover_remote_models(config: AppConfig) -> list[str]:
-    """通过 provider 的 /models 接口自动发现可用模型列表。"""
-    provider_config = config.ai_client.model_provider
-    if not provider_config.api_key:
-        raise click.ClickException(_missing_api_key_message(provider_config.name))
-    provider = create_model_provider(provider_config)
-    return await provider.list_models(timeout_seconds=config.ai_client.timeout_seconds)
-
-
-async def _probe_provider_connection(config: AppConfig) -> str:
-    provider_config = config.ai_client.model_provider
-    if not provider_config.api_key:
-        raise click.ClickException(_missing_api_key_message(provider_config.name))
-    provider = create_model_provider(provider_config)
-    response = await provider.chat(
-        [{"role": "user", "content": "ping"}],
-        system_prompt="Reply with a short connectivity confirmation.",
-        max_tokens=16,
-        timeout_seconds=config.ai_client.timeout_seconds,
-    )
-    return response.text
-
-
-def _build_provider_health_payload(
-    config: AppConfig,
-    *,
-    config_path: Path | None,
-    discovered_models: list[str] | None = None,
-    probe_response: str | None = None,
-) -> dict[str, Any]:
-    provider = config.ai_client.model_provider
-    payload: dict[str, Any] = {
-        "config_path": str(resolve_config_path(config_path)),
-        "provider": provider.name,
-        "display_name": provider.display_name,
-        "model": provider.model_name,
-        "base_url": provider.base_url,
-        "api_format": provider.api_format,
-        "api_key_present": bool(provider.api_key),
-    }
-    if discovered_models is not None:
-        payload["discovered_model_count"] = len(discovered_models)
-        payload["discovered_models"] = discovered_models
-    if probe_response is not None:
-        payload["probe_ok"] = True
-        payload["probe_response_excerpt"] = probe_response[:120]
-    return payload
-
-
-def _model_discovery_fallback_message(config: AppConfig, exc: Exception) -> str:
-    return (
-        f"{exc}\n\n"
-        "Fallback 建议：\n"
-        "1. 先运行 `pr-review config health --discover-models` 检查当前 provider 是否支持远端模型发现。\n"
-        "2. 如果服务商不支持 `/models`，请手动设置模型名："
-        "`pr-review config model --name \"<模型ID>\"`。\n"
-        f"3. 当前配置的模型是 `{config.ai_client.model}`；如果 chat 已提示 `Not supported model`，请改成服务商实际支持的模型 ID。"
-    )
-
-
 def _print_chat_message(console: Console, role: str, text: str, *, layout: str) -> None:
     """打印聊天消息，支持 plain/compact/split 三种布局。"""
     if layout == "plain":
@@ -1548,18 +1494,22 @@ def config_health(ctx: click.Context, discover_models: bool, probe: bool) -> Non
     probe_response: str | None = None
     if discover_models:
         try:
-            discovered_models = asyncio.run(_discover_remote_models(config))
+            discovered_models = asyncio.run(
+                discover_remote_models(config, missing_api_key_message=_missing_api_key_message)
+            )
         except AIClientError as exc:
             raise click.ClickException(str(exc)) from exc
     if probe:
         try:
-            probe_response = asyncio.run(_probe_provider_connection(config))
+            probe_response = asyncio.run(
+                probe_provider_connection(config, missing_api_key_message=_missing_api_key_message)
+            )
         except AIClientError as exc:
             raise click.ClickException(f"Provider probe failed: {exc}") from exc
 
     click.echo(
         json.dumps(
-            _build_provider_health_payload(
+            build_provider_health_payload(
                 config,
                 config_path=config_path,
                 discovered_models=discovered_models,
@@ -1595,9 +1545,11 @@ def config_models(
     config_path = _config_path_from_context(ctx)
     config = AppConfig.load(config_path)
     try:
-        models = asyncio.run(_discover_remote_models(config))
+        models = asyncio.run(
+            discover_remote_models(config, missing_api_key_message=_missing_api_key_message)
+        )
     except AIClientError as exc:
-        raise click.ClickException(_model_discovery_fallback_message(config, exc)) from exc
+        raise click.ClickException(build_model_discovery_fallback_message(config, exc)) from exc
     if not models:
         raise click.ClickException("当前 provider 未返回可发现的模型列表，请手动设置模型名。")
 
