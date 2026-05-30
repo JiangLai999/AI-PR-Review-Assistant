@@ -16,7 +16,6 @@ from pydantic import BaseModel, Field
 
 from ai_pr_review.config import ContextBuilderConfig
 
-
 SUPPORTED_LANGUAGE_EXTENSIONS = {
     ".py": "python",
     ".js": "javascript",
@@ -132,7 +131,9 @@ class ContextBuilder:
         for start_line, end_line in windows:
             rendered_sections.append(f"@@ context {start_line}:{end_line} @@")
             for line_number in range(start_line, end_line + 1):
-                line_content = file_lines[line_number - 1] if line_number - 1 < len(file_lines) else ""
+                line_content = (
+                    file_lines[line_number - 1] if line_number - 1 < len(file_lines) else ""
+                )
                 prefix = ">" if line_number in changed_line_numbers else " "
                 rendered_sections.append(f"{prefix}{line_number:>4}: {line_content}")
 
@@ -186,7 +187,9 @@ class ContextBuilder:
             if class_match:
                 indent = len(class_match.group("indent"))
                 end_line = self._find_python_block_end(lines, line_number, indent)
-                methods = self._collect_python_class_methods(lines, line_number + 1, end_line, indent)
+                methods = self._collect_python_class_methods(
+                    lines, line_number + 1, end_line, indent
+                )
                 parents = self._split_csv(class_match.group("parents") or "")
                 classes.append(
                     ClassInfo(
@@ -227,7 +230,9 @@ class ContextBuilder:
         functions: list[FunctionInfo] = []
         classes: list[ClassInfo] = []
 
-        import_pattern = re.compile(r"^\s*(?:import\s+.+\s+from\s+['\"].+['\"];?|const\s+.+\s*=\s*require\(.+\);?)\s*$")
+        import_pattern = re.compile(
+            r"^\s*(?:import\s+.+\s+from\s+['\"].+['\"];?|const\s+.+\s*=\s*require\(.+\);?)\s*$"
+        )
         function_patterns = [
             re.compile(
                 r"^(?P<indent>\s*)(?P<async>async\s+)?function\s+(?P<name>[A-Za-z_$]\w*)\s*\((?P<params>[^)]*)\)\s*(?::\s*(?P<return>[^\{]+))?\s*\{"
@@ -283,7 +288,9 @@ class ContextBuilder:
                             start_line=line_number,
                             end_line=self._find_brace_block_end(lines, line_number),
                             parameters=self._split_csv(function_match.group("params") or ""),
-                            return_type=self._clean_return_type(function_match.groupdict().get("return")),
+                            return_type=self._clean_return_type(
+                                function_match.groupdict().get("return")
+                            ),
                             is_async=is_async,
                         )
                     )
@@ -306,7 +313,9 @@ class ContextBuilder:
 
         for raw_line in diff.splitlines():
             if raw_line.startswith("@@"):
-                match = re.match(r"@@ -\d+(?:,\d+)? \+(?P<start>\d+)(?:,(?P<count>\d+))? @@", raw_line)
+                match = re.match(
+                    r"@@ -\d+(?:,\d+)? \+(?P<start>\d+)(?:,(?P<count>\d+))? @@", raw_line
+                )
                 if not match:
                     continue
                 current_new_line = int(match.group("start"))
@@ -334,7 +343,9 @@ class ContextBuilder:
 
         return changed_line_numbers
 
-    def _merge_line_windows(self, changed_lines: set[int], total_lines: int) -> list[tuple[int, int]]:
+    def _merge_line_windows(
+        self, changed_lines: set[int], total_lines: int
+    ) -> list[tuple[int, int]]:
         """为变更行生成前后窗口，并合并重叠区间。"""
         if not changed_lines or total_lines <= 0:
             return []
@@ -380,7 +391,9 @@ class ContextBuilder:
         class_indent: int,
     ) -> list[str]:
         """收集 Python 类方法名。"""
-        method_pattern = re.compile(r"^(?P<indent>\s*)(?:async\s+)?def\s+(?P<name>[A-Za-z_]\w*)\s*\(")
+        method_pattern = re.compile(
+            r"^(?P<indent>\s*)(?:async\s+)?def\s+(?P<name>[A-Za-z_]\w*)\s*\("
+        )
         methods: list[str] = []
         for index in range(start_line - 1, end_line):
             match = method_pattern.match(lines[index])

@@ -178,9 +178,7 @@ class PRFetcher:
         def _get_diff():
             headers = {"Accept": "application/vnd.github.v3.diff"}
             requester = pr._requester
-            _, data = requester.requestJsonAndCheck(
-                "GET", pr.diff_url, headers=headers
-            )
+            _, data = requester.requestJsonAndCheck("GET", pr.diff_url, headers=headers)
             if data is None:
                 return ""
             if isinstance(data, bytes):
@@ -235,9 +233,7 @@ class PRFetcher:
 
         return all_files
 
-    def fetch_file_content(
-        self, owner: str, repo: str, file_path: str, ref: str
-    ) -> str | None:
+    def fetch_file_content(self, owner: str, repo: str, file_path: str, ref: str) -> str | None:
         """获取仓库中指定文件的内容。
 
         Args:
@@ -261,6 +257,7 @@ class PRFetcher:
                 return None
             content = content_file.content
             import base64
+
             return base64.b64decode(content).decode("utf-8", errors="replace")
         except PRNotFoundError:
             logger.warning("文件不存在: %s/%s/%s @ %s", owner, repo, file_path, ref)
@@ -288,8 +285,7 @@ class PRFetcher:
                 last_exception = e
                 if e.status == 401:
                     raise AuthenticationError(
-                        f"GitHub Token 无效或已过期。请检查 GITHUB_TOKEN。"
-                        f"（{error_context}）",
+                        f"GitHub Token 无效或已过期。请检查 GITHUB_TOKEN。" f"（{error_context}）",
                         original_error=e,
                     ) from e
                 if e.status == 404:
@@ -358,9 +354,7 @@ class PRFetcher:
         if reset_timestamp and reset_timestamp > now:
             wait_seconds = reset_timestamp - now + 1
 
-        logger.warning(
-            "GitHub API Rate Limit 已超出，等待 %.0f 秒后重试...", wait_seconds
-        )
+        logger.warning("GitHub API Rate Limit 已超出，等待 %.0f 秒后重试...", wait_seconds)
         time.sleep(wait_seconds)
 
     def _backoff_delay(self, attempt: int) -> float:

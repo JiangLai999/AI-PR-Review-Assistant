@@ -8,14 +8,13 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from contextlib import contextmanager
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from ai_pr_review.config import ResultStoreConfig
 from ai_pr_review.services.prompt_assembler import ReviewResult
 from ai_pr_review.utils.github_url_parser import parse_pr_url
-
 
 # 严重级别字段列表，用于统计
 SEVERITY_FIELDS = ("critical", "high", "medium", "low", "info")
@@ -158,8 +157,7 @@ class ResultStore:
     def get_statistics(self) -> dict:
         """获取统计信息。"""
         with self._connect() as connection:
-            row = connection.execute(
-                """
+            row = connection.execute("""
                 SELECT
                     COUNT(*) AS total_runs,
                     COUNT(DISTINCT pr_url) AS unique_prs,
@@ -172,16 +170,14 @@ class ResultStore:
                     COALESCE(SUM(total_cost), 0) AS total_cost,
                     MAX(created_at) AS latest_run_at
                 FROM runs
-                """
-            ).fetchone()
+                """).fetchone()
 
         return dict(row)
 
     def _initialize_database(self) -> None:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute(
-                """
+            connection.execute("""
                 CREATE TABLE IF NOT EXISTS runs (
                     id TEXT PRIMARY KEY,
                     pr_url TEXT NOT NULL,
@@ -204,8 +200,7 @@ class ResultStore:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     result_json TEXT
                 )
-                """
-            )
+                """)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

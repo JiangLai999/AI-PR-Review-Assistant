@@ -11,7 +11,11 @@ from typing import Any
 from urllib import error, request
 
 from ai_pr_review.config import ModelProviderConfig
-from ai_pr_review.services.exceptions import AIAuthenticationError, AIResponseFormatError, AIServiceError
+from ai_pr_review.services.exceptions import (
+    AIAuthenticationError,
+    AIResponseFormatError,
+    AIServiceError,
+)
 from ai_pr_review.services.model_providers.base import BaseModelProvider, ProviderResponse
 
 
@@ -46,16 +50,22 @@ class OpenAICompatibleProvider(BaseModelProvider):
                 raw_body = response.read().decode("utf-8")
         except error.HTTPError as exc:
             if exc.code == 401:
-                raise AIAuthenticationError("模型供应商 API 认证失败。", original_error=exc) from exc
+                raise AIAuthenticationError(
+                    "模型供应商 API 认证失败。", original_error=exc
+                ) from exc
             detail = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
-            raise AIServiceError(f"模型列表请求失败: HTTP {exc.code} {detail}".strip(), original_error=exc) from exc
+            raise AIServiceError(
+                f"模型列表请求失败: HTTP {exc.code} {detail}".strip(), original_error=exc
+            ) from exc
         except error.URLError as exc:
             raise AIServiceError("模型列表网络请求失败。", original_error=exc) from exc
 
         try:
             payload = json.loads(raw_body)
         except json.JSONDecodeError as exc:
-            raise AIResponseFormatError("模型列表返回的 JSON 无法解析。", original_error=exc) from exc
+            raise AIResponseFormatError(
+                "模型列表返回的 JSON 无法解析。", original_error=exc
+            ) from exc
 
         data = payload.get("data")
         if not isinstance(data, list):
@@ -92,9 +102,13 @@ class OpenAICompatibleProvider(BaseModelProvider):
                 raw_body = response.read().decode("utf-8")
         except error.HTTPError as exc:
             if exc.code == 401:
-                raise AIAuthenticationError("模型供应商 API 认证失败。", original_error=exc) from exc
+                raise AIAuthenticationError(
+                    "模型供应商 API 认证失败。", original_error=exc
+                ) from exc
             detail = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
-            raise AIServiceError(f"模型供应商请求失败: HTTP {exc.code} {detail}".strip(), original_error=exc) from exc
+            raise AIServiceError(
+                f"模型供应商请求失败: HTTP {exc.code} {detail}".strip(), original_error=exc
+            ) from exc
         except error.URLError as exc:
             raise AIServiceError("模型供应商网络请求失败。", original_error=exc) from exc
 
@@ -102,7 +116,9 @@ class OpenAICompatibleProvider(BaseModelProvider):
             payload = json.loads(raw_body)
             choice = payload["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-            raise AIResponseFormatError("OpenAI 兼容接口返回格式无效。", original_error=exc) from exc
+            raise AIResponseFormatError(
+                "OpenAI 兼容接口返回格式无效。", original_error=exc
+            ) from exc
 
         usage = payload.get("usage", {})
         return ProviderResponse(

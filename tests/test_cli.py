@@ -14,8 +14,8 @@ from ai_pr_review.cli import main
 from ai_pr_review.config import AppConfig, ReportRendererConfig, ResultStoreConfig
 from ai_pr_review.models.pr_data import FileDiff, FileStatus, PRData
 from ai_pr_review.services.context_builder import FileContext
-from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
 from ai_pr_review.services.exceptions import PRFetcherError
+from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
 from ai_pr_review.services.result_store import ResultStore
 
 
@@ -691,7 +691,9 @@ def test_cli_chat_message_uses_configured_provider(monkeypatch, tmp_path: Path):
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
-    monkeypatch.setattr(cli_module, "create_model_provider", lambda config: StubChatProvider(config))
+    monkeypatch.setattr(
+        cli_module, "create_model_provider", lambda config: StubChatProvider(config)
+    )
     config = config_module.AppConfig.from_env()
     config.ai_client = config_module.AIClientConfig(
         provider="deepseek",
@@ -720,7 +722,9 @@ def test_cli_chat_message_handles_provider_error(monkeypatch, tmp_path: Path):
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
-    monkeypatch.setattr(cli_module, "create_model_provider", lambda config: FailingChatProvider(config))
+    monkeypatch.setattr(
+        cli_module, "create_model_provider", lambda config: FailingChatProvider(config)
+    )
     config = config_module.AppConfig.from_env()
     config.ai_client = config_module.AIClientConfig(
         provider="custom",
@@ -775,7 +779,9 @@ def test_cli_config_models_discovers_and_sets_first(monkeypatch, tmp_path: Path)
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
-    monkeypatch.setattr(cli_module, "create_model_provider", lambda config: StubChatProvider(config))
+    monkeypatch.setattr(
+        cli_module, "create_model_provider", lambda config: StubChatProvider(config)
+    )
     config = config_module.AppConfig.from_env()
     config.ai_client = config_module.AIClientConfig(
         provider="custom",
@@ -1048,7 +1054,9 @@ def test_config_load_migrates_legacy_pr_fetcher_github_token(monkeypatch, tmp_pa
             "auto_publish_comment": False,
         },
     }
-    config_path.write_text(json.dumps(legacy_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    config_path.write_text(
+        json.dumps(legacy_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     saved = config_module.AppConfig.load(config_path)
 

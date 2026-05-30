@@ -11,9 +11,7 @@ from ai_pr_review.services.exceptions import InvalidPRURLError
 _GITHUB_PR_URL_PATTERN = re.compile(
     r"^https?://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)/?.*$"
 )
-_GITHUB_SSH_PATTERN = re.compile(
-    r"^git@github\.com:(?P<owner>[^/]+)/(?P<repo>[^/]+)\.git$"
-)
+_GITHUB_SSH_PATTERN = re.compile(r"^git@github\.com:(?P<owner>[^/]+)/(?P<repo>[^/]+)\.git$")
 
 
 def parse_pr_url(pr_url: str) -> ParsedPRUrl:

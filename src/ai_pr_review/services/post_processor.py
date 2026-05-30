@@ -7,7 +7,6 @@ from collections.abc import Hashable
 from ai_pr_review.config import PostProcessorConfig
 from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
 
-
 SEVERITY_ORDER = {
     "critical": 0,
     "high": 1,

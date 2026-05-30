@@ -5,10 +5,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Callable, Hashable
 from dataclasses import asdict, dataclass, field
-import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse

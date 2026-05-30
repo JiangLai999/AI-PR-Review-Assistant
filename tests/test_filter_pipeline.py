@@ -5,8 +5,8 @@ import pytest
 from ai_pr_review.config import DEFAULT_FILTER_EXCLUDE_PATTERNS, FilterPipelineConfig
 from ai_pr_review.models.pr_data import FileDiff, FileStatus, PRData
 from ai_pr_review.services.filter_pipeline import (
-    FilterPipeline,
     FileFilter,
+    FilterPipeline,
     FilterReason,
     FilterReasonCode,
 )
@@ -69,9 +69,7 @@ class TestFileFilter:
         assert result.primary_reason.code == FilterReasonCode.EXCLUDED_DELETION_ONLY
 
     def test_large_change_file_is_excluded(self):
-        file_filter = FileFilter(
-            FilterPipelineConfig(exclude_patterns=[], max_changes=100)
-        )
+        file_filter = FileFilter(FilterPipelineConfig(exclude_patterns=[], max_changes=100))
 
         result = file_filter.evaluate(build_file("src/generated.py", changes=101))
 

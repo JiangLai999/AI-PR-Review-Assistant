@@ -21,7 +21,6 @@ from ai_pr_review.services.pr_fetcher import PRFetcher
 from ai_pr_review.services.token_bucket import TokenBucket
 from ai_pr_review.utils.github_url_parser import parse_pr_url
 
-
 # ============================================================
 # 6.1 TokenBucket 单元测试
 # ============================================================
@@ -233,7 +232,8 @@ class TestPRFetcherFetch:
 
             with patch.object(fetcher, "_fetch_diff", return_value="mock diff"):
                 with patch.object(
-                    fetcher, "_fetch_files",
+                    fetcher,
+                    "_fetch_files",
                     return_value=[
                         FileDiff(
                             filename="a.py",
