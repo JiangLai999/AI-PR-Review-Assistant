@@ -919,6 +919,7 @@ def _chat_help_text() -> str:
         "/help - 显示可用聊天命令\n"
         "/config - 显示当前会话配置\n"
         "/model <模型ID> - 仅本次会话切换模型\n"
+        "/review <PR_URL> - 在当前会话中运行 PR 审查\n"
         "/clear - 清空当前会话历史\n"
         "/exit - 退出聊天"
     )
@@ -965,6 +966,19 @@ def _handle_chat_slash_command(
             return True
         _set_active_model(config, argument)
         console.print(f"Active model set to: {config.ai_client.model}")
+        return True
+    if command == "/review":
+        if not argument:
+            console.print("Usage: /review <PR_URL>", style="bold red")
+            return True
+        try:
+            artifacts = asyncio.run(run_review(argument, model=config.ai_client.model, config=config))
+            render_terminal_report(console, artifacts, config)
+            console.print(
+                f"Saved run {artifacts.run_id} | cost=${artifacts.total_cost:.4f} | duration={artifacts.duration_seconds:.2f}s"
+            )
+        except (PRFetcherError, AIClientError) as exc:
+            console.print(Panel(f"Error: {exc}", title="Review Error", border_style="red"))
         return True
     return False
 
