@@ -18,6 +18,11 @@ from rich.table import Table
 
 from ai_pr_review.chat_commands import handle_basic_chat_slash_command
 from ai_pr_review.chat_session import clear_chat_session, load_chat_session, save_chat_session
+from ai_pr_review.config_diagnostics import (
+    build_health_check_output,
+    resolve_model_discovery,
+    validate_provider_for_test,
+)
 from ai_pr_review.config_helpers import (
     append_gitignore_entry,
     build_local_example_payload,
@@ -1328,13 +1333,11 @@ def config_init(
 def config_test(ctx: click.Context) -> None:
     """Validate the resolved provider configuration."""
     config = AppConfig.load(_config_path_from_context(ctx))
-    provider = config.provider.to_model_provider()
     try:
-        provider.validate()
+        validate_provider_for_test(config, missing_api_key_message=_missing_api_key_message)
     except ConfigValidationError as exc:
         raise click.ClickException(str(exc)) from exc
-    if not provider.api_key:
-        raise click.ClickException(_missing_api_key_message(provider.name))
+    provider = config.provider.to_model_provider()
     click.echo(
         f"Configuration valid: provider={provider.name}, model={provider.model_name}, format={provider.api_format}"
     )
@@ -1359,43 +1362,17 @@ def config_health(ctx: click.Context, discover_models: bool, probe: bool) -> Non
     """Check whether the configured provider is ready to use."""
     config_path = _config_path_from_context(ctx)
     config = AppConfig.load(config_path)
-    provider = config.provider.to_model_provider()
     try:
-        provider.validate()
+        payload = build_health_check_output(
+            config,
+            config_path=config_path,
+            discover_models_enabled=discover_models,
+            probe_enabled=probe,
+            missing_api_key_message=_missing_api_key_message,
+        )
     except ConfigValidationError as exc:
         raise click.ClickException(str(exc)) from exc
-    if not provider.api_key:
-        raise click.ClickException(_missing_api_key_message(provider.name))
-
-    discovered_models: list[str] | None = None
-    probe_response: str | None = None
-    if discover_models:
-        try:
-            discovered_models = asyncio.run(
-                discover_remote_models(config, missing_api_key_message=_missing_api_key_message)
-            )
-        except AIClientError as exc:
-            raise click.ClickException(str(exc)) from exc
-    if probe:
-        try:
-            probe_response = asyncio.run(
-                probe_provider_connection(config, missing_api_key_message=_missing_api_key_message)
-            )
-        except AIClientError as exc:
-            raise click.ClickException(f"Provider probe failed: {exc}") from exc
-
-    click.echo(
-        json.dumps(
-            build_provider_health_payload(
-                config,
-                config_path=config_path,
-                discovered_models=discovered_models,
-                probe_response=probe_response,
-            ),
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
+    click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 @config_command.command("model")
@@ -1422,34 +1399,23 @@ def config_models(
     config_path = _config_path_from_context(ctx)
     config = AppConfig.load(config_path)
     try:
-        models = asyncio.run(
-            discover_remote_models(config, missing_api_key_message=_missing_api_key_message)
+        payload = resolve_model_discovery(
+            config,
+            model_name=model_name,
+            set_first=set_first,
+            config_path=config_path,
+            missing_api_key_message=_missing_api_key_message,
+            save_key_checker=_active_config_has_saved_api_key,
+            set_active_model=_set_active_model,
         )
-    except AIClientError as exc:
-        raise click.ClickException(build_model_discovery_fallback_message(config, exc)) from exc
-    if not models:
-        raise click.ClickException("当前 provider 未返回可发现的模型列表，请手动设置模型名。")
-
-    if model_name is not None:
-        if model_name not in models:
-            raise click.ClickException(f"远端模型列表中未找到：{model_name}")
-        _set_active_model(config, model_name)
-        config.save(config_path, save_key=_active_config_has_saved_api_key(config_path))
-    elif set_first:
-        _set_active_model(config, models[0])
-        config.save(config_path, save_key=_active_config_has_saved_api_key(config_path))
+    except ConfigValidationError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     if as_json:
-        click.echo(
-            json.dumps(
-                {"models": models, "active_model": config.ai_client.model},
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+        click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
         return
     click.echo("Discovered models:")
-    for model in models:
+    for model in payload["models"]:
         marker = "*" if model == config.ai_client.model else " "
         click.echo(f"{marker} {model}")
 
