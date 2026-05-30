@@ -1,4 +1,7 @@
-"""OpenAI-compatible provider implementation."""
+"""OpenAI 兼容接口模型供应商实现。
+
+支持所有 OpenAI 兼容的 API 服务，包括 DeepSeek、Qwen、SiliconFlow 等。
+"""
 
 from __future__ import annotations
 
@@ -13,15 +16,24 @@ from ai_pr_review.services.model_providers.base import BaseModelProvider, Provid
 
 
 class OpenAICompatibleProvider(BaseModelProvider):
-    """HTTP client for OpenAI-compatible chat completion APIs."""
+    """OpenAI 兼容接口的 HTTP 客户端。
+
+    支持 chat completion 和模型列表发现。
+    """
 
     async def chat(self, messages: list[dict[str, Any]], **kwargs: Any) -> ProviderResponse:
+        """异步发送聊天补全请求。"""
         return await asyncio.to_thread(self._chat_sync, messages, **kwargs)
 
     async def list_models(self, **kwargs: Any) -> list[str]:
+        """异步获取远端可用模型列表。"""
         return await asyncio.to_thread(self._list_models_sync, **kwargs)
 
     def _list_models_sync(self, **kwargs: Any) -> list[str]:
+        """同步获取模型列表，调用 /models 接口。
+
+        返回去重排序后的模型 ID 列表。
+        """
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",

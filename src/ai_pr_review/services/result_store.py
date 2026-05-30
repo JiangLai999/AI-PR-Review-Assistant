@@ -1,4 +1,7 @@
-"""Review 结果存储模块。"""
+"""Review 结果存储模块。
+
+使用 SQLite 持久化审查结果和运行历史，支持按 PR 查询和统计。
+"""
 
 from __future__ import annotations
 
@@ -14,6 +17,7 @@ from ai_pr_review.services.prompt_assembler import ReviewResult
 from ai_pr_review.utils.github_url_parser import parse_pr_url
 
 
+# 严重级别字段列表，用于统计
 SEVERITY_FIELDS = ("critical", "high", "medium", "low", "info")
 
 
@@ -21,6 +25,7 @@ class ResultStore:
     """使用 SQLite 持久化 ReviewResult 和运行历史。"""
 
     def __init__(self, config: ResultStoreConfig):
+        """初始化存储层，创建数据库目录和表结构。"""
         self._config = config
         self._db_path = Path(config.db_path).expanduser()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
