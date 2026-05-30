@@ -7,7 +7,7 @@ import asyncio
 from ai_pr_review.config import AIClientConfig, AppConfig, PRFetcherConfig, ResultStoreConfig
 from ai_pr_review.models.pr_data import FileDiff, FileStatus, PRData
 from ai_pr_review.services.context_builder import FileContext
-from ai_pr_review.services.filter_pipeline import FilterPipelineResult
+from ai_pr_review.services.filter_pipeline import FilterPipelineResult, FilterReason, FilterReasonCode
 from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
 from ai_pr_review.services.review_orchestrator import ReviewOrchestrator
 
@@ -175,3 +175,57 @@ def test_review_orchestrator_limits_fetch_and_review_concurrency(monkeypatch, tm
     assert len(artifacts.review_result.findings) == 4
     assert orchestrator._pr_fetcher.max_active_fetches <= 2
     assert artifacts.review_result.summary.count("reviewed") == 4
+
+
+def test_review_orchestrator_explains_empty_filtered_summary(monkeypatch, tmp_path):
+    class ExcludingFilterPipeline:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def filter_pr_data(self, pr_data: PRData):
+            result = FilterPipelineResult()
+            result.results = [
+                type(
+                    "FilterResult",
+                    (),
+                    {
+                        "file": file_diff,
+                        "included": False,
+                        "primary_reason": FilterReason(
+                            code=FilterReasonCode.EXCLUDED_BY_PATTERN,
+                            action="exclude",
+                            message="命中黑名单",
+                        ),
+                    },
+                )()
+                for file_diff in pr_data.files
+            ]
+            filtered_pr_data = pr_data.model_copy(update={"files": []})
+            return filtered_pr_data, result
+
+    monkeypatch.setattr("ai_pr_review.services.review_orchestrator.PRFetcher", StubPRFetcher)
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.FilterPipeline", ExcludingFilterPipeline
+    )
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.ContextBuilder", StubContextBuilder
+    )
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.PromptAssembler", StubPromptAssembler
+    )
+    monkeypatch.setattr("ai_pr_review.services.review_orchestrator.AIClient", StubAIClient)
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.PostProcessor", StubPostProcessor
+    )
+    monkeypatch.setattr("ai_pr_review.services.review_orchestrator.ResultStore", StubResultStore)
+
+    config = AppConfig.from_env()
+    config.pr_fetcher = PRFetcherConfig(github_token="token", fetch_concurrency=2)
+    config.ai_client = AIClientConfig(api_key="api-key", review_concurrency=3)
+    config.result_store = ResultStoreConfig(db_path=str(tmp_path / "results.db"))
+    orchestrator = ReviewOrchestrator(config)
+
+    artifacts = asyncio.run(orchestrator.review("https://github.com/owner/repo/pull/42"))
+
+    assert "No reviewable files remained after filtering" in artifacts.review_result.summary
+    assert "命中黑名单规则 4 个" in artifacts.review_result.summary

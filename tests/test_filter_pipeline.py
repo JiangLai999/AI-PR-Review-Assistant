@@ -203,6 +203,7 @@ class TestFilterPipeline:
         result = pipeline.run([build_file("docs/README.md")]).to_dict()
 
         assert result["total_files"] == 1
+        assert result["excluded_reason_counts"] == {"excluded_by_pattern": 1}
         assert result["results"][0]["filename"] == "docs/README.md"
         assert result["results"][0]["reasons"][0]["code"] == "excluded_by_pattern"
         assert result["results"][0]["reasons"][0]["action"] == "exclude"

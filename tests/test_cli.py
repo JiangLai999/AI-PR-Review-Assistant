@@ -1289,6 +1289,60 @@ def test_cli_stats_returns_aggregated_statistics(monkeypatch, tmp_path: Path):
     assert payload["total_findings"] == 1
 
 
+def test_cli_review_explains_filter_summary_when_no_files_reviewed(monkeypatch, tmp_path: Path):
+    class ExcludingFilterPipeline(StubFilterPipeline):
+        def filter_pr_data(self, pr_data: PRData):
+            class Result:
+                included_count = 0
+                excluded_count = 1
+
+                @property
+                def included_files(self):
+                    return []
+
+                @property
+                def excluded_results(self):
+                    return [
+                        type(
+                            "FilterResult",
+                            (),
+                            {
+                                "primary_reason": type(
+                                    "Reason",
+                                    (),
+                                    {"code": type("Code", (), {"value": "excluded_by_pattern"})()},
+                                )(),
+                            },
+                        )()
+                    ]
+
+                def excluded_reason_counts(self):
+                    return {"excluded_by_pattern": 1}
+
+                def to_dict(self):
+                    return {
+                        "total_files": 1,
+                        "included_count": 0,
+                        "excluded_count": 1,
+                        "excluded_reason_counts": {"excluded_by_pattern": 1},
+                        "results": [],
+                    }
+
+            filtered_pr = pr_data.model_copy(update={"files": []})
+            return filtered_pr, Result()
+
+    install_success_stubs(monkeypatch)
+    monkeypatch.setattr(orchestrator_module, "FilterPipeline", ExcludingFilterPipeline)
+    configure_temp_app(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["https://github.com/owner/repo/pull/42"])
+
+    assert result.exit_code == 0
+    assert "No reviewable files remained after filtering." in result.output
+    assert "命中黑名单规则 1 个" in result.output
+
+
 def test_cli_rejects_multiple_short_circuit_modes(monkeypatch, tmp_path: Path):
     install_success_stubs(monkeypatch)
     configure_temp_app(monkeypatch, tmp_path)
