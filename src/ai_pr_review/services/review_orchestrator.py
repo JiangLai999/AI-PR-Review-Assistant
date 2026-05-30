@@ -17,6 +17,13 @@ from ai_pr_review.services.pr_fetcher import PRFetcher
 from ai_pr_review.services.prompt_assembler import PromptAssembler, ReviewResult
 from ai_pr_review.services.result_store import ResultStore
 
+FILTER_REASON_SUMMARY_LABELS = {
+    "excluded_by_pattern": "命中黑名单规则",
+    "excluded_deletion_only": "仅删除改动",
+    "excluded_too_large": "变更量过大",
+    "custom_rule": "自定义规则过滤",
+}
+
 
 @dataclass(slots=True)
 class ReviewArtifacts:
@@ -172,7 +179,17 @@ class ReviewOrchestrator:
 
     def _build_empty_summary(self, filter_result: FilterPipelineResult) -> str:
         if filter_result.included_count == 0:
-            return "No reviewable files remained after filtering."
+            reason_counts = filter_result.excluded_reason_counts()
+            if not reason_counts:
+                return "No reviewable files remained after filtering."
+            parts = [
+                f"{FILTER_REASON_SUMMARY_LABELS.get(code, code)} {count} 个"
+                for code, count in sorted(reason_counts.items())
+            ]
+            return (
+                "No reviewable files remained after filtering. "
+                f"Excluded {filter_result.excluded_count} files: {'; '.join(parts)}."
+            )
         return "No valid findings were identified."
 
 

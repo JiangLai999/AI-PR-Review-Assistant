@@ -114,11 +114,22 @@ class FilterPipelineResult:
     def excluded_count(self) -> int:
         return len(self.excluded_results)
 
+    def excluded_reason_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for result in self.excluded_results:
+            reason = result.primary_reason
+            if reason is None:
+                continue
+            code = reason.code.value
+            counts[code] = counts.get(code, 0) + 1
+        return counts
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "total_files": self.total_files,
             "included_count": self.included_count,
             "excluded_count": self.excluded_count,
+            "excluded_reason_counts": self.excluded_reason_counts(),
             "results": [result.to_dict() for result in self.results],
         }
 
