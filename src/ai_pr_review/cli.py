@@ -29,6 +29,7 @@ from ai_pr_review.config_helpers import (
     build_project_config_payload,
     provider_env_var,
 )
+from ai_pr_review.config_wizard import apply_wizard_configuration, json_prompt, resolve_save_key_choice
 from ai_pr_review.config import (
     CONFIG_PATH_ENV_VAR,
     DEFAULT_CONFIG_PATH,
@@ -959,19 +960,6 @@ def _handle_chat_slash_command(
     return False
 
 
-def _json_prompt(text: str, default: dict[str, Any] | None = None) -> dict[str, Any]:
-    raw = click.prompt(
-        text, default=json.dumps(default or {}, ensure_ascii=False), show_default=True
-    )
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise click.ClickException(f"JSON 解析失败: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise click.ClickException("JSON 输入必须是对象。")
-    return payload
-
-
 def _run_config_wizard(quick: bool, advanced: bool, save_key: bool | None) -> Path:
     console = Console()
     existing = AppConfig.load()
@@ -986,8 +974,8 @@ def _run_config_wizard(quick: bool, advanced: bool, save_key: bool | None) -> Pa
     headers: dict[str, str] = {}
     extra_params: dict[str, Any] = {}
     if advanced:
-        headers = _json_prompt("Headers JSON", default=provider.headers)
-        extra_params = _json_prompt("Extra params JSON", default=provider.extra_params)
+        headers = json_prompt("Headers JSON", default=provider.headers)
+        extra_params = json_prompt("Extra params JSON", default=provider.extra_params)
     github_token = _prompt_github_token(console, existing.github_token)
     preferences = _prompt_preferences(console, preferences)
 
@@ -1002,45 +990,14 @@ def _run_config_wizard(quick: bool, advanced: bool, save_key: bool | None) -> Pa
         extra_params=extra_params,
     )
 
-    config = existing
-    config.provider = ProviderConfig(
-        name=final_provider.name,
-        display_name=final_provider.display_name,
-        api_key=final_provider.api_key,
-        base_url=final_provider.base_url,
-        api_format=final_provider.api_format,
-        models={selected_model.name: selected_model},
-        default_model=selected_model.name,
+    config = apply_wizard_configuration(
+        existing,
+        final_provider=final_provider,
+        selected_model=selected_model,
+        github_token=github_token,
+        preferences=preferences,
     )
-    config.github_token = github_token
-    config.preferences = preferences
-    config.ai_client = AIClientConfig(
-        **{
-            **config.ai_client.__dict__,
-            "provider": final_provider.name,
-            "api_key": final_provider.api_key,
-            "model": final_provider.model_name,
-            "base_url": final_provider.base_url,
-            "api_format": final_provider.api_format,
-            "headers": final_provider.headers,
-            "extra_params": final_provider.extra_params,
-        }
-    )
-    config.pr_fetcher.github_token = github_token
-    if save_key is None:
-        save_key = Confirm.ask(
-            "是否保存 API Key 到配置文件？选择否时需通过环境变量提供 Key。",
-            default=True,
-            console=console,
-        )
-    elif save_key:
-        confirmed = Confirm.ask(
-            "警告：API Key 将以明文形式保存到配置文件，是否继续？",
-            default=True,
-            console=console,
-        )
-        if not confirmed:
-            raise click.Abort()
+    save_key = resolve_save_key_choice(console, save_key)
 
     config_path = DEFAULT_CONFIG_PATH
     _run_provider_validation(console, final_provider, config_path)
