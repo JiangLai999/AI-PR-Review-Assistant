@@ -888,11 +888,26 @@ async def _discover_remote_models(config: AppConfig) -> list[str]:
     return await provider.list_models(timeout_seconds=config.ai_client.timeout_seconds)
 
 
+async def _probe_provider_connection(config: AppConfig) -> str:
+    provider_config = config.ai_client.model_provider
+    if not provider_config.api_key:
+        raise click.ClickException(_missing_api_key_message(provider_config.name))
+    provider = create_model_provider(provider_config)
+    response = await provider.chat(
+        [{"role": "user", "content": "ping"}],
+        system_prompt="Reply with a short connectivity confirmation.",
+        max_tokens=16,
+        timeout_seconds=config.ai_client.timeout_seconds,
+    )
+    return response.text
+
+
 def _build_provider_health_payload(
     config: AppConfig,
     *,
     config_path: Path | None,
     discovered_models: list[str] | None = None,
+    probe_response: str | None = None,
 ) -> dict[str, Any]:
     provider = config.ai_client.model_provider
     payload: dict[str, Any] = {
@@ -907,6 +922,9 @@ def _build_provider_health_payload(
     if discovered_models is not None:
         payload["discovered_model_count"] = len(discovered_models)
         payload["discovered_models"] = discovered_models
+    if probe_response is not None:
+        payload["probe_ok"] = True
+        payload["probe_response_excerpt"] = probe_response[:120]
     return payload
 
 
@@ -1508,8 +1526,13 @@ def config_test(ctx: click.Context) -> None:
     is_flag=True,
     help="Try provider model discovery through the remote /models endpoint.",
 )
+@click.option(
+    "--probe",
+    is_flag=True,
+    help="Send a minimal chat request to verify real provider connectivity.",
+)
 @click.pass_context
-def config_health(ctx: click.Context, discover_models: bool) -> None:
+def config_health(ctx: click.Context, discover_models: bool, probe: bool) -> None:
     """Check whether the configured provider is ready to use."""
     config_path = _config_path_from_context(ctx)
     config = AppConfig.load(config_path)
@@ -1522,11 +1545,17 @@ def config_health(ctx: click.Context, discover_models: bool) -> None:
         raise click.ClickException(_missing_api_key_message(provider.name))
 
     discovered_models: list[str] | None = None
+    probe_response: str | None = None
     if discover_models:
         try:
             discovered_models = asyncio.run(_discover_remote_models(config))
         except AIClientError as exc:
             raise click.ClickException(str(exc)) from exc
+    if probe:
+        try:
+            probe_response = asyncio.run(_probe_provider_connection(config))
+        except AIClientError as exc:
+            raise click.ClickException(f"Provider probe failed: {exc}") from exc
 
     click.echo(
         json.dumps(
@@ -1534,6 +1563,7 @@ def config_health(ctx: click.Context, discover_models: bool) -> None:
                 config,
                 config_path=config_path,
                 discovered_models=discovered_models,
+                probe_response=probe_response,
             ),
             ensure_ascii=False,
             indent=2,
