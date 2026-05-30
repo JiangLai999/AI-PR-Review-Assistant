@@ -16,6 +16,7 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 
+from ai_pr_review.chat_commands import handle_basic_chat_slash_command
 from ai_pr_review.chat_session import clear_chat_session, load_chat_session, save_chat_session
 from ai_pr_review.config_helpers import (
     append_gitignore_entry,
@@ -914,33 +915,6 @@ def _active_config_has_saved_api_key(config_path: Path | None) -> bool:
     )
 
 
-def _chat_help_text() -> str:
-    return (
-        "/help - 显示可用聊天命令\n"
-        "/config - 显示当前会话配置\n"
-        "/history - 显示最近 5 条审查历史\n"
-        "/stats - 显示审查统计\n"
-        "/model <模型ID> - 仅本次会话切换模型\n"
-        "/review <PR_URL> - 在当前会话中运行 PR 审查\n"
-        "/clear - 清空当前会话历史\n"
-        "/exit - 退出聊天"
-    )
-
-
-def _render_chat_config(config: AppConfig, layout: str) -> str:
-    return json.dumps(
-        {
-            "provider": config.ai_client.provider,
-            "model": config.ai_client.model,
-            "base_url": config.ai_client.base_url,
-            "response_language": config.preferences.language,
-            "layout": layout,
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
-
-
 def _handle_chat_slash_command(
     console: Console,
     config: AppConfig,
@@ -949,38 +923,21 @@ def _handle_chat_slash_command(
     command_text: str,
     layout: str,
 ) -> bool:
+    if handle_basic_chat_slash_command(
+        console,
+        config,
+        config_path,
+        messages,
+        command_text,
+        layout,
+        clear_session=clear_chat_session,
+        set_active_model=_set_active_model,
+    ):
+        return True
+
     parts = command_text.split(maxsplit=1)
     command = parts[0].lower()
     argument = parts[1].strip() if len(parts) > 1 else ""
-
-    if command == "/help":
-        console.print(Panel(_chat_help_text(), title="Chat Commands", border_style="cyan"))
-        return True
-    if command == "/config":
-        console.print(Panel(_render_chat_config(config, layout), title="Chat Config", border_style="green"))
-        return True
-    if command == "/history":
-        store = ResultStore(config.result_store)
-        payload = {"runs": store.list_runs(limit=5)}
-        console.print(Panel(json.dumps(payload, ensure_ascii=False, indent=2), title="History", border_style="green"))
-        return True
-    if command == "/stats":
-        store = ResultStore(config.result_store)
-        payload = store.get_statistics()
-        console.print(Panel(json.dumps(payload, ensure_ascii=False, indent=2), title="Stats", border_style="green"))
-        return True
-    if command == "/clear":
-        messages.clear()
-        clear_chat_session(config_path)
-        console.print("Conversation cleared.")
-        return True
-    if command == "/model":
-        if not argument:
-            console.print("Usage: /model <模型ID>", style="bold red")
-            return True
-        _set_active_model(config, argument)
-        console.print(f"Active model set to: {config.ai_client.model}")
-        return True
     if command == "/review":
         if not argument:
             console.print("Usage: /review <PR_URL>", style="bold red")
