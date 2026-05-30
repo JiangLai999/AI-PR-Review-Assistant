@@ -236,6 +236,55 @@ def test_cli_writes_markdown_report(monkeypatch, tmp_path: Path):
     assert "### SQL injection risk" in content
 
 
+def test_cli_markdown_report_includes_filter_summary_when_files_excluded(monkeypatch, tmp_path: Path):
+    class PartiallyExcludedFilterPipeline(StubFilterPipeline):
+        def filter_pr_data(self, pr_data: PRData):
+            class Result:
+                total_files = 1
+                included_count = 1
+                excluded_count = 1
+
+                @property
+                def excluded_reason_counts(self):
+                    return {"excluded_by_pattern": 1}
+
+                def excluded_reason_counts(self):
+                    return {"excluded_by_pattern": 1}
+
+                def to_dict(self):
+                    return {
+                        "total_files": 1,
+                        "included_count": 1,
+                        "excluded_count": 1,
+                        "excluded_reason_counts": {"excluded_by_pattern": 1},
+                        "results": [],
+                    }
+
+            return pr_data, Result()
+
+    install_success_stubs(monkeypatch)
+    monkeypatch.setattr(orchestrator_module, "FilterPipeline", PartiallyExcludedFilterPipeline)
+    configure_temp_app(monkeypatch, tmp_path)
+    runner = CliRunner()
+    output_path = tmp_path / "report.md"
+
+    result = runner.invoke(
+        main,
+        [
+            "https://github.com/owner/repo/pull/42",
+            "--format",
+            "markdown",
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    content = output_path.read_text(encoding="utf-8")
+    assert "## Filter Summary" in content
+    assert "`excluded_by_pattern`: 1" in content
+
+
 def test_cli_infers_json_format_from_output_extension(monkeypatch, tmp_path: Path):
     install_success_stubs(monkeypatch)
     configure_temp_app(monkeypatch, tmp_path)
@@ -251,6 +300,7 @@ def test_cli_infers_json_format_from_output_extension(monkeypatch, tmp_path: Pat
     content = output_path.read_text(encoding="utf-8")
     assert '"total_findings": 1' in content
     assert '"repository": "owner/repo"' in content
+    assert '"filter"' in content
 
 
 def test_cli_publishes_comment(monkeypatch):

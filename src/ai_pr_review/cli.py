@@ -722,12 +722,47 @@ def build_report_payload(artifacts: ReviewArtifacts) -> dict:
     return payload
 
 
+def _build_filter_summary_markdown(artifacts: ReviewArtifacts) -> str:
+    filter_result = artifacts.filter_result
+    if hasattr(filter_result, "excluded_reason_counts"):
+        reason_counts = filter_result.excluded_reason_counts()
+    else:
+        reason_counts = filter_result.to_dict().get("excluded_reason_counts", {})
+    if not reason_counts:
+        return ""
+    total_files = getattr(filter_result, "total_files", filter_result.to_dict().get("total_files", 0))
+    included_count = getattr(
+        filter_result,
+        "included_count",
+        filter_result.to_dict().get("included_count", 0),
+    )
+    excluded_count = getattr(
+        filter_result,
+        "excluded_count",
+        filter_result.to_dict().get("excluded_count", 0),
+    )
+    lines = ["## Filter Summary", ""]
+    lines.append(f"- **Total Files**: {total_files}")
+    lines.append(f"- **Included**: {included_count}")
+    lines.append(f"- **Excluded**: {excluded_count}")
+    lines.append("")
+    lines.append("### Excluded Reason Counts")
+    lines.append("")
+    for code, count in sorted(reason_counts.items()):
+        lines.append(f"- `{code}`: {count}")
+    return "\n".join(lines)
+
+
 def render_markdown_report(artifacts: ReviewArtifacts, config: AppConfig | None = None) -> str:
     app_config = config or AppConfig.load()
-    return ReportRenderer(app_config.report_renderer).render_markdown(
+    rendered = ReportRenderer(app_config.report_renderer).render_markdown(
         artifacts.review_result or ReviewResult(summary="", findings=[]),
         artifacts.pr_data,
     )
+    filter_summary = _build_filter_summary_markdown(artifacts)
+    if not filter_summary:
+        return rendered
+    return f"{rendered}\n\n{filter_summary}"
 
 
 def render_github_comment_report(
@@ -742,9 +777,10 @@ def render_github_comment_report(
 
 def render_json_report(artifacts: ReviewArtifacts, config: AppConfig | None = None) -> str:
     app_config = config or AppConfig.load()
-    return ReportRenderer(app_config.report_renderer).render_json(
-        artifacts.review_result or ReviewResult(summary="", findings=[]),
-        artifacts.pr_data,
+    return json.dumps(
+        build_report_payload(artifacts),
+        ensure_ascii=False,
+        indent=app_config.report_renderer.json_indent,
     )
 
 
