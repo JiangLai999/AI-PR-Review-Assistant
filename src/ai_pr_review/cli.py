@@ -910,6 +910,17 @@ def _build_provider_health_payload(
     return payload
 
 
+def _model_discovery_fallback_message(config: AppConfig, exc: Exception) -> str:
+    return (
+        f"{exc}\n\n"
+        "Fallback 建议：\n"
+        "1. 先运行 `pr-review config health --discover-models` 检查当前 provider 是否支持远端模型发现。\n"
+        "2. 如果服务商不支持 `/models`，请手动设置模型名："
+        "`pr-review config model --name \"<模型ID>\"`。\n"
+        f"3. 当前配置的模型是 `{config.ai_client.model}`；如果 chat 已提示 `Not supported model`，请改成服务商实际支持的模型 ID。"
+    )
+
+
 def _print_chat_message(console: Console, role: str, text: str, *, layout: str) -> None:
     """打印聊天消息，支持 plain/compact/split 三种布局。"""
     if layout == "plain":
@@ -1556,7 +1567,7 @@ def config_models(
     try:
         models = asyncio.run(_discover_remote_models(config))
     except AIClientError as exc:
-        raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(_model_discovery_fallback_message(config, exc)) from exc
     if not models:
         raise click.ClickException("当前 provider 未返回可发现的模型列表，请手动设置模型名。")
 
