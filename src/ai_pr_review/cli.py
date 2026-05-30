@@ -16,6 +16,7 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 
+from ai_pr_review.chat_session import clear_chat_session, load_chat_session, save_chat_session
 from ai_pr_review.config import (
     CONFIG_PATH_ENV_VAR,
     DEFAULT_CONFIG_PATH,
@@ -911,43 +912,6 @@ def _active_config_has_saved_api_key(config_path: Path | None) -> bool:
     )
 
 
-def _chat_session_path(config_path: Path | None) -> Path:
-    return resolve_config_path(config_path).parent / "chat_session.json"
-
-
-def _load_chat_session(config_path: Path | None) -> list[dict[str, Any]]:
-    session_path = _chat_session_path(config_path)
-    if not session_path.exists():
-        return []
-    try:
-        payload = json.loads(session_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(payload, list):
-        return []
-    messages: list[dict[str, Any]] = []
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        role = item.get("role")
-        content = item.get("content")
-        if isinstance(role, str) and isinstance(content, str):
-            messages.append({"role": role, "content": content})
-    return messages
-
-
-def _save_chat_session(config_path: Path | None, messages: list[dict[str, Any]]) -> None:
-    session_path = _chat_session_path(config_path)
-    session_path.parent.mkdir(parents=True, exist_ok=True)
-    session_path.write_text(json.dumps(messages, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _clear_chat_session(config_path: Path | None) -> None:
-    session_path = _chat_session_path(config_path)
-    if session_path.exists():
-        session_path.unlink()
-
-
 def _chat_help_text() -> str:
     return (
         "/help - 显示可用聊天命令\n"
@@ -1005,7 +969,7 @@ def _handle_chat_slash_command(
         return True
     if command == "/clear":
         messages.clear()
-        _clear_chat_session(config_path)
+        clear_chat_session(config_path)
         console.print("Conversation cleared.")
         return True
     if command == "/model":
@@ -1726,7 +1690,7 @@ def chat_command(
     if model_name is not None:
         _set_active_model(config, model_name)
     active_layout = layout or getattr(config.preferences, "chat_layout", "compact")
-    messages = _load_chat_session(config_path)
+    messages = load_chat_session(config_path)
     console.print(Panel("输入 /exit 退出。", title=_chat_title(config), border_style="cyan"))
     if messages:
         console.print(f"Restored {len(messages)} messages from the previous chat session.")
@@ -1745,7 +1709,7 @@ def chat_command(
             console.print(Panel(str(exc), title="Error", border_style="red"))
             return
         messages.append({"role": "assistant", "content": answer})
-        _save_chat_session(config_path, messages)
+        save_chat_session(config_path, messages)
         _print_chat_message(console, "Assistant", answer, layout=active_layout)
 
     if message is not None:
