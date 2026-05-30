@@ -707,6 +707,59 @@ def test_cli_config_test_fails_when_api_key_missing(monkeypatch, tmp_path: Path)
     assert "AI_PR_REVIEW_API_KEY" in result.output
 
 
+def test_cli_config_health_reports_provider_status(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+    config = config_module.AppConfig.from_env()
+    config.ai_client = config_module.AIClientConfig(
+        provider="deepseek",
+        api_key="deepseek-key",
+        model="deepseek-chat",
+        base_url="https://api.deepseek.com/v1",
+        api_format="openai",
+    )
+    config.save(config_path, save_key=True)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["config", "health"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["provider"] == "deepseek"
+    assert payload["model"] == "deepseek-chat"
+    assert payload["api_key_present"] is True
+
+
+def test_cli_config_health_can_discover_models(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(
+        cli_module, "create_model_provider", lambda config: StubChatProvider(config)
+    )
+    config = config_module.AppConfig.from_env()
+    config.ai_client = config_module.AIClientConfig(
+        provider="custom",
+        api_key="custom-key",
+        model="custom-model",
+        base_url="https://example.com/v1",
+        api_format="openai",
+    )
+    config.provider = config_module.ProviderConfig.from_model_provider(
+        config.ai_client.model_provider
+    )
+    config.save(config_path, save_key=True)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["config", "health", "--discover-models"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["discovered_model_count"] == 2
+    assert payload["discovered_models"] == ["model-a", "model-b"]
+
+
 def test_cli_preferences_command_updates_preferences(monkeypatch, tmp_path: Path):
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
