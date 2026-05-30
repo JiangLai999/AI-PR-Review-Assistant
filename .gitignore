@@ -1,4 +1,5 @@
 # Local project secrets
+.ai_pr_review/config.json
 .ai_pr_review/config.local.json
 
 # Python cache and test artifacts
