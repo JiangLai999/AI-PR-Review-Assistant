@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 
 from ai_pr_review.config import ResultStoreConfig
 from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
@@ -73,7 +74,7 @@ def test_save_result_populates_run_metadata_from_pr_url(tmp_path):
         build_review_result(severities=["critical", "high", "high", "info"]),
     )
 
-    with sqlite3.connect(db_path) as connection:
+    with closing(sqlite3.connect(db_path)) as connection:
         connection.row_factory = sqlite3.Row
         row = connection.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
 
@@ -159,7 +160,7 @@ def test_database_uses_wal_mode(tmp_path):
     db_path = tmp_path / "results.db"
     ResultStore(ResultStoreConfig(db_path=str(db_path)))
 
-    with sqlite3.connect(db_path) as connection:
+    with closing(sqlite3.connect(db_path)) as connection:
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
     assert journal_mode.lower() == "wal"
