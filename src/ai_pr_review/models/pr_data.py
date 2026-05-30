@@ -24,9 +24,7 @@ class FileDiff(BaseModel):
     """单个文件的差异信息。"""
 
     filename: str = Field(description="文件路径（相对于仓库根目录）")
-    previous_filename: str | None = Field(
-        default=None, description="重命名前的文件路径"
-    )
+    previous_filename: str | None = Field(default=None, description="重命名前的文件路径")
     status: FileStatus = Field(description="变更状态")
     additions: int = Field(default=0, description="新增行数")
     deletions: int = Field(default=0, description="删除行数")

@@ -3,8 +3,8 @@
 使用 Token Bucket 算法控制 GitHub API 请求速率，防止触发 403 Rate Limit。
 """
 
-import time
 import threading
+import time
 from dataclasses import dataclass
 
 

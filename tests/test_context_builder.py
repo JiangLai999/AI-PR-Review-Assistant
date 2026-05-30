@@ -3,7 +3,6 @@
 from ai_pr_review.config import ContextBuilderConfig
 from ai_pr_review.services.context_builder import ContextBuilder
 
-
 PYTHON_CONTENT = """import os
 from typing import Any
 
@@ -67,7 +66,10 @@ class TestContextBuilder:
         assert result.classes[0].parent_classes == ["BaseService"]
         assert "@@ context" in result.diff_with_context
         assert ">   7:         self.repo = repo" in result.diff_with_context
-        assert "    9:     async def run(self, item: str) -> dict[str, Any]:" in result.diff_with_context
+        assert (
+            "    9:     async def run(self, item: str) -> dict[str, Any]:"
+            in result.diff_with_context
+        )
 
     def test_extract_ast_context_extracts_typescript_symbols(self):
         builder = ContextBuilder(ContextBuilderConfig(enable_tree_sitter=False))

@@ -17,17 +17,17 @@ from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 
 from ai_pr_review.config import (
-    AIClientConfig,
-    AppConfig,
-    ConfigValidationError,
-    DEFAULT_CONFIG_PATH,
     CONFIG_PATH_ENV_VAR,
+    DEFAULT_CONFIG_PATH,
     MODEL_PROVIDER_PRESETS,
-    ModelProviderConfig,
-    PROVIDER_MODEL_PRESETS,
     PROJECT_CONFIG_DIRNAME,
     PROJECT_CONFIG_FILENAME,
     PROJECT_LOCAL_CONFIG_FILENAME,
+    PROVIDER_MODEL_PRESETS,
+    AIClientConfig,
+    AppConfig,
+    ConfigValidationError,
+    ModelProviderConfig,
     PreferencesConfig,
     ProviderConfig,
     ProviderModelConfig,
@@ -39,8 +39,8 @@ from ai_pr_review.services.model_providers.factory import create_model_provider
 from ai_pr_review.services.pr_fetcher import PRFetcher
 from ai_pr_review.services.prompt_assembler import ReviewResult
 from ai_pr_review.services.report_renderer import ReportRenderer
-from ai_pr_review.services.review_orchestrator import ReviewArtifacts, ReviewOrchestrator
 from ai_pr_review.services.result_store import ResultStore
+from ai_pr_review.services.review_orchestrator import ReviewArtifacts, ReviewOrchestrator
 
 PROVIDER_WIZARD_OPTIONS = [
     {
@@ -485,7 +485,9 @@ def _prompt_github_token(console: Console, default_value: str) -> str:
         return github_token.strip()
 
 
-def _prompt_interface_preferences(console: Console, current: PreferencesConfig) -> PreferencesConfig:
+def _prompt_interface_preferences(
+    console: Console, current: PreferencesConfig
+) -> PreferencesConfig:
     _render_section_header(
         console,
         "界面与语言",
@@ -819,9 +821,9 @@ def _format_chat_error(exc: Exception, config: AppConfig) -> str:
         return (
             f"模型服务不支持当前模型：{config.ai_client.model}\n"
             "请确认服务商实际支持的模型 ID，然后运行：\n"
-            f"  pr-review config model --name \"<模型ID>\"\n"
+            f'  pr-review config model --name "<模型ID>"\n'
             "也可以仅本次聊天临时覆盖：\n"
-            f"  pr-review chat --model \"<模型ID>\""
+            f'  pr-review chat --model "<模型ID>"'
         )
     return message
 
@@ -1351,7 +1353,13 @@ def config_models(
         config.save(config_path, save_key=_active_config_has_saved_api_key(config_path))
 
     if as_json:
-        click.echo(json.dumps({"models": models, "active_model": config.ai_client.model}, ensure_ascii=False, indent=2))
+        click.echo(
+            json.dumps(
+                {"models": models, "active_model": config.ai_client.model},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return
     click.echo("Discovered models:")
     for model in models:

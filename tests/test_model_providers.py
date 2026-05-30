@@ -39,7 +39,14 @@ def test_model_provider_config_from_name_uses_preset(monkeypatch):
 
 
 def test_model_provider_validate_rejects_missing_base_url_for_openai_format():
-    config = ModelProviderConfig(name="custom", display_name="Custom", api_key="key", base_url="", model_name="m", api_format="openai")
+    config = ModelProviderConfig(
+        name="custom",
+        display_name="Custom",
+        api_key="key",
+        base_url="",
+        model_name="m",
+        api_format="openai",
+    )
 
     with pytest.raises(ConfigValidationError, match="base_url"):
         config.validate()
@@ -128,7 +135,9 @@ def test_openai_compatible_provider_parses_response(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: DummyResponse())
 
-    response = provider._chat_sync([{"role": "user", "content": "hello"}], max_tokens=32, timeout_seconds=5)
+    response = provider._chat_sync(
+        [{"role": "user", "content": "hello"}], max_tokens=32, timeout_seconds=5
+    )
 
     assert response.text == '{"summary":"ok","findings":[]}'
     assert response.input_tokens == 9

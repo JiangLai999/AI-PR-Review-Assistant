@@ -36,7 +36,9 @@ def build_finding(
     )
 
 
-def build_review_result(summary: str = "summary", severities: list[str] | None = None) -> ReviewResult:
+def build_review_result(
+    summary: str = "summary", severities: list[str] | None = None
+) -> ReviewResult:
     levels = severities or ["high", "medium"]
     findings = [
         build_finding(

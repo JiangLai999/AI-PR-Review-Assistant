@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field
 from ai_pr_review.config import PromptAssemblerConfig
 from ai_pr_review.services.context_builder import FileContext
 
-
 BASE_SYSTEM_PROMPT = """You are a code reviewer. Output findings in the specified JSON format ONLY.
 No preamble, no markdown fences, no commentary outside the JSON.
 
@@ -178,7 +177,11 @@ class PromptAssembler:
 
         rendered = []
         for class_info in file_context.classes:
-            parents = f" extends {', '.join(class_info.parent_classes)}" if class_info.parent_classes else ""
+            parents = (
+                f" extends {', '.join(class_info.parent_classes)}"
+                if class_info.parent_classes
+                else ""
+            )
             methods = ", ".join(class_info.methods) if class_info.methods else "none"
             rendered.append(
                 f"{class_info.name}{parents} methods=[{methods}] [{class_info.start_line}-{class_info.end_line}]"

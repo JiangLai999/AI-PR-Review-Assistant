@@ -9,7 +9,6 @@ from dataclasses import dataclass
 
 from ai_pr_review.config import CostControllerConfig
 
-
 MODEL_PRICING: dict[str, tuple[float, float]] = {
     "claude-sonnet-4-20250514": (3.0, 15.0),
     "claude-sonnet": (3.0, 15.0),

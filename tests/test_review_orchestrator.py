@@ -147,11 +147,19 @@ class StubResultStore:
 
 def test_review_orchestrator_limits_fetch_and_review_concurrency(monkeypatch, tmp_path):
     monkeypatch.setattr("ai_pr_review.services.review_orchestrator.PRFetcher", StubPRFetcher)
-    monkeypatch.setattr("ai_pr_review.services.review_orchestrator.FilterPipeline", StubFilterPipeline)
-    monkeypatch.setattr("ai_pr_review.services.review_orchestrator.ContextBuilder", StubContextBuilder)
-    monkeypatch.setattr("ai_pr_review.services.review_orchestrator.PromptAssembler", StubPromptAssembler)
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.FilterPipeline", StubFilterPipeline
+    )
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.ContextBuilder", StubContextBuilder
+    )
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.PromptAssembler", StubPromptAssembler
+    )
     monkeypatch.setattr("ai_pr_review.services.review_orchestrator.AIClient", StubAIClient)
-    monkeypatch.setattr("ai_pr_review.services.review_orchestrator.PostProcessor", StubPostProcessor)
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.PostProcessor", StubPostProcessor
+    )
     monkeypatch.setattr("ai_pr_review.services.review_orchestrator.ResultStore", StubResultStore)
 
     config = AppConfig.from_env()

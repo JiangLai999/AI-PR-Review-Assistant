@@ -21,6 +21,7 @@ from ai_pr_review.services.exceptions import (
 from ai_pr_review.services.model_providers.factory import create_model_provider
 from ai_pr_review.services.prompt_assembler import ReviewResult
 
+
 class AIClient:
     """调用模型供应商 API 并返回结构化审查结果。"""
 
@@ -52,9 +53,9 @@ class AIClient:
 
     async def review_code(self, system_prompt: str, user_prompt: str) -> ReviewResult:
         """调用 AI 进行代码审查。"""
-        estimated_input_tokens = self._estimate_text_tokens(system_prompt) + self._estimate_text_tokens(
-            user_prompt
-        )
+        estimated_input_tokens = self._estimate_text_tokens(
+            system_prompt
+        ) + self._estimate_text_tokens(user_prompt)
         estimated_max_cost = self.estimate_cost(estimated_input_tokens, self._config.max_tokens)
         self._enforce_cost_limits(estimated_max_cost)
 
@@ -174,7 +175,10 @@ class AIClient:
 
     def _enforce_cost_limits(self, pending_cost: float) -> None:
         if not self._cost_controller.check_budget(pending_cost):
-            if self._cost_controller.get_total_cost() + pending_cost > self._config.max_cost_per_run:
+            if (
+                self._cost_controller.get_total_cost() + pending_cost
+                > self._config.max_cost_per_run
+            ):
                 raise AICostLimitError(
                     f"本次 AI 调用预计成本 ${pending_cost:.4f}，超过单次上限 ${self._config.max_cost_per_run:.2f}。"
                 )

@@ -96,9 +96,7 @@ class TestPromptAssembler:
         assert "@@ context 1:3 @@" in prompt
 
     def test_build_user_prompt_truncates_large_sections(self):
-        assembler = PromptAssembler(
-            PromptAssemblerConfig(max_diff_chars=20, max_context_chars=20)
-        )
+        assembler = PromptAssembler(PromptAssemblerConfig(max_diff_chars=20, max_context_chars=20))
 
         prompt = assembler.build_user_prompt(build_file_context())
 

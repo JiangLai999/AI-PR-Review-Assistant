@@ -141,9 +141,7 @@ def test_render_markdown_supports_custom_template():
 
 
 def test_render_github_comment_can_include_code_snippets_when_enabled():
-    renderer = ReportRenderer(
-        ReportRendererConfig(include_code_snippets_in_github_comment=True)
-    )
+    renderer = ReportRenderer(ReportRendererConfig(include_code_snippets_in_github_comment=True))
 
     output = renderer.render_github_comment(build_review_result(), build_pr_data())
 
