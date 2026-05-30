@@ -185,6 +185,26 @@ class FailingDiscoveryProvider:
         raise AIServiceError("模型列表请求失败: HTTP 404 Not Found")
 
 
+class ProbeSuccessProvider:
+    def __init__(self, config):
+        self.config = config
+
+    async def chat(self, messages, **kwargs):
+        from ai_pr_review.services.model_providers.base import ProviderResponse
+
+        return ProviderResponse(text="pong")
+
+
+class ProbeFailingProvider:
+    def __init__(self, config):
+        self.config = config
+
+    async def chat(self, messages, **kwargs):
+        from ai_pr_review.services.exceptions import AIServiceError
+
+        raise AIServiceError("模型供应商网络请求失败。")
+
+
 def install_success_stubs(monkeypatch):
     monkeypatch.setattr("ai_pr_review.cli.PRFetcher", StubPRFetcher)
     monkeypatch.setattr("ai_pr_review.services.review_orchestrator.PRFetcher", StubPRFetcher)
@@ -768,6 +788,62 @@ def test_cli_config_health_can_discover_models(monkeypatch, tmp_path: Path):
     payload = json.loads(result.output)
     assert payload["discovered_model_count"] == 2
     assert payload["discovered_models"] == ["model-a", "model-b"]
+
+
+def test_cli_config_health_probe_reports_connectivity(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(
+        cli_module, "create_model_provider", lambda config: ProbeSuccessProvider(config)
+    )
+    config = config_module.AppConfig.from_env()
+    config.ai_client = config_module.AIClientConfig(
+        provider="custom",
+        api_key="custom-key",
+        model="custom-model",
+        base_url="https://example.com/v1",
+        api_format="openai",
+    )
+    config.provider = config_module.ProviderConfig.from_model_provider(
+        config.ai_client.model_provider
+    )
+    config.save(config_path, save_key=True)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["config", "health", "--probe"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["probe_ok"] is True
+    assert payload["probe_response_excerpt"] == "pong"
+
+
+def test_cli_config_health_probe_failure_returns_error(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(
+        cli_module, "create_model_provider", lambda config: ProbeFailingProvider(config)
+    )
+    config = config_module.AppConfig.from_env()
+    config.ai_client = config_module.AIClientConfig(
+        provider="custom",
+        api_key="custom-key",
+        model="custom-model",
+        base_url="https://example.com/v1",
+        api_format="openai",
+    )
+    config.provider = config_module.ProviderConfig.from_model_provider(
+        config.ai_client.model_provider
+    )
+    config.save(config_path, save_key=True)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["config", "health", "--probe"])
+
+    assert result.exit_code == 1
+    assert "Provider probe failed" in result.output
 
 
 def test_cli_preferences_command_updates_preferences(monkeypatch, tmp_path: Path):
