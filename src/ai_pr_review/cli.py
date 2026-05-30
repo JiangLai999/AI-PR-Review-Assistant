@@ -19,9 +19,13 @@ from rich.table import Table
 from ai_pr_review.chat_commands import handle_basic_chat_slash_command
 from ai_pr_review.chat_runtime import run_chat_session
 from ai_pr_review.chat_session import clear_chat_session, load_chat_session, save_chat_session
+from ai_pr_review.config_commands import (
+    run_config_health,
+    run_config_model,
+    run_config_models,
+    run_config_test,
+)
 from ai_pr_review.config_diagnostics import (
-    build_health_check_output,
-    resolve_model_discovery,
     validate_provider_for_test,
 )
 from ai_pr_review.config_helpers import (
@@ -1292,16 +1296,16 @@ def config_test(ctx: click.Context) -> None:
     """Validate the resolved provider configuration."""
     config = AppConfig.load(_config_path_from_context(ctx))
     try:
-        validate_provider_for_test(config, missing_api_key_message=_missing_api_key_message)
+        payload = run_config_test(config, missing_api_key_message=_missing_api_key_message)
     except ConfigValidationError as exc:
         raise click.ClickException(str(exc)) from exc
-    provider = config.provider.to_model_provider()
+    provider = payload["provider"]
     click.echo(
         f"Configuration valid: provider={provider.name}, model={provider.model_name}, format={provider.api_format}"
     )
-    click.echo(f"Default output format: {config.preferences.output_format}")
-    if provider.risk_warning is not None:
-        click.echo(provider.risk_warning)
+    click.echo(f"Default output format: {payload['output_format']}")
+    if payload["risk_warning"] is not None:
+        click.echo(payload["risk_warning"])
 
 
 @config_command.command("health")
@@ -1321,11 +1325,11 @@ def config_health(ctx: click.Context, discover_models: bool, probe: bool) -> Non
     config_path = _config_path_from_context(ctx)
     config = AppConfig.load(config_path)
     try:
-        payload = build_health_check_output(
+        payload = run_config_health(
             config,
             config_path=config_path,
-            discover_models_enabled=discover_models,
-            probe_enabled=probe,
+            discover_models=discover_models,
+            probe=probe,
             missing_api_key_message=_missing_api_key_message,
         )
     except ConfigValidationError as exc:
@@ -1340,9 +1344,14 @@ def config_model(ctx: click.Context, model_name: str) -> None:
     """Update the active model name in the current config."""
     config_path = _config_path_from_context(ctx)
     config = AppConfig.load(config_path)
-    _set_active_model(config, model_name)
-    config.save(config_path, save_key=_active_config_has_saved_api_key(config_path))
-    click.echo(f"Active model set to: {model_name}")
+    updated_model = run_config_model(
+        config,
+        config_path=config_path,
+        model_name=model_name,
+        save_key_checker=_active_config_has_saved_api_key,
+        set_active_model=_set_active_model,
+    )
+    click.echo(f"Active model set to: {updated_model}")
 
 
 @config_command.command("models")
@@ -1357,11 +1366,11 @@ def config_models(
     config_path = _config_path_from_context(ctx)
     config = AppConfig.load(config_path)
     try:
-        payload = resolve_model_discovery(
+        payload = run_config_models(
             config,
+            config_path=config_path,
             model_name=model_name,
             set_first=set_first,
-            config_path=config_path,
             missing_api_key_message=_missing_api_key_message,
             save_key_checker=_active_config_has_saved_api_key,
             set_active_model=_set_active_model,
