@@ -17,6 +17,12 @@ from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 
 from ai_pr_review.chat_session import clear_chat_session, load_chat_session, save_chat_session
+from ai_pr_review.config_helpers import (
+    append_gitignore_entry,
+    build_local_example_payload,
+    build_project_config_payload,
+    provider_env_var,
+)
 from ai_pr_review.config import (
     CONFIG_PATH_ENV_VAR,
     DEFAULT_CONFIG_PATH,
@@ -821,15 +827,11 @@ def _provider_choices() -> list[str]:
     return list(MODEL_PROVIDER_PRESETS.keys())
 
 
-def _provider_env_var(provider_name: str) -> str:
-    return str(MODEL_PROVIDER_PRESETS.get(provider_name, {}).get("env_var", "AI_PR_REVIEW_API_KEY"))
-
-
 def _missing_api_key_message(provider_name: str) -> str:
-    provider_env_var = _provider_env_var(provider_name)
+    resolved_provider_env_var = provider_env_var(provider_name)
     return (
         "模型供应商 API Key 未提供。请重新运行 `pr-review config` 并选择保存 API Key，"
-        f"或设置环境变量 {provider_env_var} / AI_PR_REVIEW_API_KEY。"
+        f"或设置环境变量 {resolved_provider_env_var} / AI_PR_REVIEW_API_KEY。"
     )
 
 
@@ -993,52 +995,6 @@ def _handle_chat_slash_command(
             console.print(Panel(f"Error: {exc}", title="Review Error", border_style="red"))
         return True
     return False
-
-
-def _build_project_config_payload(
-    provider_name: str,
-    *,
-    model_name: str | None = None,
-    base_url: str | None = None,
-    api_format: str | None = None,
-) -> dict[str, Any]:
-    provider = ModelProviderConfig.from_name(provider_name, api_key="")
-    if model_name is not None:
-        provider.model_name = model_name
-    if base_url is not None:
-        provider.base_url = base_url
-    if api_format is not None:
-        provider.api_format = api_format
-
-    provider_config = ProviderConfig.from_model_provider(provider)
-    provider_payload = provider_config.to_dict()
-    provider_payload.pop("api_key", None)
-    return {
-        "provider": provider_payload,
-        "preferences": asdict(PreferencesConfig()),
-    }
-
-
-def _build_local_example_payload(provider_name: str) -> dict[str, Any]:
-    return {
-        "provider": {
-            "api_key": "",
-        },
-        "_note": (
-            f"Do not commit this file after copying it to {PROJECT_LOCAL_CONFIG_FILENAME}. "
-            f"Recommended: set {_provider_env_var(provider_name)} or AI_PR_REVIEW_API_KEY instead."
-        ),
-    }
-
-
-def _append_gitignore_entry(gitignore_path: Path, entry: str) -> bool:
-    existing = gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
-    lines = {line.strip() for line in existing.splitlines()}
-    if entry in lines:
-        return False
-    suffix = "" if not existing or existing.endswith("\n") else "\n"
-    gitignore_path.write_text(f"{existing}{suffix}{entry}\n", encoding="utf-8")
-    return True
 
 
 def _json_prompt(text: str, default: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1381,7 +1337,7 @@ def config_init(
     if config_path.exists() and not force:
         raise click.ClickException(f"配置文件已存在：{config_path}。如需覆盖请使用 --force。")
 
-    payload = _build_project_config_payload(
+    payload = build_project_config_payload(
         provider,
         model_name=model_name,
         base_url=base_url,
@@ -1393,7 +1349,7 @@ def config_init(
     if local_example:
         example_path = config_dir / f"{PROJECT_LOCAL_CONFIG_FILENAME}.example"
         if force or not example_path.exists():
-            example_payload = _build_local_example_payload(provider)
+            example_payload = build_local_example_payload(provider)
             example_path.write_text(
                 json.dumps(example_payload, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -1403,10 +1359,10 @@ def config_init(
     if update_gitignore:
         gitignore_path = directory / ".gitignore"
         ignored = f"{PROJECT_CONFIG_DIRNAME}/{PROJECT_LOCAL_CONFIG_FILENAME}"
-        if _append_gitignore_entry(gitignore_path, ignored):
+        if append_gitignore_entry(gitignore_path, ignored):
             click.echo(f"Updated gitignore: {gitignore_path}")
 
-    env_var = _provider_env_var(provider)
+    env_var = provider_env_var(provider)
     click.echo(f"Set API key via environment variable: {env_var} or AI_PR_REVIEW_API_KEY")
 
 
