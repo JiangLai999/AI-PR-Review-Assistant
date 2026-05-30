@@ -789,17 +789,20 @@ def _missing_api_key_message(provider_name: str) -> str:
 
 
 def _response_language_instruction(language: str) -> str:
+    """根据语言设置生成模型回复语言指令。"""
     if language.lower().startswith("en"):
         return "Respond in English unless the user explicitly asks for another language."
     return "请默认使用中文回答，除非用户明确要求使用其他语言。"
 
 
 def _chat_title(config: AppConfig) -> str:
+    """生成聊天窗口标题，显示供应商名和模型名。"""
     provider = config.provider
     return f"AI PR Review Chat | {provider.display_name} / {provider.default_model}"
 
 
 def _set_active_model(config: AppConfig, model_name: str) -> None:
+    """设置当前活跃模型，同时更新 provider 和 ai_client 配置。"""
     model_name = model_name.strip()
     if not model_name:
         raise click.ClickException("模型名称不能为空。")
@@ -810,6 +813,7 @@ def _set_active_model(config: AppConfig, model_name: str) -> None:
 
 
 def _format_chat_error(exc: Exception, config: AppConfig) -> str:
+    """将模型调用错误转换为用户友好的提示信息。"""
     message = str(exc)
     if "Not supported model" in message:
         return (
@@ -823,6 +827,7 @@ def _format_chat_error(exc: Exception, config: AppConfig) -> str:
 
 
 async def _send_chat_message(config: AppConfig, messages: list[dict[str, Any]]) -> str:
+    """发送聊天消息到模型并返回回复文本。"""
     provider_config = config.ai_client.model_provider
     if not provider_config.api_key:
         raise click.ClickException(_missing_api_key_message(provider_config.name))
@@ -837,6 +842,7 @@ async def _send_chat_message(config: AppConfig, messages: list[dict[str, Any]]) 
 
 
 async def _discover_remote_models(config: AppConfig) -> list[str]:
+    """通过 provider 的 /models 接口自动发现可用模型列表。"""
     provider_config = config.ai_client.model_provider
     if not provider_config.api_key:
         raise click.ClickException(_missing_api_key_message(provider_config.name))
@@ -845,6 +851,7 @@ async def _discover_remote_models(config: AppConfig) -> list[str]:
 
 
 def _print_chat_message(console: Console, role: str, text: str, *, layout: str) -> None:
+    """打印聊天消息，支持 plain/compact/split 三种布局。"""
     if layout == "plain":
         console.print(f"{role}: {text}")
         return
@@ -853,6 +860,7 @@ def _print_chat_message(console: Console, role: str, text: str, *, layout: str) 
 
 
 def _active_config_has_saved_api_key(config_path: Path | None) -> bool:
+    """检查当前配置文件中是否已保存 API Key。"""
     path = resolve_config_path(config_path)
     if not path.exists():
         return False

@@ -38,14 +38,24 @@ DEFAULT_FILTER_EXCLUDE_PATTERNS = [
     "**/*.yaml",
 ]
 
+# 环境变量：自定义配置文件路径
 CONFIG_PATH_ENV_VAR = "AI_PR_REVIEW_CONFIG"
+# 项目级配置目录名
 PROJECT_CONFIG_DIRNAME = ".ai_pr_review"
+# 项目级共享配置文件名（可提交到仓库）
 PROJECT_CONFIG_FILENAME = "config.json"
+# 项目本地私有配置文件名（不应提交，含 API Key 等敏感信息）
 PROJECT_LOCAL_CONFIG_FILENAME = "config.local.json"
+# 旧版默认配置路径（向后兼容）
 LEGACY_DEFAULT_CONFIG_PATH = Path("~/.ai_pr_review/config.json").expanduser()
 
 
 def _default_config_path() -> Path:
+    """获取默认用户配置文件路径。
+
+    Windows 下优先使用 %APPDATA%/ai-pr-review/config.json，
+    其他平台使用 ~/.ai_pr_review/config.json。
+    """
     appdata = os.getenv("APPDATA", "").strip()
     if os.name == "nt" and appdata:
         modern_path = Path(appdata) / "ai-pr-review" / "config.json"
@@ -58,6 +68,10 @@ DEFAULT_CONFIG_PATH = _default_config_path()
 
 
 def resolve_config_path(path: Path | None = None) -> Path:
+    """解析实际使用的配置文件路径。
+
+    优先级：显式传入的 path > 环境变量 AI_PR_REVIEW_CONFIG > 默认路径。
+    """
     if path is not None:
         return path
     override = os.getenv(CONFIG_PATH_ENV_VAR, "").strip()
@@ -67,6 +81,7 @@ def resolve_config_path(path: Path | None = None) -> Path:
 
 
 def _find_project_root(start: Path | None = None) -> Path | None:
+    """从指定目录向上查找包含 .git 的项目根目录。"""
     current = (start or Path.cwd()).resolve()
     while True:
         if (current / ".git").exists():
@@ -77,6 +92,11 @@ def _find_project_root(start: Path | None = None) -> Path | None:
 
 
 def project_config_paths(start: Path | None = None) -> list[Path]:
+    """获取项目级配置文件路径列表。
+
+    返回项目根目录下的 .ai_pr_review/config.json 和 config.local.json。
+    如果不在 git 仓库中，返回空列表。
+    """
     root = _find_project_root(start)
     if root is None:
         return []
@@ -88,6 +108,13 @@ def project_config_paths(start: Path | None = None) -> list[Path]:
 
 
 def active_config_paths(path: Path | None = None) -> list[Path]:
+    """获取所有生效的配置文件路径。
+
+    加载顺序（后者覆盖前者）：
+    1. 用户级配置文件
+    2. 项目级 .ai_pr_review/config.json
+    3. 项目本地 .ai_pr_review/config.local.json
+    """
     user_config_path = resolve_config_path(path)
     if path is not None:
         return [user_config_path]
@@ -95,6 +122,7 @@ def active_config_paths(path: Path | None = None) -> list[Path]:
 
 
 def _deep_merge_dicts(base: dict[str, object], override: dict[str, object]) -> dict[str, object]:
+    """深度合并两个字典，override 中的值覆盖 base 中的同名键。"""
     merged = dict(base)
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
@@ -105,8 +133,10 @@ def _deep_merge_dicts(base: dict[str, object], override: dict[str, object]) -> d
 
 
 def mask_api_key(api_key: str) -> str:
-    """Mask an API key for safe display."""
+    """对 API Key 进行脱敏处理，用于安全显示。
 
+    示例：sk-ant-abc123 -> sk-ant-***123
+    """
     if not api_key:
         return ""
 
@@ -120,7 +150,7 @@ def mask_api_key(api_key: str) -> str:
 
 
 class ConfigValidationError(ValueError):
-    """Raised when persisted or runtime config is invalid."""
+    """配置校验错误，当配置文件或运行时配置无效时抛出。"""
 
 
 MODEL_PROVIDER_PRESETS: dict[str, dict[str, object]] = {
