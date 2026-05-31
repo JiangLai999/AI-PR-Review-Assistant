@@ -128,7 +128,7 @@ def markdown_to_html(markdown: str) -> str:
 def build_docs_data() -> dict:
     readme = read_text(README)
     api_doc = read_text(API_DOC)
-    workflow_doc = read_text(WORKFLOW_DOC)
+    workflow_doc = read_text(WORKFLOW_DOC) if WORKFLOW_DOC.exists() else ""
 
     tabs = [
         {
