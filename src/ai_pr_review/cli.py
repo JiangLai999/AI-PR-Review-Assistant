@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -1480,6 +1481,107 @@ def chat_command(
             return None
         return answer
 
+    def handle_raw_command(command_text: str) -> bool:
+        stripped = command_text.strip()
+        if not stripped.startswith("pr-review "):
+            return False
+
+        try:
+            parts = shlex.split(stripped)
+        except ValueError as exc:
+            console.print(Panel(f"命令解析失败: {exc}", title="Error", border_style="red"))
+            return True
+
+        if len(parts) < 2:
+            console.print(
+                Panel(
+                    "请提供 PR URL，例如：pr-review https://github.com/owner/repo/pull/123",
+                    title="Error",
+                    border_style="red",
+                )
+            )
+            return True
+
+        pr_url = parts[1]
+        model_override: str | None = None
+        output_format = "terminal"
+        output: Path | None = None
+        publish_comment = False
+        dry_run = False
+        only_fetch = False
+        only_filter = False
+        show_filter_reasons = False
+
+        i = 2
+        while i < len(parts):
+            token = parts[i]
+            if token == "--model" and i + 1 < len(parts):
+                model_override = parts[i + 1]
+                i += 2
+                continue
+            if token == "--format" and i + 1 < len(parts):
+                output_format = parts[i + 1]
+                i += 2
+                continue
+            if token == "--output" and i + 1 < len(parts):
+                output = Path(parts[i + 1])
+                i += 2
+                continue
+            if token == "--publish-comment":
+                publish_comment = True
+                i += 1
+                continue
+            if token == "--dry-run":
+                dry_run = True
+                i += 1
+                continue
+            if token == "--only-fetch":
+                only_fetch = True
+                i += 1
+                continue
+            if token == "--only-filter":
+                only_filter = True
+                i += 1
+                continue
+            if token == "--show-filter-reasons":
+                show_filter_reasons = True
+                i += 1
+                continue
+
+            console.print(
+                Panel(f"不支持的聊天内命令参数: {token}", title="Error", border_style="red")
+            )
+            return True
+
+        try:
+            effective_format = infer_output_format(output_format, str(output) if output else None)
+            execute_review_flow(
+                console,
+                pr_url=pr_url,
+                model=model_override,
+                app_config=config,
+                effective_format=effective_format,
+                output=output,
+                publish_comment=publish_comment,
+                dry_run=dry_run,
+                only_fetch=only_fetch,
+                only_filter=only_filter,
+                show_filter_reasons=show_filter_reasons,
+                run_review=run_review,
+                render_markdown_report=render_markdown_report,
+                render_json_report=render_json_report,
+                render_terminal_report=render_terminal_report,
+                render_github_comment_report=render_github_comment_report,
+                maybe_publish_comment=maybe_publish_comment,
+            )
+        except ValueError as exc:
+            console.print(Panel(str(exc), title="Error", border_style="red"))
+        except (PRFetcherError, AIClientError) as exc:
+            console.print(Panel(f"Error: {exc}", title="Review Error", border_style="red"))
+        except Exception as exc:
+            console.print(Panel(f"Unexpected error: {exc}", title="Error", border_style="red"))
+        return True
+
     run_chat_session(
         console,
         config=config,
@@ -1491,6 +1593,7 @@ def chat_command(
         chat_title=_chat_title,
         print_chat_message=print_chat_message,
         slash_handler=_handle_chat_slash_command,
+        raw_command_handler=handle_raw_command,
         send_message=send_message,
     )
 

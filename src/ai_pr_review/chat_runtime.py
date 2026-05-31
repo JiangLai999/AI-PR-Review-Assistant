@@ -27,6 +27,7 @@ def run_chat_session(
     slash_handler: Callable[
         [Console, AppConfig, Path | None, list[dict[str, Any]], str, str], bool
     ],
+    raw_command_handler: Callable[[str], bool],
     send_message: Callable[[list[dict[str, Any]], str], str],
 ) -> None:
     messages = load_session(config_path)
@@ -54,6 +55,8 @@ def run_chat_session(
         if user_text.lower() in {"/exit", "exit", "quit", "q"}:
             break
         if not user_text:
+            continue
+        if raw_command_handler(user_text):
             continue
         if user_text.startswith("/") and slash_handler(
             console, config, config_path, messages, user_text, active_layout
