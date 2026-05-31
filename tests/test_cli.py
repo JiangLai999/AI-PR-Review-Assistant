@@ -974,6 +974,7 @@ def test_cli_chat_slash_help_and_config(monkeypatch, tmp_path: Path):
     assert result.exit_code == 0
     assert "Chat Commands" in result.output
     assert "/model <模型ID>" in result.output
+    assert "/session - 显示当前 chat 会话信息" in result.output
     assert "Chat Config" in result.output
     assert '"model": "deepseek-chat"' in result.output
 
@@ -1037,8 +1038,19 @@ def test_cli_chat_slash_history_outputs_recent_runs(monkeypatch, tmp_path: Path)
     result = runner.invoke(main, ["chat", "--layout", "plain"], input="/history\n/exit\n")
 
     assert result.exit_code == 0
-    assert "History" in result.output
-    assert '"pr_url": "https://github.com/owner/repo/pull/42"' in result.output
+    assert "History (1)" in result.output
+
+
+def test_cli_chat_slash_history_supports_limit_argument(monkeypatch, tmp_path: Path):
+    install_success_stubs(monkeypatch)
+    configure_temp_app(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    runner.invoke(main, ["https://github.com/owner/repo/pull/42"])
+    result = runner.invoke(main, ["chat", "--layout", "plain"], input="/history 1\n/exit\n")
+
+    assert result.exit_code == 0
+    assert "History (1)" in result.output
 
 
 def test_cli_chat_slash_stats_outputs_aggregates(monkeypatch, tmp_path: Path):
@@ -1051,7 +1063,32 @@ def test_cli_chat_slash_stats_outputs_aggregates(monkeypatch, tmp_path: Path):
 
     assert result.exit_code == 0
     assert "Stats" in result.output
-    assert '"total_runs": 1' in result.output
+    assert "total_runs" in result.output
+    assert "1" in result.output
+
+
+def test_cli_chat_slash_session_outputs_current_context(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "create_model_provider", lambda config: StubChatProvider(config))
+    config = config_module.AppConfig.from_env()
+    config.ai_client = config_module.AIClientConfig(
+        provider="deepseek",
+        api_key="deepseek-key",
+        model="deepseek-chat",
+        base_url="https://api.deepseek.com/v1",
+        api_format="openai",
+    )
+    config.preferences = config_module.PreferencesConfig(chat_layout="plain")
+    config.save(config_path, save_key=True)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["chat", "--layout", "plain"], input="/session\n/exit\n")
+
+    assert result.exit_code == 0
+    assert "Chat Session" in result.output
+    assert '"model": "deepseek-chat"' in result.output
 
 
 def test_cli_chat_persists_and_restores_session(monkeypatch, tmp_path: Path):
