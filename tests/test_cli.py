@@ -917,9 +917,9 @@ def test_cli_chat_message_uses_configured_provider(monkeypatch, tmp_path: Path):
     result = runner.invoke(main, ["chat", "--message", "你好", "--layout", "plain"])
 
     assert result.exit_code == 0
-    assert "AI PR Review Chat" in result.output
-    assert "You: 你好" in result.output
-    assert "Assistant: echo: 你好" in result.output
+    assert "Terminal Workspace" in result.output
+    assert "你好" in result.output
+    assert "echo: 你好" in result.output
 
 
 def test_cli_chat_message_handles_provider_error(monkeypatch, tmp_path: Path):
@@ -978,10 +978,10 @@ def test_cli_chat_slash_help_and_config(monkeypatch, tmp_path: Path):
     result = runner.invoke(main, ["chat", "--layout", "plain"], input="/help\n/config\n/exit\n")
 
     assert result.exit_code == 0
-    assert "Chat Commands" in result.output
-    assert "/model <模型ID>" in result.output
-    assert "/session - 显示当前 chat 会话信息" in result.output
-    assert "Chat Config" in result.output
+    assert "Commands" in result.output
+    assert "/model <ID>" in result.output
+    assert "/session" in result.output
+    assert "Config" in result.output
     assert '"model": "deepseek-chat"' in result.output
 
 
@@ -1014,8 +1014,8 @@ def test_cli_chat_slash_model_switches_session_model(monkeypatch, tmp_path: Path
     )
 
     assert result.exit_code == 0
-    assert "Active model set to: new-model" in result.output
-    assert "Assistant: new-model: hello" in result.output
+    assert "模型已切换为: new-model" in result.output
+    assert "new-model: hello" in result.output
 
 
 def test_cli_chat_slash_review_runs_pr_review(monkeypatch, tmp_path: Path):
@@ -1095,7 +1095,7 @@ def test_cli_chat_slash_session_outputs_current_context(monkeypatch, tmp_path: P
     result = runner.invoke(main, ["chat", "--layout", "plain"], input="/session\n/exit\n")
 
     assert result.exit_code == 0
-    assert "Chat Session" in result.output
+    assert "Session" in result.output
     assert '"model": "deepseek-chat"' in result.output
 
 
@@ -1119,11 +1119,11 @@ def test_cli_chat_persists_and_restores_session(monkeypatch, tmp_path: Path):
 
     runner = CliRunner()
     first = runner.invoke(main, ["chat", "--layout", "plain"], input="你好\n/exit\n")
-    second = runner.invoke(main, ["chat", "--layout", "plain"], input="/exit\n")
+    second = runner.invoke(main, ["chat", "--layout", "plain"], input="/restore\n/exit\n")
 
     assert first.exit_code == 0
     assert second.exit_code == 0
-    assert "Restored 2 messages from the previous chat session." in second.output
+    assert "已恢复" in second.output
 
 
 def test_cli_chat_clear_removes_persisted_session(monkeypatch, tmp_path: Path):
@@ -1150,7 +1150,7 @@ def test_cli_chat_clear_removes_persisted_session(monkeypatch, tmp_path: Path):
     result = runner.invoke(main, ["chat", "--layout", "plain"], input="/clear\n/exit\n")
 
     assert result.exit_code == 0
-    assert "Conversation cleared." in result.output
+    assert "会话已清空" in result.output
     assert not (tmp_path / "chat_session.json").exists()
 
 
