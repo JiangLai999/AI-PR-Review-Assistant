@@ -1,6 +1,6 @@
-"""Chat runtime helpers.
+"""Chat runtime helpers - Premium TUI design.
 
-Design inspired by OpenCode, Claude Code, and OpenClaw.
+Inspired by OpenCode, Claude Code, and OpenClaw.
 """
 
 from __future__ import annotations
@@ -12,13 +12,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from rich.align import Align
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.syntax import Syntax
-from rich.table import Table
 from rich.text import Text
 
 from ai_pr_review.config import AppConfig
@@ -26,46 +26,65 @@ from ai_pr_review.config import AppConfig
 CODE_BLOCK_RE = re.compile(r"```(?P<lang>[\w+-]*)\n(?P<code>.*?)```", re.DOTALL)
 
 
-def _render_status_bar(config: AppConfig, message_count: int) -> Text:
-    """状态栏 - 借鉴 Claude Code 的极简状态行。"""
-    provider = config.provider.display_name or config.ai_client.provider
-    model = config.ai_client.model
+def _pixel_brand() -> Text:
+    """大像素品牌横幅 - PR REVIEW."""
+    lines = [
+        "██████  ██████      ██████  ███████ ██    ██ ██ ███████ ██  ██",
+        "██   ██ ██   ██     ██   ██ ██      ██    ██ ██ ██      ██  ██",
+        "██████  ██████      ██████  █████   ██    ██ ██ █████   ██████",
+        "██      ██   ██     ██   ██ ██       ██  ██  ██ ██      ██  ██",
+        "██      ██   ██     ██   ██ ███████   ████   ██ ███████ ██  ██",
+    ]
 
-    status = Text()
-    status.append(" ● ", style="bold green")
-    status.append(provider, style="bold white")
-    status.append(" / ", style="dim")
-    status.append(model, style="grey70")
-    status.append("  |  ", style="dim")
-    status.append(f"{message_count} msgs", style="grey70")
-    status.append("  |  ", style="dim")
-    status.append(datetime.now().strftime("%H:%M"), style="grey62")
-
-    return status
+    brand = Text()
+    for line in lines:
+        brand.append(line + "\n", style="bold white")
+    return brand
 
 
 def _render_header(config: AppConfig) -> Panel:
-    """品牌头部 - 借鉴 OpenCode 的像素风格 + OpenClaw 的简洁感。"""
-    brand = Text()
-    brand.append("  ", style="white")
-    brand.append("██", style="bold white")
-    brand.append("  ", style="white")
-    brand.append("AI PR Review", style="bold white")
-    brand.append("  ", style="dim")
-    brand.append("/", style="dim")
-    brand.append("  ", style="dim")
-    brand.append("Terminal Workspace", style="grey62")
+    """品牌头部 - 大像素横幅 + 副标题."""
+    subtitle = Text()
+    subtitle.append("AI-Powered Pull Request Review", style="grey70")
+    subtitle.append("  ·  ", style="dim")
+    subtitle.append("Terminal Workspace", style="grey50")
+
+    content = Group(
+        Text(""),
+        Align.center(_pixel_brand()),
+        Text(""),
+        Align.center(subtitle),
+        Text(""),
+    )
 
     return Panel(
-        brand,
-        border_style="grey27",
-        padding=(0, 1),
+        content,
+        border_style="grey35",
+        padding=(0, 2),
         style="white on black",
     )
 
 
+def _render_status_bar(config: AppConfig, message_count: int) -> Text:
+    """状态栏 - 极简连接信息."""
+    provider = config.provider.display_name or config.ai_client.provider
+    model = config.ai_client.model
+
+    status = Text()
+    status.append("  ● ", style="bold green")
+    status.append(provider, style="bold white")
+    status.append(" / ", style="dim")
+    status.append(model, style="grey70")
+    status.append("    ", style="dim")
+    status.append(f"{message_count} messages", style="grey70")
+    status.append("    ", style="dim")
+    status.append(datetime.now().strftime("%Y-%m-%d %H:%M"), style="grey62")
+    status.append("\n")
+    return status
+
+
 def _render_assistant_content(text: str) -> Any:
-    """渲染 assistant 消息内容，支持 Markdown 和代码高亮。"""
+    """渲染 assistant 消息内容，支持 Markdown 和代码高亮."""
     parts: list[Any] = []
     cursor = 0
     for match in CODE_BLOCK_RE.finditer(text):
@@ -90,84 +109,124 @@ def _render_assistant_content(text: str) -> Any:
     return Group(*parts)
 
 
+def _render_user_message(text: str, timestamp: str) -> Panel:
+    """渲染用户消息 - 简洁淡色边框."""
+    header = Text()
+    header.append(" ▶ ", style="bold cyan")
+    header.append("YOU", style="bold cyan")
+    header.append(f"  ·  {timestamp}", style="dim")
+
+    return Panel(
+        Text(text, style="white"),
+        title=header,
+        title_align="left",
+        border_style="grey30",
+        padding=(0, 2),
+        style="white on black",
+    )
+
+
+def _render_assistant_message(text: str, timestamp: str) -> Panel:
+    """渲染助手消息 - 高亮边框."""
+    header = Text()
+    header.append(" ⏺ ", style="bold green")
+    header.append("ASSISTANT", style="bold green")
+    header.append(f"  ·  {timestamp}", style="dim")
+
+    return Panel(
+        _render_assistant_content(text),
+        title=header,
+        title_align="left",
+        border_style="grey70",
+        padding=(0, 2),
+        style="white on black",
+    )
+
+
 def _render_message(role: str, text: str, timestamp: str | None = None) -> Panel:
-    """渲染单条消息 - 借鉴 Claude Code 的 ⏺ 符号 + OpenClaw 的时间戳。"""
+    """渲染消息 - 根据角色选择不同样式."""
     time_str = timestamp or datetime.now().strftime("%H:%M")
 
     if role == "user":
-        header = Text()
-        header.append(" > ", style="bold cyan")
-        header.append("YOU", style="bold cyan")
-        header.append(f"  {time_str}", style="dim")
-        renderable: Any = Text(text, style="white")
-        border_style = "grey35"
+        return _render_user_message(text, time_str)
     else:
-        header = Text()
-        header.append(" ⏺ ", style="bold green")
-        header.append("ASSISTANT", style="bold green")
-        header.append(f"  {time_str}", style="dim")
-        renderable = _render_assistant_content(text)
-        border_style = "grey70"
+        return _render_assistant_message(text, time_str)
+
+
+def _render_welcome() -> Panel:
+    """欢迎消息 - 引导用户开始使用."""
+    welcome = Text()
+    welcome.append("\n")
+    welcome.append("  Welcome to AI PR Review", style="bold white")
+    welcome.append("\n\n")
+    welcome.append("  ", style="grey70")
+    welcome.append("▶", style="green")
+    welcome.append("  Paste a ", style="grey70")
+    welcome.append("GitHub PR URL", style="bold cyan")
+    welcome.append(" to auto-review code\n", style="grey70")
+    welcome.append("  ", style="grey70")
+    welcome.append("▶", style="green")
+    welcome.append("  Type ", style="grey70")
+    welcome.append("/", style="bold cyan")
+    welcome.append(" to see available commands\n", style="grey70")
+    welcome.append("  ", style="grey70")
+    welcome.append("▶", style="green")
+    welcome.append("  Type ", style="grey70")
+    welcome.append("/help", style="bold cyan")
+    welcome.append(" for full help\n", style="grey70")
+    welcome.append("  ", style="grey70")
+    welcome.append("▶", style="green")
+    welcome.append("  Type ", style="grey70")
+    welcome.append("/exit", style="bold cyan")
+    welcome.append(" to quit\n", style="grey70")
+    welcome.append("\n")
 
     return Panel(
-        renderable,
-        title=header,
-        border_style=border_style,
-        padding=(0, 1),
+        welcome,
+        title=" Welcome ",
+        title_align="left",
+        border_style="grey30",
+        padding=(0, 2),
         style="white on black",
     )
 
 
 def _render_transcript(messages: list[dict[str, Any]]) -> Panel:
-    """渲染消息历史。"""
+    """渲染消息历史."""
     if not messages:
-        empty = Text()
-        empty.append("  ", style="grey70")
-        empty.append(">", style="green")
-        empty.append("  粘贴 GitHub PR URL 自动审查\n", style="grey70")
-        empty.append("  ", style="grey70")
-        empty.append(">", style="green")
-        empty.append("  输入 ", style="grey70")
-        empty.append("/help", style="bold cyan")
-        empty.append(" 查看所有命令\n", style="grey70")
-        empty.append("  ", style="grey70")
-        empty.append(">", style="green")
-        empty.append("  输入 ", style="grey70")
-        empty.append("/exit", style="bold cyan")
-        empty.append(" 退出\n", style="grey70")
-        empty.append("  ", style="grey70")
-        empty.append(">", style="green")
-        empty.append("  支持 Markdown 格式回复与代码高亮\n", style="grey70")
-        return Panel(
-            empty,
-            title=" Welcome ",
-            border_style="grey35",
-            padding=(1, 1),
-            style="white on black",
-        )
+        return _render_welcome()
 
-    renderables = []
-    for message in messages[-12:]:
+    recent = messages[-12:]
+    renderables: list[Any] = []
+    for i, message in enumerate(recent):
         role = str(message.get("role", "assistant")).lower()
         content = str(message.get("content", ""))
         timestamp = str(message.get("timestamp", ""))
         renderables.append(_render_message(role, content, timestamp if timestamp else None))
+        if i < len(recent) - 1:
+            renderables.append(Text(""))
 
     return Panel(
         Group(*renderables),
         title=" Transcript ",
-        border_style="grey35",
+        title_align="left",
+        border_style="grey30",
         padding=(1, 1),
         style="white on black",
     )
 
 
 def _render_input_hint() -> Panel:
-    """输入提示 - 借鉴 OpenCode 的底部工具栏。"""
+    """输入提示."""
     input_text = Text()
-    input_text.append(" >", style="bold white")
-    input_text.append(" ", style="white")
-    return Panel(input_text, border_style="grey35", padding=(0, 1), style="white on black")
+    input_text.append(" ▶ ", style="bold green")
+    input_text.append("Type your message or paste a PR URL...", style="grey50")
+    return Panel(
+        input_text,
+        border_style="grey30",
+        padding=(0, 1),
+        style="white on black",
+    )
 
 
 def _render_workspace(
@@ -175,7 +234,7 @@ def _render_workspace(
     messages: list[dict[str, Any]],
     session_path: str | None,
 ) -> Group:
-    """渲染完整工作区。"""
+    """渲染完整工作区."""
     return Group(
         _render_header(config),
         _render_status_bar(config, len(messages)),
@@ -184,29 +243,55 @@ def _render_workspace(
     )
 
 
-def _spinner_frame(elapsed: float) -> str:
-    """旋转动画帧。"""
-    frames = ["-", "\\", "|", "/"]
-    idx = int(elapsed * 8) % len(frames)
-    return frames[idx]
+# 多样化思考阶段 - 借鉴 Claude Code 的多阶段思考
+THINKING_STAGES = [
+    (0.0, "▰▱▱▱▱", "Connecting"),
+    (1.0, "▰▰▱▱▱", "Analyzing"),
+    (3.0, "▰▰▰▱▱", "Generating"),
+    (6.0, "▰▰▰▰▱", "Crafting"),
+    (12.0, "▰▰▰▰▰", "Finishing"),
+]
 
 
-def _thinking_stage(elapsed: float) -> str:
-    """根据时间返回思考阶段文字。"""
-    if elapsed < 0.5:
-        return "Analyzing input..."
-    elif elapsed < 1.0:
-        return "Building context..."
-    elif elapsed < 2.0:
-        return "Calling AI model..."
-    elif elapsed < 5.0:
-        return "Processing response..."
-    else:
-        return "Still working..."
+def _thinking_animation(elapsed: float) -> tuple[str, str, str]:
+    """返回 (spinner, progress, message) 多阶段动画."""
+    spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    spinner = spinner_frames[int(elapsed * 10) % len(spinner_frames)]
+
+    stage = THINKING_STAGES[0]
+    for s in THINKING_STAGES:
+        if elapsed >= s[0]:
+            stage = s
+        else:
+            break
+
+    return spinner, stage[1], stage[2]
+
+
+def _render_thinking(elapsed: float) -> Panel:
+    """渲染思考状态 - 多样化进度显示."""
+    spinner, progress, message = _thinking_animation(elapsed)
+
+    content = Text()
+    content.append(f"  {spinner}  ", style="bold cyan")
+    content.append(progress, style="bold cyan")
+    content.append("  ", style="white")
+    content.append(message, style="bold white")
+    content.append("...", style="dim")
+    content.append(f"   {elapsed:.1f}s", style="dim")
+
+    return Panel(
+        content,
+        title=" Thinking ",
+        title_align="left",
+        border_style="cyan",
+        padding=(0, 1),
+        style="white on black",
+    )
 
 
 def _build_prompt_session() -> Any | None:
-    """构建 prompt_toolkit 会话。"""
+    """构建 prompt_toolkit 会话."""
     try:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.completion import WordCompleter
@@ -245,6 +330,9 @@ def _build_prompt_session() -> Any | None:
                 "  <style fg='#444444'>│</style>"
                 "  <b><style fg='#888888'> / </style></b>"
                 " <style fg='#555555'>commands</style>"
+                "  <style fg='#444444'>│</style>"
+                "  <b><style fg='#888888'> Ctrl+C </style></b>"
+                " <style fg='#555555'>exit</style>"
             ),
             multiline=False,
         )
@@ -269,7 +357,7 @@ def run_chat_session(
     raw_command_handler: Callable[[str], bool],
     send_message: Callable[[list[dict[str, Any]], str], str],
 ) -> None:
-    """运行聊天会话主循环。"""
+    """运行聊天会话主循环."""
     messages: list[dict[str, Any]] = []
     session_path = str(config_path) if config_path is not None else None
     prompt_session = _build_prompt_session()
@@ -293,16 +381,7 @@ def run_chat_session(
             with Live(console=console, refresh_per_second=12, transient=True) as live:
                 while True:
                     elapsed = time.time() - start_time
-                    spinner = _spinner_frame(elapsed)
-                    stage = _thinking_stage(elapsed)
-                    live.update(
-                        Panel(
-                            Text(f" {spinner} {stage} ({elapsed:.1f}s)", style="bold white"),
-                            border_style="grey35",
-                            padding=(0, 1),
-                            style="white on black",
-                        )
-                    )
+                    live.update(_render_thinking(elapsed))
                     if elapsed > 0.3:
                         break
                 answer = send_message(messages, user_text)
@@ -330,16 +409,16 @@ def run_chat_session(
                 from prompt_toolkit.formatted_text import HTML
 
                 user_text = prompt_session.prompt(
-                    HTML("<b><style fg='#ffffff'>> </style></b>")
+                    HTML("<b><style fg='#ffffff'>▶ </style></b>")
                 ).strip()
             else:
-                user_text = Prompt.ask("[bold white]>[/bold white]", console=console).strip()
+                user_text = Prompt.ask("[bold white]▶[/bold white]", console=console).strip()
         except (EOFError, KeyboardInterrupt):
-            console.print("\n[dim]退出聊天。[/dim]")
+            console.print("\n[dim]Exiting chat.[/dim]")
             break
 
         if user_text.lower() in {"/exit", "exit", "quit", "q"}:
-            console.print("[dim]退出聊天。[/dim]")
+            console.print("[dim]Exiting chat.[/dim]")
             break
         if not user_text:
             continue
