@@ -1,4 +1,7 @@
-"""Chat runtime helpers."""
+"""Chat runtime helpers.
+
+Design inspired by OpenCode, Claude Code, and OpenClaw.
+"""
 
 from __future__ import annotations
 
@@ -9,8 +12,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from rich.box import ASCII
-from rich.columns import Columns
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
@@ -25,36 +26,42 @@ from ai_pr_review.config import AppConfig
 CODE_BLOCK_RE = re.compile(r"```(?P<lang>[\w+-]*)\n(?P<code>.*?)```", re.DOTALL)
 
 
-def _render_status_bar(config: AppConfig, message_count: int) -> Panel:
-    """简洁的状态栏。"""
+def _render_status_bar(config: AppConfig, message_count: int) -> Text:
+    """状态栏 - 借鉴 Claude Code 的极简状态行。"""
     provider = config.provider.display_name or config.ai_client.provider
     model = config.ai_client.model
 
     status = Text()
-    status.append(" * ", style="bold green")
-    status.append("CONNECTED", style="bold green")
-    status.append("  |  ", style="dim")
+    status.append(" ● ", style="bold green")
     status.append(provider, style="bold white")
     status.append(" / ", style="dim")
     status.append(model, style="grey70")
     status.append("  |  ", style="dim")
-    status.append(f"{message_count} messages", style="grey70")
+    status.append(f"{message_count} msgs", style="grey70")
+    status.append("  |  ", style="dim")
+    status.append(datetime.now().strftime("%H:%M"), style="grey62")
 
-    return Panel(status, border_style="grey35", padding=(0, 1), style="white on black", box=ASCII)
+    return status
 
 
 def _render_header(config: AppConfig) -> Panel:
-    """简洁的品牌头部。"""
+    """品牌头部 - 借鉴 OpenCode 的像素风格 + OpenClaw 的简洁感。"""
     brand = Text()
+    brand.append("  ", style="white")
+    brand.append("██", style="bold white")
+    brand.append("  ", style="white")
     brand.append("AI PR Review", style="bold white")
-    brand.append("  -  ", style="dim")
+    brand.append("  ", style="dim")
+    brand.append("/", style="dim")
+    brand.append("  ", style="dim")
     brand.append("Terminal Workspace", style="grey62")
-    brand.append("  |  ", style="dim")
-    brand.append(config.provider.display_name or config.ai_client.provider, style="bold white")
-    brand.append(" / ", style="dim")
-    brand.append(config.ai_client.model, style="grey70")
 
-    return Panel(brand, border_style="grey27", padding=(0, 1), style="white on black", box=ASCII)
+    return Panel(
+        brand,
+        border_style="grey27",
+        padding=(0, 1),
+        style="white on black",
+    )
 
 
 def _render_assistant_content(text: str) -> Any:
@@ -69,7 +76,7 @@ def _render_assistant_content(text: str) -> Any:
                 parts.append(Markdown(prose))
         lang = (match.group("lang") or "text").strip() or "text"
         code = match.group("code").rstrip()
-        parts.append(Syntax(code, lang, theme="github-dark", word_wrap=True, line_numbers=False))
+        parts.append(Syntax(code, lang, theme="monokai", word_wrap=True, line_numbers=False))
         cursor = end
 
     tail = text[cursor:].strip()
@@ -84,7 +91,7 @@ def _render_assistant_content(text: str) -> Any:
 
 
 def _render_message(role: str, text: str, timestamp: str | None = None) -> Panel:
-    """渲染单条消息，带时间戳和更好的样式。"""
+    """渲染单条消息 - 借鉴 Claude Code 的 ⏺ 符号 + OpenClaw 的时间戳。"""
     time_str = timestamp or datetime.now().strftime("%H:%M")
 
     if role == "user":
@@ -96,7 +103,7 @@ def _render_message(role: str, text: str, timestamp: str | None = None) -> Panel
         border_style = "grey35"
     else:
         header = Text()
-        header.append(" * ", style="bold green")
+        header.append(" ⏺ ", style="bold green")
         header.append("ASSISTANT", style="bold green")
         header.append(f"  {time_str}", style="dim")
         renderable = _render_assistant_content(text)
@@ -108,7 +115,6 @@ def _render_message(role: str, text: str, timestamp: str | None = None) -> Panel
         border_style=border_style,
         padding=(0, 1),
         style="white on black",
-        box=ASCII,
     )
 
 
@@ -138,7 +144,6 @@ def _render_transcript(messages: list[dict[str, Any]]) -> Panel:
             border_style="grey35",
             padding=(1, 1),
             style="white on black",
-            box=ASCII,
         )
 
     renderables = []
@@ -154,18 +159,15 @@ def _render_transcript(messages: list[dict[str, Any]]) -> Panel:
         border_style="grey35",
         padding=(1, 1),
         style="white on black",
-        box=ASCII,
     )
 
 
 def _render_input_hint() -> Panel:
-    """简洁的输入提示。"""
+    """输入提示 - 借鉴 OpenCode 的底部工具栏。"""
     input_text = Text()
     input_text.append(" >", style="bold white")
     input_text.append(" ", style="white")
-    return Panel(
-        input_text, border_style="grey35", padding=(0, 1), style="white on black", box=ASCII
-    )
+    return Panel(input_text, border_style="grey35", padding=(0, 1), style="white on black")
 
 
 def _render_workspace(
