@@ -19,6 +19,12 @@ from rich.table import Table
 from ai_pr_review.chat_commands import handle_basic_chat_slash_command
 from ai_pr_review.chat_runtime import run_chat_session
 from ai_pr_review.chat_session import clear_chat_session, load_chat_session, save_chat_session
+from ai_pr_review.config_entry import (
+    build_config_show_output,
+    run_config_export,
+    run_config_import,
+    run_config_init,
+)
 from ai_pr_review.config_commands import (
     run_config_health,
     run_config_model,
@@ -1189,13 +1195,7 @@ def config_show(ctx: click.Context) -> None:
     """Show resolved configuration and active config sources."""
     config_path = _config_path_from_context(ctx)
     config = AppConfig.load(config_path)
-    click.echo(
-        json.dumps(
-            _export_config_payload(config, config_path=config_path, mask_secrets=True),
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
+    click.echo(build_config_show_output(config, config_path=config_path, export_config_payload=_export_config_payload))
 
 
 @config_command.command("init")
@@ -1244,40 +1244,24 @@ def config_init(
     update_gitignore: bool,
 ) -> None:
     """Initialize project-level config templates."""
-    directory = directory or Path.cwd()
-    config_dir = directory / PROJECT_CONFIG_DIRNAME
-    config_dir.mkdir(parents=True, exist_ok=True)
-
-    config_path = config_dir / PROJECT_CONFIG_FILENAME
-    if config_path.exists() and not force:
-        raise click.ClickException(f"配置文件已存在：{config_path}。如需覆盖请使用 --force。")
-
-    payload = build_project_config_payload(
-        provider,
-        model_name=model_name,
-        base_url=base_url,
-        api_format=api_format,
-    )
-    config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        config_path, example_path, gitignore_path, env_var = run_config_init(
+            provider=provider,
+            model_name=model_name,
+            base_url=base_url,
+            api_format=api_format,
+            directory=directory,
+            force=force,
+            local_example=local_example,
+            update_gitignore=update_gitignore,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Created project config: {config_path}")
-
-    if local_example:
-        example_path = config_dir / f"{PROJECT_LOCAL_CONFIG_FILENAME}.example"
-        if force or not example_path.exists():
-            example_payload = build_local_example_payload(provider)
-            example_path.write_text(
-                json.dumps(example_payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            click.echo(f"Created local override example: {example_path}")
-
-    if update_gitignore:
-        gitignore_path = directory / ".gitignore"
-        ignored = f"{PROJECT_CONFIG_DIRNAME}/{PROJECT_LOCAL_CONFIG_FILENAME}"
-        if append_gitignore_entry(gitignore_path, ignored):
-            click.echo(f"Updated gitignore: {gitignore_path}")
-
-    env_var = provider_env_var(provider)
+    if example_path is not None and example_path.exists():
+        click.echo(f"Created local override example: {example_path}")
+    if gitignore_path is not None and gitignore_path.exists():
+        click.echo(f"Updated gitignore: {gitignore_path}")
     click.echo(f"Set API key via environment variable: {env_var} or AI_PR_REVIEW_API_KEY")
 
 
@@ -1393,12 +1377,13 @@ def config_export(output: Path, include_secrets: bool) -> None:
     ctx = click.get_current_context(silent=True)
     config_path = _config_path_from_context(ctx)
     config = AppConfig.load(config_path)
-    payload = _export_config_payload(
-        config,
+    run_config_export(
+        output,
+        config=config,
         config_path=config_path,
-        mask_secrets=not include_secrets,
+        include_secrets=include_secrets,
+        export_config_payload=_export_config_payload,
     )
-    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     click.echo(f"Exported configuration to {output}")
 
 
@@ -1407,34 +1392,13 @@ def config_export(output: Path, include_secrets: bool) -> None:
 @click.option("--save-key", is_flag=True, help="Persist imported API key and GitHub token.")
 def config_import(input_path: Path, save_key: bool) -> None:
     """Import configuration from JSON file into the active user config path."""
-    raw = json.loads(input_path.read_text(encoding="utf-8"))
-    provider_payload = raw.get("provider")
-    preferences_payload = raw.get("preferences", {})
-    if not isinstance(provider_payload, dict):
-        raise click.ClickException("导入失败：缺少 provider 配置对象。")
-
-    provider = ProviderConfig.from_dict(provider_payload)
-    provider.validate()
     ctx = click.get_current_context(silent=True)
     config_path = _config_path_from_context(ctx)
     config = AppConfig.load(config_path)
-    config.provider = provider
-    config.github_token = str(raw.get("github_token", ""))
-    if isinstance(preferences_payload, dict):
-        config.preferences = PreferencesConfig(**preferences_payload)
-    model_provider = provider.to_model_provider()
-    config.ai_client = AIClientConfig(
-        **{
-            **config.ai_client.__dict__,
-            "provider": model_provider.name,
-            "api_key": model_provider.api_key,
-            "model": model_provider.model_name,
-            "base_url": model_provider.base_url,
-            "api_format": model_provider.api_format,
-        }
-    )
-    config.pr_fetcher.github_token = config.github_token
-    config.save(config_path, save_key=save_key)
+    try:
+        run_config_import(input_path, config=config, save_key=save_key, config_path=config_path)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Imported configuration from {input_path}")
 
 
