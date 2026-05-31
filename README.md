@@ -60,6 +60,49 @@ pr-review <PR URL>
   -> ReportRenderer 输出终端 / Markdown / JSON / GitHub comment
 ```
 
+## 最新能力
+
+### 配置与诊断
+
+- 支持图形化配置向导：`pr-review config`
+- 支持项目级配置初始化：`pr-review config init`
+- 支持 provider 健康检查：`pr-review config health`
+- 支持远端模型发现：`pr-review config models`
+- 支持模型发现失败时的 fallback 提示
+- 支持 provider 最小连通性探测：`pr-review config health --probe`
+
+### Chat Workspace
+
+- 支持终端聊天工作台：`pr-review chat`
+- 支持 slash commands：`/help`、`/config`、`/session`、`/history`、`/stats`、`/model`、`/review`、`/clear`、`/exit`
+- 支持 chat 会话历史恢复和清空
+- 支持在 chat 中直接触发 PR review
+
+### 输出解释性
+
+- 当过滤后无可审查文件时，summary 会直接解释排除原因
+- Markdown / JSON 报告包含过滤摘要
+- Review 输出支持更完整的 `filter` 结构
+
+## 🎉 最新更新
+
+### 配置系统优化（2026-05-30）
+
+- ✅ 实现命令行图形化配置向导（Rich 库）
+- ✅ 支持多模型供应商可视化选择
+- ✅ API Key 输入支持粘贴
+- ✅ 配置验证进度条
+- ✅ 修复配置持久化问题
+- ✅ 修复 API Key 保存问题
+
+### 安装优化
+
+- ✅ 支持 pipx 一行命令安装
+- ✅ 创建一键安装脚本
+- ✅ 自动配置 PATH
+
+---
+
 ## 快速开始
 
 ### 推荐安装：PyPI
@@ -201,10 +244,25 @@ export AI_PR_REVIEW_BASE_URL="https://token-plan-cn.xiaomimimo.com/v1"
 项目默认 provider 是 `anthropic`，也可以通过交互式命令写入配置：
 
 ```bash
+# 启动图形化配置向导（推荐）
+pr-review config
+
+# 快速配置
 pr-review config --quick
+
+# 查看配置
 pr-review config show
+
+# 测试配置
 pr-review config test
 ```
+
+**配置向导特点**：
+- 🎨 美观的 Rich 面板界面
+- 📊 供应商选择表格（显示类型、推荐度）
+- 🔑 API Key 输入支持粘贴
+- ✅ 配置验证进度条
+- 📋 配置摘要展示
 
 如果是在仓库内初始化团队共享配置，推荐使用：
 
