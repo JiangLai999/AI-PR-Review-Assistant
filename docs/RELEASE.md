@@ -24,7 +24,7 @@ pipx install ai-pr-review
 ### Fallback: install from GitHub
 
 ```bash
- pipx install "git+https://github.com/JiangLai999/AI-PR-Review-.git"
+ pipx install "git+https://github.com/JiangLai999/AI-PR-Review-Assistant.git"
 ```
 
 ### One-line bootstrap from GitHub script
@@ -32,25 +32,25 @@ pipx install ai-pr-review
 Linux/macOS, default to PyPI:
 
 ```bash
- curl -fsSL https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-/main/install.sh | sh
+ curl -fsSL https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-Assistant/main/install.sh | sh
 ```
 
 Linux/macOS, force GitHub source:
 
 ```bash
- curl -fsSL https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-/main/install.sh | INSTALL_SOURCE=github GITHUB_REPOSITORY=JiangLai999/AI-PR-Review- sh
+ curl -fsSL https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-Assistant/main/install.sh | INSTALL_SOURCE=github GITHUB_REPOSITORY=JiangLai999/AI-PR-Review-Assistant sh
 ```
 
 Windows PowerShell, default to PyPI:
 
 ```powershell
- irm https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-/main/install.ps1 | iex
+ irm https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-Assistant/main/install.ps1 | iex
 ```
 
 Windows PowerShell, force GitHub source:
 
 ```powershell
- $env:INSTALL_SOURCE='github'; $env:GITHUB_REPOSITORY='JiangLai999/AI-PR-Review-'; irm https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-/main/install.ps1 | iex
+ $env:INSTALL_SOURCE='github'; $env:GITHUB_REPOSITORY='JiangLai999/AI-PR-Review-Assistant'; irm https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-Assistant/main/install.ps1 | iex
 ```
 
 ## Why This Is The Best Fit
@@ -93,6 +93,6 @@ After publishing, verify both channels:
 
 ```bash
 pipx install ai-pr-review
- pipx install "git+https://github.com/JiangLai999/AI-PR-Review-.git"
+ pipx install "git+https://github.com/JiangLai999/AI-PR-Review-Assistant.git"
 pr-review --help
 ```

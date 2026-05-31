@@ -5,7 +5,7 @@
 ## 开发环境
 
 ```bash
-git clone https://github.com/JiangLai999/AI-PR-Review-.git
+git clone https://github.com/JiangLai999/AI-PR-Review-Assistant.git
 cd AI-PR-Review-
 pip install -e .[dev]
 ```

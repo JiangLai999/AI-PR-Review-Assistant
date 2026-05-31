@@ -195,27 +195,27 @@ def build_docs_data() -> dict:
         {
             "title": "README.md",
             "description": "安装、配置、技术栈、路线图与真实能力边界。",
-            "url": "https://github.com/JiangLai999/AI-PR-Review-/blob/main/README.md",
+            "url": "https://github.com/JiangLai999/AI-PR-Review-Assistant/blob/main/README.md",
         },
         {
             "title": "docs/API.md",
             "description": "CLI 命令、参数、输出格式与退出行为。",
-            "url": "https://github.com/JiangLai999/AI-PR-Review-/blob/main/docs/API.md",
+            "url": "https://github.com/JiangLai999/AI-PR-Review-Assistant/blob/main/docs/API.md",
         },
         {
             "title": "docs/PR_WORKFLOW.md",
             "description": "Pull Request 流程、分支建议、模板和验证清单。",
-            "url": "https://github.com/JiangLai999/AI-PR-Review-/blob/main/docs/PR_WORKFLOW.md",
+            "url": "https://github.com/JiangLai999/AI-PR-Review-Assistant/blob/main/docs/PR_WORKFLOW.md",
         },
         {
             "title": "docs/RELEASE.md",
             "description": "发布、分发与版本管理流程。",
-            "url": "https://github.com/JiangLai999/AI-PR-Review-/blob/main/docs/RELEASE.md",
+            "url": "https://github.com/JiangLai999/AI-PR-Review-Assistant/blob/main/docs/RELEASE.md",
         },
         {
             "title": "CONTRIBUTING.md",
             "description": "贡献规范、协作方式与提交建议。",
-            "url": "https://github.com/JiangLai999/AI-PR-Review-/blob/main/CONTRIBUTING.md",
+            "url": "https://github.com/JiangLai999/AI-PR-Review-Assistant/blob/main/CONTRIBUTING.md",
         },
     ]
 

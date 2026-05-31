@@ -98,9 +98,9 @@ heroTl
 
 **展示内容**：
 - 175 Tests Passing
-- 12 Core Modules
+- 14 Core Modules
 - 18 Model Providers
-- 92% Code Coverage
+- 88% Code Coverage
 
 **GSAP 动画 — 数字滚动**：
 ```javascript
