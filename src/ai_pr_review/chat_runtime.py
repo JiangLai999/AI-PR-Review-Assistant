@@ -6,6 +6,7 @@ Inspired by OpenCode, Claude Code, and OpenClaw.
 from __future__ import annotations
 
 import re
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -143,14 +144,19 @@ def _render_assistant_message(text: str, timestamp: str) -> Panel:
     )
 
 
-def _render_message(role: str, text: str, timestamp: str | None = None) -> Panel:
+def _render_message(
+    role: str, text: str, timestamp: str | None = None, duration_seconds: float | None = None
+) -> Panel:
     """渲染消息 - 根据角色选择不同样式."""
     time_str = timestamp or datetime.now().strftime("%H:%M")
 
     if role == "user":
         return _render_user_message(text, time_str)
     else:
-        return _render_assistant_message(text, time_str)
+        panel = _render_assistant_message(text, time_str)
+        if duration_seconds is not None:
+            panel.subtitle = f"[dim]response · {duration_seconds:.1f}s[/dim]"
+        return panel
 
 
 def _render_welcome() -> Panel:
@@ -202,7 +208,11 @@ def _render_transcript(messages: list[dict[str, Any]]) -> Panel:
         role = str(message.get("role", "assistant")).lower()
         content = str(message.get("content", ""))
         timestamp = str(message.get("timestamp", ""))
-        renderables.append(_render_message(role, content, timestamp if timestamp else None))
+        duration_seconds = message.get("duration_seconds")
+        duration = float(duration_seconds) if isinstance(duration_seconds, (int, float)) else None
+        renderables.append(
+            _render_message(role, content, timestamp if timestamp else None, duration)
+        )
         if i < len(recent) - 1:
             renderables.append(Text(""))
 
@@ -288,6 +298,24 @@ def _render_thinking(elapsed: float) -> Panel:
         padding=(0, 1),
         style="white on black",
     )
+
+
+def _run_message_in_background(
+    send_message: Callable[[list[dict[str, Any]], str], str],
+    messages: list[dict[str, Any]],
+    user_text: str,
+) -> tuple[threading.Thread, dict[str, Any]]:
+    result: dict[str, Any] = {"answer": None, "error": None}
+
+    def target() -> None:
+        try:
+            result["answer"] = send_message(messages, user_text)
+        except Exception as exc:  # pragma: no cover - surfaced to caller
+            result["error"] = exc
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    return thread, result
 
 
 def _build_prompt_session() -> Any | None:
@@ -376,17 +404,19 @@ def run_chat_session(
         rerender_workspace()
 
         start_time = time.time()
-        answer = None
-        try:
-            with Live(console=console, refresh_per_second=12, transient=True) as live:
-                while True:
-                    elapsed = time.time() - start_time
-                    live.update(_render_thinking(elapsed))
-                    if elapsed > 0.3:
-                        break
-                answer = send_message(messages, user_text)
-        except Exception:
-            answer = send_message(messages, user_text)
+        thread, result = _run_message_in_background(send_message, messages, user_text)
+        with Live(console=console, refresh_per_second=12, transient=True) as live:
+            while thread.is_alive():
+                elapsed = time.time() - start_time
+                live.update(_render_thinking(elapsed))
+                time.sleep(0.08)
+
+        if result["error"] is not None:
+            messages.pop()
+            rerender_workspace()
+            raise result["error"]
+
+        answer = result["answer"]
 
         if not answer:
             messages.pop()
@@ -395,7 +425,15 @@ def run_chat_session(
             return
 
         timestamp = datetime.now().strftime("%H:%M")
-        messages.append({"role": "assistant", "content": answer, "timestamp": timestamp})
+        elapsed = time.time() - start_time
+        messages.append(
+            {
+                "role": "assistant",
+                "content": answer,
+                "timestamp": timestamp,
+                "duration_seconds": round(elapsed, 3),
+            }
+        )
         save_session(config_path, messages)
         rerender_workspace()
 

@@ -30,7 +30,14 @@ def load_chat_session(config_path: Path | None) -> list[dict[str, Any]]:
         role = item.get("role")
         content = item.get("content")
         if isinstance(role, str) and isinstance(content, str):
-            messages.append({"role": role, "content": content})
+            message: dict[str, Any] = {"role": role, "content": content}
+            timestamp = item.get("timestamp")
+            duration_seconds = item.get("duration_seconds")
+            if isinstance(timestamp, str):
+                message["timestamp"] = timestamp
+            if isinstance(duration_seconds, (int, float)):
+                message["duration_seconds"] = float(duration_seconds)
+            messages.append(message)
     return messages
 
 
