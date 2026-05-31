@@ -930,29 +930,28 @@ async def _send_chat_message(config: AppConfig, messages: list[dict[str, Any]]) 
 def _print_chat_message(console: Console, role: str, text: str, *, layout: str) -> None:
     """打印聊天消息，支持 plain/compact/split 三种布局。"""
     if layout == "plain":
-        icon = "👤" if role == "You" else "🤖"
-        style = "bold green" if role == "You" else "bold cyan"
-        console.print(f"  {icon} ", end="")
+        style = "bold white"
         console.print(f"[{style}]{role}:[/{style}] {text}")
         return
     if role == "You":
-        border_style = "green"
-        title_style = "bold green"
-        icon = "👤"
+        border_style = "grey35"
+        title_style = "bold white"
+        icon = "YOU"
         subtitle = "input"
     else:
-        border_style = "bright_cyan"
-        title_style = "bold bright_cyan"
-        icon = "🤖"
+        border_style = "white"
+        title_style = "bold white"
+        icon = "ASSISTANT"
         subtitle = "assistant"
     renderable = Markdown(text) if role == "Assistant" else text
     panel = Panel(
         renderable,
-        title=f"[{title_style}]{icon} {role}[/{title_style}]",
+        title=f"[{title_style}]{icon}[/{title_style}]",
         subtitle=f"[dim]{subtitle}[/dim]",
         border_style=border_style,
         expand=layout == "split",
         padding=(0, 1),
+        style="white on black",
     )
     console.print(panel)
 
