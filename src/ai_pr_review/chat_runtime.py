@@ -434,7 +434,8 @@ def run_chat_session(
         console.print()
 
     def rerender_chat() -> None:
-        console.print()
+        console.clear()
+        print_header()
         console.print(_render_status_bar(config, len(messages)))
         console.print(_render_transcript(messages))
         console.print(_render_input_area())
