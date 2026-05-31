@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from rich.align import Align
+from rich.box import DOUBLE, HEAVY, ROUNDED, SQUARE
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
@@ -39,6 +40,8 @@ def _pixel_brand() -> Text:
 
     brand = Text()
     for line in lines:
+        brand.append(" " + line + "\n", style="grey35")
+    for line in lines:
         brand.append(line + "\n", style="bold white")
     return brand
 
@@ -58,11 +61,19 @@ def _render_header(config: AppConfig) -> Panel:
         Text(""),
     )
 
-    return Panel(
+    inner = Panel(
         content,
-        border_style="grey35",
+        border_style="grey58",
         padding=(0, 2),
         style="white on black",
+        box=DOUBLE,
+    )
+    return Panel(
+        inner,
+        border_style="grey35",
+        padding=(0, 1),
+        style="white on black",
+        box=SQUARE,
     )
 
 
@@ -121,26 +132,45 @@ def _render_user_message(text: str, timestamp: str) -> Panel:
         Text(text, style="white"),
         title=header,
         title_align="left",
-        border_style="grey30",
+        border_style="grey42",
         padding=(0, 2),
         style="white on black",
+        box=ROUNDED,
     )
 
 
-def _render_assistant_message(text: str, timestamp: str) -> Panel:
+def _render_assistant_message(
+    text: str, timestamp: str, duration_seconds: float | None = None
+) -> Panel:
     """渲染助手消息 - 高亮边框."""
     header = Text()
     header.append(" ⏺ ", style="bold green")
     header.append("ASSISTANT", style="bold green")
     header.append(f"  ·  {timestamp}", style="dim")
 
-    return Panel(
-        _render_assistant_content(text),
+    body: Any = _render_assistant_content(text)
+    if duration_seconds is not None:
+        footer = Text()
+        footer.append("\n")
+        footer.append("Completed in ", style="grey62")
+        footer.append(f"{duration_seconds:.1f}s", style="bold green")
+        body = Group(body, footer)
+
+    inner = Panel(
+        body,
         title=header,
         title_align="left",
         border_style="grey70",
         padding=(0, 2),
         style="white on black",
+        box=HEAVY,
+    )
+    return Panel(
+        inner,
+        border_style="grey35",
+        padding=(0, 1),
+        style="white on black",
+        box=SQUARE,
     )
 
 
@@ -153,10 +183,7 @@ def _render_message(
     if role == "user":
         return _render_user_message(text, time_str)
     else:
-        panel = _render_assistant_message(text, time_str)
-        if duration_seconds is not None:
-            panel.subtitle = f"[dim]response · {duration_seconds:.1f}s[/dim]"
-        return panel
+        return _render_assistant_message(text, time_str, duration_seconds)
 
 
 def _render_welcome() -> Panel:
@@ -191,9 +218,10 @@ def _render_welcome() -> Panel:
         welcome,
         title=" Welcome ",
         title_align="left",
-        border_style="grey30",
+        border_style="grey42",
         padding=(0, 2),
         style="white on black",
+        box=ROUNDED,
     )
 
 
@@ -220,22 +248,26 @@ def _render_transcript(messages: list[dict[str, Any]]) -> Panel:
         Group(*renderables),
         title=" Transcript ",
         title_align="left",
-        border_style="grey30",
+        border_style="grey58",
         padding=(1, 1),
         style="white on black",
+        box=SQUARE,
     )
 
 
-def _render_input_hint() -> Panel:
-    """输入提示."""
-    input_text = Text()
-    input_text.append(" ▶ ", style="bold green")
-    input_text.append("Type your message or paste a PR URL...", style="grey50")
+def _render_input_area(current_input: str = "") -> Panel:
+    """渲染输入区 - 用户输入在上，提示文字在下."""
+    content = Text()
+    if current_input:
+        content.append(f"  {current_input}\n", style="bold white")
+    content.append("  ▶ ", style="bold green")
+    content.append("Type your message or paste a PR URL...", style="grey50")
     return Panel(
-        input_text,
-        border_style="grey30",
+        content,
+        border_style="grey42",
         padding=(0, 1),
         style="white on black",
+        box=ROUNDED,
     )
 
 
@@ -249,7 +281,6 @@ def _render_workspace(
         _render_header(config),
         _render_status_bar(config, len(messages)),
         _render_transcript(messages),
-        _render_input_hint(),
     )
 
 
@@ -290,13 +321,21 @@ def _render_thinking(elapsed: float) -> Panel:
     content.append("...", style="dim")
     content.append(f"   {elapsed:.1f}s", style="dim")
 
-    return Panel(
+    inner = Panel(
         content,
         title=" Thinking ",
         title_align="left",
         border_style="cyan",
         padding=(0, 1),
         style="white on black",
+        box=ROUNDED,
+    )
+    return Panel(
+        inner,
+        border_style="grey35",
+        padding=(0, 1),
+        style="white on black",
+        box=SQUARE,
     )
 
 
@@ -394,6 +433,7 @@ def run_chat_session(
         console.clear()
         console.print()
         console.print(_render_workspace(config, messages, session_path))
+        console.print(_render_input_area())
         console.print()
 
     rerender_workspace()
@@ -447,10 +487,10 @@ def run_chat_session(
                 from prompt_toolkit.formatted_text import HTML
 
                 user_text = prompt_session.prompt(
-                    HTML("<b><style fg='#ffffff'>▶ </style></b>")
+                    HTML("<b><style fg='#4ade80'>▶</style></b> ")
                 ).strip()
             else:
-                user_text = Prompt.ask("[bold white]▶[/bold white]", console=console).strip()
+                user_text = Prompt.ask("[bold green]▶[/bold green]", console=console).strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]Exiting chat.[/dim]")
             break
