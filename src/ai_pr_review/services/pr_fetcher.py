@@ -177,8 +177,9 @@ class PRFetcher:
 
         def _get_diff():
             headers = {"Accept": "application/vnd.github.v3.diff"}
+            api_url = f"/repos/{pr.base.repo.full_name}/pulls/{pr.number}"
             requester = pr._requester
-            _, data = requester.requestJsonAndCheck("GET", pr.diff_url, headers=headers)
+            _, data = requester.requestJsonAndCheck("GET", api_url, headers=headers)
             if data is None:
                 return ""
             if isinstance(data, bytes):
@@ -202,7 +203,7 @@ class PRFetcher:
     def _paginate_files(self, pr: PullRequest.PullRequest) -> list[FileDiff]:
         """分页获取所有变更文件。"""
         all_files: list[FileDiff] = []
-        page = 1
+        page = 0
         per_page = 100
 
         while True:
