@@ -1,13 +1,15 @@
-﻿"""Chat runtime helpers."""
+"""Chat runtime helpers."""
 
 from __future__ import annotations
 
 import re
 import time
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from rich.box import ASCII
 from rich.columns import Columns
 from rich.console import Console, Group
 from rich.live import Live
@@ -23,114 +25,40 @@ from ai_pr_review.config import AppConfig
 CODE_BLOCK_RE = re.compile(r"```(?P<lang>[\w+-]*)\n(?P<code>.*?)```", re.DOTALL)
 
 
-def _render_status_bar(config: AppConfig, message_count: int, session_path: str | None) -> Panel:
+def _render_status_bar(config: AppConfig, message_count: int) -> Panel:
+    """简洁的状态栏。"""
     provider = config.provider.display_name or config.ai_client.provider
     model = config.ai_client.model
-    layout = (
-        config.preferences.chat_layout if hasattr(config.preferences, "chat_layout") else "split"
-    )
-    path_display = session_path if session_path else "memory"
 
     status = Text()
-    status.append(" * ", style="bold white")
-    status.append("CONNECTED", style="bold white")
-    status.append("   ")
-    status.append("Provider", style="bold white")
-    status.append(f" {provider}", style="grey82")
-    status.append("   ")
-    status.append("Model", style="bold white")
-    status.append(f" {model}", style="grey82")
-    status.append("   ")
-    status.append("Layout", style="bold white")
-    status.append(f" {layout}", style="grey82")
-    status.append("   ")
-    status.append("Messages", style="bold white")
-    status.append(f" {message_count}", style="grey82")
-    status.append("   ")
-    status.append("Session", style="bold white")
-    status.append(f" {path_display}", style="dim")
+    status.append(" * ", style="bold green")
+    status.append("CONNECTED", style="bold green")
+    status.append("  |  ", style="dim")
+    status.append(provider, style="bold white")
+    status.append(" / ", style="dim")
+    status.append(model, style="grey70")
+    status.append("  |  ", style="dim")
+    status.append(f"{message_count} messages", style="grey70")
 
-    return Panel(status, border_style="grey27", padding=(0, 1), style="white on black")
-
-
-def _pixel_brand_text() -> Text:
-    brand = Text()
-    brand.append(
-        " ██  ████  ██    ██  ████      ████  ████      ████  ██  ██  ██  ████  ██  ██\n",
-        style="bold white",
-    )
-    brand.append(
-        "████ ██  ████  ████ ██  ██     ██  ██  ██      ██  ████ ██ ████ ██  ██ ████ ██\n",
-        style="bold white",
-    )
-    brand.append(
-        "████ ██████ ████████ █████      ████  ████     ██████████████ ██████ ████████████\n",
-        style="bold white",
-    )
-    brand.append(
-        "██ ██ ██ ██ ██ ██ ██  ██      ██  ██  ██      ██ ██ ██  ██ ██ ██ ██ ██ ██ ██\n",
-        style="bold white",
-    )
-    brand.append(
-        "██ ██ ██ ██ ██ ██ ██  ██      ██  ██  ██      ██ ██ ██  ██ ██ ██ ██ ██ ██ ██\n",
-        style="bold white",
-    )
-    return brand
+    return Panel(status, border_style="grey35", padding=(0, 1), style="white on black", box=ASCII)
 
 
 def _render_header(config: AppConfig) -> Panel:
-    left = Text()
-    left.append_text(_pixel_brand_text())
-    left.append("\n")
-    left.append("terminal workspace", style="grey62")
-    left.append("  |  ", style="dim")
-    left.append(config.provider.display_name or config.ai_client.provider, style="bold white")
-    left.append("  |  ", style="dim")
-    left.append(config.ai_client.model, style="grey82")
+    """简洁的品牌头部。"""
+    brand = Text()
+    brand.append("AI PR Review", style="bold white")
+    brand.append("  -  ", style="dim")
+    brand.append("Terminal Workspace", style="grey62")
+    brand.append("  |  ", style="dim")
+    brand.append(config.provider.display_name or config.ai_client.provider, style="bold white")
+    brand.append(" / ", style="dim")
+    brand.append(config.ai_client.model, style="grey70")
 
-    commands = Table.grid(padding=(0, 1))
-    commands.add_column(style="bold white")
-    commands.add_column(style="grey82")
-    commands.add_row("/help", "查看全部命令")
-    commands.add_row("/status", "当前会话状态")
-    commands.add_row("/usage", "消息/字符统计")
-    commands.add_row("/compact", "压缩历史消息")
-    commands.add_row("/model <ID>", "切换模型")
-    commands.add_row("/review <URL>", "执行 PR 审查")
-    commands.add_row("/restore", "恢复历史会话")
-    commands.add_row("/clear", "清空会话")
-    commands.add_row("/exit", "退出")
-
-    right = Text()
-    right.append("Hints\n", style="bold white")
-    right.append("- 直接粘贴 GitHub PR 链接可自动审查\n", style="grey82")
-    right.append("- 输入完整 pr-review 命令也会走本地执行\n", style="grey82")
-    right.append("- 支持 Markdown 回复与代码块高亮\n", style="grey82")
-    right.append("- 输入 / 查看所有可用命令\n", style="grey82")
-
-    body = Columns(
-        [
-            Panel(
-                left, title="Brand", border_style="grey35", padding=(1, 1), style="white on black"
-            ),
-            Panel(
-                commands,
-                title="Commands",
-                border_style="grey35",
-                padding=(1, 1),
-                style="white on black",
-            ),
-            Panel(
-                right, title="Hints", border_style="grey35", padding=(1, 1), style="white on black"
-            ),
-        ],
-        expand=True,
-        equal=True,
-    )
-    return Panel(body, border_style="white", padding=(0, 1), style="white on black")
+    return Panel(brand, border_style="grey27", padding=(0, 1), style="white on black", box=ASCII)
 
 
 def _render_assistant_content(text: str) -> Any:
+    """渲染 assistant 消息内容，支持 Markdown 和代码高亮。"""
     parts: list[Any] = []
     cursor = 0
     for match in CODE_BLOCK_RE.finditer(text):
@@ -155,61 +83,89 @@ def _render_assistant_content(text: str) -> Any:
     return Group(*parts)
 
 
-def _render_message(role: str, text: str) -> Panel:
+def _render_message(role: str, text: str, timestamp: str | None = None) -> Panel:
+    """渲染单条消息，带时间戳和更好的样式。"""
+    time_str = timestamp or datetime.now().strftime("%H:%M")
+
     if role == "user":
+        header = Text()
+        header.append(" > ", style="bold cyan")
+        header.append("YOU", style="bold cyan")
+        header.append(f"  {time_str}", style="dim")
         renderable: Any = Text(text, style="white")
-        title = " YOU "
-        subtitle = "input"
         border_style = "grey35"
     else:
+        header = Text()
+        header.append(" * ", style="bold green")
+        header.append("ASSISTANT", style="bold green")
+        header.append(f"  {time_str}", style="dim")
         renderable = _render_assistant_content(text)
-        title = " ASSISTANT "
-        subtitle = "response"
-        border_style = "white"
+        border_style = "grey70"
+
     return Panel(
         renderable,
-        title=title,
-        subtitle=f"[dim]{subtitle}[/dim]",
+        title=header,
         border_style=border_style,
         padding=(0, 1),
         style="white on black",
+        box=ASCII,
     )
 
 
 def _render_transcript(messages: list[dict[str, Any]]) -> Panel:
+    """渲染消息历史。"""
     if not messages:
-        empty = Text(
-            "No messages yet. Start by typing a prompt, a PR URL, or a full pr-review command.",
-            style="grey70",
-        )
+        empty = Text()
+        empty.append("  ", style="grey70")
+        empty.append(">", style="green")
+        empty.append("  粘贴 GitHub PR URL 自动审查\n", style="grey70")
+        empty.append("  ", style="grey70")
+        empty.append(">", style="green")
+        empty.append("  输入 ", style="grey70")
+        empty.append("/help", style="bold cyan")
+        empty.append(" 查看所有命令\n", style="grey70")
+        empty.append("  ", style="grey70")
+        empty.append(">", style="green")
+        empty.append("  输入 ", style="grey70")
+        empty.append("/exit", style="bold cyan")
+        empty.append(" 退出\n", style="grey70")
+        empty.append("  ", style="grey70")
+        empty.append(">", style="green")
+        empty.append("  支持 Markdown 格式回复与代码高亮\n", style="grey70")
         return Panel(
             empty,
-            title=" Transcript ",
+            title=" Welcome ",
             border_style="grey35",
-            padding=(1, 2),
+            padding=(1, 1),
             style="white on black",
+            box=ASCII,
         )
 
     renderables = []
-    for message in messages[-14:]:
+    for message in messages[-12:]:
         role = str(message.get("role", "assistant")).lower()
         content = str(message.get("content", ""))
-        renderables.append(_render_message(role, content))
+        timestamp = str(message.get("timestamp", ""))
+        renderables.append(_render_message(role, content, timestamp if timestamp else None))
+
     return Panel(
         Group(*renderables),
         title=" Transcript ",
         border_style="grey35",
         padding=(1, 1),
         style="white on black",
+        box=ASCII,
     )
 
 
 def _render_input_hint() -> Panel:
+    """简洁的输入提示。"""
     input_text = Text()
-    input_text.append("Input", style="bold white")
-    input_text.append("  >  ", style="dim")
-    input_text.append("输入问题、/命令、GitHub PR URL 或完整 pr-review 命令", style="grey70")
-    return Panel(input_text, border_style="grey35", padding=(0, 1), style="white on black")
+    input_text.append(" >", style="bold white")
+    input_text.append(" ", style="white")
+    return Panel(
+        input_text, border_style="grey35", padding=(0, 1), style="white on black", box=ASCII
+    )
 
 
 def _render_workspace(
@@ -217,21 +173,38 @@ def _render_workspace(
     messages: list[dict[str, Any]],
     session_path: str | None,
 ) -> Group:
+    """渲染完整工作区。"""
     return Group(
         _render_header(config),
-        _render_status_bar(config, len(messages), session_path),
+        _render_status_bar(config, len(messages)),
         _render_transcript(messages),
         _render_input_hint(),
     )
 
 
 def _spinner_frame(elapsed: float) -> str:
+    """旋转动画帧。"""
     frames = ["-", "\\", "|", "/"]
     idx = int(elapsed * 8) % len(frames)
     return frames[idx]
 
 
+def _thinking_stage(elapsed: float) -> str:
+    """根据时间返回思考阶段文字。"""
+    if elapsed < 0.5:
+        return "Analyzing input..."
+    elif elapsed < 1.0:
+        return "Building context..."
+    elif elapsed < 2.0:
+        return "Calling AI model..."
+    elif elapsed < 5.0:
+        return "Processing response..."
+    else:
+        return "Still working..."
+
+
 def _build_prompt_session() -> Any | None:
+    """构建 prompt_toolkit 会话。"""
     try:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.completion import WordCompleter
@@ -262,11 +235,14 @@ def _build_prompt_session() -> Any | None:
             history=history,
             completer=completer,
             bottom_toolbar=HTML(
-                "<b><style fg='#aaaaaa'> Enter send </style></b>"
-                "  <style fg='#666666'>|</style>"
-                "  <b><style fg='#aaaaaa'> Tab complete </style></b>"
-                "  <style fg='#666666'>|</style>"
-                "  <b><style fg='#aaaaaa'> / commands </style></b>"
+                "<b><style fg='#888888'> Enter </style></b>"
+                " <style fg='#555555'>send</style>"
+                "  <style fg='#444444'>│</style>"
+                "  <b><style fg='#888888'> Tab </style></b>"
+                " <style fg='#555555'>complete</style>"
+                "  <style fg='#444444'>│</style>"
+                "  <b><style fg='#888888'> / </style></b>"
+                " <style fg='#555555'>commands</style>"
             ),
             multiline=False,
         )
@@ -291,6 +267,7 @@ def run_chat_session(
     raw_command_handler: Callable[[str], bool],
     send_message: Callable[[list[dict[str, Any]], str], str],
 ) -> None:
+    """运行聊天会话主循环。"""
     messages: list[dict[str, Any]] = []
     session_path = str(config_path) if config_path is not None else None
     prompt_session = _build_prompt_session()
@@ -304,7 +281,8 @@ def run_chat_session(
     rerender_workspace()
 
     def send_once(user_text: str) -> None:
-        messages.append({"role": "user", "content": user_text})
+        timestamp = datetime.now().strftime("%H:%M")
+        messages.append({"role": "user", "content": user_text, "timestamp": timestamp})
         rerender_workspace()
 
         start_time = time.time()
@@ -314,9 +292,10 @@ def run_chat_session(
                 while True:
                     elapsed = time.time() - start_time
                     spinner = _spinner_frame(elapsed)
+                    stage = _thinking_stage(elapsed)
                     live.update(
                         Panel(
-                            Text(f"{spinner} Thinking... {elapsed:.1f}s", style="bold white"),
+                            Text(f" {spinner} {stage} ({elapsed:.1f}s)", style="bold white"),
                             border_style="grey35",
                             padding=(0, 1),
                             style="white on black",
@@ -334,7 +313,8 @@ def run_chat_session(
             console.print("[dim]No response returned.[/dim]")
             return
 
-        messages.append({"role": "assistant", "content": answer})
+        timestamp = datetime.now().strftime("%H:%M")
+        messages.append({"role": "assistant", "content": answer, "timestamp": timestamp})
         save_session(config_path, messages)
         rerender_workspace()
 
