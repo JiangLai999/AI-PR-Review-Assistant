@@ -7,11 +7,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from rich.console import Console, Group
+from rich.columns import Columns
+from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
 from rich.prompt import Prompt
-from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 
@@ -49,49 +49,55 @@ def _render_status_bar(config: AppConfig, message_count: int, session_path: str 
     return Panel(status, border_style="dim", padding=(0, 1))
 
 
-def _render_brand_banner() -> Panel:
-    """渲染顶部品牌横幅，增强产品感。"""
-    banner = Text()
-    banner.append("AI PR REVIEW", style="bold bright_cyan")
-    banner.append("  terminal workspace", style="dim")
-    banner.append("\n")
-    banner.append("Code review  ", style="green")
-    banner.append("|  ", style="dim")
-    banner.append("Chat workspace  ", style="cyan")
-    banner.append("|  ", style="dim")
-    banner.append("Multi-provider", style="magenta")
-    return Panel(banner, border_style="bright_blue", padding=(0, 2))
+def _pixel_brand_text() -> Text:
+    brand = Text()
+    brand.append("█▀█ █▀█   █▀█ █▀█ █▀▀ █ █ █ █▀▀ █ █\n", style="bold bright_cyan")
+    brand.append("█▀█ █ █   █▀▄ █▀▀ █▀▀ ▀▄▀▄▀ █▀▀ ▀▄▀\n", style="bold bright_cyan")
+    brand.append("▀ ▀ ▀▀▀   ▀ ▀ ▀   ▀▀▀  ▀ ▀  ▀▀▀  ▀ ", style="bold bright_cyan")
+    return brand
 
 
-def _render_welcome(config: AppConfig, restored_count: int) -> Panel:
-    """渲染欢迎面板，显示帮助提示和可用命令概览。"""
-    help_text = Text()
-    help_text.append("Quick actions\n", style="bold white")
-    help_text.append("  /help", style="bold cyan")
-    help_text.append("  /status", style="bold cyan")
-    help_text.append("  /usage", style="bold cyan")
-    help_text.append("  /compact", style="bold cyan")
-    help_text.append("  /model <ID>", style="bold cyan")
-    help_text.append("  /review <URL>", style="bold cyan")
-    help_text.append("  /clear", style="bold cyan")
-    help_text.append("  /exit", style="bold cyan")
-    help_text.append("\n\n")
-    help_text.append("Tip: ", style="bold yellow")
-    help_text.append(
-        "直接粘贴 GitHub PR 链接，或输入完整 pr-review 命令，即可触发本地审查。", style="dim"
-    )
+def _render_header(config: AppConfig, restored_count: int) -> Panel:
+    """渲染统一 header：品牌横幅 + 命令帮助 + 使用提示。"""
+    left = Text()
+    left.append_text(_pixel_brand_text())
+    left.append("\n\n")
+    left.append("terminal workspace", style="dim")
+    left.append("  •  ", style="dim")
+    left.append(config.provider.display_name or config.ai_client.provider, style="bold green")
+    left.append("  •  ", style="dim")
+    left.append(config.ai_client.model, style="bold magenta")
 
+    commands = Table.grid(padding=(0, 1))
+    commands.add_column(style="bold cyan")
+    commands.add_column(style="white")
+    commands.add_row("/help", "查看全部命令")
+    commands.add_row("/status", "当前会话状态")
+    commands.add_row("/usage", "消息/字符统计")
+    commands.add_row("/compact", "压缩历史消息")
+    commands.add_row("/model <ID>", "切换模型")
+    commands.add_row("/review <URL>", "执行 PR 审查")
+    commands.add_row("/clear", "清空会话")
+    commands.add_row("/exit", "退出")
+
+    right = Text()
+    right.append("Tips\n", style="bold yellow")
+    right.append("- 直接粘贴 GitHub PR 链接可自动审查\n", style="white")
+    right.append("- 输入完整 pr-review 命令也会走本地执行\n", style="white")
+    right.append("- Chat 适合追问、复盘和快速 review\n", style="white")
     if restored_count > 0:
-        help_text.append(
-            f"\n\nRestored {restored_count} messages from previous session.", style="yellow"
-        )
+        right.append(f"\nRestored {restored_count} messages.", style="yellow")
 
-    return Panel(
-        help_text,
-        title=f"[bold cyan]{config.provider.display_name} / {config.ai_client.model}[/bold cyan]",
-        border_style="bright_blue",
-        padding=(1, 2),
+    body = Columns(
+        [
+            Panel(left, title="Brand", border_style="bright_blue", padding=(1, 1)),
+            Panel(commands, title="Commands", border_style="cyan", padding=(1, 1)),
+            Panel(right, title="Hints", border_style="yellow", padding=(1, 1)),
+        ],
+        expand=True,
+        equal=True,
     )
+    return Panel(body, border_style="bright_blue", padding=(0, 1))
 
 
 def _spinner_frame(elapsed: float) -> str:
@@ -122,9 +128,7 @@ def run_chat_session(
     session_path = str(config_path) if config_path is not None else None
 
     console.print()
-    console.print(_render_brand_banner())
-    console.print(Rule(style="dim"))
-    console.print(_render_welcome(config, len(messages)))
+    console.print(_render_header(config, len(messages)))
     console.print(_render_status_bar(config, len(messages), session_path))
     console.print()
 

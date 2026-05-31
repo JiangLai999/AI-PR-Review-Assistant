@@ -13,6 +13,7 @@ from typing import Any
 import click
 from rich import box
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 from rich.prompt import Confirm, IntPrompt, Prompt
@@ -944,8 +945,9 @@ def _print_chat_message(console: Console, role: str, text: str, *, layout: str) 
         title_style = "bold bright_cyan"
         icon = "🤖"
         subtitle = "assistant"
+    renderable = Markdown(text) if role == "Assistant" else text
     panel = Panel(
-        text,
+        renderable,
         title=f"[{title_style}]{icon} {role}[/{title_style}]",
         subtitle=f"[dim]{subtitle}[/dim]",
         border_style=border_style,
