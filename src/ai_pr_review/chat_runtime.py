@@ -40,8 +40,6 @@ def _pixel_brand() -> Text:
 
     brand = Text()
     for line in lines:
-        brand.append(" " + line + "\n", style="grey35")
-    for line in lines:
         brand.append(line + "\n", style="bold white")
     return brand
 
@@ -371,6 +369,7 @@ def _build_prompt_session() -> Any | None:
         history = InMemoryHistory()
         slash_commands = [
             "/help",
+            "/new",
             "/status",
             "/usage",
             "/compact",
@@ -429,19 +428,25 @@ def run_chat_session(
     session_path = str(config_path) if config_path is not None else None
     prompt_session = _build_prompt_session()
 
-    def rerender_workspace() -> None:
-        console.clear()
+    def print_header() -> None:
         console.print()
-        console.print(_render_workspace(config, messages, session_path))
+        console.print(_render_header(config))
+        console.print()
+
+    def rerender_chat() -> None:
+        console.print()
+        console.print(_render_status_bar(config, len(messages)))
+        console.print(_render_transcript(messages))
         console.print(_render_input_area())
         console.print()
 
-    rerender_workspace()
+    print_header()
+    rerender_chat()
 
     def send_once(user_text: str) -> None:
         timestamp = datetime.now().strftime("%H:%M")
         messages.append({"role": "user", "content": user_text, "timestamp": timestamp})
-        rerender_workspace()
+        rerender_chat()
 
         start_time = time.time()
         thread, result = _run_message_in_background(send_message, messages, user_text)
@@ -453,14 +458,14 @@ def run_chat_session(
 
         if result["error"] is not None:
             messages.pop()
-            rerender_workspace()
+            rerender_chat()
             raise result["error"]
 
         answer = result["answer"]
 
         if not answer:
             messages.pop()
-            rerender_workspace()
+            rerender_chat()
             console.print("[dim]No response returned.[/dim]")
             return
 
@@ -475,7 +480,7 @@ def run_chat_session(
             }
         )
         save_session(config_path, messages)
-        rerender_workspace()
+        rerender_chat()
 
     if message is not None:
         send_once(message)
@@ -501,11 +506,12 @@ def run_chat_session(
         if not user_text:
             continue
         if raw_command_handler(user_text):
-            rerender_workspace()
+            rerender_chat()
             continue
         if user_text.startswith("/") and slash_handler(
             console, config, config_path, messages, user_text, active_layout
         ):
-            rerender_workspace()
+            console.print()
+            console.print(_render_input_area())
             continue
         send_once(user_text)
