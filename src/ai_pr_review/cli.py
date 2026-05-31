@@ -65,6 +65,7 @@ from ai_pr_review.provider_diagnostics import (
     discover_remote_models,
     probe_provider_connection,
 )
+from ai_pr_review.review_entry import execute_review_flow
 from ai_pr_review.review_commands import (
     build_fetch_only_payload,
     build_filter_only_payload,
@@ -1101,61 +1102,27 @@ def review_command(
     try:
         app_config = AppConfig.load(_config_path_from_context(ctx))
         effective_format = infer_output_format(output_format, str(output) if output else None)
-        selected_modes = sum(bool(flag) for flag in (dry_run, only_fetch, only_filter))
-        if selected_modes > 1:
-            raise click.ClickException("--dry-run、--only-fetch 和 --only-filter 不能同时使用。")
-
-        if only_fetch:
-            orchestrator = ReviewOrchestrator(app_config)
-            artifacts = asyncio.run(orchestrator.fetch_only(pr_url))
-            payload = build_fetch_only_payload(artifacts)
-            click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
-            return
-
-        if only_filter or dry_run:
-            orchestrator = ReviewOrchestrator(app_config)
-            artifacts = asyncio.run(orchestrator.filter_only(pr_url))
-            payload = build_filter_only_payload(
-                artifacts,
-                dry_run=dry_run,
-                show_filter_reasons=show_filter_reasons,
-            )
-            click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
-            return
-
-        artifacts = asyncio.run(run_review(pr_url, model=model, verbose=verbose, config=app_config))
-
-        rendered = render_selected_report(
-            artifacts,
-            app_config,
+        execute_review_flow(
+            console,
+            pr_url=pr_url,
+            model=model,
+            app_config=app_config,
             effective_format=effective_format,
+            output=output,
+            publish_comment=publish_comment,
+            dry_run=dry_run,
+            only_fetch=only_fetch,
+            only_filter=only_filter,
+            show_filter_reasons=show_filter_reasons,
+            run_review=run_review,
             render_markdown_report=render_markdown_report,
             render_json_report=render_json_report,
+            render_terminal_report=render_terminal_report,
+            render_github_comment_report=render_github_comment_report,
+            maybe_publish_comment=maybe_publish_comment,
         )
-
-        if effective_format == "terminal":
-            render_terminal_report(console, artifacts, app_config)
-        elif output is None:
-            click.echo(rendered)
-
-        if output is not None:
-            write_report_output(
-                output,
-                rendered=rendered,
-                artifacts=artifacts,
-                app_config=app_config,
-                render_terminal_report=render_terminal_report,
-            )
-            console.print(f"Report written to {output}")
-
-        if publish_comment:
-            comment_report = render_github_comment_report(artifacts, app_config)
-            maybe_publish_comment(artifacts, comment_report, app_config)
-            console.print("Published review comment to GitHub PR.")
-
-        console.print(
-            f"Saved run {artifacts.run_id} | cost=${artifacts.total_cost:.4f} | duration={artifacts.duration_seconds:.2f}s"
-        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     except (PRFetcherError, AIClientError) as exc:
         console.print(f"Error: {exc}", style="bold red")
         raise SystemExit(1) from exc
