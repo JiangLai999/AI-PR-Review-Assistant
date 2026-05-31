@@ -56,23 +56,23 @@ def _render_status_bar(config: AppConfig, message_count: int, session_path: str 
 def _pixel_brand_text() -> Text:
     brand = Text()
     brand.append(
-        "██  ██  █████      █████   █████      █████  ██████ ██  ██ ██ ██████ ██  ██\n",
+        " ██  ████  ██    ██  ████      ████  ████      ████  ██  ██  ██  ████  ██  ██\n",
         style="bold white",
     )
     brand.append(
-        "██  ██ ██   ██     ██  ██  ██  ██     ██  ██ ██      ██  ██ ██ ██     ██  ██\n",
+        "████ ██  ████  ████ ██  ██     ██  ██  ██      ██  ████ ██ ████ ██  ██ ████ ██\n",
         style="bold white",
     )
     brand.append(
-        "██████ █████      █████   █████      █████  █████   ██  ██ ██ █████  ██████\n",
+        "████ ██████ ████████ █████      ████  ████     ██████████████ ██████ ████████████\n",
         style="bold white",
     )
     brand.append(
-        "██  ██ ██   ██     ██      ██  ██     ██  ██ ██       ████  ██ ██     ██  ██\n",
+        "██ ██ ██ ██ ██ ██ ██  ██      ██  ██  ██      ██ ██ ██  ██ ██ ██ ██ ██ ██ ██\n",
         style="bold white",
     )
     brand.append(
-        "██  ██ ██   ██     ██      ██  ██     ██  ██ ██████    ██   ██ ██████ ██  ██\n",
+        "██ ██ ██ ██ ██ ██ ██  ██      ██  ██  ██      ██ ██ ██  ██ ██ ██ ██ ██ ██ ██\n",
         style="bold white",
     )
     return brand
