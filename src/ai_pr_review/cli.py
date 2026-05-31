@@ -938,13 +938,16 @@ def _print_chat_message(console: Console, role: str, text: str, *, layout: str) 
         border_style = "green"
         title_style = "bold green"
         icon = "👤"
+        subtitle = "input"
     else:
         border_style = "bright_cyan"
         title_style = "bold bright_cyan"
         icon = "🤖"
+        subtitle = "assistant"
     panel = Panel(
         text,
         title=f"[{title_style}]{icon} {role}[/{title_style}]",
+        subtitle=f"[dim]{subtitle}[/dim]",
         border_style=border_style,
         expand=layout == "split",
         padding=(0, 1),

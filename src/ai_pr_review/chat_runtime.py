@@ -7,10 +7,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
 from rich.prompt import Prompt
+from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 
@@ -18,61 +19,72 @@ from ai_pr_review.config import AppConfig
 
 
 def _render_status_bar(config: AppConfig, message_count: int, session_path: str | None) -> Panel:
-    """渲染底部状态栏，显示 provider、model、消息数和会话路径。"""
-    table = Table.grid(padding=(0, 2))
-    table.add_column(style="bold cyan", ratio=0)
-    table.add_column(style="white", ratio=1)
-    table.add_column(style="bold green", ratio=0)
-    table.add_column(style="white", ratio=1)
-    table.add_column(style="bold yellow", ratio=0)
-    table.add_column(style="white", ratio=1)
-
+    """渲染更紧凑的状态栏，参考 opencode 的底部信息结构。"""
     provider = config.provider.display_name or config.ai_client.provider
     model = config.ai_client.model
+    layout = (
+        config.preferences.chat_layout if hasattr(config.preferences, "chat_layout") else "split"
+    )
     path_display = session_path if session_path else "memory"
 
-    table.add_row(
-        "Provider",
-        provider,
-        "Model",
-        model,
-        "Messages",
-        str(message_count),
-    )
+    status = Text()
+    status.append(" ● ", style="bold green")
+    status.append("CONNECTED", style="bold green")
+    status.append("   ")
+    status.append("Provider", style="bold cyan")
+    status.append(f" {provider}", style="white")
+    status.append("   ")
+    status.append("Model", style="bold magenta")
+    status.append(f" {model}", style="white")
+    status.append("   ")
+    status.append("Layout", style="bold yellow")
+    status.append(f" {layout}", style="white")
+    status.append("   ")
+    status.append("Messages", style="bold bright_blue")
+    status.append(f" {message_count}", style="white")
+    status.append("   ")
+    status.append("Session", style="bold white")
+    status.append(f" {path_display}", style="dim")
 
-    return Panel(
-        table,
-        title="[bold white]Session Info[/bold white]",
-        border_style="dim",
-        padding=(0, 1),
-    )
+    return Panel(status, border_style="dim", padding=(0, 1))
+
+
+def _render_brand_banner() -> Panel:
+    """渲染顶部品牌横幅，增强产品感。"""
+    banner = Text()
+    banner.append("AI PR REVIEW", style="bold bright_cyan")
+    banner.append("  terminal workspace", style="dim")
+    banner.append("\n")
+    banner.append("Code review  ", style="green")
+    banner.append("|  ", style="dim")
+    banner.append("Chat workspace  ", style="cyan")
+    banner.append("|  ", style="dim")
+    banner.append("Multi-provider", style="magenta")
+    return Panel(banner, border_style="bright_blue", padding=(0, 2))
 
 
 def _render_welcome(config: AppConfig, restored_count: int) -> Panel:
     """渲染欢迎面板，显示帮助提示和可用命令概览。"""
     help_text = Text()
-    help_text.append("可用命令：\n", style="bold white")
+    help_text.append("Quick actions\n", style="bold white")
     help_text.append("  /help", style="bold cyan")
-    help_text.append("       显示所有聊天命令\n")
     help_text.append("  /status", style="bold cyan")
-    help_text.append("      显示当前会话状态\n")
     help_text.append("  /usage", style="bold cyan")
-    help_text.append("       显示 token 使用统计\n")
     help_text.append("  /compact", style="bold cyan")
-    help_text.append("      压缩会话历史\n")
-    help_text.append("  /review <URL>", style="bold cyan")
-    help_text.append("  执行 PR 审查\n")
     help_text.append("  /model <ID>", style="bold cyan")
-    help_text.append("    切换模型\n")
+    help_text.append("  /review <URL>", style="bold cyan")
     help_text.append("  /clear", style="bold cyan")
-    help_text.append("      清空会话\n")
     help_text.append("  /exit", style="bold cyan")
-    help_text.append("       退出聊天\n")
-    help_text.append("\n")
-    help_text.append("直接输入 PR URL 也会自动触发审查。", style="dim")
+    help_text.append("\n\n")
+    help_text.append("Tip: ", style="bold yellow")
+    help_text.append(
+        "直接粘贴 GitHub PR 链接，或输入完整 pr-review 命令，即可触发本地审查。", style="dim"
+    )
 
     if restored_count > 0:
-        help_text.append(f"\n\n已恢复 {restored_count} 条历史消息。", style="yellow")
+        help_text.append(
+            f"\n\nRestored {restored_count} messages from previous session.", style="yellow"
+        )
 
     return Panel(
         help_text,
@@ -110,6 +122,8 @@ def run_chat_session(
     session_path = str(config_path) if config_path is not None else None
 
     console.print()
+    console.print(_render_brand_banner())
+    console.print(Rule(style="dim"))
     console.print(_render_welcome(config, len(messages)))
     console.print(_render_status_bar(config, len(messages), session_path))
     console.print()
@@ -129,7 +143,13 @@ def run_chat_session(
                 while True:
                     elapsed = time.time() - start_time
                     spinner = _spinner_frame(elapsed)
-                    live.update(Text(f"  {spinner} 正在思考... ({elapsed:.1f}s)", style="yellow"))
+                    live.update(
+                        Panel(
+                            Text(f"{spinner} Thinking... {elapsed:.1f}s", style="bold yellow"),
+                            border_style="yellow",
+                            padding=(0, 1),
+                        )
+                    )
                     if elapsed > 0.3:
                         break
                 answer = send_message(messages, user_text)
