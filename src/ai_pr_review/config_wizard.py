@@ -13,11 +13,11 @@ from rich.prompt import Confirm
 from ai_pr_review.config import (
     AIClientConfig,
     AppConfig,
+    ModelProviderConfig,
     PreferencesConfig,
     ProviderConfig,
     ProviderModelConfig,
 )
-from ai_pr_review.config import ModelProviderConfig
 
 
 def json_prompt(text: str, default: dict[str, Any] | None = None) -> dict[str, Any]:

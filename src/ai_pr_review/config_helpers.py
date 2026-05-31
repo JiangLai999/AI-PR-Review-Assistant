@@ -5,16 +5,16 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from ai_pr_review.config import (
     MODEL_PROVIDER_PRESETS,
     PROJECT_LOCAL_CONFIG_FILENAME,
-    PreferencesConfig,
     ModelProviderConfig,
+    PreferencesConfig,
     ProviderConfig,
 )
 

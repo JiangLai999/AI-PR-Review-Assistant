@@ -7,14 +7,15 @@ from pathlib import Path
 from typing import Any
 
 from ai_pr_review.config import (
-    AIClientConfig,
-    AppConfig,
-    PreferencesConfig,
     PROJECT_CONFIG_DIRNAME,
     PROJECT_CONFIG_FILENAME,
     PROJECT_LOCAL_CONFIG_FILENAME,
+    AIClientConfig,
+    AppConfig,
+    PreferencesConfig,
+    ProviderConfig,
+    _default_config_path,
 )
-from ai_pr_review.config import ProviderConfig, _default_config_path
 from ai_pr_review.config_helpers import (
     append_gitignore_entry,
     build_local_example_payload,

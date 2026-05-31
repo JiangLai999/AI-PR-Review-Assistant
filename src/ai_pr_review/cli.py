@@ -19,32 +19,6 @@ from rich.table import Table
 from ai_pr_review.chat_commands import handle_basic_chat_slash_command
 from ai_pr_review.chat_runtime import run_chat_session
 from ai_pr_review.chat_session import clear_chat_session, load_chat_session, save_chat_session
-from ai_pr_review.config_entry import (
-    build_config_show_output,
-    run_config_export,
-    run_config_import,
-    run_config_init,
-)
-from ai_pr_review.config_commands import (
-    run_config_health,
-    run_config_model,
-    run_config_models,
-    run_config_test,
-)
-from ai_pr_review.config_diagnostics import (
-    validate_provider_for_test,
-)
-from ai_pr_review.config_helpers import (
-    append_gitignore_entry,
-    build_local_example_payload,
-    build_project_config_payload,
-    provider_env_var,
-)
-from ai_pr_review.config_wizard import (
-    apply_wizard_configuration,
-    json_prompt,
-    resolve_save_key_choice,
-)
 from ai_pr_review.config import (
     CONFIG_PATH_ENV_VAR,
     DEFAULT_CONFIG_PATH,
@@ -63,24 +37,45 @@ from ai_pr_review.config import (
     mask_api_key,
     resolve_config_path,
 )
+from ai_pr_review.config_commands import (
+    run_config_health,
+    run_config_model,
+    run_config_models,
+    run_config_test,
+)
+from ai_pr_review.config_diagnostics import (
+    validate_provider_for_test,
+)
+from ai_pr_review.config_entry import (
+    build_config_show_output,
+    run_config_export,
+    run_config_import,
+    run_config_init,
+)
+from ai_pr_review.config_helpers import (
+    append_gitignore_entry,
+    build_local_example_payload,
+    build_project_config_payload,
+    provider_env_var,
+)
+from ai_pr_review.config_wizard import (
+    apply_wizard_configuration,
+    json_prompt,
+    resolve_save_key_choice,
+)
 from ai_pr_review.provider_diagnostics import (
     build_model_discovery_fallback_message,
     build_provider_health_payload,
     discover_remote_models,
     probe_provider_connection,
 )
-from ai_pr_review.review_entry import execute_review_flow
 from ai_pr_review.review_commands import (
     build_fetch_only_payload,
     build_filter_only_payload,
     render_selected_report,
     write_report_output,
 )
-from ai_pr_review.workspace_entry import (
-    apply_workspace_preferences,
-    build_history_output,
-    build_stats_output,
-)
+from ai_pr_review.review_entry import execute_review_flow
 from ai_pr_review.services.exceptions import AIClientError, PRFetcherError
 from ai_pr_review.services.model_providers.factory import create_model_provider
 from ai_pr_review.services.pr_fetcher import PRFetcher
@@ -88,6 +83,11 @@ from ai_pr_review.services.prompt_assembler import ReviewResult
 from ai_pr_review.services.report_renderer import ReportRenderer
 from ai_pr_review.services.result_store import ResultStore
 from ai_pr_review.services.review_orchestrator import ReviewArtifacts, ReviewOrchestrator
+from ai_pr_review.workspace_entry import (
+    apply_workspace_preferences,
+    build_history_output,
+    build_stats_output,
+)
 
 PROVIDER_WIZARD_OPTIONS = [
     {
