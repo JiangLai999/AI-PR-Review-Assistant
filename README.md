@@ -1,137 +1,169 @@
-﻿# AI PR Review Assistant
+# AI PR Review Assistant
 
-> AI 椹卞姩鐨?GitHub Pull Request 浠ｇ爜瀹℃煡 CLI 宸ュ叿
+> AI 驱动的 GitHub Pull Request 代码审查 CLI 工具
 
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-175%20Passed-brightgreen.svg)]()
 [![Coverage](https://img.shields.io/badge/Coverage-88%25-green.svg)]()
 
-馃寪 **[鍦ㄧ嚎婕旂ず](https://jianglai999.github.io/AI-PR-Review-Assistant/)** | 馃摉 **[瀹屾暣鏂囨。](docs/PROJECT_DESIGN.md)** | 馃挕 **[鍒涙柊鐐筣(docs/INNOVATION.md)**
+🌐 **[在线演示](https://jianglai999.github.io/AI-PR-Review-Assistant-web/)** | 📖 **[完整文档](docs/PROJECT_DESIGN.md)** | 💡 **[创新点](docs/INNOVATION.md)**
 
 ---
 
-## 椤圭洰绠€浠?
-AI PR Review Assistant 鏄竴涓熀浜?AI 鐨勪唬鐮佸鏌ュ伐鍏凤紝閫氳繃鏅鸿兘鍒嗘瀽 GitHub Pull Request 鍙樻洿锛岃嚜鍔ㄥ彂鐜版綔鍦ㄩ棶棰橈紝甯姪寮€鍙戣€呮彁鍗囦唬鐮佸鏌ユ晥鐜囦笌璐ㄩ噺銆?
-### 鏍稿績鐗规€?
-- 馃 **澶氭ā鍨嬫敮鎸?* 鈥?鏀寔 18+ 妯″瀷渚涘簲鍟嗭紙OpenAI銆丄nthropic銆丏eepSeek銆丵wen 绛夛級
-- 馃幆 **鏅鸿兘杩囨护** 鈥?鑷姩璺宠繃娴嬭瘯銆佹枃妗ｃ€侀厤缃瓑涓嶇浉鍏虫枃浠?- 馃搳 **缁撴瀯鍖栬緭鍑?* 鈥?缁堢褰╄壊銆丮arkdown銆丣SON銆丟itHub PR 璇勮
-- 馃挵 **鎴愭湰鎺у埗** 鈥?鍗曟杩愯鍜?24 灏忔椂绐楀彛鍙岄噸棰勭畻闄愬埗
-- 馃挰 **鑱婂ぉ宸ヤ綔鍖?* 鈥?浜や簰寮忕粓绔亰澶╋紝鏀寔鏂滄潬鍛戒护
-- 馃摝 **涓€閿畨瑁?* 鈥?pipx / pip / curl 澶氱瀹夎鏂瑰紡
+## 项目简介
+
+AI PR Review Assistant 是一个基于 AI 的代码审查工具，通过智能分析 GitHub Pull Request 变更，自动发现潜在问题，帮助开发者提升代码审查效率与质量。
+
+### 核心特性
+
+- 🤖 **多模型支持** — 支持 18+ 模型供应商（OpenAI、Anthropic、DeepSeek、Qwen 等）
+- 🎯 **智能过滤** — 自动跳过测试、文档、配置等不相关文件
+- 📊 **结构化输出** — 终端彩色、Markdown、JSON、GitHub PR 评论
+- 💰 **成本控制** — 单次运行和 24 小时窗口双重预算限制
+- 💬 **聊天工作区** — 交互式终端聊天，支持斜杠命令
+- 📦 **一键安装** — pipx / pip / curl 多种安装方式
 
 ---
 
-## 蹇€熷紑濮?
-### 瀹夎
+## 快速开始
+
+### 安装
 
 ```bash
-# 鏂瑰紡 1锛歱ipx 瀹夎锛堟帹鑽愶級
+# 方式 1：pipx 安装（推荐）
 pipx install ai-pr-review
 
-# 鏂瑰紡 2锛歱ip 瀹夎
+# 方式 2：pip 安装
 pip install ai-pr-review
 
-# 鏂瑰紡 3锛氫竴琛屽懡浠ゅ畨瑁咃紙Linux/macOS锛?curl -fsSL https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-Assistant/main/install.sh | sh
+# 方式 3：一行命令安装（Linux/macOS）
+curl -fsSL https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-Assistant/main/install.sh | sh
 
-# 鏂瑰紡 4锛氫竴琛屽懡浠ゅ畨瑁咃紙Windows PowerShell锛?irm https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-Assistant/main/install.ps1 | iex
+# 方式 4：一行命令安装（Windows PowerShell）
+irm https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-Assistant/main/install.ps1 | iex
 
-# 鏂瑰紡 5锛氫粠 GitHub 瀹夎
+# 方式 5：从 GitHub 安装
 pipx install "git+https://github.com/JiangLai999/AI-PR-Review-Assistant.git"
 
-# 鏂瑰紡 6锛氫粠婧愮爜瀹夎
+# 方式 6：从源码安装
 git clone https://github.com/JiangLai999/AI-PR-Review-Assistant.git
 cd AI-PR-Review-Assistant
 pip install -e .
 ```
 
-### 閰嶇疆
+### 配置
 
 ```bash
-# 鍚姩浜や簰寮忛厤缃悜瀵?pr-review config
+# 启动交互式配置向导
+pr-review config
 
-# 蹇€熼厤缃?pr-review config --quick
+# 快速配置
+pr-review config --quick
 
-# 鏌ョ湅褰撳墠閰嶇疆
+# 查看当前配置
 pr-review config show
 
-# 娴嬭瘯閰嶇疆鏈夋晥鎬?pr-review config test
+# 测试配置有效性
+pr-review config test
 
-# 妫€鏌ヤ緵搴斿晢鍋ュ悍鐘舵€?pr-review config health
+# 检查供应商健康状态
+pr-review config health
 
-# 鍙戠幇鍙敤妯″瀷
+# 发现可用模型
 pr-review config models
 
-# 鍒囨崲榛樿妯″瀷
-pr-review config model --name "妯″瀷鍚嶇О"
+# 切换默认模型
+pr-review config model --name "模型名称"
 ```
 
-### 浣跨敤
+### 使用
 
 ```bash
-# 瀹℃煡 PR
+# 审查 PR
 pr-review https://github.com/owner/repo/pull/123
 
-# 鎸囧畾妯″瀷瀹℃煡
+# 指定模型审查
 pr-review https://github.com/owner/repo/pull/123 --model gpt-4
 
-# 杈撳嚭涓?Markdown 鏂囦欢
+# 输出为 Markdown 文件
 pr-review https://github.com/owner/repo/pull/123 --format markdown --output report.md
 
-# 鍙戝竷涓?GitHub PR 璇勮
+# 发布为 GitHub PR 评论
 pr-review https://github.com/owner/repo/pull/123 --publish-comment
 
-# 骞茶繍琛岋紙涓嶈皟鐢?AI锛?pr-review https://github.com/owner/repo/pull/123 --dry-run
+# 干运行（不调用 AI）
+pr-review https://github.com/owner/repo/pull/123 --dry-run
 
-# 鏌ョ湅鍘嗗彶璁板綍
+# 查看历史记录
 pr-review history
 
-# 鏌ョ湅缁熻淇℃伅
+# 查看统计信息
 pr-review stats
 ```
 
 ---
 
-## 瀹℃煡娴佹按绾?
+## 审查流水线
+
 ```
 PR URL
-  鈹?  鈻?鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?   鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?   鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?鈹? PR Fetcher  鈹傗攢鈹€鈹€鈻垛攤    Filter    鈹傗攢鈹€鈹€鈻垛攤   Context    鈹?鈹? 鑾峰彇 PR 鏁版嵁 鈹?   鈹? 鏅鸿兘杩囨护    鈹?   鈹? 鏋勫缓涓婁笅鏂? 鈹?鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?   鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?   鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                                               鈹?                                               鈻?鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?   鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?   鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?鈹?   Post      鈹傗梹鈹€鈹€鈹€鈹? AI Client   鈹傗梹鈹€鈹€鈹€鈹?  Prompt     鈹?鈹? Processor   鈹?   鈹? 璋冪敤 AI 妯″瀷 鈹?   鈹? 缁勮 Prompt 鈹?鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?   鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?   鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?       鈹?       鈻?鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?   鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?鈹?Result Store 鈹?   鈹?  Report     鈹?鈹? 鎸佷箙鍖栧瓨鍌?  鈹?   鈹? 娓叉煋鎶ュ憡    鈹?鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?   鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?```
-
----
-
-## Chat 宸ヤ綔鍖?
-```bash
-# 杩涘叆鑱婂ぉ妯″紡
-pr-review chat
-
-# 鍗曟潯娑堟伅
-pr-review chat --message "甯垜鎬荤粨杩欎釜 PR 鐨勫鏌ラ噸鐐?
-
-# 涓存椂鍒囨崲妯″瀷
-pr-review chat --model "gpt-4" --message "浣犲ソ"
+  │
+  ▼
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│  PR Fetcher  │───▶│    Filter    │───▶│   Context    │
+│  获取 PR 数据 │    │  智能过滤    │    │  构建上下文  │
+└──────────────┘    └──────────────┘    └──────────────┘
+                                               │
+                                               ▼
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│    Post      │◀───│  AI Client   │◀───│   Prompt     │
+│  Processor   │    │  调用 AI 模型 │    │  组装 Prompt │
+└──────────────┘    └──────────────┘    └──────────────┘
+       │
+       ▼
+┌──────────────┐    ┌──────────────┐
+│ Result Store │    │   Report     │
+│  持久化存储   │    │  渲染报告    │
+└──────────────┘    └──────────────┘
 ```
 
-### 鏂滄潬鍛戒护
+---
 
-| 鍛戒护 | 璇存槑 |
+## Chat 工作区
+
+```bash
+# 进入聊天模式
+pr-review chat
+
+# 单条消息
+pr-review chat --message "帮我总结这个 PR 的审查重点"
+
+# 临时切换模型
+pr-review chat --model "gpt-4" --message "你好"
+```
+
+### 斜杠命令
+
+| 命令 | 说明 |
 |------|------|
-| `/help` | 鏄剧ず甯姪淇℃伅 |
-| `/status` | 鏄剧ず浼氳瘽鐘舵€?|
-| `/usage` | 鏄剧ず娑堟伅缁熻 |
-| `/model <ID>` | 鍒囨崲妯″瀷 |
-| `/review <URL>` | 鎵ц PR 瀹℃煡 |
-| `/history` | 鏌ョ湅瀹℃煡鍘嗗彶 |
-| `/stats` | 鏌ョ湅缁熻鏁版嵁 |
-| `/compact` | 鍘嬬缉浼氳瘽鍘嗗彶 |
-| `/restore` | 鎭㈠鍘嗗彶浼氳瘽 |
-| `/clear` | 娓呯┖褰撳墠浼氳瘽 |
-| `/exit` | 閫€鍑鸿亰澶?|
+| `/help` | 显示帮助信息 |
+| `/status` | 显示会话状态 |
+| `/usage` | 显示消息统计 |
+| `/model <ID>` | 切换模型 |
+| `/review <URL>` | 执行 PR 审查 |
+| `/history` | 查看审查历史 |
+| `/stats` | 查看统计数据 |
+| `/compact` | 压缩会话历史 |
+| `/restore` | 恢复历史会话 |
+| `/clear` | 清空当前会话 |
+| `/exit` | 退出聊天 |
 
 ---
 
-## 閰嶇疆鏂囦欢
+## 配置文件
 
-閰嶇疆鏂囦欢浣嶇疆锛歚~/.ai_pr_review/config.json`
+配置文件位置：`~/.ai_pr_review/config.json`
 
 ```json
 {
@@ -155,107 +187,121 @@ pr-review chat --model "gpt-4" --message "浣犲ソ"
 }
 ```
 
-### 閰嶇疆浼樺厛绾?
-1. CLI 鍙傛暟 `--config <path>`
-2. 鐜鍙橀噺 `AI_PR_REVIEW_*`
-3. 鐢ㄦ埛绾ч厤缃?`~/.ai_pr_review/config.json`
-4. 椤圭洰绾ч厤缃?`.ai_pr_review/config.json`
-5. 椤圭洰鏈湴閰嶇疆 `.ai_pr_review/config.local.json`
+### 配置优先级
+
+1. CLI 参数 `--config <path>`
+2. 环境变量 `AI_PR_REVIEW_*`
+3. 用户级配置 `~/.ai_pr_review/config.json`
+4. 项目级配置 `.ai_pr_review/config.json`
+5. 项目本地配置 `.ai_pr_review/config.local.json`
 
 ---
 
-## 鏀寔鐨勬ā鍨嬩緵搴斿晢
+## 支持的模型供应商
 
-| 渚涘簲鍟?| API 鏍煎紡 | 璇存槑 |
+| 供应商 | API 格式 | 说明 |
 |--------|----------|------|
-| OpenAI | openai | GPT 绯诲垪妯″瀷 |
-| Anthropic | anthropic | Claude 绯诲垪妯″瀷 |
-| DeepSeek | openai | DeepSeek 绯诲垪妯″瀷 |
-| Qwen | openai | 閫氫箟鍗冮棶绯诲垪 |
-| SiliconFlow | openai | 纭呭熀娴佸姩 |
-| Moonshot | openai | 鏈堜箣鏆楅潰 |
-| Zhipu | openai | 鏅鸿氨 AI |
-| Baichuan | openai | 鐧惧窛鏅鸿兘 |
+| OpenAI | openai | GPT 系列模型 |
+| Anthropic | anthropic | Claude 系列模型 |
+| DeepSeek | openai | DeepSeek 系列模型 |
+| Qwen | openai | 通义千问系列 |
+| SiliconFlow | openai | 硅基流动 |
+| Moonshot | openai | 月之暗面 |
+| Zhipu | openai | 智谱 AI |
+| Baichuan | openai | 百川智能 |
 | Minimax | openai | MiniMax |
-| Stepfun | openai | 闃惰穬鏄熻景 |
-| Doubao | openai | 璞嗗寘 |
-| Hunyuan | openai | 娣峰厓 |
-| Yi | openai | 闆朵竴涓囩墿 |
-| OpenRouter | openai | 澶氭ā鍨嬩唬鐞?|
-| API2D | openai | 绗笁鏂逛唬鐞?|
-| CloseAI | openai | 绗笁鏂逛唬鐞?|
-| OhMyGPT | openai | 绗笁鏂逛唬鐞?|
-| Custom | openai | 鑷畾涔夌鐐?|
+| Stepfun | openai | 阶跃星辰 |
+| Doubao | openai | 豆包 |
+| Hunyuan | openai | 混元 |
+| Yi | openai | 零一万物 |
+| OpenRouter | openai | 多模型代理 |
+| API2D | openai | 第三方代理 |
+| CloseAI | openai | 第三方代理 |
+| OhMyGPT | openai | 第三方代理 |
+| Custom | openai | 自定义端点 |
 
 ---
 
-## 鎶€鏈爤
+## 技术栈
 
-| 鎶€鏈?| 鐢ㄩ€?|
+| 技术 | 用途 |
 |------|------|
-| Python 3.12+ | 涓昏瑷€ |
-| Click | CLI 妗嗘灦 |
-| Rich | 缁堢 UI |
-| Pydantic | 鏁版嵁楠岃瘉 |
+| Python 3.12+ | 主语言 |
+| Click | CLI 框架 |
+| Rich | 终端 UI |
+| Pydantic | 数据验证 |
 | PyGithub | GitHub API |
-| Anthropic SDK | AI 妯″瀷璋冪敤 |
-| tree-sitter | AST 瑙ｆ瀽锛堝彲閫夛級 |
-| SQLite | 鏈湴瀛樺偍 |
-| GSAP | 鍓嶇鍔ㄧ敾 |
+| Anthropic SDK | AI 模型调用 |
+| tree-sitter | AST 解析（可选） |
+| SQLite | 本地存储 |
+| GSAP | 前端动画 |
 
 ---
 
-## 椤圭洰缁撴瀯
+## 项目结构
 
 ```
 AI-PR-Review-Assistant/
-鈹溾攢鈹€ src/ai_pr_review/
-鈹?  鈹溾攢鈹€ cli.py                    # CLI 鍏ュ彛
-鈹?  鈹溾攢鈹€ config.py                 # 閰嶇疆绠＄悊
-鈹?  鈹溾攢鈹€ config_wizard.py          # 閰嶇疆鍚戝
-鈹?  鈹溾攢鈹€ chat_commands.py          # 鑱婂ぉ鍛戒护
-鈹?  鈹溾攢鈹€ chat_runtime.py           # 鑱婂ぉ寮曟搸
-鈹?  鈹溾攢鈹€ models/
-鈹?  鈹?  鈹斺攢鈹€ pr_data.py            # 鏁版嵁妯″瀷
-鈹?  鈹溾攢鈹€ services/
-鈹?  鈹?  鈹溾攢鈹€ pr_fetcher.py         # PR 鑾峰彇
-鈹?  鈹?  鈹溾攢鈹€ filter_pipeline.py    # 鏂囦欢杩囨护
-鈹?  鈹?  鈹溾攢鈹€ context_builder.py    # 涓婁笅鏂囨瀯寤?鈹?  鈹?  鈹溾攢鈹€ prompt_assembler.py   # Prompt 缁勮
-鈹?  鈹?  鈹溾攢鈹€ ai_client.py          # AI 璋冪敤
-鈹?  鈹?  鈹溾攢鈹€ post_processor.py     # 鍚庡鐞?鈹?  鈹?  鈹溾攢鈹€ report_renderer.py    # 鎶ュ憡娓叉煋
-鈹?  鈹?  鈹溾攢鈹€ result_store.py       # 缁撴灉瀛樺偍
-鈹?  鈹?  鈹溾攢鈹€ review_orchestrator.py# 缂栨帓灞?鈹?  鈹?  鈹溾攢鈹€ cost_controller.py    # 鎴愭湰鎺у埗
-鈹?  鈹?  鈹斺攢鈹€ model_providers/      # 澶氫緵搴斿晢閫傞厤
-鈹?  鈹斺攢鈹€ utils/
-鈹?      鈹斺攢鈹€ github_url_parser.py  # URL 瑙ｆ瀽
-鈹溾攢鈹€ tests/                        # 娴嬭瘯濂椾欢 (175 tests)
-鈹溾攢鈹€ docs/                         # 鏂囨。
-鈹?  鈹溾攢鈹€ PROJECT_DESIGN.md         # 椤圭洰璁捐涔?鈹?  鈹溾攢鈹€ INNOVATION.md             # 鍒涙柊鐐规枃妗?鈹?  鈹溾攢鈹€ API.md                    # API 鏂囨。
-鈹?  鈹斺攢鈹€ WEBSITE.md                # 鍓嶇灞曠ず鏂囨。
-鈹溾攢鈹€ website/                      # 鍓嶇灞曠ず椤甸潰
-鈹?  鈹溾攢鈹€ index.html
-鈹?  鈹溾攢鈹€ css/style.css
-鈹?  鈹斺攢鈹€ js/main.js
-鈹溾攢鈹€ pyproject.toml                # 鍖呴厤缃?鈹溾攢鈹€ README.md                     # 鏈枃浠?鈹溾攢鈹€ CHANGELOG.md                  # 鍙樻洿鏃ュ織
-鈹溾攢鈹€ CONTRIBUTING.md               # 璐＄尞鎸囧崡
-鈹斺攢鈹€ LICENSE                       # MIT 璁稿彲璇?```
+├── src/ai_pr_review/
+│   ├── cli.py                    # CLI 入口
+│   ├── config.py                 # 配置管理
+│   ├── config_wizard.py          # 配置向导
+│   ├── chat_commands.py          # 聊天命令
+│   ├── chat_runtime.py           # 聊天引擎
+│   ├── models/
+│   │   └── pr_data.py            # 数据模型
+│   ├── services/
+│   │   ├── pr_fetcher.py         # PR 获取
+│   │   ├── filter_pipeline.py    # 文件过滤
+│   │   ├── context_builder.py    # 上下文构建
+│   │   ├── prompt_assembler.py   # Prompt 组装
+│   │   ├── ai_client.py          # AI 调用
+│   │   ├── post_processor.py     # 后处理
+│   │   ├── report_renderer.py    # 报告渲染
+│   │   ├── result_store.py       # 结果存储
+│   │   ├── review_orchestrator.py# 编排层
+│   │   ├── cost_controller.py    # 成本控制
+│   │   └── model_providers/      # 多供应商适配
+│   └── utils/
+│       └── github_url_parser.py  # URL 解析
+├── tests/                        # 测试套件 (175 tests)
+├── docs/                         # 文档
+│   ├── PROJECT_DESIGN.md         # 项目设计书
+│   ├── INNOVATION.md             # 创新点文档
+│   ├── API.md                    # API 文档
+│   └── WEBSITE.md                # 前端展示文档
+├── website/                      # 前端展示页面
+│   ├── index.html
+│   ├── css/style.css
+│   └── js/main.js
+├── pyproject.toml                # 包配置
+├── README.md                     # 本文件
+├── CHANGELOG.md                  # 变更日志
+├── CONTRIBUTING.md               # 贡献指南
+└── LICENSE                       # MIT 许可证
+```
 
 ---
 
-## 娴嬭瘯涓庤川閲?
+## 测试与质量
+
 ```bash
-# 杩愯娴嬭瘯
+# 运行测试
 pytest
 
-# 浠ｇ爜鏍煎紡鍖栨鏌?black --check src tests
+# 代码格式化检查
+black --check src tests
 
-# 瀵煎叆鎺掑簭妫€鏌?isort --check-only src tests
+# 导入排序检查
+isort --check-only src tests
 
-# 绫诲瀷妫€鏌?mypy src
+# 类型检查
+mypy src
 ```
 
-### 娴嬭瘯瑕嗙洊鐜?
-| 妯″潡 | 娴嬭瘯鏁?| 瑕嗙洊鐜?|
+### 测试覆盖率
+
+| 模块 | 测试数 | 覆盖率 |
 |------|--------|--------|
 | CLI | 54 | 85% |
 | PR Fetcher | 48 | 87% |
@@ -269,64 +315,69 @@ pytest
 | Report Renderer | 6 | 97% |
 | Model Providers | 8 | 82% |
 | Review Orchestrator | 1 | 97% |
-| **鎬昏** | **175** | **88%** |
+| **总计** | **175** | **88%** |
 
 ---
 
-## 鍒涙柊鐐?
-鏈」鐩噰鐢?**AI 澶氭ā鍨嬪崗浣滃喅绛?* 妯″紡锛屽叿鏈変互涓嬪垱鏂帮細
+## 创新点
 
-| 鍒涙柊鐐?| 鎻忚堪 |
+本项目采用 **AI 多模型协作决策** 模式，具有以下创新：
+
+| 创新点 | 描述 |
 |--------|------|
-| 涓夋柟浼氳皥鍐崇瓥 | Claude Code + DeepSeek + 鐢ㄦ埛澶氳疆璁ㄨ |
-| 鍙屾ā鍨嬪苟琛屽晢璁?| DeepSeek + GPT 5.4 浜掕ˉ鍗忎綔 |
-| 鍙屽眰 Prompt 缁撴瀯 | 650 tokens锛屽噺灏?65% |
-| 涓夌骇 Fallback | tree-sitter 鈫?姝ｅ垯 鈫?diff context |
-| 澶氫緵搴斿晢閫傞厤 | 18+ 妯″瀷渚涘簲鍟嗙粺涓€鎺ュ彛 |
-| 鍓嶇浜у搧灞曠ず | GSAP 鍔ㄧ敾 + 瀹屾暣鏂囨。宓屽叆 |
+| 三方会谈决策 | Claude Code + DeepSeek + 用户多轮讨论 |
+| 双模型并行商讨 | DeepSeek + GPT 5.4 互补协作 |
+| 双层 Prompt 结构 | 650 tokens，减少 65% |
+| 三级 Fallback | tree-sitter → 正则 → diff context |
+| 多供应商适配 | 18+ 模型供应商统一接口 |
+| 前端产品展示 | GSAP 动画 + 完整文档嵌入 |
 
-璇﹁ [鍒涙柊鐐规枃妗(docs/INNOVATION.md)銆?
+详见 [创新点文档](docs/INNOVATION.md)。
+
 ---
 
-## 鐩稿叧鏂囨。
+## 相关文档
 
-| 鏂囨。 | 璇存槑 |
+| 文档 | 说明 |
 |------|------|
-| [PROJECT_DESIGN.md](docs/PROJECT_DESIGN.md) | 瀹屾暣椤圭洰璁捐涔?|
-| [INNOVATION.md](docs/INNOVATION.md) | 鍒涙柊鐐规枃妗?|
-| [API.md](docs/API.md) | API 鏂囨。 |
-| [WEBSITE.md](docs/WEBSITE.md) | 鍓嶇灞曠ず鏂囨。 |
-| [CHANGELOG.md](CHANGELOG.md) | 鍙樻洿鏃ュ織 |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | 璐＄尞鎸囧崡 |
-| [RELEASE.md](docs/RELEASE.md) | 鍙戝竷鎸囧崡 |
+| [PROJECT_DESIGN.md](docs/PROJECT_DESIGN.md) | 完整项目设计书 |
+| [INNOVATION.md](docs/INNOVATION.md) | 创新点文档 |
+| [API.md](docs/API.md) | API 文档 |
+| [WEBSITE.md](docs/WEBSITE.md) | 前端展示文档 |
+| [CHANGELOG.md](CHANGELOG.md) | 变更日志 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南 |
+| [RELEASE.md](docs/RELEASE.md) | 发布指南 |
 
 ---
 
-## 璐＄尞
+## 贡献
 
-娆㈣繋鎻愪氦 Issue 鎴?Pull Request锛?
-1. Fork 鏈粨搴?2. 鍒涘缓鍔熻兘鍒嗘敮 (`git checkout -b feature/xxx`)
-3. 鎻愪氦鏇存敼 (`git commit -m 'feat: add xxx'`)
-4. 鎺ㄩ€佸埌鍒嗘敮 (`git push origin feature/xxx`)
-5. 鍒涘缓 Pull Request
+欢迎提交 Issue 或 Pull Request！
 
-璇风‘淇濓細
-- 鎵€鏈夋祴璇曢€氳繃 (`pytest`)
-- 浠ｇ爜鏍煎紡姝ｇ‘ (`black --check src tests`)
-- 瀵煎叆鎺掑簭姝ｇ‘ (`isort --check-only src tests`)
-- 绫诲瀷妫€鏌ラ€氳繃 (`mypy src`)
+1. Fork 本仓库
+2. 创建功能分支 (`git checkout -b feature/xxx`)
+3. 提交更改 (`git commit -m 'feat: add xxx'`)
+4. 推送到分支 (`git push origin feature/xxx`)
+5. 创建 Pull Request
+
+请确保：
+- 所有测试通过 (`pytest`)
+- 代码格式正确 (`black --check src tests`)
+- 导入排序正确 (`isort --check-only src tests`)
+- 类型检查通过 (`mypy src`)
 
 ---
 
-## 璁稿彲璇?
-鏈」鐩噰鐢?[MIT 璁稿彲璇乚(LICENSE)銆?
+## 许可证
+
+本项目采用 [MIT 许可证](LICENSE)。
+
 ---
 
-## 鑷磋阿
+## 致谢
 
-- [PyGithub](https://github.com/PyGithub/PyGithub) 鈥?GitHub API 璁块棶
-- [Rich](https://github.com/Textualize/rich) 鈥?缁堢 UI
-- [Click](https://github.com/pallets/click) 鈥?CLI 妗嗘灦
-- [Anthropic](https://www.anthropic.com/) 鈥?AI 妯″瀷鏀寔
-- [GSAP](https://greensock.com/gsap/) 鈥?鍓嶇鍔ㄧ敾
-
+- [PyGithub](https://github.com/PyGithub/PyGithub) — GitHub API 访问
+- [Rich](https://github.com/Textualize/rich) — 终端 UI
+- [Click](https://github.com/pallets/click) — CLI 框架
+- [Anthropic](https://www.anthropic.com/) — AI 模型支持
+- [GSAP](https://greensock.com/gsap/) — 前端动画
