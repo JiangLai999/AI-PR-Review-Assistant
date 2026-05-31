@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shlex
 from dataclasses import asdict
 from pathlib import Path
@@ -951,6 +952,10 @@ def _active_config_has_saved_api_key(config_path: Path | None) -> bool:
     )
 
 
+def _is_github_pr_url(text: str) -> bool:
+    return bool(re.match(r"^https://github\.com/[^/]+/[^/]+/pull/\d+/?$", text.strip()))
+
+
 def _handle_chat_slash_command(
     console: Console,
     config: AppConfig,
@@ -1483,14 +1488,16 @@ def chat_command(
 
     def handle_raw_command(command_text: str) -> bool:
         stripped = command_text.strip()
-        if not stripped.startswith("pr-review "):
+        if _is_github_pr_url(stripped):
+            parts = ["pr-review", stripped]
+        elif stripped.startswith("pr-review "):
+            try:
+                parts = shlex.split(stripped)
+            except ValueError as exc:
+                console.print(Panel(f"命令解析失败: {exc}", title="Error", border_style="red"))
+                return True
+        else:
             return False
-
-        try:
-            parts = shlex.split(stripped)
-        except ValueError as exc:
-            console.print(Panel(f"命令解析失败: {exc}", title="Error", border_style="red"))
-            return True
 
         if len(parts) < 2:
             console.print(
