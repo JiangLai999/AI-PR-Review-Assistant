@@ -59,6 +59,12 @@ from ai_pr_review.provider_diagnostics import (
     discover_remote_models,
     probe_provider_connection,
 )
+from ai_pr_review.review_commands import (
+    build_fetch_only_payload,
+    build_filter_only_payload,
+    render_selected_report,
+    write_report_output,
+)
 from ai_pr_review.services.exceptions import AIClientError, PRFetcherError
 from ai_pr_review.services.model_providers.factory import create_model_provider
 from ai_pr_review.services.pr_fetcher import PRFetcher
@@ -1096,46 +1102,30 @@ def review_command(
         if only_fetch:
             orchestrator = ReviewOrchestrator(app_config)
             artifacts = asyncio.run(orchestrator.fetch_only(pr_url))
-            payload = {
-                "pr": artifacts.pr_data.model_dump(mode="json"),
-                "run": {"duration_seconds": artifacts.duration_seconds},
-            }
+            payload = build_fetch_only_payload(artifacts)
             click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
             return
 
         if only_filter or dry_run:
             orchestrator = ReviewOrchestrator(app_config)
             artifacts = asyncio.run(orchestrator.filter_only(pr_url))
-            payload = {
-                "pr": {
-                    "number": artifacts.pr_data.pr_number,
-                    "title": artifacts.pr_data.title,
-                    "url": artifacts.pr_data.url,
-                    "repository": artifacts.pr_data.repo_full_name,
-                    "files_changed": artifacts.pr_data.changed_files_count,
-                },
-                "filter": artifacts.filter_result.to_dict(),
-                "run": {
-                    "dry_run": dry_run,
-                    "duration_seconds": artifacts.duration_seconds,
-                },
-            }
-            if not show_filter_reasons:
-                for result in payload["filter"]["results"]:
-                    result.pop("reasons", None)
+            payload = build_filter_only_payload(
+                artifacts,
+                dry_run=dry_run,
+                show_filter_reasons=show_filter_reasons,
+            )
             click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
             return
 
         artifacts = asyncio.run(run_review(pr_url, model=model, verbose=verbose, config=app_config))
 
-        terminal_text: str | None = None
-        if effective_format == "markdown":
-            rendered = render_markdown_report(artifacts, app_config)
-        elif effective_format == "json":
-            rendered = render_json_report(artifacts, app_config)
-        else:
-            rendered = None
-            terminal_text = None
+        rendered = render_selected_report(
+            artifacts,
+            app_config,
+            effective_format=effective_format,
+            render_markdown_report=render_markdown_report,
+            render_json_report=render_json_report,
+        )
 
         if effective_format == "terminal":
             render_terminal_report(console, artifacts, app_config)
@@ -1143,12 +1133,13 @@ def review_command(
             click.echo(rendered)
 
         if output is not None:
-            content = rendered
-            if content is None:
-                terminal_console = Console(record=True)
-                render_terminal_report(terminal_console, artifacts, app_config)
-                content = terminal_console.export_text()
-            output.write_text(content, encoding="utf-8")
+            write_report_output(
+                output,
+                rendered=rendered,
+                artifacts=artifacts,
+                app_config=app_config,
+                render_terminal_report=render_terminal_report,
+            )
             console.print(f"Report written to {output}")
 
         if publish_comment:
