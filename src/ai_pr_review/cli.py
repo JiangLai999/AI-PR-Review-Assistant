@@ -994,6 +994,7 @@ def _handle_chat_slash_command(
         command_text,
         layout,
         clear_session=clear_chat_session,
+        load_session=load_chat_session,
         set_active_model=_set_active_model,
     ):
         return True

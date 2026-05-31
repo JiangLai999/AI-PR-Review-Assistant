@@ -56,29 +56,29 @@ def _render_status_bar(config: AppConfig, message_count: int, session_path: str 
 def _pixel_brand_text() -> Text:
     brand = Text()
     brand.append(
-        " ###  ###   ####   ####   ####   #####  #   #  ###   #####  #   #\n",
+        "██  ██  █████      █████   █████      █████  ██████ ██  ██ ██ ██████ ██  ██\n",
         style="bold white",
     )
     brand.append(
-        "#   # #  #   #  #   #  #   #  #   #      #   #   #    #      #   #\n",
+        "██  ██ ██   ██     ██  ██  ██  ██     ██  ██ ██      ██  ██ ██ ██     ██  ██\n",
         style="bold white",
     )
     brand.append(
-        "##### ###    ####   ####   ####   ###    # # #   #    ###    # # #\n",
+        "██████ █████      █████   █████      █████  █████   ██  ██ ██ █████  ██████\n",
         style="bold white",
     )
     brand.append(
-        "#   # #      #  #   #  #   #  #   #      ## ##   #    #      ## ##\n",
+        "██  ██ ██   ██     ██      ██  ██     ██  ██ ██       ████  ██ ██     ██  ██\n",
         style="bold white",
     )
     brand.append(
-        "#   # #      #  #   #  #   #  #   #####  #   #  ###   #####  #   #\n",
+        "██  ██ ██   ██     ██      ██  ██     ██  ██ ██████    ██   ██ ██████ ██  ██\n",
         style="bold white",
     )
     return brand
 
 
-def _render_header(config: AppConfig, restored_count: int) -> Panel:
+def _render_header(config: AppConfig) -> Panel:
     left = Text()
     left.append_text(_pixel_brand_text())
     left.append("\n")
@@ -97,6 +97,7 @@ def _render_header(config: AppConfig, restored_count: int) -> Panel:
     commands.add_row("/compact", "压缩历史消息")
     commands.add_row("/model <ID>", "切换模型")
     commands.add_row("/review <URL>", "执行 PR 审查")
+    commands.add_row("/restore", "恢复历史会话")
     commands.add_row("/clear", "清空会话")
     commands.add_row("/exit", "退出")
 
@@ -105,9 +106,7 @@ def _render_header(config: AppConfig, restored_count: int) -> Panel:
     right.append("- 直接粘贴 GitHub PR 链接可自动审查\n", style="grey82")
     right.append("- 输入完整 pr-review 命令也会走本地执行\n", style="grey82")
     right.append("- 支持 Markdown 回复与代码块高亮\n", style="grey82")
-    right.append("- 输入框支持历史记录与底部工具栏\n", style="grey82")
-    if restored_count > 0:
-        right.append(f"\nRestored {restored_count} messages.", style="white")
+    right.append("- 输入 / 查看所有可用命令\n", style="grey82")
 
     body = Columns(
         [
@@ -217,10 +216,9 @@ def _render_workspace(
     config: AppConfig,
     messages: list[dict[str, Any]],
     session_path: str | None,
-    restored_count: int,
 ) -> Group:
     return Group(
-        _render_header(config, restored_count),
+        _render_header(config),
         _render_status_bar(config, len(messages), session_path),
         _render_transcript(messages),
         _render_input_hint(),
@@ -236,6 +234,7 @@ def _spinner_frame(elapsed: float) -> str:
 def _build_prompt_session() -> Any | None:
     try:
         from prompt_toolkit import PromptSession
+        from prompt_toolkit.completion import WordCompleter
         from prompt_toolkit.formatted_text import HTML
         from prompt_toolkit.history import InMemoryHistory
     except ModuleNotFoundError:
@@ -243,14 +242,31 @@ def _build_prompt_session() -> Any | None:
 
     try:
         history = InMemoryHistory()
+        slash_commands = [
+            "/help",
+            "/status",
+            "/usage",
+            "/compact",
+            "/restore",
+            "/config",
+            "/session",
+            "/history",
+            "/stats",
+            "/model",
+            "/review",
+            "/clear",
+            "/exit",
+        ]
+        completer = WordCompleter(slash_commands, ignore_case=True)
         return PromptSession(
             history=history,
+            completer=completer,
             bottom_toolbar=HTML(
                 "<b><style fg='#aaaaaa'> Enter send </style></b>"
                 "  <style fg='#666666'>|</style>"
-                "  <b><style fg='#aaaaaa'> ↑↓ history </style></b>"
+                "  <b><style fg='#aaaaaa'> Tab complete </style></b>"
                 "  <style fg='#666666'>|</style>"
-                "  <b><style fg='#aaaaaa'> paste PR URL or pr-review command </style></b>"
+                "  <b><style fg='#aaaaaa'> / commands </style></b>"
             ),
             multiline=False,
         )
@@ -275,14 +291,14 @@ def run_chat_session(
     raw_command_handler: Callable[[str], bool],
     send_message: Callable[[list[dict[str, Any]], str], str],
 ) -> None:
-    messages = load_session(config_path)
+    messages: list[dict[str, Any]] = []
     session_path = str(config_path) if config_path is not None else None
     prompt_session = _build_prompt_session()
 
     def rerender_workspace() -> None:
         console.clear()
         console.print()
-        console.print(_render_workspace(config, messages, session_path, len(messages)))
+        console.print(_render_workspace(config, messages, session_path))
         console.print()
 
     rerender_workspace()

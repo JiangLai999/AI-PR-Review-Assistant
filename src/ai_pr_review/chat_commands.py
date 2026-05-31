@@ -21,6 +21,7 @@ def build_chat_help_text() -> str:
         "/status    - 显示当前会话状态\n"
         "/usage     - 显示 token 使用统计\n"
         "/compact   - 压缩会话历史\n"
+        "/restore   - 恢复之前的会话记录\n"
         "/config    - 显示当前会话配置\n"
         "/session   - 显示当前 chat 会话信息\n"
         "/history [limit] - 显示最近 N 条审查历史\n"
@@ -97,6 +98,7 @@ def handle_basic_chat_slash_command(
     layout: str,
     *,
     clear_session: Callable[[Path | None], None],
+    load_session: Callable[[Path | None], list[dict[str, Any]]],
     set_active_model: Callable[[AppConfig, str], None],
 ) -> bool:
     parts = command_text.split(maxsplit=1)
@@ -196,5 +198,14 @@ def handle_basic_chat_slash_command(
         console.print(
             f"已压缩会话：移除 {removed} 条消息，保留 {len(messages)} 条。", style="green"
         )
+        return True
+    if command == "/restore":
+        loaded = load_session(config_path)
+        if not loaded:
+            console.print("没有找到历史会话记录。", style="yellow")
+            return True
+        messages.clear()
+        messages.extend(loaded)
+        console.print(f"已恢复 {len(messages)} 条历史消息。", style="green")
         return True
     return False
