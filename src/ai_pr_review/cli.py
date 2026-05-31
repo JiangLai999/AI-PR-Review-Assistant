@@ -72,6 +72,11 @@ from ai_pr_review.review_commands import (
     render_selected_report,
     write_report_output,
 )
+from ai_pr_review.workspace_entry import (
+    apply_workspace_preferences,
+    build_history_output,
+    build_stats_output,
+)
 from ai_pr_review.services.exceptions import AIClientError, PRFetcherError
 from ai_pr_review.services.model_providers.factory import create_model_provider
 from ai_pr_review.services.pr_fetcher import PRFetcher
@@ -1376,11 +1381,7 @@ def config_import(input_path: Path, save_key: bool) -> None:
 def history_command(ctx: click.Context, pr_url: str | None, limit: int) -> None:
     """Show persisted review history."""
     config = AppConfig.load(_config_path_from_context(ctx))
-    store = ResultStore(config.result_store)
-    payload = {
-        "runs": store.list_runs(pr_url=pr_url, limit=limit),
-        "statistics": store.get_statistics(),
-    }
+    payload = build_history_output(config, pr_url=pr_url, limit=limit)
     click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -1420,22 +1421,16 @@ def preferences_command(
     """Show or update CLI preferences."""
     config_path = _config_path_from_context(ctx)
     config = AppConfig.load(config_path)
-    changed = False
-    if ui_language is not None:
-        config.preferences.ui_language = ui_language
-        changed = True
-    if response_language is not None:
-        config.preferences.language = response_language
-        changed = True
-    if chat_layout is not None:
-        config.preferences.chat_layout = chat_layout
-        changed = True
-    if output_format is not None:
-        config.preferences.output_format = output_format
-        changed = True
-    if changed:
-        config.save(config_path, save_key=_active_config_has_saved_api_key(config_path))
-    click.echo(json.dumps(asdict(config.preferences), ensure_ascii=False, indent=2))
+    payload = apply_workspace_preferences(
+        config,
+        config_path=config_path,
+        ui_language=ui_language,
+        response_language=response_language,
+        chat_layout=chat_layout,
+        output_format=output_format,
+        save_key_checker=_active_config_has_saved_api_key,
+    )
+    click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 @main.command("chat")
@@ -1493,8 +1488,7 @@ def chat_command(
 def stats_command(ctx: click.Context) -> None:
     """Show persisted review statistics."""
     config = AppConfig.load(_config_path_from_context(ctx))
-    store = ResultStore(config.result_store)
-    click.echo(json.dumps(store.get_statistics(), ensure_ascii=False, indent=2))
+    click.echo(json.dumps(build_stats_output(config), ensure_ascii=False, indent=2))
 
 
 __all__ = [
