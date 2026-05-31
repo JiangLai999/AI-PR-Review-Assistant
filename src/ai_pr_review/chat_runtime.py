@@ -1,27 +1,31 @@
-"""Chat 运行时辅助函数。"""
+﻿"""Chat runtime helpers."""
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import InMemoryHistory
 from rich.columns import Columns
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.prompt import Prompt
-from rich.rule import Rule
+from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
 from ai_pr_review.config import AppConfig
 
+CODE_BLOCK_RE = re.compile(r"```(?P<lang>[\w+-]*)\n(?P<code>.*?)```", re.DOTALL)
+
 
 def _render_status_bar(config: AppConfig, message_count: int, session_path: str | None) -> Panel:
-    """渲染更紧凑的状态栏，参考 opencode 的底部信息结构。"""
     provider = config.provider.display_name or config.ai_client.provider
     model = config.ai_client.model
     layout = (
@@ -53,17 +57,33 @@ def _render_status_bar(config: AppConfig, message_count: int, session_path: str 
 
 def _pixel_brand_text() -> Text:
     brand = Text()
-    brand.append("█▀█ █ █   █▀█ █▀█   █▀█ █▀▀ █ █ █ █▀▀ █ █\n", style="bold white")
-    brand.append("█▀█ █ █   █▀▀ █▀▄   █▀▄ █▀▀ ▀▄▀▄▀ █▀▀ ▀▄▀\n", style="bold white")
-    brand.append("▀ ▀ ▀▀▀   ▀   ▀ ▀   ▀ ▀ ▀▀▀  ▀ ▀  ▀▀▀  ▀ ", style="bold white")
+    brand.append(
+        "██   ██  ██████      ██████   ██████      ██████  ███████ ██    ██ ██ ███████ ██     ██\n",
+        style="bold white",
+    )
+    brand.append(
+        "██   ██ ██    ██     ██   ██  ██   ██     ██   ██ ██      ██    ██ ██ ██      ██     ██\n",
+        style="bold white",
+    )
+    brand.append(
+        "███████ ██    ██     ██████   ██████      ██████  █████   ██    ██ ██ █████   ██  █  ██\n",
+        style="bold white",
+    )
+    brand.append(
+        "██   ██ ██    ██     ██       ██   ██     ██   ██ ██       ██  ██  ██ ██      ██ ███ ██\n",
+        style="bold white",
+    )
+    brand.append(
+        "██   ██  ██████      ██       ██   ██     ██   ██ ███████   ████   ██ ███████  ███ ███ \n",
+        style="bold white",
+    )
     return brand
 
 
 def _render_header(config: AppConfig, restored_count: int) -> Panel:
-    """渲染统一 header：品牌横幅 + 命令帮助 + 使用提示。"""
     left = Text()
     left.append_text(_pixel_brand_text())
-    left.append("\n\n")
+    left.append("\n")
     left.append("terminal workspace", style="grey62")
     left.append("  •  ", style="dim")
     left.append(config.provider.display_name or config.ai_client.provider, style="bold white")
@@ -86,7 +106,8 @@ def _render_header(config: AppConfig, restored_count: int) -> Panel:
     right.append("Hints\n", style="bold white")
     right.append("- 直接粘贴 GitHub PR 链接可自动审查\n", style="grey82")
     right.append("- 输入完整 pr-review 命令也会走本地执行\n", style="grey82")
-    right.append("- Chat 适合追问、复盘和快速 review\n", style="grey82")
+    right.append("- 支持 Markdown 回复与代码块高亮\n", style="grey82")
+    right.append("- 输入框支持历史记录与底部工具栏\n", style="grey82")
     if restored_count > 0:
         right.append(f"\nRestored {restored_count} messages.", style="white")
 
@@ -112,15 +133,39 @@ def _render_header(config: AppConfig, restored_count: int) -> Panel:
     return Panel(body, border_style="white", padding=(0, 1), style="white on black")
 
 
+def _render_assistant_content(text: str) -> Any:
+    parts: list[Any] = []
+    cursor = 0
+    for match in CODE_BLOCK_RE.finditer(text):
+        start, end = match.span()
+        if start > cursor:
+            prose = text[cursor:start].strip()
+            if prose:
+                parts.append(Markdown(prose))
+        lang = (match.group("lang") or "text").strip() or "text"
+        code = match.group("code").rstrip()
+        parts.append(Syntax(code, lang, theme="github-dark", word_wrap=True, line_numbers=False))
+        cursor = end
+
+    tail = text[cursor:].strip()
+    if tail:
+        parts.append(Markdown(tail))
+
+    if not parts:
+        return Text(text, style="white")
+    if len(parts) == 1:
+        return parts[0]
+    return Group(*parts)
+
+
 def _render_message(role: str, text: str) -> Panel:
-    renderable: Any
     if role == "user":
-        renderable = Text(text, style="white")
+        renderable: Any = Text(text, style="white")
         title = " YOU "
         subtitle = "input"
         border_style = "grey35"
     else:
-        renderable = Markdown(text)
+        renderable = _render_assistant_content(text)
         title = " ASSISTANT "
         subtitle = "response"
         border_style = "white"
@@ -149,7 +194,7 @@ def _render_transcript(messages: list[dict[str, Any]]) -> Panel:
         )
 
     renderables = []
-    for message in messages[-12:]:
+    for message in messages[-14:]:
         role = str(message.get("role", "assistant")).lower()
         content = str(message.get("content", ""))
         renderables.append(_render_message(role, content))
@@ -162,7 +207,7 @@ def _render_transcript(messages: list[dict[str, Any]]) -> Panel:
     )
 
 
-def _render_input_bar() -> Panel:
+def _render_input_hint() -> Panel:
     input_text = Text()
     input_text.append("Input", style="bold white")
     input_text.append("  >  ", style="dim")
@@ -180,15 +225,25 @@ def _render_workspace(
         _render_header(config, restored_count),
         _render_status_bar(config, len(messages), session_path),
         _render_transcript(messages),
-        _render_input_bar(),
+        _render_input_hint(),
     )
 
 
 def _spinner_frame(elapsed: float) -> str:
-    """根据经过时间返回 spinner 帧。"""
     frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     idx = int(elapsed * 8) % len(frames)
     return frames[idx]
+
+
+def _build_prompt_session() -> PromptSession[str]:
+    history = InMemoryHistory()
+    return PromptSession(
+        history=history,
+        bottom_toolbar=HTML(
+            "<b><style fg='#aaaaaa'> Enter send </style></b>  <style fg='#666666'>•</style>  <b><style fg='#aaaaaa'> ↑↓ history </style></b>  <style fg='#666666'>•</style>  <b><style fg='#aaaaaa'> paste PR URL or pr-review command </style></b>"
+        ),
+        multiline=False,
+    )
 
 
 def run_chat_session(
@@ -210,6 +265,7 @@ def run_chat_session(
 ) -> None:
     messages = load_session(config_path)
     session_path = str(config_path) if config_path is not None else None
+    prompt_session = _build_prompt_session()
 
     def rerender_workspace() -> None:
         console.clear()
@@ -226,11 +282,7 @@ def run_chat_session(
         start_time = time.time()
         answer = None
         try:
-            with Live(
-                console=console,
-                refresh_per_second=12,
-                transient=True,
-            ) as live:
+            with Live(console=console, refresh_per_second=12, transient=True) as live:
                 while True:
                     elapsed = time.time() - start_time
                     spinner = _spinner_frame(elapsed)
@@ -264,7 +316,7 @@ def run_chat_session(
 
     while True:
         try:
-            user_text = Prompt.ask("[bold white]You[/bold white]", console=console).strip()
+            user_text = prompt_session.prompt(HTML("<b><style fg='#ffffff'>❯ </style></b>")).strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]退出聊天。[/dim]")
             break
