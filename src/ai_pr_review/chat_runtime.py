@@ -8,14 +8,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.history import InMemoryHistory
 from rich.columns import Columns
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.prompt import Prompt
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
@@ -235,12 +233,23 @@ def _spinner_frame(elapsed: float) -> str:
     return frames[idx]
 
 
-def _build_prompt_session() -> PromptSession[str]:
+def _build_prompt_session() -> Any | None:
+    try:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.formatted_text import HTML
+        from prompt_toolkit.history import InMemoryHistory
+    except ModuleNotFoundError:
+        return None
+
     history = InMemoryHistory()
     return PromptSession(
         history=history,
         bottom_toolbar=HTML(
-            "<b><style fg='#aaaaaa'> Enter send </style></b>  <style fg='#666666'>•</style>  <b><style fg='#aaaaaa'> ↑↓ history </style></b>  <style fg='#666666'>•</style>  <b><style fg='#aaaaaa'> paste PR URL or pr-review command </style></b>"
+            "<b><style fg='#aaaaaa'> Enter send </style></b>"
+            "  <style fg='#666666'>•</style>"
+            "  <b><style fg='#aaaaaa'> ↑↓ history </style></b>"
+            "  <style fg='#666666'>•</style>"
+            "  <b><style fg='#aaaaaa'> paste PR URL or pr-review command </style></b>"
         ),
         multiline=False,
     )
@@ -316,7 +325,14 @@ def run_chat_session(
 
     while True:
         try:
-            user_text = prompt_session.prompt(HTML("<b><style fg='#ffffff'>❯ </style></b>")).strip()
+            if prompt_session is not None:
+                from prompt_toolkit.formatted_text import HTML
+
+                user_text = prompt_session.prompt(
+                    HTML("<b><style fg='#ffffff'>❯ </style></b>")
+                ).strip()
+            else:
+                user_text = Prompt.ask("[bold white]❯[/bold white]", console=console).strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]退出聊天。[/dim]")
             break
