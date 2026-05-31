@@ -860,8 +860,9 @@ class AppConfig:
             api_key = self.ai_client.api_key or self.provider.api_key
             self.ai_client.api_key = api_key
             self.provider.api_key = api_key
-        self._sync_runtime_sections()
+        # Sync provider from ai_client first, then sync runtime sections
         self.provider = ProviderConfig.from_model_provider(self.ai_client.model_provider)
+        self._sync_runtime_sections()
         if self.provider.api_key or self.ai_client.api_key:
             api_key = self.provider.api_key or self.ai_client.api_key
             self.provider.api_key = api_key

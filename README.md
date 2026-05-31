@@ -124,7 +124,7 @@ pip install ai-pr-review
 适合需要最新主分支代码、还没发布到 PyPI 的修复版本：
 
 ```bash
- pipx install "git+https://github.com/JiangLai999/AI-PR-Review-.git"
+ pipx install "git+https://github.com/JiangLai999/AI-PR-Review-AssistantAssistant.git"
 ```
 
 ### 一行命令安装
@@ -132,25 +132,25 @@ pip install ai-pr-review
 Linux / macOS，默认从 PyPI 安装：
 
 ```bash
- curl -fsSL https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-/main/install.sh | sh
+ curl -fsSL https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-AssistantAssistant/main/install.sh | sh
 ```
 
 Linux / macOS，强制从 GitHub 安装：
 
 ```bash
- curl -fsSL https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-/main/install.sh | INSTALL_SOURCE=github GITHUB_REPOSITORY=JiangLai999/AI-PR-Review- sh
+ curl -fsSL https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-AssistantAssistant/main/install.sh | INSTALL_SOURCE=github GITHUB_REPOSITORY=JiangLai999/AI-PR-Review-Assistant sh
 ```
 
 Windows PowerShell，默认从 PyPI 安装：
 
 ```powershell
- irm https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-/main/install.ps1 | iex
+ irm https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-AssistantAssistant/main/install.ps1 | iex
 ```
 
 Windows PowerShell，强制从 GitHub 安装：
 
 ```powershell
- $env:INSTALL_SOURCE='github'; $env:GITHUB_REPOSITORY='JiangLai999/AI-PR-Review-'; irm https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-/main/install.ps1 | iex
+ $env:INSTALL_SOURCE='github'; $env:GITHUB_REPOSITORY='JiangLai999/AI-PR-Review-Assistant'; irm https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-AssistantAssistant/main/install.ps1 | iex
 ```
 
 安装完成后：
@@ -163,8 +163,8 @@ pr-review config
 ### 从源码安装
 
 ```bash
- git clone https://github.com/JiangLai999/AI-PR-Review-.git
- cd AI-PR-Review-
+ git clone https://github.com/JiangLai999/AI-PR-Review-AssistantAssistant.git
+ cd AI-PR-Review-Assistant
 pip install -e .
 ```
 

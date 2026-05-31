@@ -7,28 +7,36 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from rich.box import ASCII
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from ai_pr_review.config import AppConfig
 from ai_pr_review.services.result_store import ResultStore
 
 
 def build_chat_help_text() -> str:
+    """构建帮助文本，使用表格对齐。"""
     return (
-        "/help      - 显示可用聊天命令\n"
-        "/status    - 显示当前会话状态\n"
-        "/usage     - 显示 token 使用统计\n"
-        "/compact   - 压缩会话历史\n"
-        "/config    - 显示当前会话配置\n"
-        "/session   - 显示当前 chat 会话信息\n"
-        "/history [limit] - 显示最近 N 条审查历史\n"
-        "/stats     - 显示审查统计\n"
-        "/model <模型ID> - 仅本次会话切换模型\n"
-        "/review <PR_URL> - 在当前会话中运行 PR 审查\n"
-        "/clear     - 清空当前会话历史\n"
-        "/exit      - 退出聊天"
+        "  Command           Description\n"
+        "  ─────────────────────────────────────────\n"
+        "  /help             Show this help\n"
+        "  /status           Show session status\n"
+        "  /usage            Show message/char stats\n"
+        "  /compact          Compress session history\n"
+        "  /restore          Restore previous session\n"
+        "  /config           Show current config\n"
+        "  /session          Show chat session info\n"
+        "  /history [N]      Show last N review runs\n"
+        "  /stats            Show review statistics\n"
+        "  /model <ID>       Switch model for this session\n"
+        "  /review <URL>     Run PR review in chat\n"
+        "  /clear            Clear session history\n"
+        "  /exit             Quit chat\n"
+        "\n"
+        "  Tip: Paste GitHub PR URL to auto-trigger review"
     )
 
 
@@ -104,19 +112,47 @@ def handle_basic_chat_slash_command(
     argument = parts[1].strip() if len(parts) > 1 else ""
 
     if command == "/help":
-        console.print(Panel(build_chat_help_text(), title="Chat Commands", border_style="cyan"))
+        title = Text()
+        title.append(" * ", style="bold cyan")
+        title.append("Commands", style="bold cyan")
+        console.print(
+            Panel(
+                build_chat_help_text(),
+                title=title,
+                border_style="dim",
+                padding=(1, 2),
+                style="white on black",
+                box=ASCII,
+            )
+        )
         return True
     if command == "/config":
+        title = Text()
+        title.append(" * ", style="bold green")
+        title.append("Config", style="bold green")
         console.print(
-            Panel(render_chat_config(config, layout), title="Chat Config", border_style="green")
+            Panel(
+                render_chat_config(config, layout),
+                title=title,
+                border_style="dim",
+                padding=(1, 2),
+                style="white on black",
+                box=ASCII,
+            )
         )
         return True
     if command == "/session":
+        title = Text()
+        title.append(" * ", style="bold green")
+        title.append("Session", style="bold green")
         console.print(
             Panel(
                 render_chat_session(config, config_path, messages, layout),
-                title="Chat Session",
-                border_style="green",
+                title=title,
+                border_style="dim",
+                padding=(1, 2),
+                style="white on black",
+                box=ASCII,
             )
         )
         return True
@@ -125,65 +161,107 @@ def handle_basic_chat_slash_command(
             try:
                 limit = max(1, int(argument))
             except ValueError:
-                console.print("Usage: /history [limit]", style="bold red")
+                console.print("[red]Usage: /history [limit][/red]")
                 return True
         else:
             limit = 5
         store = ResultStore(config.result_store)
         payload = store.list_runs(limit=limit)
+        title = Text()
+        title.append(" * ", style="bold green")
+        title.append(f"History ({len(payload)})", style="bold green")
         console.print(
             Panel(
                 render_history_table(payload),
-                title=f"History ({len(payload)})",
-                border_style="green",
+                title=title,
+                border_style="dim",
+                padding=(1, 2),
+                style="white on black",
+                box=ASCII,
             )
         )
         return True
     if command == "/stats":
         store = ResultStore(config.result_store)
         stats_payload: dict[str, Any] = store.get_statistics()
-        console.print(Panel(render_stats_table(stats_payload), title="Stats", border_style="green"))
+        title = Text()
+        title.append(" * ", style="bold green")
+        title.append("Stats", style="bold green")
+        console.print(
+            Panel(
+                render_stats_table(stats_payload),
+                title=title,
+                border_style="dim",
+                padding=(1, 2),
+                style="white on black",
+                box=ASCII,
+            )
+        )
         return True
     if command == "/clear":
         messages.clear()
         clear_session(config_path)
-        console.print("Conversation cleared.")
+        console.print("[green]✓[/green] Session cleared.")
         return True
     if command == "/model":
         if not argument:
-            console.print("Usage: /model <模型ID>", style="bold red")
+            console.print("[red]Usage: /model <ID>[/red]")
             return True
         set_active_model(config, argument)
-        console.print(f"Active model set to: {config.ai_client.model}")
+        console.print(f"[green]✓[/green] Model set to: [bold]{config.ai_client.model}[/bold]")
         return True
     if command == "/status":
+        title = Text()
+        title.append(" * ", style="bold cyan")
+        title.append("Status", style="bold cyan")
         table = Table(box=None, expand=True, show_header=False)
-        table.add_column("Key", style="bold cyan", width=16)
-        table.add_column("Value")
+        table.add_column("Key", style="bold white", width=14)
+        table.add_column("Value", style="grey70")
         table.add_row("Provider", config.provider.display_name or config.ai_client.provider)
         table.add_row("Model", config.ai_client.model)
         table.add_row("Base URL", config.ai_client.base_url or "default")
         table.add_row("Language", config.preferences.language)
         table.add_row("Messages", str(len(messages)))
         table.add_row("Session", str(config_path) if config_path else "memory")
-        console.print(Panel(table, title="Session Status", border_style="cyan"))
+        console.print(
+            Panel(
+                table,
+                title=title,
+                border_style="dim",
+                padding=(1, 2),
+                style="white on black",
+                box=ASCII,
+            )
+        )
         return True
     if command == "/usage":
         total_chars = sum(len(m.get("content", "")) for m in messages)
         user_msgs = sum(1 for m in messages if m.get("role") == "user")
         assistant_msgs = sum(1 for m in messages if m.get("role") == "assistant")
+        title = Text()
+        title.append(" * ", style="bold green")
+        title.append("Usage", style="bold green")
         table = Table(box=None, expand=True, show_header=False)
-        table.add_column("Metric", style="bold cyan", width=16)
-        table.add_column("Value")
+        table.add_column("Metric", style="bold white", width=16)
+        table.add_column("Value", style="grey70")
         table.add_row("Total Messages", str(len(messages)))
         table.add_row("User Messages", str(user_msgs))
         table.add_row("Assistant Messages", str(assistant_msgs))
         table.add_row("Total Characters", str(total_chars))
-        console.print(Panel(table, title="Usage Statistics", border_style="green"))
+        console.print(
+            Panel(
+                table,
+                title=title,
+                border_style="dim",
+                padding=(1, 2),
+                style="white on black",
+                box=ASCII,
+            )
+        )
         return True
     if command == "/compact":
         if len(messages) <= 2:
-            console.print("会话历史已经很短，无需压缩。", style="yellow")
+            console.print("[yellow]⚠[/yellow] Session history is already short.")
             return True
         original_count = len(messages)
         first_msg = messages[0] if messages else None
@@ -194,7 +272,7 @@ def handle_basic_chat_slash_command(
         messages.extend(last_msgs)
         removed = original_count - len(messages)
         console.print(
-            f"已压缩会话：移除 {removed} 条消息，保留 {len(messages)} 条。", style="green"
+            f"[green]✓[/green] Compressed: removed {removed} messages, kept {len(messages)}."
         )
         return True
     return False

@@ -44,9 +44,9 @@ dev = [
 ]
 
 [project.urls]
-Documentation = "https://github.com/JiangLai999/AI-PR-Review-/blob/main/README.md"
-Changelog = "https://github.com/JiangLai999/AI-PR-Review-/blob/main/CHANGELOG.md"
-Issues = "https://github.com/JiangLai999/AI-PR-Review-/issues"
+Documentation = "https://github.com/JiangLai999/AI-PR-Review-Assistant/blob/main/README.md"
+Changelog = "https://github.com/JiangLai999/AI-PR-Review-Assistant/blob/main/CHANGELOG.md"
+Issues = "https://github.com/JiangLai999/AI-PR-Review-Assistant/issues"
 
 [project.scripts]
 pr-review = "ai_pr_review.cli:main"

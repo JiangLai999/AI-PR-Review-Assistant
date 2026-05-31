@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $PackageName = "ai-pr-review"
 $InstallSource = if ($env:INSTALL_SOURCE) { $env:INSTALL_SOURCE } else { "pypi" }
-$GithubRepository = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { "JiangLai999/AI-PR-Review-" }
+$GithubRepository = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { "JiangLai999/AI-PR-Review-Assistant" }
 
 function Get-PythonCommand {
     if (Get-Command py -ErrorAction SilentlyContinue) {

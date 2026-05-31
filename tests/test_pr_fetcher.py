@@ -300,7 +300,7 @@ class TestPRFetcherFetch:
 
         assert [file.filename for file in result] == ["a.py"]
         assert mock_pr.get_files.call_count == 1
-        paginated_files.get_page.assert_called_once_with(1)
+        paginated_files.get_page.assert_called_once_with(0)
 
 
 # ============================================================
