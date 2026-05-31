@@ -17,15 +17,18 @@ from ai_pr_review.services.result_store import ResultStore
 
 def build_chat_help_text() -> str:
     return (
-        "/help - 显示可用聊天命令\n"
-        "/config - 显示当前会话配置\n"
-        "/session - 显示当前 chat 会话信息\n"
+        "/help      - 显示可用聊天命令\n"
+        "/status    - 显示当前会话状态\n"
+        "/usage     - 显示 token 使用统计\n"
+        "/compact   - 压缩会话历史\n"
+        "/config    - 显示当前会话配置\n"
+        "/session   - 显示当前 chat 会话信息\n"
         "/history [limit] - 显示最近 N 条审查历史\n"
-        "/stats - 显示审查统计\n"
+        "/stats     - 显示审查统计\n"
         "/model <模型ID> - 仅本次会话切换模型\n"
         "/review <PR_URL> - 在当前会话中运行 PR 审查\n"
-        "/clear - 清空当前会话历史\n"
-        "/exit - 退出聊天"
+        "/clear     - 清空当前会话历史\n"
+        "/exit      - 退出聊天"
     )
 
 
@@ -152,5 +155,46 @@ def handle_basic_chat_slash_command(
             return True
         set_active_model(config, argument)
         console.print(f"Active model set to: {config.ai_client.model}")
+        return True
+    if command == "/status":
+        table = Table(box=None, expand=True, show_header=False)
+        table.add_column("Key", style="bold cyan", width=16)
+        table.add_column("Value")
+        table.add_row("Provider", config.provider.display_name or config.ai_client.provider)
+        table.add_row("Model", config.ai_client.model)
+        table.add_row("Base URL", config.ai_client.base_url or "default")
+        table.add_row("Language", config.preferences.language)
+        table.add_row("Messages", str(len(messages)))
+        table.add_row("Session", str(config_path) if config_path else "memory")
+        console.print(Panel(table, title="Session Status", border_style="cyan"))
+        return True
+    if command == "/usage":
+        total_chars = sum(len(m.get("content", "")) for m in messages)
+        user_msgs = sum(1 for m in messages if m.get("role") == "user")
+        assistant_msgs = sum(1 for m in messages if m.get("role") == "assistant")
+        table = Table(box=None, expand=True, show_header=False)
+        table.add_column("Metric", style="bold cyan", width=16)
+        table.add_column("Value")
+        table.add_row("Total Messages", str(len(messages)))
+        table.add_row("User Messages", str(user_msgs))
+        table.add_row("Assistant Messages", str(assistant_msgs))
+        table.add_row("Total Characters", str(total_chars))
+        console.print(Panel(table, title="Usage Statistics", border_style="green"))
+        return True
+    if command == "/compact":
+        if len(messages) <= 2:
+            console.print("会话历史已经很短，无需压缩。", style="yellow")
+            return True
+        original_count = len(messages)
+        first_msg = messages[0] if messages else None
+        last_msgs = messages[-4:] if len(messages) >= 4 else messages
+        messages.clear()
+        if first_msg:
+            messages.append(first_msg)
+        messages.extend(last_msgs)
+        removed = original_count - len(messages)
+        console.print(
+            f"已压缩会话：移除 {removed} 条消息，保留 {len(messages)} 条。", style="green"
+        )
         return True
     return False

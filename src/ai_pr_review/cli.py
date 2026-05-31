@@ -929,10 +929,27 @@ async def _send_chat_message(config: AppConfig, messages: list[dict[str, Any]]) 
 def _print_chat_message(console: Console, role: str, text: str, *, layout: str) -> None:
     """打印聊天消息，支持 plain/compact/split 三种布局。"""
     if layout == "plain":
-        console.print(f"{role}: {text}")
+        icon = "👤" if role == "You" else "🤖"
+        style = "bold green" if role == "You" else "bold cyan"
+        console.print(f"  {icon} ", end="")
+        console.print(f"[{style}]{role}:[/{style}] {text}")
         return
-    border_style = "cyan" if role == "You" else "green"
-    console.print(Panel(text, title=role, border_style=border_style, expand=layout == "split"))
+    if role == "You":
+        border_style = "green"
+        title_style = "bold green"
+        icon = "👤"
+    else:
+        border_style = "bright_cyan"
+        title_style = "bold bright_cyan"
+        icon = "🤖"
+    panel = Panel(
+        text,
+        title=f"[{title_style}]{icon} {role}[/{title_style}]",
+        border_style=border_style,
+        expand=layout == "split",
+        padding=(0, 1),
+    )
+    console.print(panel)
 
 
 def _active_config_has_saved_api_key(config_path: Path | None) -> bool:
