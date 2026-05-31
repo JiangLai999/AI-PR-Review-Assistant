@@ -6,6 +6,7 @@ Inspired by OpenCode, Claude Code, and OpenClaw.
 from __future__ import annotations
 
 import re
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -436,6 +437,8 @@ def run_chat_session(
     console.print()
 
     def send_once(user_text: str) -> None:
+        sys.stdout.write("\x1b[1A\x1b[2K")
+        sys.stdout.flush()
         timestamp = datetime.now().strftime("%H:%M")
         messages.append({"role": "user", "content": user_text, "timestamp": timestamp})
         console.print(_render_user_message(user_text, timestamp))
