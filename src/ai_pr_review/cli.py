@@ -40,7 +40,11 @@ from ai_pr_review.config_helpers import (
     build_project_config_payload,
     provider_env_var,
 )
-from ai_pr_review.config_wizard import apply_wizard_configuration, json_prompt, resolve_save_key_choice
+from ai_pr_review.config_wizard import (
+    apply_wizard_configuration,
+    json_prompt,
+    resolve_save_key_choice,
+)
 from ai_pr_review.config import (
     CONFIG_PATH_ENV_VAR,
     DEFAULT_CONFIG_PATH,
@@ -773,7 +777,9 @@ def _build_filter_summary_markdown(artifacts: ReviewArtifacts) -> str:
         reason_counts = filter_result.to_dict().get("excluded_reason_counts", {})
     if not reason_counts:
         return ""
-    total_files = getattr(filter_result, "total_files", filter_result.to_dict().get("total_files", 0))
+    total_files = getattr(
+        filter_result, "total_files", filter_result.to_dict().get("total_files", 0)
+    )
     included_count = getattr(
         filter_result,
         "included_count",
@@ -972,7 +978,9 @@ def _handle_chat_slash_command(
             console.print("Usage: /review <PR_URL>", style="bold red")
             return True
         try:
-            artifacts = asyncio.run(run_review(argument, model=config.ai_client.model, config=config))
+            artifacts = asyncio.run(
+                run_review(argument, model=config.ai_client.model, config=config)
+            )
             render_terminal_report(console, artifacts, config)
             console.print(
                 f"Saved run {artifacts.run_id} | cost=${artifacts.total_cost:.4f} | duration={artifacts.duration_seconds:.2f}s"
@@ -1167,7 +1175,11 @@ def config_show(ctx: click.Context) -> None:
     """Show resolved configuration and active config sources."""
     config_path = _config_path_from_context(ctx)
     config = AppConfig.load(config_path)
-    click.echo(build_config_show_output(config, config_path=config_path, export_config_payload=_export_config_payload))
+    click.echo(
+        build_config_show_output(
+            config, config_path=config_path, export_config_payload=_export_config_payload
+        )
+    )
 
 
 @config_command.command("init")
@@ -1453,7 +1465,7 @@ def chat_command(
     if model_name is not None:
         _set_active_model(config, model_name)
     active_layout = layout or getattr(config.preferences, "chat_layout", "compact")
-    
+
     def print_chat_message(local_console: Console, role: str, text: str) -> None:
         _print_chat_message(local_console, role, text, layout=active_layout)
 

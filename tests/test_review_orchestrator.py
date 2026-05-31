@@ -7,7 +7,11 @@ import asyncio
 from ai_pr_review.config import AIClientConfig, AppConfig, PRFetcherConfig, ResultStoreConfig
 from ai_pr_review.models.pr_data import FileDiff, FileStatus, PRData
 from ai_pr_review.services.context_builder import FileContext
-from ai_pr_review.services.filter_pipeline import FilterPipelineResult, FilterReason, FilterReasonCode
+from ai_pr_review.services.filter_pipeline import (
+    FilterPipelineResult,
+    FilterReason,
+    FilterReasonCode,
+)
 from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
 from ai_pr_review.services.review_orchestrator import ReviewOrchestrator
 

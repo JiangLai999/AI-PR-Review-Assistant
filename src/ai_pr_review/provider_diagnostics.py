@@ -47,7 +47,7 @@ def build_model_discovery_fallback_message(config: AppConfig, exc: Exception) ->
         "Fallback 建议：\n"
         "1. 先运行 `pr-review config health --discover-models` 检查当前 provider 是否支持远端模型发现。\n"
         "2. 如果服务商不支持 `/models`，请手动设置模型名："
-        "`pr-review config model --name \"<模型ID>\"`。\n"
+        '`pr-review config model --name "<模型ID>"`。\n'
         f"3. 当前配置的模型是 `{config.ai_client.model}`；如果 chat 已提示 `Not supported model`，请改成服务商实际支持的模型 ID。"
     )
 

@@ -24,7 +24,9 @@ def run_chat_session(
     save_session: Callable[[Path | None, list[dict[str, Any]]], None],
     chat_title: Callable[[AppConfig], str],
     print_chat_message: Callable[[Console, str, str], None],
-    slash_handler: Callable[[Console, AppConfig, Path | None, list[dict[str, Any]], str, str], bool],
+    slash_handler: Callable[
+        [Console, AppConfig, Path | None, list[dict[str, Any]], str, str], bool
+    ],
     send_message: Callable[[list[dict[str, Any]], str], None],
 ) -> None:
     messages = load_session(config_path)

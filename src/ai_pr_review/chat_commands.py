@@ -29,7 +29,9 @@ def build_chat_help_text() -> str:
     )
 
 
-def render_chat_session(config: AppConfig, config_path: Path | None, messages: list[dict[str, Any]], layout: str) -> str:
+def render_chat_session(
+    config: AppConfig, config_path: Path | None, messages: list[dict[str, Any]], layout: str
+) -> str:
     return json.dumps(
         {
             "provider": config.ai_client.provider,
@@ -102,7 +104,9 @@ def handle_basic_chat_slash_command(
         console.print(Panel(build_chat_help_text(), title="Chat Commands", border_style="cyan"))
         return True
     if command == "/config":
-        console.print(Panel(render_chat_config(config, layout), title="Chat Config", border_style="green"))
+        console.print(
+            Panel(render_chat_config(config, layout), title="Chat Config", border_style="green")
+        )
         return True
     if command == "/session":
         console.print(
@@ -125,15 +129,17 @@ def handle_basic_chat_slash_command(
         store = ResultStore(config.result_store)
         payload = store.list_runs(limit=limit)
         console.print(
-            Panel(render_history_table(payload), title=f"History ({len(payload)})", border_style="green")
+            Panel(
+                render_history_table(payload),
+                title=f"History ({len(payload)})",
+                border_style="green",
+            )
         )
         return True
     if command == "/stats":
         store = ResultStore(config.result_store)
         payload = store.get_statistics()
-        console.print(
-            Panel(render_stats_table(payload), title="Stats", border_style="green")
-        )
+        console.print(Panel(render_stats_table(payload), title="Stats", border_style="green"))
         return True
     if command == "/clear":
         messages.clear()

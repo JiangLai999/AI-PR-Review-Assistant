@@ -276,7 +276,9 @@ def test_cli_writes_markdown_report(monkeypatch, tmp_path: Path):
     assert "### SQL injection risk" in content
 
 
-def test_cli_markdown_report_includes_filter_summary_when_files_excluded(monkeypatch, tmp_path: Path):
+def test_cli_markdown_report_includes_filter_summary_when_files_excluded(
+    monkeypatch, tmp_path: Path
+):
     class PartiallyExcludedFilterPipeline(StubFilterPipeline):
         def filter_pr_data(self, pr_data: PRData):
             class Result:
@@ -893,7 +895,9 @@ def test_cli_chat_message_uses_configured_provider(monkeypatch, tmp_path: Path):
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
-    monkeypatch.setattr(cli_module, "create_model_provider", lambda config: StubChatProvider(config))
+    monkeypatch.setattr(
+        cli_module, "create_model_provider", lambda config: StubChatProvider(config)
+    )
     config = config_module.AppConfig.from_env()
     config.ai_client = config_module.AIClientConfig(
         provider="deepseek",
@@ -952,7 +956,9 @@ def test_cli_chat_slash_help_and_config(monkeypatch, tmp_path: Path):
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
-    monkeypatch.setattr(cli_module, "create_model_provider", lambda config: StubChatProvider(config))
+    monkeypatch.setattr(
+        cli_module, "create_model_provider", lambda config: StubChatProvider(config)
+    )
     config = config_module.AppConfig.from_env()
     config.ai_client = config_module.AIClientConfig(
         provider="deepseek",
@@ -1071,7 +1077,9 @@ def test_cli_chat_slash_session_outputs_current_context(monkeypatch, tmp_path: P
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
-    monkeypatch.setattr(cli_module, "create_model_provider", lambda config: StubChatProvider(config))
+    monkeypatch.setattr(
+        cli_module, "create_model_provider", lambda config: StubChatProvider(config)
+    )
     config = config_module.AppConfig.from_env()
     config.ai_client = config_module.AIClientConfig(
         provider="deepseek",
@@ -1095,7 +1103,9 @@ def test_cli_chat_persists_and_restores_session(monkeypatch, tmp_path: Path):
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
     monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
-    monkeypatch.setattr(cli_module, "create_model_provider", lambda config: StubChatProvider(config))
+    monkeypatch.setattr(
+        cli_module, "create_model_provider", lambda config: StubChatProvider(config)
+    )
     config = config_module.AppConfig.from_env()
     config.ai_client = config_module.AIClientConfig(
         provider="deepseek",

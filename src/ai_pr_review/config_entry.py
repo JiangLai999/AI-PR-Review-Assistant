@@ -6,7 +6,14 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ai_pr_review.config import AIClientConfig, AppConfig, PreferencesConfig, PROJECT_CONFIG_DIRNAME, PROJECT_CONFIG_FILENAME, PROJECT_LOCAL_CONFIG_FILENAME
+from ai_pr_review.config import (
+    AIClientConfig,
+    AppConfig,
+    PreferencesConfig,
+    PROJECT_CONFIG_DIRNAME,
+    PROJECT_CONFIG_FILENAME,
+    PROJECT_LOCAL_CONFIG_FILENAME,
+)
 from ai_pr_review.config import ProviderConfig, _default_config_path
 from ai_pr_review.config_helpers import (
     append_gitignore_entry,
@@ -83,7 +90,9 @@ def run_config_export(
     include_secrets: bool,
     export_config_payload,
 ) -> Path:
-    payload = export_config_payload(config, config_path=config_path, mask_secrets=not include_secrets)
+    payload = export_config_payload(
+        config, config_path=config_path, mask_secrets=not include_secrets
+    )
     output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return output
 

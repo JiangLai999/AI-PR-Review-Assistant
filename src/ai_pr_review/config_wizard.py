@@ -10,12 +10,20 @@ import click
 from rich.console import Console
 from rich.prompt import Confirm
 
-from ai_pr_review.config import AIClientConfig, AppConfig, PreferencesConfig, ProviderConfig, ProviderModelConfig
+from ai_pr_review.config import (
+    AIClientConfig,
+    AppConfig,
+    PreferencesConfig,
+    ProviderConfig,
+    ProviderModelConfig,
+)
 from ai_pr_review.config import ModelProviderConfig
 
 
 def json_prompt(text: str, default: dict[str, Any] | None = None) -> dict[str, Any]:
-    raw = click.prompt(text, default=json.dumps(default or {}, ensure_ascii=False), show_default=True)
+    raw = click.prompt(
+        text, default=json.dumps(default or {}, ensure_ascii=False), show_default=True
+    )
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:

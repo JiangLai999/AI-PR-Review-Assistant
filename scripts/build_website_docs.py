@@ -5,7 +5,6 @@ import json
 import re
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
 API_DOC = ROOT / "docs" / "API.md"
@@ -91,7 +90,9 @@ def markdown_to_html(markdown: str) -> str:
                     break
                 items.append(re.sub(r"^\d+\.\s+", "", current))
                 i += 1
-            parts.append("<ol>" + "".join(f"<li>{inline_format(item)}</li>" for item in items) + "</ol>")
+            parts.append(
+                "<ol>" + "".join(f"<li>{inline_format(item)}</li>" for item in items) + "</ol>"
+            )
             continue
 
         if stripped.startswith("- "):
@@ -102,14 +103,20 @@ def markdown_to_html(markdown: str) -> str:
                     break
                 items.append(current[2:])
                 i += 1
-            parts.append("<ul>" + "".join(f"<li>{inline_format(item)}</li>" for item in items) + "</ul>")
+            parts.append(
+                "<ul>" + "".join(f"<li>{inline_format(item)}</li>" for item in items) + "</ul>"
+            )
             continue
 
         paragraph_lines = [stripped]
         i += 1
         while i < len(lines):
             current = lines[i].strip()
-            if not current or current.startswith(("```", "### ", "- ")) or re.match(r"^\d+\.\s+", current):
+            if (
+                not current
+                or current.startswith(("```", "### ", "- "))
+                or re.match(r"^\d+\.\s+", current)
+            ):
                 break
             paragraph_lines.append(current)
             i += 1
