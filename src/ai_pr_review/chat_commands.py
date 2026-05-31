@@ -138,8 +138,8 @@ def handle_basic_chat_slash_command(
         return True
     if command == "/stats":
         store = ResultStore(config.result_store)
-        payload = store.get_statistics()
-        console.print(Panel(render_stats_table(payload), title="Stats", border_style="green"))
+        stats_payload: dict[str, Any] = store.get_statistics()
+        console.print(Panel(render_stats_table(stats_payload), title="Stats", border_style="green"))
         return True
     if command == "/clear":
         messages.clear()

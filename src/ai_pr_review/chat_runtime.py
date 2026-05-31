@@ -27,7 +27,7 @@ def run_chat_session(
     slash_handler: Callable[
         [Console, AppConfig, Path | None, list[dict[str, Any]], str, str], bool
     ],
-    send_message: Callable[[list[dict[str, Any]], str], None],
+    send_message: Callable[[list[dict[str, Any]], str], str],
 ) -> None:
     messages = load_session(config_path)
     console.print(Panel("输入 /exit 退出。", title=chat_title(config), border_style="cyan"))
@@ -38,7 +38,7 @@ def run_chat_session(
         messages.append({"role": "user", "content": user_text})
         print_chat_message(console, "You", user_text)
         answer = send_message(messages, user_text)
-        if answer is None:
+        if not answer:
             messages.pop()
             return
         messages.append({"role": "assistant", "content": answer})
