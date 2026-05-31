@@ -32,7 +32,7 @@ def _render_status_bar(config: AppConfig, message_count: int, session_path: str 
     path_display = session_path if session_path else "memory"
 
     status = Text()
-    status.append(" ● ", style="bold white")
+    status.append(" * ", style="bold white")
     status.append("CONNECTED", style="bold white")
     status.append("   ")
     status.append("Provider", style="bold white")
@@ -56,23 +56,23 @@ def _render_status_bar(config: AppConfig, message_count: int, session_path: str 
 def _pixel_brand_text() -> Text:
     brand = Text()
     brand.append(
-        "██   ██  ██████      ██████   ██████      ██████  ███████ ██    ██ ██ ███████ ██     ██\n",
+        " ###  ###   ####   ####   ####   #####  #   #  ###   #####  #   #\n",
         style="bold white",
     )
     brand.append(
-        "██   ██ ██    ██     ██   ██  ██   ██     ██   ██ ██      ██    ██ ██ ██      ██     ██\n",
+        "#   # #  #   #  #   #  #   #  #   #      #   #   #    #      #   #\n",
         style="bold white",
     )
     brand.append(
-        "███████ ██    ██     ██████   ██████      ██████  █████   ██    ██ ██ █████   ██  █  ██\n",
+        "##### ###    ####   ####   ####   ###    # # #   #    ###    # # #\n",
         style="bold white",
     )
     brand.append(
-        "██   ██ ██    ██     ██       ██   ██     ██   ██ ██       ██  ██  ██ ██      ██ ███ ██\n",
+        "#   # #      #  #   #  #   #  #   #      ## ##   #    #      ## ##\n",
         style="bold white",
     )
     brand.append(
-        "██   ██  ██████      ██       ██   ██     ██   ██ ███████   ████   ██ ███████  ███ ███ \n",
+        "#   # #      #  #   #  #   #  #   #####  #   #  ###   #####  #   #\n",
         style="bold white",
     )
     return brand
@@ -83,9 +83,9 @@ def _render_header(config: AppConfig, restored_count: int) -> Panel:
     left.append_text(_pixel_brand_text())
     left.append("\n")
     left.append("terminal workspace", style="grey62")
-    left.append("  •  ", style="dim")
+    left.append("  |  ", style="dim")
     left.append(config.provider.display_name or config.ai_client.provider, style="bold white")
-    left.append("  •  ", style="dim")
+    left.append("  |  ", style="dim")
     left.append(config.ai_client.model, style="grey82")
 
     commands = Table.grid(padding=(0, 1))
@@ -228,7 +228,7 @@ def _render_workspace(
 
 
 def _spinner_frame(elapsed: float) -> str:
-    frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    frames = ["-", "\\", "|", "/"]
     idx = int(elapsed * 8) % len(frames)
     return frames[idx]
 
@@ -241,18 +241,21 @@ def _build_prompt_session() -> Any | None:
     except ModuleNotFoundError:
         return None
 
-    history = InMemoryHistory()
-    return PromptSession(
-        history=history,
-        bottom_toolbar=HTML(
-            "<b><style fg='#aaaaaa'> Enter send </style></b>"
-            "  <style fg='#666666'>•</style>"
-            "  <b><style fg='#aaaaaa'> ↑↓ history </style></b>"
-            "  <style fg='#666666'>•</style>"
-            "  <b><style fg='#aaaaaa'> paste PR URL or pr-review command </style></b>"
-        ),
-        multiline=False,
-    )
+    try:
+        history = InMemoryHistory()
+        return PromptSession(
+            history=history,
+            bottom_toolbar=HTML(
+                "<b><style fg='#aaaaaa'> Enter send </style></b>"
+                "  <style fg='#666666'>|</style>"
+                "  <b><style fg='#aaaaaa'> ↑↓ history </style></b>"
+                "  <style fg='#666666'>|</style>"
+                "  <b><style fg='#aaaaaa'> paste PR URL or pr-review command </style></b>"
+            ),
+            multiline=False,
+        )
+    except Exception:
+        return None
 
 
 def run_chat_session(
@@ -329,10 +332,10 @@ def run_chat_session(
                 from prompt_toolkit.formatted_text import HTML
 
                 user_text = prompt_session.prompt(
-                    HTML("<b><style fg='#ffffff'>❯ </style></b>")
+                    HTML("<b><style fg='#ffffff'>> </style></b>")
                 ).strip()
             else:
-                user_text = Prompt.ask("[bold white]❯[/bold white]", console=console).strip()
+                user_text = Prompt.ask("[bold white]>[/bold white]", console=console).strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]退出聊天。[/dim]")
             break

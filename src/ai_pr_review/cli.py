@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import shlex
+import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -1486,6 +1487,10 @@ def chat_command(
     ctx: click.Context, message: str | None, model_name: str | None, layout: str | None
 ) -> None:
     """Open a lightweight terminal chat with the configured model."""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+    except Exception:
+        pass
     console = Console()
     config_path = _config_path_from_context(ctx)
     config = AppConfig.load(config_path)
