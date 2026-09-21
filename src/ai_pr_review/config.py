@@ -668,6 +668,20 @@ class AIClientConfig:
 
     @property
     def model_provider(self) -> ModelProviderConfig:
+        """返回 ModelProviderConfig 实例供 AIClient 使用"""
+        return ModelProviderConfig(
+            name=self.provider,
+            display_name=self.provider,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            model_name=self.model,
+            api_format=self.api_format,
+            headers=dict(self.headers),
+            extra_params=dict(self.extra_params),
+        )
+
+    @property
+    def model_provider(self) -> ModelProviderConfig:
         return ModelProviderConfig(
             name=self.provider,
             display_name=MODEL_PROVIDER_PRESETS.get(self.provider, {}).get(

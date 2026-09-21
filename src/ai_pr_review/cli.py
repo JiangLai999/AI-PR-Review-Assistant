@@ -1528,7 +1528,7 @@ def _handle_analyze_history_action(
         # Call AI model
         from ai_pr_review.services.ai_client import AIClient
 
-        ai_client = AIClient(config)
+        ai_client = AIClient(config.ai_client)
         messages = [{"role": "user", "content": prompt}]
 
         import asyncio
@@ -1637,7 +1637,7 @@ def _handle_explain_finding_action(
         # Call AI model
         from ai_pr_review.services.ai_client import AIClient
 
-        ai_client = AIClient(config)
+        ai_client = AIClient(config.ai_client)
         messages = [{"role": "user", "content": prompt}]
 
         import asyncio
