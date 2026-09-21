@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 from collections.abc import Callable, Hashable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -65,6 +66,17 @@ def _default_config_path() -> Path:
 
 
 DEFAULT_CONFIG_PATH = _default_config_path()
+
+
+def _default_result_store_path() -> Path:
+    """Return a stable, writable per-user SQLite path."""
+    local_app_data = os.getenv("LOCALAPPDATA", "").strip()
+    if os.name == "nt" and local_app_data:
+        return Path(local_app_data) / "ai-pr-review" / "results.db"
+    xdg_data_home = os.getenv("XDG_DATA_HOME", "").strip()
+    if xdg_data_home:
+        return Path(xdg_data_home) / "ai-pr-review" / "results.db"
+    return Path("~/.local/share/ai-pr-review/results.db").expanduser()
 
 
 def resolve_config_path(path: Path | None = None) -> Path:
@@ -167,6 +179,13 @@ MODEL_PROVIDER_PRESETS: dict[str, dict[str, object]] = {
         "model_name": "gpt-4o-mini",
         "api_format": "openai",
         "env_var": "OPENAI_API_KEY",
+    },
+    "ollama": {
+        "display_name": "Ollama (Local)",
+        "base_url": "http://127.0.0.1:11434/v1",
+        "model_name": "qwen3.5:4b",
+        "api_format": "openai",
+        "env_var": "",
     },
     "deepseek": {
         "display_name": "DeepSeek",
@@ -303,10 +322,16 @@ PROVIDER_MODEL_PRESETS: dict[str, dict[str, dict[str, int | str]]] = {
         ("gpt-4o-mini", 128_000, 16_384),
         ("gpt-4.1", 128_000, 16_384),
     ),
+    "ollama": _build_models(
+        ("qwen3.5:4b", 8_192, 1_024),
+        ("qwen3:4b", 8_192, 1_024),
+        ("phi4-mini", 8_192, 1_024),
+        ("gemma3:4b", 8_192, 1_024),
+        ("qwen2.5-coder:3b", 8_192, 1_024),
+    ),
     "deepseek": _build_models(
-        ("deepseek-chat", 32_768, 4_096),
-        ("deepseek-coder", 32_768, 4_096),
-        ("deepseek-v3", 65_536, 8_192),
+        ("deepseek-flash", 1_048_576, 384_000),
+        ("deepseek-v4-pro", 1_048_576, 128_000),
     ),
     "qwen": _build_models(
         ("qwen-plus", 131_072, 8_192),
@@ -400,8 +425,15 @@ class ModelProviderConfig:
             raise ConfigValidationError("OpenAI 兼容或自定义接口必须配置 base_url。")
         if self.base_url.strip():
             parsed = urlparse(self.base_url)
-            if parsed.scheme.lower() != "https":
-                raise ConfigValidationError("base_url 必须使用 HTTPS。")
+            is_local_endpoint = self.name.lower() in {"ollama", "local"} and parsed.hostname in {
+                "127.0.0.1",
+                "localhost",
+                "::1",
+            }
+            if parsed.scheme.lower() != "https" and not is_local_endpoint:
+                raise ConfigValidationError(
+                    "base_url 必须使用 HTTPS；本地 Ollama 仅允许回环地址使用 HTTP。"
+                )
         if not isinstance(self.headers, dict) or not isinstance(self.extra_params, dict):
             raise ConfigValidationError("headers 和 extra_params 必须为对象。")
 
@@ -590,6 +622,9 @@ class AIClientConfig:
     max_tokens: int = 4096
     timeout_seconds: int = 120
     review_concurrency: int = 2
+    enable_static_analysis: bool = True
+    enable_cross_file_review: bool = False
+    cross_file_max_files: int = 8
 
     max_retries: int = 3
     retry_base_delay: float = 1.0
@@ -676,7 +711,7 @@ class PostProcessorConfig:
 class ResultStoreConfig:
     """Result Store 的可调配置。"""
 
-    db_path: str = "~/.ai_pr_review/results.db"
+    db_path: str = field(default_factory=lambda: str(_default_result_store_path()))
     max_results: int = 1000
 
 
@@ -771,6 +806,9 @@ class AppConfig:
         effective_api_key = api_key or provider_api_key
         if provider_name:
             self.provider.name = provider_name
+            self.provider.display_name = str(
+                MODEL_PROVIDER_PRESETS.get(provider_name, {}).get("display_name", provider_name)
+            )
             self.ai_client.provider = provider_name
         if model_name:
             self.provider.default_model = model_name
@@ -789,6 +827,20 @@ class AppConfig:
             self.pr_fetcher.github_token = github_token
         self._sync_runtime_sections()
 
+    @staticmethod
+    def _filter_dataclass_payload(
+        config_type: type, payload: dict[str, object]
+    ) -> dict[str, object]:
+        """Ignore fields introduced by newer versions when loading old installs.
+
+        User config files outlive the CLI version that created them. Filtering
+        unknown keys keeps an older pipx installation from crashing before it can
+        run `pr-review config` or `pr-review chat` and lets the user upgrade in
+        place instead of losing access to the CLI.
+        """
+        allowed = {item.name for item in fields(config_type)}
+        return {key: value for key, value in payload.items() if key in allowed}
+
     def _apply_payload(self, data: dict[str, object]) -> None:
         if isinstance(data.get("pr_fetcher"), dict):
             self.pr_fetcher = PRFetcherConfig(**data["pr_fetcher"])
@@ -800,7 +852,9 @@ class AppConfig:
             self.prompt_assembler = PromptAssemblerConfig(**data["prompt_assembler"])
         ai_client_data = data.get("ai_client")
         if isinstance(ai_client_data, dict):
-            self.ai_client = AIClientConfig(**ai_client_data)
+            self.ai_client = AIClientConfig(
+                **self._filter_dataclass_payload(AIClientConfig, ai_client_data)
+            )
         if isinstance(data.get("cost_controller"), dict):
             self.cost_controller = CostControllerConfig(**data["cost_controller"])
         if isinstance(data.get("post_processor"), dict):
@@ -842,31 +896,27 @@ class AppConfig:
     def save(self, path: Path | None = None, *, save_key: bool = False) -> Path:
         config_path = resolve_config_path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        if self.ai_client.api_key and not self.provider.api_key:
-            self.provider = ProviderConfig.from_model_provider(self.ai_client.model_provider)
-        elif self.provider.api_key and not self.ai_client.api_key:
-            provider = self.provider.to_model_provider()
-            self.ai_client = AIClientConfig(
-                **{
-                    **asdict(self.ai_client),
-                    "provider": provider.name,
-                    "api_key": provider.api_key,
-                    "model": provider.model_name,
-                    "base_url": provider.base_url,
-                    "api_format": provider.api_format,
-                }
-            )
         if self.ai_client.api_key or self.provider.api_key:
             api_key = self.ai_client.api_key or self.provider.api_key
-            self.ai_client.api_key = api_key
             self.provider.api_key = api_key
-        self._sync_runtime_sections()
+            self.ai_client.api_key = api_key
         self.provider = ProviderConfig.from_model_provider(self.ai_client.model_provider)
-        if self.provider.api_key or self.ai_client.api_key:
-            api_key = self.provider.api_key or self.ai_client.api_key
-            self.provider.api_key = api_key
-            self.ai_client.api_key = api_key
         self._sync_runtime_sections()
+        if not save_key:
+            payload_api_key = ""
+            # 默认不落盘密钥是刻意的安全设计，但必须让人知道这件事发生了：
+            # 调用方若按常规 `save(path)` 保存，密钥会被静默丢弃，
+            # 下次启动就变成"未配置"，而现场没有任何线索。
+            if self.ai_client.api_key or self.provider.api_key:
+                warnings.warn(
+                    "save_key=False：API Key 未写入配置文件（这是默认的安全行为）。"
+                    "若希望持久化密钥，请调用 save(path, save_key=True)，"
+                    "或在 Web 设置页保存。",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        else:
+            payload_api_key = self.provider.api_key or self.ai_client.api_key or ""
         payload = {
             "provider": self.provider.to_dict(),
             "github_token": self.github_token,
@@ -885,8 +935,11 @@ class AppConfig:
             "result_store": asdict(self.result_store),
             "report_renderer": asdict(self.report_renderer),
         }
-        if not save_key:
+        if not payload_api_key:
             payload["provider"].pop("api_key", None)
             payload["ai_client"].pop("api_key", None)
+        else:
+            payload["provider"]["api_key"] = payload_api_key
+            payload["ai_client"]["api_key"] = payload_api_key
         config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return config_path

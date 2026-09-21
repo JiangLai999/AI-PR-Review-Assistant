@@ -24,6 +24,42 @@ SUPPORTED_LANGUAGE_EXTENSIONS = {
     ".tsx": "typescript",
 }
 
+# tree-sitter 语法包按需导入，未安装时自动退化为正则提取。
+TREE_SITTER_GRAMMAR_MODULES = {
+    "python": "tree_sitter_python",
+    "javascript": "tree_sitter_javascript",
+    "typescript": "tree_sitter_typescript",
+}
+
+_TREE_SITTER_LANGUAGE_CACHE: dict[str, object | None] = {}
+
+
+def _load_tree_sitter_language(language: str):
+    """加载并缓存 tree-sitter 语法；不可用时返回 None。"""
+    if language in _TREE_SITTER_LANGUAGE_CACHE:
+        return _TREE_SITTER_LANGUAGE_CACHE[language]
+
+    resolved: object | None = None
+    module_name = TREE_SITTER_GRAMMAR_MODULES.get(language)
+    if module_name is not None:
+        try:
+            import importlib
+
+            from tree_sitter import Language
+
+            grammar_module = importlib.import_module(module_name)
+            capsule = (
+                grammar_module.language_typescript()
+                if language == "typescript"
+                else grammar_module.language()
+            )
+            resolved = Language(capsule)
+        except Exception:
+            resolved = None
+
+    _TREE_SITTER_LANGUAGE_CACHE[language] = resolved
+    return resolved
+
 
 class FunctionInfo(BaseModel):
     """函数信息。"""
@@ -66,6 +102,7 @@ class FileContext(BaseModel):
     functions: list[FunctionInfo] = Field(default_factory=list)
     classes: list[ClassInfo] = Field(default_factory=list)
     parse_mode: str
+    full_content: str = ""
 
 
 class ContextBuilder:
@@ -89,6 +126,7 @@ class ContextBuilder:
             functions=ast_context.functions,
             classes=ast_context.classes,
             parse_mode=ast_context.parse_mode,
+            full_content=full_content,
         )
 
     def extract_ast_context(
@@ -140,19 +178,267 @@ class ContextBuilder:
         return "\n".join(rendered_sections)
 
     def _tree_sitter_extract(self, content: str, language: str) -> ASTContext:
-        """可选 tree-sitter 提取。
+        """使用 tree-sitter 语法树提取结构化上下文。
 
-        当前环境未安装语法包时自动抛错，交由 regex fallback 接管。
+        语法包未安装或语言不受支持时抛错，交由 regex fallback 接管。
         """
         if language == "text":
             return ASTContext(parse_mode="fallback")
 
-        try:
-            import tree_sitter  # noqa: F401
-        except ImportError as exc:
-            raise RuntimeError("tree-sitter is not installed") from exc
+        grammar = _load_tree_sitter_language(language)
+        if grammar is None:
+            raise RuntimeError(f"tree-sitter grammar is unavailable for language: {language}")
 
-        raise RuntimeError("tree-sitter grammar is unavailable in current environment")
+        from tree_sitter import Parser
+
+        payload = content.encode("utf-8")
+        tree = Parser(grammar).parse(payload)
+
+        imports: list[str] = []
+        functions: list[FunctionInfo] = []
+        classes: list[ClassInfo] = []
+
+        if language == "python":
+            self._collect_python_tree(tree.root_node, payload, imports, functions, classes)
+        else:
+            self._collect_ecmascript_tree(tree.root_node, payload, imports, functions, classes)
+
+        return ASTContext(
+            imports=imports[: self._config.max_ast_items],
+            functions=functions[: self._config.max_ast_items],
+            classes=classes[: self._config.max_ast_items],
+            parse_mode="tree-sitter",
+        )
+
+    def _collect_python_tree(
+        self,
+        root: object,
+        payload: bytes,
+        imports: list[str],
+        functions: list[FunctionInfo],
+        classes: list[ClassInfo],
+    ) -> None:
+        """遍历 Python 语法树，按声明层级收集符号。"""
+        for node in root.named_children:
+            node_type = node.type
+            if node_type in {"import_statement", "import_from_statement"}:
+                imports.append(self._node_text(payload, node).strip())
+
+        for node in root.named_children:
+            if node.type != "class_definition":
+                continue
+            name_node = node.child_by_field_name("name")
+            if name_node is None:
+                continue
+            superclasses = node.child_by_field_name("superclasses")
+            parents = [
+                self._node_text(payload, child).strip()
+                for child in (superclasses.named_children if superclasses else [])
+                if self._node_text(payload, child).strip()
+            ]
+            body = node.child_by_field_name("body")
+            methods: list[str] = []
+            for child in body.named_children if body else []:
+                if child.type != "function_definition":
+                    continue
+                method_name = child.child_by_field_name("name")
+                if method_name is None:
+                    continue
+                methods.append(self._node_text(payload, method_name))
+                function = self._python_function(payload, child)
+                if function is not None:
+                    functions.append(function)
+            classes.append(
+                ClassInfo(
+                    name=self._node_text(payload, name_node),
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    methods=methods,
+                    parent_classes=parents,
+                )
+            )
+
+        for node in root.named_children:
+            if node.type != "function_definition":
+                continue
+            function = self._python_function(payload, node)
+            if function is not None:
+                functions.append(function)
+
+    def _python_function(self, payload: bytes, node: object) -> FunctionInfo | None:
+        name_node = node.child_by_field_name("name")
+        if name_node is None:
+            return None
+        parameters_node = node.child_by_field_name("parameters")
+        return_type_node = node.child_by_field_name("return_type")
+        return FunctionInfo(
+            name=self._node_text(payload, name_node),
+            start_line=node.start_point[0] + 1,
+            end_line=node.end_point[0] + 1,
+            parameters=self._python_parameters(payload, parameters_node),
+            return_type=self._clean_return_type(
+                self._node_text(payload, return_type_node) if return_type_node else None
+            ),
+            is_async=self._has_child_token(node, "async"),
+        )
+
+    def _python_parameters(self, payload: bytes, parameters_node: object) -> list[str]:
+        if parameters_node is None:
+            return []
+        parameters: list[str] = []
+        for child in parameters_node.named_children:
+            if child.type in {"identifier", "typed_parameter", "typed_default_parameter"}:
+                parameters.append(self._node_text(payload, child).strip())
+            elif child.type == "default_parameter":
+                name_node = child.child_by_field_name("name")
+                if name_node is not None:
+                    parameters.append(self._node_text(payload, name_node).strip())
+        return parameters
+
+    def _collect_ecmascript_tree(
+        self,
+        root: object,
+        payload: bytes,
+        imports: list[str],
+        functions: list[FunctionInfo],
+        classes: list[ClassInfo],
+    ) -> None:
+        """遍历 JavaScript/TypeScript 语法树，按声明层级收集符号。"""
+        for node in root.named_children:
+            node = self._unwrap_export_statement(node)
+            if node.type in {"import_statement", "lexical_declaration", "variable_declaration"}:
+                text = self._node_text(payload, node).strip()
+                if node.type == "import_statement" or "require(" in text:
+                    imports.append(text)
+            if node.type == "class_declaration":
+                self._ecmascript_class(payload, node, functions, classes)
+
+        for node in root.named_children:
+            node = self._unwrap_export_statement(node)
+            if node.type == "function_declaration":
+                function = self._ecmascript_function(payload, node, node)
+                if function is not None:
+                    functions.append(function)
+            elif node.type in {"lexical_declaration", "variable_declaration"}:
+                for declarator in node.named_children:
+                    if declarator.type != "variable_declarator":
+                        continue
+                    value_node = declarator.child_by_field_name("value")
+                    if value_node is None or value_node.type != "arrow_function":
+                        continue
+                    function = self._ecmascript_function(payload, declarator, value_node)
+                    if function is not None:
+                        functions.append(function)
+
+    def _ecmascript_class(
+        self,
+        payload: bytes,
+        node: object,
+        functions: list[FunctionInfo],
+        classes: list[ClassInfo],
+    ) -> None:
+        name_node = node.child_by_field_name("name")
+        if name_node is None:
+            return
+        parents: list[str] = []
+        for child in node.named_children:
+            if child.type == "class_heritage":
+                text = self._node_text(payload, child)
+                heritage = re.sub(r"^\s*extends\s+", "", text).strip()
+                if heritage:
+                    parents.extend(self._split_csv(heritage))
+
+        body = node.child_by_field_name("body")
+        if body is None:
+            body = next(
+                (child for child in node.named_children if child.type == "class_body"), None
+            )
+        methods: list[str] = []
+        for child in body.named_children if body else []:
+            if child.type != "method_definition":
+                continue
+            method_name = child.child_by_field_name("name")
+            if method_name is None:
+                continue
+            methods.append(self._node_text(payload, method_name))
+            function = self._ecmascript_function(payload, child, child)
+            if function is not None:
+                functions.append(function)
+
+        classes.append(
+            ClassInfo(
+                name=self._node_text(payload, name_node),
+                start_line=node.start_point[0] + 1,
+                end_line=node.end_point[0] + 1,
+                methods=methods,
+                parent_classes=parents,
+            )
+        )
+
+    def _ecmascript_function(
+        self, payload: bytes, name_source: object, signature_source: object
+    ) -> FunctionInfo | None:
+        name = self._ecmascript_name(payload, name_source)
+        if not name:
+            return None
+        parameters_node = signature_source.child_by_field_name("parameters")
+        return_type_node = signature_source.child_by_field_name("return_type")
+
+        parameters: list[str] = []
+        for child in parameters_node.named_children if parameters_node else []:
+            text = self._node_text(payload, child).strip()
+            if text:
+                parameters.append(text)
+
+        return FunctionInfo(
+            name=name,
+            start_line=name_source.start_point[0] + 1,
+            end_line=name_source.end_point[0] + 1,
+            parameters=parameters,
+            return_type=self._clean_return_type(
+                self._node_text(payload, return_type_node) if return_type_node else None
+            ),
+            is_async=self._has_child_token(signature_source, "async"),
+        )
+
+    def _ecmascript_name(self, payload: bytes, node: object) -> str:
+        name_node = node.child_by_field_name("name")
+        if name_node is not None:
+            return self._node_text(payload, name_node)
+        return ""
+
+    @staticmethod
+    def _unwrap_export_statement(node: object) -> object:
+        """展开 `export ...` 包装节点，取出内部声明。"""
+        while node.type == "export_statement":
+            inner = next(
+                (
+                    child
+                    for child in node.named_children
+                    if child.type
+                    in {
+                        "class_declaration",
+                        "function_declaration",
+                        "lexical_declaration",
+                        "variable_declaration",
+                        "interface_declaration",
+                        "type_alias_declaration",
+                    }
+                ),
+                None,
+            )
+            if inner is None:
+                break
+            node = inner
+        return node
+
+    @staticmethod
+    def _node_text(payload: bytes, node: object) -> str:
+        return payload[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _has_child_token(node: object, token: str) -> bool:
+        return any(child.type == token for child in node.children)
 
     def _regex_extract(self, content: str, language: str) -> ASTContext:
         """使用正则从源码中提取结构化上下文。"""
@@ -450,7 +736,7 @@ class ContextBuilder:
         """清理返回类型字符串。"""
         if value is None:
             return None
-        cleaned = value.strip()
+        cleaned = value.strip().lstrip(":").strip()
         return cleaned or None
 
     def _strip_line_comments(self, line: str) -> str:

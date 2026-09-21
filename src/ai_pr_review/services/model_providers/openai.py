@@ -17,6 +17,7 @@ from ai_pr_review.services.exceptions import (
     AIServiceError,
 )
 from ai_pr_review.services.model_providers.base import BaseModelProvider, ProviderResponse
+from ai_pr_review.services.review_policy import structured_review_params
 
 
 class OpenAICompatibleProvider(BaseModelProvider):
@@ -85,6 +86,16 @@ class OpenAICompatibleProvider(BaseModelProvider):
             "max_tokens": kwargs["max_tokens"],
             **self.config.extra_params,
         }
+        for passthrough_key in ("think",):
+            if passthrough_key in kwargs:
+                payload[passthrough_key] = kwargs[passthrough_key]
+        # Structured output is a review-task policy, not a global chat default.
+        # Ordinary `pr-review chat` must keep its natural-language responses.
+        if kwargs.get("structured_output", False):
+            for key, value in structured_review_params(
+                self.config.name, self.config.model_name
+            ).items():
+                payload.setdefault(key, value)
         system_prompt = kwargs.get("system_prompt", "")
         if system_prompt and not any(message.get("role") == "system" for message in messages):
             payload["messages"] = [{"role": "system", "content": system_prompt}, *messages]
@@ -114,19 +125,52 @@ class OpenAICompatibleProvider(BaseModelProvider):
 
         try:
             payload = json.loads(raw_body)
-            choice = payload["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+            choice = payload["choices"][0]
+            message = choice.get("message", {}) if isinstance(choice, dict) else {}
+            text = self._extract_message_text(message, payload)
+            if not text:
+                raise ValueError(
+                    f"empty model content; finish_reason={choice.get('finish_reason') if isinstance(choice, dict) else None}"
+                )
+        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise AIResponseFormatError(
-                "OpenAI 兼容接口返回格式无效。", original_error=exc
+                "OpenAI 兼容接口返回中没有可解析的文本内容。请检查模型是否支持当前 Chat Completions 接口。",
+                original_error=exc,
             ) from exc
 
         usage = payload.get("usage", {})
         return ProviderResponse(
-            text=str(choice).strip(),
+            text=text,
             input_tokens=int(usage.get("prompt_tokens", 0) or 0),
             output_tokens=int(usage.get("completion_tokens", 0) or 0),
             raw_response=payload,
         )
+
+    @staticmethod
+    def _extract_message_text(message: Any, payload: dict[str, Any]) -> str:
+        """Normalize string, block-array, and reasoning-style responses."""
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, str) and block.strip():
+                    parts.append(block)
+                elif isinstance(block, dict):
+                    value = block.get("text") or block.get("content") or block.get("output_text")
+                    if isinstance(value, str) and value.strip():
+                        parts.append(value)
+            if parts:
+                return "\n".join(parts).strip()
+        for candidate in (
+            message.get("output_text") if isinstance(message, dict) else None,
+            message.get("reasoning_content") if isinstance(message, dict) else None,
+            payload.get("output_text"),
+        ):
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return ""
 
     @property
     def _chat_url(self) -> str:

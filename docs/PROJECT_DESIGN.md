@@ -171,13 +171,21 @@ GitHub PR URL
 |------|------|------|------|
 | PR Fetcher | 获取 PR 数据 | GitHub URL | PRData |
 | Filter Pipeline | 过滤文件 | FileDiff[] | FileDiff[] |
-| Context Builder | 构建上下文 | FileDiff + Content | FileContext |
+| Context Builder | 构建上下文（tree-sitter → 正则 → diff 三级降级） | FileDiff + Content | FileContext |
+| Review Planner | 生成确定性审查计划 | PRData + FilterResult | ReviewPlan |
+| Static Analyzer | 逐行安全规则 | FileDiff + FileContext | Finding[] |
+| Python AST Analyzer | 语法级规则（可变默认参数、裸异常、资源泄漏等） | FileDiff + FileContext | Finding[] |
+| Symbol Index | 提取签名、定位跨文件引用 | FileContext[] | SymbolDefinition[] / CrossFileReference[] |
+| Cross-file Interface Analyzer | 签名对比与外部调用方影响 | FileContext[] + base 签名 | InterfaceImpact[] |
+| Finding Validator | 校验 finding 是否对应真实变更 | Finding + FileDiff + FileContext | Evidence |
 | Prompt Assembler | 组装 Prompt | FileContext | SystemPrompt + UserPrompt |
 | AI Client | 调用 AI 模型 | Prompts | ReviewResult |
 | Post Processor | 后处理 | ReviewResult | ReviewResult |
 | Result Store | 持久化 | ReviewResult | RunID |
 | Report Renderer | 渲染报告 | ReviewResult | FormattedReport |
 | Cost Controller | 成本控制 | UsageRecord | BudgetStatus |
+| Benchmark | 量化分析策略效果 | BenchmarkCase[] | BenchmarkReport |
+| Web Server | 本地工作台 HTTP 接口 | HTTP 请求 | JSON |
 
 ---
 

@@ -48,9 +48,11 @@ def _pixel_brand() -> Text:
 def _render_header(config: AppConfig) -> Panel:
     """品牌头部 - 大像素横幅 + 副标题."""
     subtitle = Text()
-    subtitle.append("AI-Powered Pull Request Review", style="grey70")
+    subtitle.append("Terminal Workspace", style="grey70")
     subtitle.append("  ·  ", style="dim")
-    subtitle.append("Terminal Workspace", style="grey50")
+    subtitle.append("AI PR REVIEW ASSISTANT", style="grey50")
+    subtitle.append("  ·  ", style="dim")
+    subtitle.append("EVIDENCE-FIRST", style="grey50")
 
     content = Group(
         Text(""),
@@ -82,12 +84,14 @@ def _render_status_bar(config: AppConfig, message_count: int) -> Text:
     model = config.ai_client.model
 
     status = Text()
-    status.append("  ● ", style="bold green")
+    status.append("  ● LOCAL ", style="bold green")
     status.append(provider, style="bold white")
     status.append(" / ", style="dim")
     status.append(model, style="grey70")
     status.append("    ", style="dim")
     status.append(f"{message_count} messages", style="grey70")
+    status.append("    ", style="dim")
+    status.append("EVIDENCE-FIRST", style="grey62")
     status.append("    ", style="dim")
     status.append(datetime.now().strftime("%Y-%m-%d %H:%M"), style="grey62")
     status.append("\n")

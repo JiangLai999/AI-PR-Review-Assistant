@@ -8,26 +8,46 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Added
 
-- CLI history and stats commands backed by SQLite result storage.
-- GitHub comment rendering and publish flow for PR reviews.
-- API documentation for the CLI surface in `docs/API.md`.
-- Contribution guide, release guide, CI workflows, and community templates.
-- Website documentation hub with GSAP animations (`website/`).
-- Chat workspace with ASCII-art UI, welcome message, and timestamp support.
-- Slash command auto-completion and `/restore` command for session recovery.
-- Prompt-toolkit integration for enhanced input experience.
+- Review planner producing a transparent `ReviewPlan` (risk level, categories,
+  priority files, strategies, cross-file requirement).
+- Evidence validation for every finding (file, line range, changed-line check,
+  code-snippet match) with `valid` / `needs_review` / `invalid` status.
+- Python AST analyzer with syntax-level rules: mutable default arguments, bare
+  `except`, `is` comparison against literals, unclosed resources, unsafe
+  deserialization, `subprocess` with `shell=True`, disabled TLS verification,
+  weak hash algorithms, and exceptions re-raised without `from`.
+- Additional line-level rules: unsafe `yaml.load`, `verify=False`, hard-coded
+  credential constants, and debug mode enabled in source.
+- Cross-file symbol index and interface-impact analysis: signature comparison
+  against the PR base revision plus external caller resolution.
+- Real tree-sitter integration for Python, JavaScript and TypeScript behind the
+  optional `ast` extra, with automatic regex fallback when unavailable.
+- Benchmark subsystem (`pr-review benchmark`) with a curated known-defect case
+  library and precision / recall / F1 / false-positive-rate / line-accuracy
+  metrics.
+- Productised local web workbench with risk overview, progress indicator,
+  filterable findings list, evidence badges, human feedback buttons, review
+  history, and report loading.
+- New HTTP endpoints: `/api/history`, `/api/report`, `/api/feedback`.
+- Finding feedback persistence (accepted / rejected / fixed / needs_review).
+- Concurrent-safe AI budget reservation.
 
 ### Changed
 
-- README now reflects the repository's current executable scope more precisely.
-- Packaging metadata and release support were expanded for PyPI publishing.
-- Chat UI redesigned with ASCII box drawing for better cross-platform compatibility.
-- GitHub repository URL updated to `JiangLai999/AI-PR-Review-Assistant`.
+- Finding merge deduplicates results that line-level and AST rules both report.
+- CLI history and stats commands backed by SQLite result storage.
+- GitHub comment rendering and publish flow for PR reviews.
+- Website documentation hub with GSAP animations (`website/`).
+- Chat workspace with ASCII-art UI, welcome message, and timestamp support.
 
 ### Fixed
 
+- `ResultStore.save_result` failed on every call: the `metadata_json` column was
+  missing from the schema and the INSERT placeholder count did not match the
+  value tuple. Existing databases are migrated in place.
+- CLI test doubles now use the real `FilterPipelineResult` type, which restored
+  the full test suite.
 - Pagination index in PR file fetching (0-based vs 1-based).
-- Chat test assertions updated for new UI format.
 - Import ordering and black formatting for CI compliance.
 
 ## [0.1.0] - 2026-05-30

@@ -42,3 +42,41 @@ jobs:
 
       - name: Build package
         run: python -m build
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Build workbench
+        run: npm run build
+
+      - name: Verify build output is committed
+        # web_static 随包分发，必须与 web/ 源码保持同步，
+        # 否则 pip 安装后拿到的是过期界面。
+        run: |
+          cd ..
+          if ! git diff --quiet -- src/ai_pr_review/web_static; then
+            echo "::error::src/ai_pr_review/web_static 与 web/ 源码不同步，请在本地执行 cd web && npm run build 并提交产物。"
+            git diff --stat -- src/ai_pr_review/web_static
+            exit 1
+          fi
+          echo "构建产物与源码同步。"

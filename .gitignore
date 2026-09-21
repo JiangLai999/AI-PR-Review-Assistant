@@ -25,6 +25,15 @@ env/
 *.sqlite
 *.sqlite3
 
+# Frontend toolchain (web/)
+# 注意：src/ai_pr_review/web_static/ 是构建产物，但需要提交——
+# 它是随包分发的界面资源，使 `pip install` 之后无需 Node 即可运行 pr-review serve。
+web/node_modules/
+web/.npm-cache/
+web/.vite/
+web/.shots/
+.distcheck/
+
 # OS/editor files
 .DS_Store
 Thumbs.db

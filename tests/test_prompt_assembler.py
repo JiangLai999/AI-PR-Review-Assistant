@@ -111,3 +111,12 @@ class TestPromptAssembler:
         assert "properties" in schema
         assert schema["properties"]["summary"]["type"] == "string"
         assert schema["properties"]["findings"]["type"] == "array"
+
+    def test_build_system_prompt_includes_response_language_contract(self):
+        assembler = PromptAssembler(response_language="zh-CN")
+        prompt = assembler.build_system_prompt("python")
+        assert "Simplified Chinese" in prompt
+        assert "Keep file paths" in prompt
+
+        english = PromptAssembler(response_language="en-US").build_system_prompt("python")
+        assert "in English" in english

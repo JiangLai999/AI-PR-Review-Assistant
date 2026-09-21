@@ -12,6 +12,7 @@ from ai_pr_review.services.ai_client import AIClient
 from ai_pr_review.services.exceptions import AIResponseFormatError
 from ai_pr_review.services.model_providers.anthropic import AnthropicProvider
 from ai_pr_review.services.model_providers.factory import create_model_provider
+from ai_pr_review.services.model_providers.ollama import OllamaProvider
 from ai_pr_review.services.model_providers.openai import OpenAICompatibleProvider
 
 
@@ -144,6 +145,34 @@ def test_openai_compatible_provider_parses_response(monkeypatch):
     assert response.output_tokens == 3
 
 
+def test_deepseek_chat_requests_json_mode(monkeypatch):
+    provider = OpenAICompatibleProvider(
+        ModelProviderConfig.from_name("deepseek", api_key="key", model_name="deepseek-flash")
+    )
+    captured = {}
+
+    class DummyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"choices": [{"message": {"content": '{"summary":"ok","findings":[]}'}}]}
+            ).encode()
+
+    def fake_urlopen(req, **kwargs):
+        captured.update(json.loads(req.data.decode()))
+        return DummyResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider._chat_sync([], max_tokens=32, timeout_seconds=5, structured_output=True)
+    assert captured["response_format"] == {"type": "json_object"}
+    assert captured["thinking"] == {"type": "disabled"}
+
+
 def test_openai_compatible_provider_lists_models(monkeypatch):
     provider = OpenAICompatibleProvider(
         ModelProviderConfig.from_name(
@@ -226,3 +255,156 @@ def test_openai_compatible_provider_rejects_invalid_models_payload(monkeypatch):
 
     with pytest.raises(AIResponseFormatError, match="data"):
         provider._list_models_sync(timeout_seconds=5)
+
+
+def test_openai_provider_parses_block_content_and_reasoning_fallback(monkeypatch):
+    provider = OpenAICompatibleProvider(
+        ModelProviderConfig.from_name(
+            "custom",
+            api_key="key",
+            base_url="https://example.com/v1",
+            model_name="m",
+            api_format="openai",
+        )
+    )
+
+    class DummyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": [
+                                    {"type": "text", "text": '{"summary":"ok","findings":[]}'}
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ).encode()
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: DummyResponse())
+    response = provider._chat_sync([], max_tokens=8, timeout_seconds=5)
+    assert response.text == '{"summary":"ok","findings":[]}'
+
+
+def test_openai_provider_uses_reasoning_content_when_content_is_null(monkeypatch):
+    provider = OpenAICompatibleProvider(
+        ModelProviderConfig.from_name(
+            "custom",
+            api_key="key",
+            base_url="https://example.com/v1",
+            model_name="m",
+            api_format="openai",
+        )
+    )
+
+    class DummyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "reasoning_content": '{"summary":"ok","findings":[]}',
+                            }
+                        }
+                    ]
+                }
+            ).encode()
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: DummyResponse())
+    response = provider._chat_sync([], max_tokens=8, timeout_seconds=5)
+    assert response.text.startswith('{"summary"')
+
+
+def test_deepseek_review_policy_disables_thinking_and_uses_json(monkeypatch):
+    from ai_pr_review.services.review_policy import structured_review_params
+
+    assert structured_review_params("deepseek", "deepseek-flash") == {
+        "response_format": {"type": "json_object"},
+        "thinking": {"type": "disabled"},
+    }
+
+
+def test_openai_provider_does_not_force_json_for_normal_chat(monkeypatch):
+    provider = OpenAICompatibleProvider(
+        ModelProviderConfig.from_name("deepseek", api_key="key", model_name="deepseek-flash")
+    )
+    captured = {}
+
+    class DummyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": "hello"}}]}).encode()
+
+    def fake_urlopen(req, **kwargs):
+        captured.update(json.loads(req.data.decode()))
+        return DummyResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider._chat_sync([], max_tokens=16, timeout_seconds=5)
+    assert "response_format" not in captured
+    assert "thinking" not in captured
+
+
+def test_ollama_preset_allows_local_http_and_defaults_to_qwen():
+    config = ModelProviderConfig.from_name("ollama")
+
+    assert config.base_url == "http://127.0.0.1:11434/v1"
+    assert config.model_name == "qwen3.5:4b"
+    config.validate()
+
+
+def test_factory_returns_ollama_provider():
+    provider = create_model_provider(ModelProviderConfig.from_name("ollama"))
+
+    assert isinstance(provider, OllamaProvider)
+
+
+def test_ollama_lists_native_models(monkeypatch):
+    provider = OllamaProvider(ModelProviderConfig.from_name("ollama"))
+
+    class DummyResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"models": [{"name": "qwen3.5:4b"}, {"name": "phi4-mini"}]}).encode()
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: DummyResponse())
+
+    assert provider._list_ollama_models_sync(timeout_seconds=2) == ["phi4-mini", "qwen3.5:4b"]
+
+
+def test_ollama_capability_profile_supports_structured_output():
+    from ai_pr_review.services.model_capabilities import get_model_capabilities
+
+    profile = get_model_capabilities("ollama", "qwen3.5:4b")
+
+    assert profile.supports_json_object is True
+    assert profile.context_window == 8192

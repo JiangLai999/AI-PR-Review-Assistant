@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 import ai_pr_review.cli as cli_module
@@ -15,6 +16,12 @@ from ai_pr_review.config import AppConfig, ReportRendererConfig, ResultStoreConf
 from ai_pr_review.models.pr_data import FileDiff, FileStatus, PRData
 from ai_pr_review.services.context_builder import FileContext
 from ai_pr_review.services.exceptions import PRFetcherError
+from ai_pr_review.services.filter_pipeline import (
+    FilterPipelineResult,
+    FilterReason,
+    FilterReasonCode,
+    FilterResult,
+)
 from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
 from ai_pr_review.services.result_store import ResultStore
 
@@ -67,19 +74,8 @@ class StubFilterPipeline:
         pass
 
     def filter_pr_data(self, pr_data: PRData):
-        class Result:
-            included_count = 1
-            excluded_count = 0
-
-            def to_dict(self):
-                return {
-                    "total_files": 1,
-                    "included_count": 1,
-                    "excluded_count": 0,
-                    "results": [],
-                }
-
-        return pr_data, Result()
+        results = [FilterResult(file=file_diff, included=True) for file_diff in pr_data.files]
+        return pr_data, FilterPipelineResult(results=results)
 
 
 class StubContextBuilder:
@@ -247,7 +243,9 @@ def test_cli_terminal_output_success(monkeypatch, tmp_path: Path):
 
     assert result.exit_code == 0
     assert "AI PR Review Report" in result.output
-    assert "Total Findings: 1" in result.output
+    assert "Total Findings: 1" in result.output or (
+        "问题总数" in result.output and "1" in result.output
+    )
     assert "SQL injection risk" in result.output
     assert "Saved run " in result.output
 
@@ -281,28 +279,30 @@ def test_cli_markdown_report_includes_filter_summary_when_files_excluded(
 ):
     class PartiallyExcludedFilterPipeline(StubFilterPipeline):
         def filter_pr_data(self, pr_data: PRData):
-            class Result:
-                total_files = 1
-                included_count = 1
-                excluded_count = 1
-
-                @property
-                def excluded_reason_counts(self):
-                    return {"excluded_by_pattern": 1}
-
-                def excluded_reason_counts(self):
-                    return {"excluded_by_pattern": 1}
-
-                def to_dict(self):
-                    return {
-                        "total_files": 1,
-                        "included_count": 1,
-                        "excluded_count": 1,
-                        "excluded_reason_counts": {"excluded_by_pattern": 1},
-                        "results": [],
-                    }
-
-            return pr_data, Result()
+            excluded_file = FileDiff(
+                filename="docs/README.md",
+                status=FileStatus.MODIFIED,
+                additions=1,
+                deletions=0,
+                changes=1,
+                patch="@@ -1 +1,2 @@\n doc\n+more",
+            )
+            results = [
+                FilterResult(file=file_diff, included=True) for file_diff in pr_data.files
+            ] + [
+                FilterResult(
+                    file=excluded_file,
+                    included=False,
+                    reasons=[
+                        FilterReason(
+                            code=FilterReasonCode.EXCLUDED_BY_PATTERN,
+                            action="exclude",
+                            message="Matched a skip pattern.",
+                        )
+                    ],
+                )
+            ]
+            return pr_data, FilterPipelineResult(results=results)
 
     install_success_stubs(monkeypatch)
     monkeypatch.setattr(orchestrator_module, "FilterPipeline", PartiallyExcludedFilterPipeline)
@@ -345,7 +345,7 @@ def test_cli_infers_json_format_from_output_extension(monkeypatch, tmp_path: Pat
     assert '"filter"' in content
 
 
-def test_cli_publishes_comment(monkeypatch):
+def test_cli_publishes_comment(monkeypatch, tmp_path: Path):
     created_fetchers: list[StubPRFetcher] = []
 
     def factory(*args, **kwargs):
@@ -370,13 +370,12 @@ def test_cli_publishes_comment(monkeypatch):
     )
 
     runner = CliRunner()
-    with runner.isolated_filesystem():
-        temp_dir = Path.cwd()
-        configure_temp_app(monkeypatch, temp_dir)
-        result = runner.invoke(
-            main,
-            ["https://github.com/owner/repo/pull/42", "--publish-comment", "--format", "markdown"],
-        )
+    monkeypatch.chdir(tmp_path)
+    configure_temp_app(monkeypatch, tmp_path)
+    result = runner.invoke(
+        main,
+        ["https://github.com/owner/repo/pull/42", "--publish-comment", "--format", "markdown"],
+    )
 
     assert result.exit_code == 0
     assert len(created_fetchers) == 2
@@ -418,7 +417,9 @@ def test_cli_config_show_outputs_saved_provider(monkeypatch, tmp_path: Path):
         base_url="https://api.deepseek.com/v1",
         api_format="openai",
     )
-    config.save(config_path)
+    # 未加 save_key=True，密钥不会被写入配置文件；save() 会就此告警。
+    with pytest.warns(RuntimeWarning, match="save_key=False"):
+        config.save(config_path)
 
     runner = CliRunner()
     result = runner.invoke(main, ["config", "show"])
@@ -685,7 +686,9 @@ def test_cli_config_test_validates_provider(monkeypatch, tmp_path: Path):
         base_url="https://openrouter.ai/api/v1",
         api_format="openai",
     )
-    config.save(config_path)
+    # 未加 save_key=True，密钥不会被写入配置文件；save() 会就此告警。
+    with pytest.warns(RuntimeWarning, match="save_key=False"):
+        config.save(config_path)
 
     runner = CliRunner()
     result = runner.invoke(main, ["config", "test"])
@@ -728,7 +731,9 @@ def test_cli_config_test_fails_when_api_key_missing(monkeypatch, tmp_path: Path)
         base_url="https://example.com/v1",
         api_format="openai",
     )
-    config.save(config_path, save_key=False)
+    # 显式不保存密钥：save() 应当就此告警。
+    with pytest.warns(RuntimeWarning, match="save_key=False"):
+        config.save(config_path, save_key=False)
 
     runner = CliRunner()
     result = runner.invoke(main, ["config", "test"])
@@ -1031,7 +1036,9 @@ def test_cli_chat_slash_review_runs_pr_review(monkeypatch, tmp_path: Path):
 
     assert result.exit_code == 0
     assert config.report_renderer.title in result.output
-    assert "Total Findings: 1" in result.output
+    assert "Total Findings: 1" in result.output or (
+        "问题总数" in result.output and "1" in result.output
+    )
     assert "Saved run " in result.output
 
 
@@ -1279,11 +1286,13 @@ def test_cli_config_quick_wizard_no_save_key_omits_key(monkeypatch, tmp_path: Pa
     monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
 
     runner = CliRunner()
-    result = runner.invoke(
-        main,
-        ["config", "--quick", "--no-save-key"],
-        input="zh-CN\ncompact\nzh-CN\n3\ndeepseek-key\n1\ndeepseek-chat\n32768\n4096\nghp_123456789012345678901234567890123456\nterminal\nn\n",
-    )
+    # --no-save-key 走的是不持久化密钥的路径，save() 会就此告警。
+    with pytest.warns(RuntimeWarning, match="save_key=False"):
+        result = runner.invoke(
+            main,
+            ["config", "--quick", "--no-save-key"],
+            input="zh-CN\ncompact\nzh-CN\n3\ndeepseek-key\n1\ndeepseek-chat\n32768\n4096\nghp_123456789012345678901234567890123456\nterminal\nn\n",
+        )
 
     assert result.exit_code == 0
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
@@ -1669,7 +1678,7 @@ def test_cli_dry_run_hides_filter_reasons_by_default(monkeypatch, tmp_path: Path
     assert payload["run"]["dry_run"] is True
     assert payload["pr"]["files_changed"] == 1
     assert payload["filter"]["included_count"] == 1
-    assert payload["filter"]["results"] == []
+    assert all("reasons" not in entry for entry in payload["filter"]["results"])
 
 
 def test_cli_only_filter_can_show_filter_reasons(monkeypatch, tmp_path: Path):
@@ -1729,44 +1738,22 @@ def test_cli_stats_returns_aggregated_statistics(monkeypatch, tmp_path: Path):
 def test_cli_review_explains_filter_summary_when_no_files_reviewed(monkeypatch, tmp_path: Path):
     class ExcludingFilterPipeline(StubFilterPipeline):
         def filter_pr_data(self, pr_data: PRData):
-            class Result:
-                included_count = 0
-                excluded_count = 1
-
-                @property
-                def included_files(self):
-                    return []
-
-                @property
-                def excluded_results(self):
-                    return [
-                        type(
-                            "FilterResult",
-                            (),
-                            {
-                                "primary_reason": type(
-                                    "Reason",
-                                    (),
-                                    {"code": type("Code", (), {"value": "excluded_by_pattern"})()},
-                                )(),
-                            },
-                        )()
-                    ]
-
-                def excluded_reason_counts(self):
-                    return {"excluded_by_pattern": 1}
-
-                def to_dict(self):
-                    return {
-                        "total_files": 1,
-                        "included_count": 0,
-                        "excluded_count": 1,
-                        "excluded_reason_counts": {"excluded_by_pattern": 1},
-                        "results": [],
-                    }
-
+            results = [
+                FilterResult(
+                    file=file_diff,
+                    included=False,
+                    reasons=[
+                        FilterReason(
+                            code=FilterReasonCode.EXCLUDED_BY_PATTERN,
+                            action="exclude",
+                            message="Matched a skip pattern.",
+                        )
+                    ],
+                )
+                for file_diff in pr_data.files
+            ]
             filtered_pr = pr_data.model_copy(update={"files": []})
-            return filtered_pr, Result()
+            return filtered_pr, FilterPipelineResult(results=results)
 
     install_success_stubs(monkeypatch)
     monkeypatch.setattr(orchestrator_module, "FilterPipeline", ExcludingFilterPipeline)

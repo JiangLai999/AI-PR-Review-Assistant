@@ -33,8 +33,16 @@ class AnthropicProvider(BaseModelProvider):
         parts: list[str] = []
         for block in getattr(response, "content", []) or []:
             text = getattr(block, "text", None)
+            if not text:
+                text = getattr(block, "thinking", None)
+            if not text and isinstance(block, dict):
+                text = block.get("text") or block.get("thinking") or block.get("content")
             if text:
-                parts.append(text)
+                parts.append(str(text))
+        if not parts:
+            output_text = getattr(response, "output_text", None)
+            if output_text:
+                parts.append(str(output_text))
         usage = getattr(response, "usage", None)
         return ProviderResponse(
             text="\n".join(parts).strip(),

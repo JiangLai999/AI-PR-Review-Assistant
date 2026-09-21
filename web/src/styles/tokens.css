@@ -1,0 +1,378 @@
+/* =========================================================================
+   DSH 设计体系 —— 暗色主题
+   数值取自 DeepSeek Harness 官网样式表的 [data-theme=dark] 令牌块与其 @font-face
+   声明，非近似估计。参考站整站即暗色，因此这里以暗色为默认。
+   ========================================================================= */
+
+/* ---------- 自托管字体（参考站同源 + 项目官网字体） ---------- */
+
+@font-face {
+  font-family: 'Host Grotesk';
+  font-style: normal;
+  font-weight: 300 800;
+  font-display: swap;
+  src: url('/fonts/host-grotesk-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/dm-sans-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/dm-sans-500.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/fonts/dm-sans-700.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Fragment Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/fragment-mono-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Montserrat';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/montserrat.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Montserrat';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/montserrat-500.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Montserrat';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/montserrat-600.woff2') format('woff2');
+}
+/* 项目官网字体：Manrope + JetBrains Mono（Google Fonts 同源 TTF，离线自托管） */
+@font-face {
+  font-family: 'Manrope';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/manrope-400.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Manrope';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/manrope-500.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Manrope';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/manrope-600.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Manrope';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/fonts/manrope-700.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-400.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-500.ttf') format('truetype');
+}
+
+:root {
+  /* ---- 字体族（项目官网 + DeepSeek Harness 混合） ---- */
+  --ds-font-sans: 'Manrope', 'DM Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    Roboto, 'Helvetica Neue', Arial, 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei',
+    sans-serif;
+  --ds-font-display: 'Manrope', var(--ds-font-sans);
+  --ds-font-mono: 'JetBrains Mono', 'Fragment Mono', ui-monospace, SFMono-Regular, Menlo, Consolas,
+    'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', monospace;
+
+  /* ---- 品牌（项目官网蓝色渐变体系） ---- */
+  --ds-color-brand: #6799fe;
+  --ds-color-brand-deep: #4f46e5;
+  --ds-color-brand-soft: rgba(37, 99, 235, 0.14);
+
+  /* ---- 文字（dark）----
+     description 从 0.5 提到 0.62：0.5 在 #0a0a0a 上对比度约 4.6:1，
+     13px 以下小字达不到 WCAG AA；0.62 约 6.8:1 稳过 AA。placeholder 相应提到 0.38。 */
+  --ds-color-text-primary: #fff;
+  --ds-color-text-primary-bluish: #fff;
+  --ds-color-text-secondary: hsla(0, 0%, 100%, 0.8);
+  --ds-color-text-description: hsla(0, 0%, 100%, 0.62);
+  --ds-color-text-placeholder: hsla(0, 0%, 100%, 0.38);
+  --ds-color-text-inverse: #0a0a0a;
+
+  /* ---- 背景（dark） ---- */
+  --ds-color-bg-page: #0a0a0a;
+  --ds-color-bg-surface-1: hsla(0, 0%, 100%, 0.06);
+  --ds-color-bg-surface-2: hsla(0, 0%, 100%, 0.04);
+  --ds-color-bg-surface-3: hsla(0, 0%, 100%, 0.02);
+  --ds-color-bg-surface-4: hsla(0, 0%, 100%, 0.015);
+  --ds-color-bg-surface-5: hsla(0, 0%, 100%, 0.12);
+  --ds-color-bg-overlay: #262626;
+  --ds-color-bg-surface-raised: hsla(0, 0%, 100%, 0.25);
+  --ds-color-bg-hero-cta: hsla(0, 0%, 100%, 0.12);
+  --ds-color-bg-code: rgba(0, 0, 0, 0.35);
+  --ds-color-bg-hover: hsla(0, 0%, 100%, 0.06);
+  --ds-color-bg-input: hsla(0, 0%, 100%, 0.08);
+  --ds-color-bg-input-hover: hsla(0, 0%, 100%, 0.12);
+
+  /* ---- 边框（dark） ---- */
+  --ds-color-border-subtle: hsla(0, 0%, 100%, 0.08);
+  --ds-color-border-default: hsla(0, 0%, 100%, 0.06);
+  --ds-color-border-divider: hsla(0, 0%, 100%, 0.25);
+  --ds-color-border-hover: hsla(0, 0%, 100%, 0.2);
+  --ds-color-border-strong: hsla(0, 0%, 100%, 0.24);
+  --ds-color-border-secondary: hsla(0, 0%, 100%, 0.2);
+  --ds-color-border-input: hsla(0, 0%, 100%, 0.2);
+  --ds-color-border-input-focus: hsla(0, 0%, 100%, 0.25);
+  --ds-color-static-black: #0f0f0f;
+  --ds-color-scrollbar: hsla(0, 0%, 100%, 0.2);
+
+  /* ---- 按钮（dark） ---- */
+  --ds-btn-primary-bg: #fff;
+  --ds-btn-primary-text: #0a0a0a;
+  --ds-btn-primary-border: transparent;
+  --ds-btn-primary-hover-bg: rgba(0, 0, 0, 0.2);
+  --ds-btn-secondary-bg: var(--ds-color-bg-surface-1);
+  --ds-btn-secondary-text: #fff;
+  --ds-btn-secondary-border: hsla(0, 0%, 100%, 0.15);
+  --ds-btn-secondary-hover-bg: hsla(0, 0%, 100%, 0.2);
+  --ds-btn-secondary-hover-border: hsla(0, 0%, 100%, 0.6);
+  --ds-btn-ghost-bg: transparent;
+  --ds-btn-ghost-text: #fff;
+  --ds-btn-ghost-border: transparent;
+  --ds-btn-ghost-hover-bg: hsla(0, 0%, 100%, 0.08);
+  --ds-btn-ghost-hover-border: hsla(0, 0%, 100%, 0.2);
+
+  /* ---- 圆角 ----
+     对齐 deepseek.com/harness 2026-09 实测值（card 24 / panel 16 / media 10 / input 10 / sm 8）。
+     工作台是数据密集界面，card 取 16 在参考站营销卡(24)与旧值(12)之间取工具理性平衡。 */
+  --ds-radius-pill: 100px; /* 仅按钮、徽标 */
+  --ds-radius-card: 16px;
+  --ds-radius-panel: 12px;
+  --ds-radius-media: 10px;
+  --ds-radius-input: 10px;
+  --ds-radius-sm: 8px;
+  --ds-radius-xs: 4px;
+  --ds-radius-code: 8px;
+
+  /* ---- 间距 ---- */
+  --ds-space-1: 4px;
+  --ds-space-2: 8px;
+  --ds-space-3: 12px;
+  --ds-space-4: 16px;
+  --ds-space-5: 24px;
+  --ds-space-6: 32px;
+  --ds-space-7: 40px;
+  --ds-space-8: 56px;
+  --ds-space-9: 80px;
+  --ds-space-10: 120px;
+  --ds-space-11: 160px;
+
+  /* ---- 排版刻度（参考站 .ds-text-*） ---- */
+  --ds-text-display: 40px; /* 仅概览页 Hero 使用 */
+  --ds-text-hero: 34px;
+  --ds-text-heading1: 26px;
+  --ds-text-heading2: 21px;
+  --ds-text-subtitle: 17px;
+  --ds-text-title: 15px;
+  --ds-text-body: 15px;
+  --ds-text-caption: 13px;
+  --ds-text-xs: 13px;
+  --ds-text-2xs: 12px;
+  --ds-text-3xs: 11px;
+
+  /* 字距：字号越大越收紧（获奖站大字普遍 -0.02 ~ -0.055em） */
+  --ds-tracking-display: -0.045em;
+  --ds-tracking-heading: -0.03em;
+  --ds-tracking-title: -0.015em;
+  --ds-tracking-body: -0.005em;
+
+  --ds-leading-hero: 1.5;
+  --ds-leading-body: 1.6;
+
+  /* ---- 容器（参考站 .ds-container 三档断点） ---- */
+  --ds-container-max: 1600px;
+  --ds-container-gutter: 48px;
+
+  /* ---- 效果 ---- */
+  --ds-shadow-card: hsla(0, 0%, 100%, 0.12) 0px 1px 0px 0px inset;
+  --ds-blur-glass: 12px;
+  --ds-dur-fast: 160ms; /* 悬停、焦点这类即时反馈 */
+  --ds-dur-base: 240ms; /* 常规状态切换 */
+  --ds-dur-slow: 420ms; /* 面板展开、视图切换 */
+  --ds-dur-enter: 560ms; /* 首次入场，仅一次 */
+  --ds-ease-out: cubic-bezier(0.22, 1, 0.36, 1); /* 快出缓停，获奖站常见 */
+  --ds-ease-inout: cubic-bezier(0.65, 0, 0.35, 1);
+  --ds-transition: 0.2s ease;
+
+  /* ---- 严重度 / 状态（暗底适配） ---- */
+  --ds-sev-critical: #ff6b6b;
+  --ds-sev-critical-bg: rgba(255, 107, 107, 0.14);
+  --ds-sev-high: #ff9f5a;
+  --ds-sev-high-bg: rgba(255, 159, 90, 0.14);
+  --ds-sev-medium: #ffd166;
+  --ds-sev-medium-bg: rgba(255, 209, 102, 0.14);
+  --ds-sev-low: #67d4e8;
+  --ds-sev-low-bg: rgba(103, 212, 232, 0.14);
+  --ds-sev-info: hsla(0, 0%, 100%, 0.65);
+  --ds-sev-info-bg: hsla(0, 0%, 100%, 0.08);
+  --ds-state-valid: #5fd39a;
+  --ds-state-valid-bg: rgba(95, 211, 154, 0.14);
+  --ds-state-invalid: #ff6b6b;
+  --ds-state-invalid-bg: rgba(255, 107, 107, 0.14);
+  --ds-state-needs: #ffd166;
+  --ds-state-needs-bg: rgba(255, 209, 102, 0.14);
+  --ds-state-unverified: hsla(0, 0%, 100%, 0.65);
+  --ds-state-unverified-bg: hsla(0, 0%, 100%, 0.08);
+}
+
+@media (min-width: 768px) {
+  :root {
+    --ds-text-display: 56px;
+    --ds-text-hero: 40px;
+    --ds-text-heading1: 30px;
+    --ds-container-gutter: 64px;
+  }
+}
+@media (min-width: 1560px) {
+  :root {
+    --ds-text-display: 64px;
+    --ds-container-gutter: 80px;
+  }
+}
+
+/* ========================= 基础 ========================= */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--ds-color-bg-page);
+  color: var(--ds-color-text-primary);
+  font-family: var(--ds-font-sans);
+  font-size: var(--ds-text-body);
+  line-height: var(--ds-leading-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  font-family: var(--ds-font-display);
+  font-weight: 500;
+  color: var(--ds-color-text-primary);
+  letter-spacing: -0.02em;
+  line-height: 1.5;
+}
+
+h1 { font-size: var(--ds-text-heading1); letter-spacing: var(--ds-tracking-heading); }
+h2 { font-size: var(--ds-text-heading2); letter-spacing: var(--ds-tracking-heading); }
+h3 { font-size: var(--ds-text-title); letter-spacing: var(--ds-tracking-title); }
+
+p { margin: 0; }
+
+a {
+  color: var(--ds-color-brand);
+  text-decoration: none;
+  transition: color var(--ds-transition);
+}
+a:hover { color: var(--ds-color-brand-deep); }
+
+code,
+pre,
+kbd {
+  font-family: var(--ds-font-mono);
+  font-size: 0.94em;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+::selection {
+  background: rgba(103, 153, 254, 0.3);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ds-color-scrollbar) transparent;
+}
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--ds-color-scrollbar);
+  border-radius: var(--ds-radius-pill);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+@keyframes ds-hero-enter {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes ds-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes ds-sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(320%); }
+}
+@keyframes ds-skeleton {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

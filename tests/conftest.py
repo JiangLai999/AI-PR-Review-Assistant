@@ -1,8 +1,32 @@
 """共享 pytest fixtures 和测试工具。"""
 
+import os
 from datetime import datetime
 
 import pytest
+
+# 需要在测试前清除的覆盖类环境变量（凭证由测试自行 setenv 注入）
+_ISOLATED_ENV_VARS = {
+    "AI_PR_REVIEW_API_KEY",
+    "AI_PR_REVIEW_PROVIDER",
+    "AI_PR_REVIEW_MODEL",
+    "AI_PR_REVIEW_BASE_URL",
+    "AI_PR_REVIEW_API_FORMAT",
+    "AI_PR_REVIEW_CONFIG",
+    "GITHUB_TOKEN",
+}
+
+
+@pytest.fixture(autouse=True)
+def _isolate_provider_env(monkeypatch) -> None:
+    """移除本机真实凭证与覆盖变量，保证测试环境可复现。
+
+    任何 ``*_API_KEY`` 形式的环境变量（如 ANTHROPIC_API_KEY、DEEPSEEK_API_KEY）
+    都会被清除；测试需要时通过 ``monkeypatch.setenv`` 自行注入。
+    """
+    for var in list(os.environ):
+        if var.endswith("_API_KEY") or var in _ISOLATED_ENV_VARS:
+            monkeypatch.delenv(var, raising=False)
 
 
 @pytest.fixture

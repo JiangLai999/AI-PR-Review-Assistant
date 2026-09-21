@@ -22,6 +22,19 @@ function Get-PythonCommand {
     throw "Python 3.12+ was not found. Please install Python first."
 }
 
+function Assert-PythonVersion {
+    param([string[]]$Command)
+    $versionText = (Invoke-PythonCommand $Command --version 2>&1 | Out-String).Trim()
+    if ($versionText -notmatch 'Python\s+(\d+)\.(\d+)') {
+        throw "Unable to determine Python version from: $versionText"
+    }
+    $major = [int]$Matches[1]
+    $minor = [int]$Matches[2]
+    if ($major -ne 3 -or $minor -lt 12) {
+        throw "Python 3.12+ is required, but Python $major.$minor was found."
+    }
+}
+
 function Invoke-PythonCommand {
     param(
         [string[]]$Command,
@@ -86,6 +99,8 @@ if ($InstallSource -eq "github") {
     Write-Host "Repository: $GithubRepository" -ForegroundColor Cyan
 }
 
+$pythonCmd = Get-PythonCommand
+Assert-PythonVersion $pythonCmd
 Ensure-Pipx
 $packageSpec = Get-PackageSpec
 

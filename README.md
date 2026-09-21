@@ -4,8 +4,8 @@
 
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-175%20Passed-brightgreen.svg)]()
-[![Coverage](https://img.shields.io/badge/Coverage-88%25-green.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-270%20Passed-brightgreen.svg)]()
+[![Coverage](https://img.shields.io/badge/Coverage-87%25-green.svg)]()
 
 🌐 **[在线演示](https://jianglai999.github.io/AI-PR-Review-Assistant-web/)** | 📖 **[完整文档](docs/PROJECT_DESIGN.md)** | 💡 **[创新点](docs/INNOVATION.md)**
 
@@ -20,6 +20,9 @@ AI PR Review Assistant 是一个基于 AI 的代码审查工具，通过智能�
 ### 核心特性
 
 - 🤖 **多模型支持** — 支持 18+ 模型供应商（OpenAI、Anthropic、DeepSeek、Qwen 等）
+- 🧭 **智能审查规划** — 根据 PR 意图、风险关键词和文件变更动态生成审查计划
+- ✅ **证据验证** — 校验 finding 的文件、行号、Diff 关联和代码片段，标记可信度状态
+- 🔍 **规则 + AI 分析** — 将确定性安全规则与 AI 推理结果合并，支持跨文件影响信号
 - 🎯 **智能过滤** — 自动跳过测试、文档、配置等不相关文件
 - 📊 **结构化输出** — 终端彩色、Markdown、JSON、GitHub PR 评论
 - 💰 **成本控制** — 单次运行和 24 小时窗口双重预算限制
@@ -64,6 +67,9 @@ irm https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-Assistant/main/in
 git clone https://github.com/JiangLai999/AI-PR-Review-Assistant.git
 cd AI-PR-Review-Assistant
 pip install -e .
+
+# 可选：启用 tree-sitter 语法级上下文（Python / JS / TS）
+pip install -e ".[ast]"
 ```
 
 ### 配置
@@ -89,6 +95,9 @@ pr-review config models
 
 # 切换默认模型
 pr-review config model --name "模型名称"
+
+# 预览审查计划（不调用 AI）
+pr-review plan https://github.com/owner/repo/pull/123
 ```
 
 ### 使用
@@ -114,9 +123,32 @@ pr-review history
 
 # 查看统计信息
 pr-review stats
+
+# 记录人工反馈（用于误报/修复追踪）
+pr-review feedback <run-id> <finding-id> --status accepted --note "确认问题"
+
+# 离线演示规划、规则检查和证据验证
+pr-review demo
+
+# 输出比赛现场推荐演示路径
+pr-review showcase
+pr-review showcase --json-output
+
+# 启动本地 Web 工作台
+pr-review serve
 ```
 
 ---
+
+## 参赛版架构与审查流水线
+
+### 项目架构图
+
+![AI PR Review Assistant 项目架构图](docs/assets/p2/project-architecture.png)
+
+### 审查流水线图
+
+![AI PR Review Assistant 审查流水线图](docs/assets/p2/review-pipeline.png)
 
 ## 审查流水线
 
@@ -177,7 +209,12 @@ pr-review chat --model "gpt-4" --message "你好"
 
 ## 配置文件
 
-配置文件位置：`~/.ai_pr_review/config.json`
+配置文件位置：
+
+- Windows：`%APPDATA%\ai-pr-review\config.json`（兼容旧版 `~/.ai_pr_review/config.json`）
+- macOS / Linux：`~/.ai_pr_review/config.json`
+
+项目级配置位于仓库根目录的 `.ai_pr_review/config.json`，私有覆盖配置位于 `.ai_pr_review/config.local.json`。
 
 ```json
 {
@@ -201,13 +238,15 @@ pr-review chat --model "gpt-4" --message "你好"
 }
 ```
 
-### 配置优先级
+### 配置加载与覆盖规则
 
-1. CLI 参数 `--config <path>`
-2. 环境变量 `AI_PR_REVIEW_*`
-3. 用户级配置 `~/.ai_pr_review/config.json`
-4. 项目级配置 `.ai_pr_review/config.json`
-5. 项目本地配置 `.ai_pr_review/config.local.json`
+配置文件按以下顺序加载，后加载的文件覆盖同名字段：
+
+1. 用户级配置
+2. 项目级配置 `.ai_pr_review/config.json`
+3. 项目本地配置 `.ai_pr_review/config.local.json`
+
+随后应用 `AI_PR_REVIEW_*` 和 `GITHUB_TOKEN` 环境变量覆盖。`--config <path>` 用于指定用户级配置文件路径，不会绕过环境变量覆盖。
 
 ---
 
@@ -246,9 +285,16 @@ pr-review chat --model "gpt-4" --message "你好"
 | Pydantic | 数据验证 |
 | PyGithub | GitHub API |
 | Anthropic SDK | AI 模型调用 |
-| tree-sitter | AST 解析（可选） |
+| AST 增强上下文 | Tree-sitter（可选，`pip install -e ".[ast]"`）→ 正则提取 → Diff 上下文降级 |
+| Python AST 规则 | 标准库 `ast`，用于可变默认参数、裸异常等语法级检查 |
 | SQLite | 本地存储 |
-| GSAP | 前端动画 |
+| React 18 + TypeScript | Web 工作台界面 |
+| Vite 6 | 前端构建（产物随包分发） |
+| GSAP | 官网展示页动画 |
+
+> Web 工作台的前端构建产物已随包提交在 `src/ai_pr_review/web_static/`，
+> 因此 `pip install` 之后**无需 Node** 即可用 `pr-review serve` 打开完整界面。
+> 只有修改前端源码时才需要 Node。
 
 ---
 
@@ -262,12 +308,19 @@ AI-PR-Review-Assistant/
 │   ├── config_wizard.py          # 配置向导
 │   ├── chat_commands.py          # 聊天命令
 │   ├── chat_runtime.py           # 聊天引擎
+│   ├── web_server.py             # 本地 Web 服务端（标准库）
+│   ├── web_static/               # Web 工作台构建产物（随包分发，无需 Node）
 │   ├── models/
-│   │   └── pr_data.py            # 数据模型
+│   │   ├── pr_data.py            # PR 数据模型
+│   │   └── review_plan.py        # 审查计划 / 证据 / 接口变更模型
+│   ├── benchmark/                # 基准测试体系
+│   │   ├── cases.py              # 已知缺陷样例库
+│   │   ├── models.py             # 指标与报告模型
+│   │   └── runner.py             # 评测执行器
 │   ├── services/
 │   │   ├── pr_fetcher.py         # PR 获取
 │   │   ├── filter_pipeline.py    # 文件过滤
-│   │   ├── context_builder.py    # 上下文构建
+│   │   ├── context_builder.py    # 上下文构建（三级降级）
 │   │   ├── prompt_assembler.py   # Prompt 组装
 │   │   ├── ai_client.py          # AI 调用
 │   │   ├── post_processor.py     # 后处理
@@ -275,19 +328,39 @@ AI-PR-Review-Assistant/
 │   │   ├── result_store.py       # 结果存储
 │   │   ├── review_orchestrator.py# 编排层
 │   │   ├── cost_controller.py    # 成本控制
+│   │   ├── agent/
+│   │   │   └── planner.py        # 确定性审查规划
+│   │   ├── analyzers/
+│   │   │   ├── static_analyzer.py      # 逐行安全规则
+│   │   │   ├── python_ast_analyzer.py  # Python AST 规则
+│   │   │   ├── symbol_index.py         # 跨文件符号索引
+│   │   │   ├── cross_file_interface.py # 接口影响分析
+│   │   │   ├── cross_file_analyzer.py  # 轻量关系信号
+│   │   │   └── finding_merge.py        # 结果去重合并
+│   │   ├── evidence/
+│   │   │   └── finding_validator.py    # 证据校验
 │   │   └── model_providers/      # 多供应商适配
 │   └── utils/
 │       └── github_url_parser.py  # URL 解析
-├── tests/                        # 测试套件 (175 tests)
+├── tests/                        # 测试套件
 ├── docs/                         # 文档
 │   ├── PROJECT_DESIGN.md         # 项目设计书
 │   ├── INNOVATION.md             # 创新点文档
 │   ├── API.md                    # API 文档
-│   └── WEBSITE.md                # 前端展示文档
-├── website/                      # 前端展示页面
+│   └── RELEASE.md                # 发布说明
+├── website/                      # 前端展示页面（官网，纯静态）
 │   ├── index.html
 │   ├── css/style.css
 │   └── js/main.js
+├── web/                          # Web 工作台前端源码（React + Vite）
+│   ├── src/
+│   │   ├── api/                  # 接口客户端与类型契约
+│   │   ├── components/           # 组件与设计体系
+│   │   ├── pages/                # 概览 / 审查 / 历史 / 准确率 / 接口
+│   │   └── styles/               # DSH 设计令牌与组件样式
+│   ├── index.html
+│   ├── package.json
+│   └── vite.config.ts
 ├── pyproject.toml                # 包配置
 ├── README.md                     # 本文件
 ├── CHANGELOG.md                  # 变更日志
@@ -296,6 +369,69 @@ AI-PR-Review-Assistant/
 ```
 
 ---
+
+## 智能审查增强
+
+完整审查现在会生成透明的 `ReviewPlan`，并在模型结果之后执行：
+
+- 静态安全规则检查（动态执行、HTML 注入、硬编码凭证、SQL 插值等）
+- Python AST 规则（可变默认参数、裸 except、`is` 字面量比较、未关闭资源、
+  危险反序列化、`shell=True`、关闭 TLS 校验、弱哈希、异常链丢失等）
+- Finding 证据验证（文件、行号、变更行、代码片段）
+- 跨文件符号级接口影响分析（签名对比 + 外部调用方定位）
+- 并发安全的 AI 预算预留
+- SQLite 中的 Finding 人工反馈记录
+
+可以先使用 `pr-review plan <PR_URL>` 查看审查范围，再执行完整审查。
+
+### Web 工作台
+
+```bash
+pr-review serve            # 默认 http://127.0.0.1:8787
+```
+
+界面包含五个视图：
+
+| 视图 | 内容 |
+|------|------|
+| **概览** | 产品定位、审查流水线八步、关键能力、实时统计数据、基准准确率 |
+| **审查工作台** | PR 链接输入、计划/完整审查、风险总览指标、审查计划、证据校验、文件过滤、跨文件接口影响、可筛选 Findings、人工反馈、原始 JSON |
+| **历史审查** | 运行记录表、聚合统计、按运行 ID 载入完整报告 |
+| **准确率** | 三种策略对比、混淆矩阵、逐样例指标 |
+| **接口** | 全部 HTTP 接口与 CLI 命令参考、运行边界说明 |
+
+前端为 React + Vite 应用，**构建产物随包分发**，因此普通用户无需 Node：
+
+```bash
+# 仅修改前端源码时才需要
+cd web && npm install && npm run build   # 输出到 src/ai_pr_review/web_static/
+```
+
+### 三级上下文降级
+
+```
+Level 1: tree-sitter 语法树（需安装可选依赖 ".[ast]"）
+Level 2: 正则提取
+Level 3: 仅 diff 上下文
+```
+
+未安装 tree-sitter 时自动降级到正则，不影响运行。
+
+### 基准测试
+
+内置已知缺陷样例库，用于量化分析策略并防止规则退化：
+
+```bash
+pr-review benchmark                  # 默认 combined 策略
+pr-review benchmark --strategy all   # 横向比较 static / ast / combined
+pr-review benchmark --json-output    # 完整 JSON 明细
+```
+
+当前样例库（4 个样例、12 处已知缺陷、1 个对照组）在 `combined` 策略下的
+实测结果为 Precision 1.00 / Recall 1.00 / Line accuracy 1.00。
+
+> 这是**精选回归样例集**的成绩，用于保证规则不退化、误报不增加，
+> 不等同于在真实 PR 上的泛化准确率。
 
 ## 测试与质量
 
@@ -315,14 +451,24 @@ mypy src
 
 ### 测试覆盖率
 
-| 模块 | 测试数 | 覆盖率 |
-|------|--------|--------|
-| CLI | 54 | 85% |
-| PR Fetcher | 48 | 87% |
-| Filter Pipeline | 14 | 96% |
-| Context Builder | 5 | 94% |
-| Prompt Assembler | 6 | 95% |
-| AI Client | 12 | 77% |
-| Post Processor | 5 | 100% |
-| Cost Controller | 6 | 93% |
-| Result Store | 6 
+以下测试数按 `pytest --collect-only` 统计，覆盖率为 `pytest --cov` 实测结果。
+
+| 模块 | 测试数 | 说明 |
+|------|--------|------|
+| CLI | 54 | 命令入口、报告渲染、聊天斜杠命令 |
+| PR Fetcher | 48 | 分页、限流、错误分类 |
+| Filter Pipeline | 14 | 黑白名单、过滤原因 |
+| Context Builder | 9 | tree-sitter / 正则 / 降级三态 |
+| Python AST Analyzer | 18 | 可变默认参数、裸异常、资源泄漏等 |
+| Cross-file Interface | 17 | 符号索引、签名对比、外部引用 |
+| Benchmark | 25 | 指标计算、样例库、回归保护 |
+| Web Server | 23 | HTTP 接口、错误码、反馈写入 |
+| PR Fetcher / AI Client | 12 | 重试、成本、JSON 解析 |
+| Prompt Assembler | 6 | 双层 prompt、schema |
+| Post Processor | 5 | 置信度、去重、排序 |
+| Cost Controller | 6 | 单次与 24 小时预算 |
+| Result Store | 6 | 持久化、元数据、反馈 |
+| Report Renderer | 6 | 四种输出格式 |
+| Model Providers | 8 | 供应商适配 |
+| Review Orchestrator | 2 | 并发、空过滤摘要 |
+| **总计** | **270** | 全量通过，覆盖率 87% |
