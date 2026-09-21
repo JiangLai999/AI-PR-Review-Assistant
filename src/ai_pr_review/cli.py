@@ -26,7 +26,13 @@ from rich.table import Table
 
 from ai_pr_review.chat_commands import handle_basic_chat_slash_command
 from ai_pr_review.chat_runtime import run_chat_session
-from ai_pr_review.chat_session import clear_chat_session, load_chat_session, save_chat_session
+from ai_pr_review.chat_session import (
+    clear_chat_session,
+    load_chat_context,
+    load_chat_session,
+    save_chat_context,
+    save_chat_session,
+)
 from ai_pr_review.config import (
     CONFIG_PATH_ENV_VAR,
     DEFAULT_CONFIG_PATH,
@@ -97,7 +103,12 @@ from ai_pr_review.services.pr_fetcher import PRFetcher
 from ai_pr_review.services.prompt_assembler import ReviewResult
 from ai_pr_review.services.report_renderer import ReportRenderer
 from ai_pr_review.services.result_store import ResultStore
-from ai_pr_review.services.review_orchestrator import ReviewArtifacts, ReviewOrchestrator
+from ai_pr_review.services.hybrid_orchestrator import HybridReviewOrchestrator
+from ai_pr_review.services.review_orchestrator import (
+    ReviewArtifacts,
+    ReviewCancelled,
+    ReviewOrchestrator,
+)
 from ai_pr_review.workspace_entry import (
     apply_workspace_preferences,
     build_history_output,
@@ -820,10 +831,16 @@ async def run_review(
     verbose: bool = False,
     config: AppConfig | None = None,
     progress_console: Console | None = None,
+    use_hybrid: bool = True,
 ) -> ReviewArtifacts:
     """Run a review with terminal guidance and animated progress when interactive."""
     app_config = config or AppConfig.load()
-    orchestrator = ReviewOrchestrator(app_config)
+
+    # 根据配置决定使用混合编排器还是标准编排器
+    if use_hybrid and hasattr(app_config.preferences, 'hybrid_strategy'):
+        orchestrator = HybridReviewOrchestrator(app_config)
+    else:
+        orchestrator = ReviewOrchestrator(app_config)
     animate = progress_console is not None
     progress = None
     task_id = None
@@ -1464,12 +1481,84 @@ def _handle_list_history_action(
         )
 
 
+def _handle_analyze_history_action(
+    action: ChatAction,
+    context: ChatContext,
+    config: AppConfig,
+) -> ActionResult:
+    """Analyze review history trends with AI."""
+    try:
+        from ai_pr_review.services.result_store import ResultStore
+
+        store = ResultStore(config.result_store)
+        limit = action.arguments.get("limit", 20)
+        runs = store.list_runs(limit=limit)
+
+        if not runs:
+            return ActionResult(
+                action="analyze_history",
+                ok=False,
+                message="没有历史记录可分析",
+                error_code="no_history",
+            )
+
+        # Build analysis prompt
+        prompt = f"""请分析最近 {len(runs)} 次代码审查记录，给出趋势报告。
+
+**审查记录摘要**:
+"""
+        for i, run in enumerate(runs[:10], 1):  # 只显示前10条
+            prompt += f"\n{i}. {run.get('timestamp', 'N/A')}"
+            prompt += f"\n   - PR: {run.get('pr_url', 'N/A')}"
+            prompt += f"\n   - 问题数: {run.get('finding_count', 0)}"
+            prompt += f"\n   - 成本: ${run.get('cost', 0):.4f}"
+            prompt += f"\n   - 模型: {run.get('model', 'N/A')}"
+
+        prompt += """
+
+请分析并回答：
+
+1. **最常见的问题类型** - 列出前5种最常出现的问题类别
+2. **风险趋势** - 问题数量是增加还是减少？
+3. **成本分析** - 平均每次审查成本，是否有优化空间？
+4. **改进建议** - 给团队 3-5 条具体的代码质量改进建议
+
+请用中文回答，简洁清晰，重点突出。"""
+
+        # Call AI model
+        from ai_pr_review.services.ai_client import AIClient
+
+        ai_client = AIClient(config)
+        messages = [{"role": "user", "content": prompt}]
+
+        import asyncio
+        response = asyncio.run(ai_client.chat(messages))
+        analysis = response.get("text", "")
+
+        return ActionResult(
+            action="analyze_history",
+            ok=True,
+            message=analysis,
+            data={
+                "run_count": len(runs),
+                "analysis": analysis,
+            },
+        )
+    except Exception as exc:
+        return ActionResult(
+            action="analyze_history",
+            ok=False,
+            message=f"分析失败: {exc}",
+            error_code="analysis_failed",
+        )
+
+
 def _handle_explain_finding_action(
     action: ChatAction,
     context: ChatContext,
     config: AppConfig,
 ) -> ActionResult:
-    """Explain a specific finding."""
+    """Explain a specific finding with AI analysis."""
     run_id = action.arguments.get("run_id") or context.current_run_id
     finding_id = action.arguments.get("finding_id")
 
@@ -1495,7 +1584,7 @@ def _handle_explain_finding_action(
                 error_code="run_not_found",
             )
 
-        # If specific finding_id is provided, filter to that finding
+        # Filter to specific finding if provided
         findings = result.get("findings", [])
         if finding_id:
             findings = [f for f in findings if f.get("finding_id") == finding_id]
@@ -1507,17 +1596,69 @@ def _handle_explain_finding_action(
                     error_code="finding_not_found",
                 )
 
+        if not findings:
+            return ActionResult(
+                action="explain_finding",
+                ok=False,
+                message="没有可解释的 Finding",
+                error_code="no_findings",
+            )
+
+        # Use AI to explain the finding
+        finding = findings[0]  # Explain the first/selected finding
+
+        # Build explanation prompt
+        prompt = f"""请用用户能理解的语言详细解释这个代码问题：
+
+**问题标题**: {finding.get('title', 'N/A')}
+**文件**: {finding.get('file', 'N/A')}:{finding.get('line_start', 'N/A')}-{finding.get('line_end', 'N/A')}
+**严重程度**: {finding.get('severity', 'N/A')}
+**分类**: {finding.get('category', 'N/A')}
+
+**代码片段**:
+```
+{finding.get('snippet', 'N/A')}
+```
+
+**原始描述**: {finding.get('description', 'N/A')}
+
+**证据状态**: {finding.get('evidence_status', 'N/A')}
+**置信度**: {finding.get('confidence', 'N/A')}
+
+请按以下结构解释：
+
+1. **这是什么问题？** - 用简单的语言描述问题本质
+2. **为什么这是个问题？** - 解释潜在的风险和后果
+3. **如何修复？** - 提供具体的修复建议和代码示例
+4. **证据分析** - 根据证据状态评估这个问题的可靠性
+
+请用中文回答，语言简洁清晰。"""
+
+        # Call AI model
+        from ai_pr_review.services.ai_client import AIClient
+
+        ai_client = AIClient(config)
+        messages = [{"role": "user", "content": prompt}]
+
+        import asyncio
+        response = asyncio.run(ai_client.chat(messages))
+        explanation = response.get("text", "")
+
         return ActionResult(
             action="explain_finding",
             ok=True,
-            message=f"找到 {len(findings)} 个 Finding",
-            data={"run_id": run_id, "findings": findings},
+            message=explanation,
+            data={
+                "finding": finding,
+                "explanation": explanation,
+                "run_id": run_id,
+            },
         )
     except Exception as exc:
         return ActionResult(
             action="explain_finding",
             ok=False,
-            message=f"查询 Finding 失败: {exc}",
+            message=f"解释失败: {exc}",
             error_code="explain_failed",
         )
 
@@ -1967,6 +2108,18 @@ def _config_path_from_context(ctx: click.Context | None) -> Path | None:
 @click.argument("pr_url")
 @click.option("--model", default=None, help="Override configured model name.")
 @click.option(
+    "--mode",
+    type=click.Choice(["auto", "quality", "balanced", "cost", "local", "remote"]),
+    default="auto",
+    help="Hybrid mode: auto=config, quality=remote first, balanced=mixed, cost=local first, local=offline, remote=remote only",
+)
+@click.option(
+    "--max-cost",
+    type=float,
+    default=None,
+    help="Maximum cost per review in USD (overrides config)",
+)
+@click.option(
     "--format",
     "output_format",
     type=click.Choice(["terminal", "markdown", "json"]),
@@ -2000,6 +2153,8 @@ def review_command(
     ctx: click.Context,
     pr_url: str,
     model: str | None,
+    mode: str,
+    max_cost: float | None,
     output_format: str,
     output: Path | None,
     publish_comment: bool,
@@ -2014,6 +2169,22 @@ def review_command(
 
     try:
         app_config = AppConfig.load(_config_path_from_context(ctx))
+
+        # 应用混合模式配置
+        if mode != "auto":
+            mode_map = {
+                "quality": "quality_first",
+                "balanced": "balanced",
+                "cost": "cost_optimized",
+                "local": "local_only",
+                "remote": "remote_only",
+            }
+            app_config.preferences.hybrid_strategy = mode_map[mode]
+
+        # 应用成本限制
+        if max_cost is not None:
+            app_config.preferences.max_cost_per_review = max_cost
+
         effective_format = infer_output_format(output_format, str(output) if output else None)
         execute_review_flow(
             console,
@@ -2542,19 +2713,42 @@ def chat_command(
 
     initial_state = "unconfigured" if needs_setup else "ready"
 
-    chat_context = ChatContext(
-        session_id=str(config_path or "transient-chat"),
-        language=config.preferences.language,
-        state=initial_state,
-        local_model=(
-            config.ai_client.model if config.provider.name.lower() in {"ollama", "local"} else None
-        ),
-        remote_model=(
-            config.ai_client.model
-            if config.provider.name.lower() not in {"ollama", "local"}
-            else None
-        ),
-    )
+    # Try to load previous ChatContext
+    saved_context = load_chat_context(config_path)
+    if saved_context and not needs_setup:
+        # Restore previous context
+        try:
+            chat_context = ChatContext(**saved_context)
+            console.print("[dim]已恢复上次会话状态[/dim]")
+        except Exception:
+            # If restoration fails, create new context
+            chat_context = ChatContext(
+                session_id=str(config_path or "transient-chat"),
+                language=config.preferences.language,
+                state=initial_state,
+                local_model=(
+                    config.ai_client.model if config.provider.name.lower() in {"ollama", "local"} else None
+                ),
+                remote_model=(
+                    config.ai_client.model
+                    if config.provider.name.lower() not in {"ollama", "local"}
+                    else None
+                ),
+            )
+    else:
+        chat_context = ChatContext(
+            session_id=str(config_path or "transient-chat"),
+            language=config.preferences.language,
+            state=initial_state,
+            local_model=(
+                config.ai_client.model if config.provider.name.lower() in {"ollama", "local"} else None
+            ),
+            remote_model=(
+                config.ai_client.model
+                if config.provider.name.lower() not in {"ollama", "local"}
+                else None
+            ),
+        )
 
     # Show configuration assistant welcome if needed
     if needs_setup and not message:
@@ -2593,6 +2787,9 @@ def chat_command(
     def handle_configure_github(act: ChatAction, ctx: ChatContext) -> ActionResult:
         return _handle_configure_github_action(act, ctx, config, console)
 
+    def handle_analyze_history(act: ChatAction, ctx: ChatContext) -> ActionResult:
+        return _handle_analyze_history_action(act, ctx, config)
+
     executor.register("chat", handle_chat)
     executor.register("start_review", handle_start_review)
     executor.register("create_review_plan", handle_create_plan)
@@ -2602,6 +2799,7 @@ def chat_command(
     executor.register("cancel_review", handle_cancel)
     executor.register("configure_provider", handle_configure_provider)
     executor.register("configure_github", handle_configure_github)
+    executor.register("analyze_history", handle_analyze_history)
 
     def send_message(messages: list[dict[str, Any]], user_text: str) -> str | None:
         try:

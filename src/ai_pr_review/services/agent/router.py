@@ -42,6 +42,9 @@ class ChatActionRouter:
             action = "configure_provider"
         elif any(keyword in normalized for keyword in ["配置 github", "github token", "configure github"]):
             action = "configure_github"
+        # Analysis actions
+        elif any(keyword in normalized for keyword in ["历史分析", "分析历史", "趋势分析", "analyze history", "history trend"]):
+            action = "analyze_history"
         # Review actions
         elif "生成审查计划" in normalized or "只看计划" in normalized or "review plan" in normalized:
             action = "create_review_plan"
@@ -83,6 +86,7 @@ class ChatActionRouter:
                 "create_review_plan",
                 "explain_finding",
                 "list_history",
+                "analyze_history",
                 "check_environment",
                 "cancel_review",
                 "configure_provider",
@@ -112,6 +116,7 @@ class ChatActionRouter:
                 "create_review_plan",
                 "explain_finding",
                 "list_history",
+                "analyze_history",
                 "check_environment",
                 "cancel_review",
                 "configure_provider",

@@ -550,6 +550,8 @@ class PreferencesConfig:
     ui_language: str = "zh-CN"
     chat_layout: str = "compact"
     auto_publish_comment: bool = False
+    hybrid_strategy: str = "balanced"  # 新增：双模型协作策略
+    max_cost_per_review: float = 0.50  # 新增：单次审查最大成本
 
 
 @dataclass
@@ -634,6 +636,10 @@ class AIClientConfig:
     max_cost_per_run: float = 5.0
     max_cost_per_24h: float = 50.0
     sliding_window_hours: int = 24
+
+    # 新增：本地模型配置
+    local_model: str = "qwen3.5:4b"
+    local_provider: str = "ollama"
 
     def __post_init__(self) -> None:
         try:
