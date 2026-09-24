@@ -34988,6 +34988,15 @@ function detailScrollDelta(name, shift) {
   return;
 }
 
+// src/review-report.ts
+function reviewReportPanels(report) {
+  const record = report ?? {};
+  return {
+    summary: typeof record.summary === "string" ? record.summary : "",
+    findings: Array.isArray(record.findings) ? record.findings : []
+  };
+}
+
 // src/app.tsx
 var orange = "#fb8147";
 var muted = "#808080";
@@ -35230,7 +35239,7 @@ function Composer(props) {
         if (text.toLowerCase().startsWith("/model") && response.result?.config) {
           props.onRuntimeChange(response.result.config);
         }
-        if (text.toLowerCase().startsWith("/review") && response.result?.report) {
+        if (response.result?.report) {
           props.onReviewReport(response.result.report);
         }
         props.onStatus("READY");
@@ -36162,6 +36171,12 @@ function App() {
   const dimensions = useTerminalDimensions();
   const compactHome = () => dimensions().height < 28;
   const appendMessage = (message) => setMessages((current) => [...current, message]);
+  const applyReviewReport = (report) => {
+    const panels = reviewReportPanels(report);
+    setReviewReport(report);
+    setReviewSummary(panels.summary);
+    setReviewFindings(panels.findings);
+  };
   const setErrorState = (message) => {
     setErrorMessage(message);
     setBackendStatus("ERROR");
@@ -36193,9 +36208,7 @@ function App() {
       args: [run.id]
     });
     if (response.ok && response.result?.report) {
-      setReviewReport(response.result.report);
-      setReviewSummary(String(response.result.report.summary ?? ""));
-      setReviewFindings(Array.isArray(response.result.report.findings) ? response.result.report.findings : []);
+      applyReviewReport(response.result.report);
       setHistoryOpen(false);
       setReviewStage("\u5386\u53F2\u62A5\u544A");
       setReviewDetail(`Run ${run.id} \xB7 ${run.created_at ?? ""}`);
@@ -36244,7 +36257,7 @@ function App() {
         setBackendStatus("ERROR");
       } else {
         if (response.result?.report)
-          setReviewReport(response.result.report);
+          applyReviewReport(response.result.report);
         if (response.result?.text)
           appendMessage({
             role: "assistant",
@@ -36830,11 +36843,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
       onSetup: () => setSetupOpen(true),
       onSessionChange: setSessionId,
       onNewSession: resetSessionUi,
-      onReviewReport: (report) => {
-        setReviewReport(report);
-        setReviewSummary(String(report.summary ?? ""));
-        setReviewFindings(Array.isArray(report.findings) ? report.findings : []);
-      },
+      onReviewReport: applyReviewReport,
       onReviewRequest: (url) => setPendingReviewUrl(url),
       onOpenFindings: () => {
         if (reviewFindings().length > 0)

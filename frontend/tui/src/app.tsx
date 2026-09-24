@@ -6,6 +6,7 @@ import { sendWithSessionRecovery } from "./session-recovery"
 import { commandCompletion, commandEnterAction, commandMatches } from "./command-menu"
 import { truncateMiddle, workspaceRootLabel } from "./format"
 import { detailScrollDelta } from "./keymap"
+import { reviewReportPanels } from "./review-report"
 import type { TextareaRenderable, KeyBinding, ScrollBoxRenderable } from "@opentui/core"
 
 const orange = "#fb8147"
@@ -322,7 +323,10 @@ function Composer(props: {
         if (text.toLowerCase().startsWith("/model") && response.result?.config) {
           props.onRuntimeChange(response.result.config as RuntimeSnapshot)
         }
-        if (text.toLowerCase().startsWith("/review") && response.result?.report) {
+        // Any command can return a report — `/review` finishes one, `/history
+        // <run>` restores one. Both must fill the review panels, otherwise the
+        // FINDINGS list stays empty and Ctrl+O silently refuses to open.
+        if (response.result?.report) {
           props.onReviewReport(response.result.report as ReviewReport)
         }
         props.onStatus("READY")
@@ -832,6 +836,15 @@ export function App() {
 
   const appendMessage = (message: ChatMessage) => setMessages((current) => [...current, message])
 
+  // Single place that turns a report into visible panels, so a new caller
+  // cannot populate the summary while forgetting the findings list.
+  const applyReviewReport = (report: ReviewReport) => {
+    const panels = reviewReportPanels(report)
+    setReviewReport(report)
+    setReviewSummary(panels.summary)
+    setReviewFindings(panels.findings as ReviewFinding[])
+  }
+
   const setErrorState = (message: string) => {
     setErrorMessage(message)
     setBackendStatus("ERROR")
@@ -855,9 +868,7 @@ export function App() {
     if (!run.id) return
     const response = await backend.request("command.execute", { name: "history", args: [run.id] })
     if (response.ok && response.result?.report) {
-      setReviewReport(response.result.report as ReviewReport)
-      setReviewSummary(String(response.result.report.summary ?? ""))
-      setReviewFindings(Array.isArray(response.result.report.findings) ? response.result.report.findings : [])
+      applyReviewReport(response.result.report as ReviewReport)
       setHistoryOpen(false)
       setReviewStage("历史报告")
       setReviewDetail(`Run ${run.id} · ${run.created_at ?? ""}`)
@@ -907,7 +918,7 @@ export function App() {
         appendMessage({ role: "assistant", content: response.error?.message ?? "PR 审查启动失败" })
         setBackendStatus("ERROR")
       } else {
-        if (response.result?.report) setReviewReport(response.result.report as ReviewReport)
+        if (response.result?.report) applyReviewReport(response.result.report as ReviewReport)
         if (response.result?.text) appendMessage({ role: "assistant", content: String(response.result.text) })
         if (!response.result?.cancelled) setBackendStatus("READY")
       }
@@ -1201,11 +1212,7 @@ export function App() {
         onSetup={() => setSetupOpen(true)}
         onSessionChange={setSessionId}
         onNewSession={resetSessionUi}
-        onReviewReport={(report) => {
-          setReviewReport(report)
-          setReviewSummary(String(report.summary ?? ""))
-          setReviewFindings(Array.isArray(report.findings) ? report.findings : [])
-        }}
+        onReviewReport={applyReviewReport}
         onReviewRequest={(url) => setPendingReviewUrl(url)}
         onOpenFindings={() => { if (reviewFindings().length > 0) setFindingsOpen(true) }}
         onOpenHistory={() => void openHistory()}
