@@ -2340,11 +2340,17 @@ async def _send_chat_message(config: AppConfig, messages: list[dict[str, Any]]) 
     if not provider_config.api_key and provider_config.name.lower() not in {"ollama", "local"}:
         raise click.ClickException(_missing_api_key_message(provider_config.name))
     provider = create_model_provider(provider_config)
+    chat_options: dict[str, Any] = {
+        "system_prompt": _response_language_instruction(config.preferences.language),
+        "max_tokens": config.ai_client.max_tokens,
+        "timeout_seconds": config.ai_client.timeout_seconds,
+    }
+    if provider_config.name.lower() in {"ollama", "local"}:
+        # Keep local thinking models in the content channel for ordinary Chat.
+        chat_options["reasoning_effort"] = "none"
     response = await provider.chat(
         messages,
-        system_prompt=_response_language_instruction(config.preferences.language),
-        max_tokens=config.ai_client.max_tokens,
-        timeout_seconds=config.ai_client.timeout_seconds,
+        **chat_options,
     )
     return response.text
 

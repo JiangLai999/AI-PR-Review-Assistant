@@ -341,6 +341,90 @@ def test_openai_provider_uses_reasoning_content_when_content_is_null(monkeypatch
     assert response.text.startswith('{"summary"')
 
 
+def test_openai_provider_uses_reasoning_when_content_is_empty(monkeypatch):
+    """Ollama returns Qwen3.5 thinking in `reasoning`, not `content`."""
+    provider = OpenAICompatibleProvider(
+        ModelProviderConfig.from_name(
+            "custom",
+            api_key="key",
+            base_url="https://example.com/v1",
+            model_name="m",
+            api_format="openai",
+        )
+    )
+
+    class DummyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "",
+                                "reasoning": "本地模型正常",
+                            }
+                        }
+                    ]
+                }
+            ).encode()
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: DummyResponse())
+    response = provider._chat_sync([], max_tokens=8, timeout_seconds=5)
+    assert response.text == "本地模型正常"
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_streams_reasoning_effort_and_uses_reasoning_fallback(monkeypatch):
+    provider = OpenAICompatibleProvider(
+        ModelProviderConfig.from_name(
+            "ollama",
+            api_key="",
+            model_name="qwen3.5:4b",
+        )
+    )
+    payloads = []
+
+    class StreamResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"reasoning":"think "}}]}\n'
+            yield b'data: {"choices":[{"delta":{"reasoning":"fallback"}}]}\n'
+            yield b"data: [DONE]\n"
+
+    def fake_urlopen(req, **kwargs):
+        payloads.append(json.loads(req.data.decode()))
+        return StreamResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    deltas = []
+
+    async def on_delta(delta):
+        deltas.append(delta)
+
+    response = await provider.stream_chat(
+        [{"role": "user", "content": "hi"}],
+        on_delta,
+        max_tokens=16,
+        timeout_seconds=2,
+        reasoning_effort="none",
+    )
+
+    assert payloads[0]["reasoning_effort"] == "none"
+    assert response.text == "think fallback"
+    assert deltas == ["think fallback"]
+
+
 def test_deepseek_review_policy_disables_thinking_and_uses_json(monkeypatch):
     from ai_pr_review.services.review_policy import structured_review_params
 

@@ -139,8 +139,9 @@ class OpenAICompatibleProvider(BaseModelProvider):
             **self.config.extra_params,
             "stream": True,
         }
-        if "think" in kwargs:
-            payload["think"] = kwargs["think"]
+        for passthrough_key in ("think", "reasoning_effort"):
+            if passthrough_key in kwargs:
+                payload[passthrough_key] = kwargs[passthrough_key]
         system_prompt = kwargs.get("system_prompt", "")
         if system_prompt and not any(message.get("role") == "system" for message in messages):
             payload["messages"] = [{"role": "system", "content": system_prompt}, *messages]
@@ -155,6 +156,7 @@ class OpenAICompatibleProvider(BaseModelProvider):
             method="POST",
         )
         parts: list[str] = []
+        reasoning_parts: list[str] = []
         usage: dict[str, Any] = {}
         try:
             response = self._open_stream(req, kwargs["timeout_seconds"], cancel_event)
@@ -196,6 +198,22 @@ class OpenAICompatibleProvider(BaseModelProvider):
                         if isinstance(content, str) and content:
                             parts.append(content)
                             emit(content)
+                        # Ollama/Qwen thinking models stream their chain of
+                        # thought separately. Keep it as a last-resort answer,
+                        # but do not interleave it with real content.
+                        reasoning = (
+                            delta.get("reasoning") or delta.get("reasoning_content")
+                            if isinstance(delta, dict)
+                            else None
+                        )
+                        if isinstance(reasoning, list):
+                            reasoning = "".join(
+                                str(block.get("text", ""))
+                                for block in reasoning
+                                if isinstance(block, dict)
+                            )
+                        if isinstance(reasoning, str) and reasoning:
+                            reasoning_parts.append(reasoning)
         except error.HTTPError as exc:
             if exc.code == 401:
                 raise AIAuthenticationError(
@@ -215,6 +233,12 @@ class OpenAICompatibleProvider(BaseModelProvider):
         finally:
             active_response.clear()
         text = "".join(parts)
+        if not text and not cancel_event.is_set():
+            # Some reasoning models ignore `reasoning_effort` and only return
+            # the reasoning channel. Surface it instead of a hard format error.
+            text = "".join(reasoning_parts).strip()
+            if text:
+                emit(text)
         if not text and not cancel_event.is_set():
             raise AIResponseFormatError("模型流式响应没有可解析的文本内容。")
         return ProviderResponse(
@@ -333,7 +357,7 @@ class OpenAICompatibleProvider(BaseModelProvider):
             "max_tokens": kwargs["max_tokens"],
             **self.config.extra_params,
         }
-        for passthrough_key in ("think",):
+        for passthrough_key in ("think", "reasoning_effort"):
             if passthrough_key in kwargs:
                 payload[passthrough_key] = kwargs[passthrough_key]
         # Structured output is a review-task policy, not a global chat default.
@@ -414,7 +438,9 @@ class OpenAICompatibleProvider(BaseModelProvider):
             message.get("output_text") if isinstance(message, dict) else None,
             message.get("reasoning_content") if isinstance(message, dict) else None,
             message.get("thinking") if isinstance(message, dict) else None,
+            message.get("reasoning") if isinstance(message, dict) else None,
             payload.get("output_text"),
+            payload.get("reasoning"),
         ):
             if isinstance(candidate, str) and candidate.strip():
                 return candidate.strip()

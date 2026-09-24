@@ -478,17 +478,25 @@ class JsonlBackend:
         provider = create_model_provider(provider_config)
         text = self._truncate(text, 12000)
         history = [*session.messages, {"role": "user", "content": text}]
-        response = await provider.stream_chat(
-            history,
-            on_delta,
-            cancel_event=cancel_event,
-            system_prompt=(
+        chat_options: dict[str, Any] = {
+            "system_prompt": (
                 "Respond in English unless the user explicitly asks for another language."
                 if self.config.preferences.language.lower().startswith("en")
                 else "请默认使用中文回答，除非用户明确要求使用其他语言。"
             ),
-            max_tokens=self.config.ai_client.max_tokens,
-            timeout_seconds=self.config.ai_client.timeout_seconds,
+            "max_tokens": self.config.ai_client.max_tokens,
+            "timeout_seconds": self.config.ai_client.timeout_seconds,
+        }
+        if provider_config.name.lower() in {"ollama", "local"}:
+            # Qwen3.5 / DeepSeek-R1 style locally hosted models otherwise spend
+            # the whole answer budget in the reasoning channel and return an
+            # empty `content`, which Chat surfaces as a connection failure.
+            chat_options["reasoning_effort"] = "none"
+        response = await provider.stream_chat(
+            history,
+            on_delta,
+            cancel_event=cancel_event,
+            **chat_options,
         )
         if cancel_event.is_set():
             raise asyncio.CancelledError

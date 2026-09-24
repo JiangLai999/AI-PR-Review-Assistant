@@ -188,11 +188,14 @@ function Composer(props: {
   const [modeIndex, setModeIndex] = createSignal(0)
   const [menuOpen, setMenuOpen] = createSignal(true)
   const [menuIndex, setMenuIndex] = createSignal(0)
+  const [copyNotice, setCopyNotice] = createSignal("")
   const renderer = useRenderer()
   const dimensions = useTerminalDimensions()
   let textarea: TextareaRenderable | undefined
   let submitLock = false
   let dismissedDraft: string | undefined
+  let lastCtrlCPressedAt = 0
+  let copyNoticeTimer: ReturnType<typeof setTimeout> | undefined
   const compact = () => dimensions().height < 28
   const matches = () => menuOpen() && dismissedDraft !== value() && props.focused !== false ? commandMatches(value()) : []
   const visibleMatches = () => {
@@ -208,12 +211,49 @@ function Composer(props: {
     { name: "return", shift: true, action: "newline" },
     { name: "enter", action: "submit" },
     { name: "enter", shift: true, action: "newline" },
+    { name: "a", ctrl: true, action: "select-all" },
   ]
 
   const setDraft = (text: string) => {
     textarea?.setText(text)
     setValue(text)
     props.onDraftChange(text)
+  }
+
+  const showCopyNotice = (message: string, durationMs = 1500) => {
+    if (copyNoticeTimer) clearTimeout(copyNoticeTimer)
+    setCopyNotice(message)
+    copyNoticeTimer = setTimeout(() => setCopyNotice(""), durationMs)
+  }
+
+  const copyToClipboard = (text: string): boolean => {
+    if (!text) return false
+    // Windows clip.exe is synchronous and handles CJK/emoji reliably. OSC52
+    // remains the fallback for remote/alternate terminals and non-Windows.
+    if (process.platform === "win32") {
+      try {
+        const result = Bun.spawnSync({ cmd: ["clip.exe"], stdin: new Blob([text]) })
+        if (result.exitCode === 0) return true
+      } catch {
+        // Fall through to OSC52.
+      }
+    }
+    try {
+      return renderer.copyToClipboardOSC52(text)
+    } catch {
+      return false
+    }
+  }
+
+  const selectedText = (): string => {
+    const editorSelection =
+      props.focused !== false && textarea?.hasSelection()
+        ? textarea.getSelectedText()
+        : ""
+    const screenSelection = renderer.hasSelection
+      ? renderer.getSelection()?.getSelectedText() ?? ""
+      : ""
+    return editorSelection || screenSelection
   }
 
   onMount(() => {
@@ -226,6 +266,10 @@ function Composer(props: {
         setDraft(initialDraft)
       }
     }, 0)
+  })
+
+  onCleanup(() => {
+    if (copyNoticeTimer) clearTimeout(copyNoticeTimer)
   })
 
   const submit = async (override?: string) => {
@@ -367,15 +411,29 @@ function Composer(props: {
   }
 
   useKeyboard((key) => {
-    // Ctrl+C must keep working while a dialog owns the focus: otherwise the
-    // only way out of a running task is killing the terminal.
+    // Ctrl+C is copy-first. A dialog must not lose its running-task cancel
+    // path, and an idle Chat must not quit on a single accidental press.
     if (isCtrlKey(key, "c")) {
+      key.stopPropagation?.()
+      key.preventDefault?.()
+      const text = selectedText()
+      if (text) {
+        const copied = copyToClipboard(text)
+        showCopyNotice(copied ? "已复制选中文本到剪贴板" : "复制失败：剪贴板不可用")
+        return
+      }
       if (props.busy) {
         props.onCancel()
-        key.stopPropagation()
-      } else {
-        renderer.destroy()
+        showCopyNotice("已请求取消当前任务")
+        return
       }
+      const now = Date.now()
+      if (now - lastCtrlCPressedAt <= 1500) {
+        renderer.destroy()
+        return
+      }
+      lastCtrlCPressedAt = now
+      showCopyNotice("没有选中文本；再按一次 Ctrl+C 退出", 1600)
       return
     }
     if (props.focused === false) return
@@ -470,6 +528,9 @@ function Composer(props: {
         <text fg="#eeeeee">{props.runtime.model ?? "model"}</text>
         <text fg={muted}>{props.runtime.provider_display ?? props.runtime.provider ?? "provider"}</text>
       </box>
+      <Show when={copyNotice()}>
+        <text fg="#f3c742" paddingLeft={2} marginTop={1}>{copyNotice()}</text>
+      </Show>
       <box flexDirection="row" justifyContent="space-between" paddingLeft={1} paddingRight={1} marginTop={1}>
         <text><span style={{ fg: "#eeeeee" }}>Enter</span> <span style={{ fg: muted }}>发送</span></text>
         <text><span style={{ fg: "#eeeeee" }}>Shift+Enter</span> <span style={{ fg: muted }}>换行</span></text>

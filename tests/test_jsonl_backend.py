@@ -980,3 +980,36 @@ def test_config_options_expose_cloud_and_local_model_choices(tmp_path: Path) -> 
     assert local_options["current"]["remote_provider"] == "deepseek"
     assert local_options["current"]["remote_model"] == "deepseek-flash"
     assert local_options["current"]["remote_api_key_configured"] is True
+
+
+def test_local_chat_disables_reasoning_channel(monkeypatch, tmp_path: Path) -> None:
+    from ai_pr_review.services.model_providers.base import ProviderResponse
+
+    async def run() -> None:
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=lambda event: None)
+        backend._apply_setup({"runtime_profile": "local", "local_model": "qwen3.5:4b"})
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        captured: dict[str, object] = {}
+
+        class FakeProvider:
+            async def stream_chat(self, messages, on_delta, **kwargs):
+                captured.update(kwargs)
+                await on_delta("本地模型正常")
+                return ProviderResponse(text="本地模型正常")
+
+        monkeypatch.setattr(
+            "ai_pr_review.backend.jsonl_server.create_model_provider",
+            lambda config: FakeProvider(),
+        )
+        response = await backend.handle(
+            {
+                "id": "turn",
+                "method": "chat.send",
+                "params": {"session_id": session["session_id"], "text": "你好"},
+            }
+        )
+
+        assert response[0]["ok"] is True
+        assert captured["reasoning_effort"] == "none"
+
+    asyncio.run(run())

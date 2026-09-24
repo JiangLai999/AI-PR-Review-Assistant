@@ -1943,3 +1943,32 @@ def test_export_run_rebuilds_markdown_and_json_from_history(monkeypatch, tmp_pat
         json.loads(js.read_text(encoding="utf-8"))["result"]["findings"][0]["category"]
         == "security"
     )
+
+
+def test_plain_chat_disables_reasoning_for_local_provider(monkeypatch):
+    import asyncio
+
+    from ai_pr_review.config import ModelProviderConfig, ProviderConfig
+    from ai_pr_review.services.model_providers.base import ProviderResponse
+
+    config = AppConfig.from_env()
+    config.local_provider = ProviderConfig.from_model_provider(
+        ModelProviderConfig.from_name("ollama", model_name="qwen3.5:4b")
+    )
+    config.preferences.hybrid_strategy = "local_only"
+    config._sync_runtime_sections()
+
+    captured = {}
+
+    class FakeProvider:
+        async def chat(self, messages, **kwargs):
+            captured.update(kwargs)
+            return ProviderResponse(text="本地模型正常")
+
+    monkeypatch.setattr(cli_module, "create_model_provider", lambda config: FakeProvider())
+    result = asyncio.run(
+        cli_module._send_chat_message(config, [{"role": "user", "content": "hi"}])
+    )
+
+    assert result == "本地模型正常"
+    assert captured["reasoning_effort"] == "none"
