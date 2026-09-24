@@ -209,6 +209,8 @@ Chat 快捷键：`Ctrl+C` 在存在选区时复制到剪贴板；无选区时第
 
 Findings 详情：`Ctrl+O` 打开；没有 findings 时会提示先执行 `/review` 或 `/history <run_id>`。列表模式下 `↑↓` 选择、`←→` 翻页、`Ctrl/Alt+↑↓` 或 `PgUp/PgDn` 滚动详情；按 `Tab` 可把焦点切到详情，再用 `↑↓ / PgUp / PgDn / Home / End` 阅读完整问题、建议、证据和代码片段。
 
+Chat 内配置助手（`Ctrl+P` / `/setup`）为六段式：运行模式 → 模型服务与连接 → API Key / 本地模型 → 模型 → GitHub Token → 界面与输出偏好 → 确认保存。保存写入最高优先级私有配置，云端切换会保留远程槽与已保存 Key。
+
 ---
 
 ## 配置文件

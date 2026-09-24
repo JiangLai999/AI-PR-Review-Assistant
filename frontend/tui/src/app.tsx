@@ -571,18 +571,35 @@ type LocalSetupOption = {
   models: string[]
 }
 
+type ChoiceOption = {
+  value: string
+  label: string
+}
+
 type SetupOptions = {
   providers: ProviderSetupOption[]
+  api_formats?: ChoiceOption[]
+  ui_languages?: ChoiceOption[]
+  output_formats?: ChoiceOption[]
+  chat_layouts?: ChoiceOption[]
   local: LocalSetupOption
   current: {
     runtime_profile?: string
     provider?: string
     model?: string
+    api_format?: string
     api_key_configured?: boolean
+    github_token_configured?: boolean
     remote_provider?: string
     remote_model?: string
     remote_base_url?: string
+    remote_api_format?: string
     remote_api_key_configured?: boolean
+    ui_language?: string
+    response_language?: string
+    output_format?: string
+    auto_publish_comment?: boolean
+    chat_layout?: string
     local_model?: string
   }
 }
@@ -605,7 +622,7 @@ const stepTitles: Record<SetupStep, string> = {
   summary: "确认并保存",
 }
 
-function SetupDialog(props: SetupDialogProps) {
+function LegacySetupDialog(props: SetupDialogProps) {
   const dimensions = useTerminalDimensions()
   const initialRuntime = runtimeOptions.findIndex((option) => option.value === props.runtime.runtime_profile)
   const [step, setStep] = createSignal<SetupStep>("runtime")
@@ -893,6 +910,618 @@ function SetupDialog(props: SetupDialogProps) {
             : step() === "key"
               ? "Enter 确认 Key · Esc 取消"
               : "Enter 下一步 · ← 返回 · Esc 取消"}
+      </text>
+    </box>
+  )
+}
+
+type SetupScreen =
+  | "runtime"
+  | "provider"
+  | "base_url"
+  | "api_format"
+  | "api_key"
+  | "model"
+  | "local_base_url"
+  | "local_model"
+  | "github"
+  | "ui_language"
+  | "response_language"
+  | "output_format"
+  | "auto_publish"
+  | "chat_layout"
+  | "summary"
+
+const screenStages: Record<SetupScreen, number> = {
+  runtime: 1,
+  provider: 2,
+  base_url: 2,
+  api_format: 2,
+  api_key: 3,
+  model: 3,
+  local_base_url: 2,
+  local_model: 3,
+  github: 4,
+  ui_language: 5,
+  response_language: 5,
+  output_format: 5,
+  auto_publish: 5,
+  chat_layout: 5,
+  summary: 6,
+}
+
+const stageNames: Record<number, string> = {
+  1: "运行模式",
+  2: "模型服务",
+  3: "凭据与模型",
+  4: "GitHub Token",
+  5: "界面与输出",
+  6: "确认保存",
+}
+
+const screenTitles: Record<SetupScreen, string> = {
+  runtime: "选择运行模式",
+  provider: "选择模型供应商",
+  base_url: "配置 API Base URL",
+  api_format: "选择 API 协议格式",
+  api_key: "配置 API Key",
+  model: "选择模型",
+  local_base_url: "配置本地 Ollama Endpoint",
+  local_model: "选择本地模型",
+  github: "配置 GitHub Token",
+  ui_language: "选择界面语言",
+  response_language: "选择模型回复语言",
+  output_format: "选择默认输出格式",
+  auto_publish: "是否自动发布 GitHub 评论",
+  chat_layout: "选择 Chat 布局",
+  summary: "确认并保存",
+}
+
+function SetupWizardDialog(props: SetupDialogProps) {
+  const dimensions = useTerminalDimensions()
+  const [screen, setScreen] = createSignal<SetupScreen>("runtime")
+  const [options, setOptions] = createSignal<SetupOptions>()
+  const [loading, setLoading] = createSignal(true)
+  const [busy, setBusy] = createSignal(false)
+  const [error, setError] = createSignal("")
+  const [inputValue, setInputValue] = createSignal("")
+  const [inputFocused, setInputFocused] = createSignal(false)
+  let inputRef: InputRenderable | undefined
+
+  const [runtimeIndex, setRuntimeIndex] = createSignal(0)
+  const [providerIndex, setProviderIndex] = createSignal(0)
+  const [modelIndex, setModelIndex] = createSignal(0)
+  const [localModelIndex, setLocalModelIndex] = createSignal(0)
+  const [apiFormatIndex, setApiFormatIndex] = createSignal(0)
+  const [uiLanguageIndex, setUiLanguageIndex] = createSignal(0)
+  const [responseLanguageIndex, setResponseLanguageIndex] = createSignal(0)
+  const [outputFormatIndex, setOutputFormatIndex] = createSignal(0)
+  const [autoPublishIndex, setAutoPublishIndex] = createSignal(1)
+  const [chatLayoutIndex, setChatLayoutIndex] = createSignal(0)
+  const [baseUrl, setBaseUrl] = createSignal("")
+  const [apiKey, setApiKey] = createSignal("")
+  const [localBaseUrl, setLocalBaseUrl] = createSignal("")
+  const [githubToken, setGithubToken] = createSignal("")
+
+  const providers = () => options()?.providers ?? []
+  const apiFormats = () => options()?.api_formats ?? [{ value: "openai", label: "OpenAI 兼容" }]
+  const uiLanguages = () =>
+    options()?.ui_languages ?? [
+      { value: "zh-CN", label: "中文 / Chinese" },
+      { value: "en-US", label: "English" },
+    ]
+  const outputFormats = () =>
+    options()?.output_formats ?? [
+      { value: "terminal", label: "Terminal" },
+      { value: "markdown", label: "Markdown" },
+      { value: "json", label: "JSON" },
+    ]
+  const chatLayouts = () =>
+    options()?.chat_layouts ?? [
+      { value: "compact", label: "紧凑 / Compact" },
+      { value: "split", label: "分栏 / Split" },
+      { value: "plain", label: "纯文本 / Plain" },
+    ]
+  const local = () => options()?.local
+  const selectedRuntime = () => runtimeOptions[runtimeIndex()]?.value ?? "cloud"
+  const needsCloud = () => selectedRuntime() === "cloud" || selectedRuntime() === "hybrid"
+  const selectedProvider = () => providers()[Math.min(providerIndex(), Math.max(0, providers().length - 1))]
+  const cloudModels = () => selectedProvider()?.models ?? []
+  const selectedModel = () =>
+    cloudModels()[Math.min(modelIndex(), Math.max(0, cloudModels().length - 1))] ?? ""
+  const localModels = () => local()?.models ?? []
+  const selectedLocalModel = () =>
+    localModels()[Math.min(localModelIndex(), Math.max(0, localModels().length - 1))] ?? ""
+  const selectedApiFormat = () => apiFormats()[apiFormatIndex()]?.value ?? "openai"
+  const selectedUiLanguage = () => uiLanguages()[uiLanguageIndex()]?.value ?? "zh-CN"
+  const selectedResponseLanguage = () => uiLanguages()[responseLanguageIndex()]?.value ?? "zh-CN"
+  const selectedOutputFormat = () => outputFormats()[outputFormatIndex()]?.value ?? "terminal"
+  const selectedChatLayout = () => chatLayouts()[chatLayoutIndex()]?.value ?? "compact"
+  const autoPublish = () => autoPublishIndex() === 0
+  const remoteKeyConfigured = () =>
+    options()?.current.remote_api_key_configured ?? options()?.current.api_key_configured ?? false
+  const githubConfigured = () => options()?.current.github_token_configured ?? false
+
+  const indexOfValue = (items: ChoiceOption[], value?: string) => {
+    const index = items.findIndex((item) => item.value === value)
+    return index >= 0 ? index : 0
+  }
+
+  const isInputScreen = (value: SetupScreen) =>
+    value === "base_url" || value === "api_key" || value === "local_base_url" || value === "github"
+
+  const cloudOrder: SetupScreen[] = [
+    "runtime",
+    "provider",
+    "base_url",
+    "api_format",
+    "api_key",
+    "model",
+    "github",
+    "ui_language",
+    "response_language",
+    "output_format",
+    "auto_publish",
+    "chat_layout",
+    "summary",
+  ]
+  const localOrder: SetupScreen[] = [
+    "runtime",
+    "local_base_url",
+    "local_model",
+    "github",
+    "ui_language",
+    "response_language",
+    "output_format",
+    "auto_publish",
+    "chat_layout",
+    "summary",
+  ]
+  const order = () => (needsCloud() ? cloudOrder : localOrder)
+
+  const inputDefault = (target: SetupScreen): string => {
+    if (target === "base_url") return baseUrl() || selectedProvider()?.base_url || ""
+    if (target === "local_base_url") return localBaseUrl() || local()?.base_url || ""
+    return ""
+  }
+
+  const focusInputSoon = () => {
+    setInputFocused(false)
+    setTimeout(() => setInputFocused(true), 50)
+  }
+
+  const goTo = (target: SetupScreen) => {
+    setError("")
+    setInputFocused(false)
+    if (isInputScreen(target)) {
+      setInputValue(inputDefault(target))
+      setScreen(target)
+      focusInputSoon()
+    } else {
+      setScreen(target)
+    }
+  }
+
+  const commitInput = () => {
+    const value = (inputRef?.value ?? inputValue()).trim()
+    if (screen() === "base_url") setBaseUrl(value)
+    else if (screen() === "api_key") setApiKey(value)
+    else if (screen() === "local_base_url") setLocalBaseUrl(value)
+    else if (screen() === "github") setGithubToken(value)
+  }
+
+  const apply = async () => {
+    if (busy()) return
+    if (isInputScreen(screen())) commitInput()
+    setBusy(true)
+    setError("")
+    try {
+      const payload: Record<string, unknown> = {
+        runtime_profile: selectedRuntime(),
+        github_token: githubToken().trim(),
+        ui_language: selectedUiLanguage(),
+        response_language: selectedResponseLanguage(),
+        output_format: selectedOutputFormat(),
+        auto_publish_comment: autoPublish(),
+        chat_layout: selectedChatLayout(),
+      }
+      if (needsCloud()) {
+        const provider = selectedProvider()
+        if (!provider) throw new Error("没有可用的云端 Provider 配置。")
+        payload.provider_name = provider.name
+        payload.model_name = selectedModel()
+        payload.base_url = baseUrl().trim() || provider.base_url
+        payload.api_format = selectedApiFormat()
+        if (apiKey().trim()) payload.api_key = apiKey().trim()
+      } else {
+        const localConfig = local()
+        if (!localConfig) throw new Error("没有可用的本地模型配置。")
+        payload.local_provider = localConfig.provider
+        payload.local_model = selectedLocalModel()
+        payload.local_base_url = localBaseUrl().trim() || localConfig.base_url
+        payload.local_api_format = localConfig.api_format
+      }
+      const response = await props.backend.request("config.setup", payload)
+      if (!response.ok) throw new Error(response.error?.message ?? "配置保存失败")
+      props.onApplied(response.result as RuntimeSnapshot)
+      props.onClose()
+    } catch (cause) {
+      const message = String(cause)
+      setError(message)
+      if (needsCloud() && message.includes("API Key")) goTo("api_key")
+      else if (message.includes("GitHub Token")) goTo("github")
+      else if (message.includes("模型")) goTo("model")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const next = () => {
+    if (isInputScreen(screen())) commitInput()
+    const current = screen()
+    if (current === "summary") {
+      void apply()
+      return
+    }
+    const currentOrder = order()
+    const index = currentOrder.indexOf(current)
+    const nextScreen = currentOrder[index + 1]
+    if (nextScreen) goTo(nextScreen)
+  }
+
+  const previous = () => {
+    const current = screen()
+    if (current === "runtime") return
+    const currentOrder = order()
+    const index = currentOrder.indexOf(current)
+    const prevScreen = currentOrder[index - 1]
+    if (prevScreen) goTo(prevScreen)
+  }
+
+  onMount(async () => {
+    try {
+      const response = await props.backend.request("config.options", {}, { timeoutMs: PROBE_TIMEOUT_MS })
+      if (!response.ok) throw new Error(response.error?.message ?? "无法读取配置选项")
+      const payload = response.result as SetupOptions
+      setOptions(payload)
+      const initialRuntime = runtimeOptions.findIndex((option) => option.value === props.runtime.runtime_profile)
+      setRuntimeIndex(initialRuntime >= 0 ? initialRuntime : 0)
+      const currentProvider = payload.providers.findIndex(
+        (item) => item.name === (payload.current.remote_provider ?? payload.current.provider),
+      )
+      const providerIndexValue = currentProvider >= 0 ? currentProvider : 0
+      setProviderIndex(providerIndexValue)
+      const provider = payload.providers[providerIndexValue]
+      setBaseUrl(payload.current.remote_base_url ?? provider?.base_url ?? "")
+      setApiFormatIndex(
+        indexOfValue(
+          payload.api_formats ?? [],
+          payload.current.remote_api_format ?? provider?.api_format,
+        ),
+      )
+      const currentModel = provider?.models.indexOf(payload.current.remote_model ?? payload.current.model ?? "") ?? -1
+      setModelIndex(currentModel >= 0 ? currentModel : 0)
+      const localConfig = payload.local
+      setLocalBaseUrl(localConfig.base_url)
+      const localIndex = localConfig.models.indexOf(payload.current.local_model ?? "")
+      setLocalModelIndex(localIndex >= 0 ? localIndex : 0)
+      setUiLanguageIndex(indexOfValue(payload.ui_languages ?? [], payload.current.ui_language))
+      setResponseLanguageIndex(
+        indexOfValue(payload.ui_languages ?? [], payload.current.response_language),
+      )
+      setOutputFormatIndex(indexOfValue(payload.output_formats ?? [], payload.current.output_format))
+      setChatLayoutIndex(indexOfValue(payload.chat_layouts ?? [], payload.current.chat_layout))
+      setAutoPublishIndex(payload.current.auto_publish_comment ? 0 : 1)
+    } catch (cause) {
+      setError(String(cause))
+    } finally {
+      setLoading(false)
+    }
+  })
+
+  useKeyboard((key) => {
+    if (key.name === "escape" && !busy()) {
+      props.onClose()
+      return
+    }
+    if (key.name === "left" && (key.ctrl === true || key.meta === true) && !busy()) {
+      previous()
+      return
+    }
+    if (key.name === "left" && !busy() && !isInputScreen(screen())) {
+      previous()
+      return
+    }
+    if (isEnterKey(key) && !busy()) {
+      if (isInputScreen(screen())) return
+      if (screen() === "summary") void apply()
+      else next()
+    }
+  })
+
+  const dialogWidth = 74
+  const dialogHeight = screen() === "provider" || screen() === "summary" ? 24 : 22
+  const left = Math.max(2, Math.floor((dimensions().width - dialogWidth) / 2))
+  const top = Math.max(0, Math.floor((dimensions().height - dialogHeight) / 2))
+
+  const renderInput = (title: string, placeholder: string) => (
+    <box marginTop={1} flexDirection="column">
+      <text fg="#eeeeee">{title}</text>
+      <box marginTop={1} backgroundColor="#202020" paddingLeft={1} paddingRight={1}>
+        <input
+          ref={(node) => { inputRef = node }}
+          value={inputValue()}
+          placeholder={placeholder}
+          focused={inputFocused()}
+          onContentChange={() => setInputValue(inputRef?.value ?? "")}
+          onSubmit={() => {
+            commitInput()
+            next()
+          }}
+          flexGrow={1}
+        />
+      </box>
+    </box>
+  )
+
+  return (
+    <box position="absolute" left={left} top={top} width={dialogWidth} height={dialogHeight} backgroundColor="#171717" borderStyle="single" borderColor={orange} padding={2} zIndex={100} flexDirection="column">
+      <text fg={orange}>配置助手 // SETUP WIZARD</text>
+      <text fg={muted}>
+        {screenStages[screen()]}/6 · {stageNames[screenStages[screen()]]} · {screenTitles[screen()]}
+      </text>
+      <Show when={loading()}><text fg={muted}>读取配置选项中...</text></Show>
+      <Show when={!loading() && screen() === "runtime"}>
+        <box marginTop={1} flexGrow={1}>
+          <select
+            options={runtimeOptions}
+            selectedIndex={runtimeIndex()}
+            focused
+            showDescription
+            width="100%"
+            height={8}
+            selectedBackgroundColor="#5a2e1c"
+            selectedTextColor="#ffffff"
+            descriptionColor={muted}
+            selectedDescriptionColor="#ffd0bb"
+            onChange={(index) => setRuntimeIndex(index)}
+          />
+        </box>
+      </Show>
+      <Show when={!loading() && screen() === "provider"}>
+        <box marginTop={1} flexGrow={1}>
+          <select
+            options={providers().map((provider) => ({
+              name: provider.display_name,
+              description: `${provider.default_model} · ${provider.base_url || "需要填写 Endpoint"}`,
+              value: provider.name,
+            }))}
+            selectedIndex={providerIndex()}
+            focused
+            showDescription
+            width="100%"
+            height={12}
+            selectedBackgroundColor="#5a2e1c"
+            selectedTextColor="#ffffff"
+            descriptionColor={muted}
+            selectedDescriptionColor="#ffd0bb"
+            onChange={(index) => {
+              setProviderIndex(index)
+              const provider = providers()[index]
+              if (provider) {
+                setBaseUrl(provider.base_url)
+                setApiFormatIndex(indexOfValue(apiFormats(), provider.api_format))
+                setModelIndex(0)
+              }
+              setApiKey("")
+            }}
+          />
+          <text fg={muted}>自定义 Endpoint / headers 等高级项仍可通过 pr-review config --advanced 配置。</text>
+        </box>
+      </Show>
+      <Show when={!loading() && screen() === "base_url"}>
+        {renderInput("API Base URL", "https://api.example.com/v1")}
+      </Show>
+      <Show when={!loading() && screen() === "api_format"}>
+        <box marginTop={1} flexGrow={1}>
+          <select
+            options={apiFormats().map((format) => ({
+              name: format.label,
+              description: format.value,
+              value: format.value,
+            }))}
+            selectedIndex={apiFormatIndex()}
+            focused
+            showDescription
+            width="100%"
+            height={6}
+            selectedBackgroundColor="#5a2e1c"
+            selectedTextColor="#ffffff"
+            descriptionColor={muted}
+            selectedDescriptionColor="#ffd0bb"
+            onChange={(index) => setApiFormatIndex(index)}
+          />
+        </box>
+      </Show>
+      <Show when={!loading() && screen() === "api_key"}>
+        {renderInput(
+          `${selectedProvider()?.display_name ?? "Provider"} API Key`,
+          remoteKeyConfigured() ? "已配置，留空保留现有 Key" : "粘贴 API Key",
+        )}
+      </Show>
+      <Show when={!loading() && screen() === "model"}>
+        <box marginTop={1} flexGrow={1}>
+          <select
+            options={cloudModels().map((model) => ({
+              name: model,
+              description: model === selectedProvider()?.default_model ? "Provider 默认模型" : "预设模型",
+              value: model,
+            }))}
+            selectedIndex={modelIndex()}
+            focused
+            showDescription
+            width="100%"
+            height={Math.min(12, Math.max(4, cloudModels().length * 2))}
+            selectedBackgroundColor="#5a2e1c"
+            selectedTextColor="#ffffff"
+            descriptionColor={muted}
+            selectedDescriptionColor="#ffd0bb"
+            onChange={(index) => setModelIndex(index)}
+          />
+        </box>
+      </Show>
+      <Show when={!loading() && screen() === "local_base_url"}>
+        {renderInput("本地 Ollama Endpoint", "http://127.0.0.1:11434/v1")}
+      </Show>
+      <Show when={!loading() && screen() === "local_model"}>
+        <box marginTop={1} flexGrow={1}>
+          <select
+            options={localModels().map((model) => ({
+              name: model,
+              description: model === local()?.default_model ? "本地默认模型" : "Ollama 本地模型",
+              value: model,
+            }))}
+            selectedIndex={localModelIndex()}
+            focused
+            showDescription
+            width="100%"
+            height={Math.min(12, Math.max(4, localModels().length * 2))}
+            selectedBackgroundColor="#5a2e1c"
+            selectedTextColor="#ffffff"
+            descriptionColor={muted}
+            selectedDescriptionColor="#ffd0bb"
+            onChange={(index) => setLocalModelIndex(index)}
+          />
+        </box>
+      </Show>
+      <Show when={!loading() && screen() === "github"}>
+        {renderInput(
+          "GitHub Token",
+          githubConfigured() ? "已配置，留空保留现有 Token" : "粘贴 GitHub Token（ghp_...）",
+        )}
+      </Show>
+      <Show when={!loading() && screen() === "ui_language"}>
+        <box marginTop={1} flexGrow={1}>
+          <select
+            options={uiLanguages().map((item) => ({ name: item.label, description: item.value, value: item.value }))}
+            selectedIndex={uiLanguageIndex()}
+            focused
+            showDescription
+            width="100%"
+            height={6}
+            selectedBackgroundColor="#5a2e1c"
+            selectedTextColor="#ffffff"
+            descriptionColor={muted}
+            selectedDescriptionColor="#ffd0bb"
+            onChange={(index) => setUiLanguageIndex(index)}
+          />
+        </box>
+      </Show>
+      <Show when={!loading() && screen() === "response_language"}>
+        <box marginTop={1} flexGrow={1}>
+          <select
+            options={uiLanguages().map((item) => ({ name: item.label, description: item.value, value: item.value }))}
+            selectedIndex={responseLanguageIndex()}
+            focused
+            showDescription
+            width="100%"
+            height={6}
+            selectedBackgroundColor="#5a2e1c"
+            selectedTextColor="#ffffff"
+            descriptionColor={muted}
+            selectedDescriptionColor="#ffd0bb"
+            onChange={(index) => setResponseLanguageIndex(index)}
+          />
+        </box>
+      </Show>
+      <Show when={!loading() && screen() === "output_format"}>
+        <box marginTop={1} flexGrow={1}>
+          <select
+            options={outputFormats().map((item) => ({ name: item.label, description: item.value, value: item.value }))}
+            selectedIndex={outputFormatIndex()}
+            focused
+            showDescription
+            width="100%"
+            height={8}
+            selectedBackgroundColor="#5a2e1c"
+            selectedTextColor="#ffffff"
+            descriptionColor={muted}
+            selectedDescriptionColor="#ffd0bb"
+            onChange={(index) => setOutputFormatIndex(index)}
+          />
+        </box>
+      </Show>
+      <Show when={!loading() && screen() === "auto_publish"}>
+        <box marginTop={1} flexGrow={1}>
+          <select
+            options={[
+              { name: "是 / Yes", description: "审查完成后自动发布 GitHub 评论", value: "yes" },
+              { name: "否 / No", description: "只生成本地报告，不自动发布", value: "no" },
+            ]}
+            selectedIndex={autoPublishIndex()}
+            focused
+            showDescription
+            width="100%"
+            height={6}
+            selectedBackgroundColor="#5a2e1c"
+            selectedTextColor="#ffffff"
+            descriptionColor={muted}
+            selectedDescriptionColor="#ffd0bb"
+            onChange={(index) => setAutoPublishIndex(index)}
+          />
+        </box>
+      </Show>
+      <Show when={!loading() && screen() === "chat_layout"}>
+        <box marginTop={1} flexGrow={1}>
+          <select
+            options={chatLayouts().map((item) => ({ name: item.label, description: item.value, value: item.value }))}
+            selectedIndex={chatLayoutIndex()}
+            focused
+            showDescription
+            width="100%"
+            height={8}
+            selectedBackgroundColor="#5a2e1c"
+            selectedTextColor="#ffffff"
+            descriptionColor={muted}
+            selectedDescriptionColor="#ffd0bb"
+            onChange={(index) => setChatLayoutIndex(index)}
+          />
+        </box>
+      </Show>
+      <Show when={!loading() && screen() === "summary"}>
+        <box marginTop={1} flexDirection="column">
+          <text><span style={{ fg: orange }}>运行模式  </span><span style={{ fg: "#eeeeee" }}>{runtimeOptions[runtimeIndex()]?.name}</span></text>
+          <Show when={needsCloud()}>
+            <text><span style={{ fg: orange }}>Provider  </span><span style={{ fg: "#eeeeee" }}>{selectedProvider()?.display_name}</span></text>
+            <text><span style={{ fg: orange }}>Endpoint  </span><span style={{ fg: "#eeeeee" }}>{baseUrl() || selectedProvider()?.base_url}</span></text>
+            <text><span style={{ fg: orange }}>API 格式  </span><span style={{ fg: "#eeeeee" }}>{selectedApiFormat()}</span></text>
+            <text><span style={{ fg: orange }}>模型       </span><span style={{ fg: "#eeeeee" }}>{selectedModel()}</span></text>
+            <text><span style={{ fg: orange }}>API Key    </span><span style={{ fg: "#eeeeee" }}>{apiKey().trim() ? "将更新" : remoteKeyConfigured() ? "保留现有" : "未配置"}</span></text>
+          </Show>
+          <Show when={!needsCloud()}>
+            <text><span style={{ fg: orange }}>本地引擎  </span><span style={{ fg: "#eeeeee" }}>{local()?.display_name}</span></text>
+            <text><span style={{ fg: orange }}>Endpoint  </span><span style={{ fg: "#eeeeee" }}>{localBaseUrl() || local()?.base_url}</span></text>
+            <text><span style={{ fg: orange }}>本地模型  </span><span style={{ fg: "#eeeeee" }}>{selectedLocalModel()}</span></text>
+          </Show>
+          <text><span style={{ fg: orange }}>GitHub    </span><span style={{ fg: "#eeeeee" }}>{githubToken().trim() ? "将更新" : githubConfigured() ? "保留现有" : "未配置"}</span></text>
+          <text><span style={{ fg: orange }}>界面语言  </span><span style={{ fg: "#eeeeee" }}>{selectedUiLanguage()}</span></text>
+          <text><span style={{ fg: orange }}>回复语言  </span><span style={{ fg: "#eeeeee" }}>{selectedResponseLanguage()}</span></text>
+          <text><span style={{ fg: orange }}>输出格式  </span><span style={{ fg: "#eeeeee" }}>{selectedOutputFormat()}</span></text>
+          <text><span style={{ fg: orange }}>自动发布  </span><span style={{ fg: "#eeeeee" }}>{autoPublish() ? "是" : "否"}</span></text>
+          <text><span style={{ fg: orange }}>Chat 布局 </span><span style={{ fg: "#eeeeee" }}>{selectedChatLayout()}</span></text>
+          <text fg={muted}>Enter 保存到私有配置；高级 headers / extra params 可稍后用 pr-review config --advanced 配置。</text>
+        </box>
+      </Show>
+      <box flexGrow={1} />
+      <Show when={error()}><text fg="#ff6b6b">{error()}</text></Show>
+      <text fg={busy() ? orange : muted}>
+        {busy()
+          ? "保存中..."
+          : screen() === "summary"
+            ? "Enter 保存 · ← 返回修改 · Esc 取消"
+            : isInputScreen(screen())
+              ? "Enter 确认 · Ctrl/Alt+← 返回 · Esc 取消"
+              : "↑↓ 选择 · Enter 下一步 · ← 返回 · Esc 取消"}
       </text>
     </box>
   )
@@ -1701,7 +2330,7 @@ export function App() {
         />
       </Show>
       <Show when={setupOpen()}>
-        <SetupDialog
+        <SetupWizardDialog
           backend={backend}
           runtime={runtime()}
           onClose={() => setSetupOpen(false)}

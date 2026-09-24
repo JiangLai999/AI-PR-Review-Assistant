@@ -963,6 +963,10 @@ def test_config_options_expose_cloud_and_local_model_choices(tmp_path: Path) -> 
     assert "deepseek" in providers
     assert "ollama" not in providers
     assert "deepseek-flash" in providers["deepseek"]["models"]
+    assert {item["value"] for item in options["api_formats"]} >= {"openai", "anthropic", "custom"}
+    assert {item["value"] for item in options["ui_languages"]} == {"zh-CN", "en-US"}
+    assert {item["value"] for item in options["output_formats"]} == {"terminal", "markdown", "json"}
+    assert {item["value"] for item in options["chat_layouts"]} == {"compact", "split", "plain"}
     assert options["local"]["provider"] == "ollama"
     assert options["local"]["models"]
 
@@ -980,6 +984,57 @@ def test_config_options_expose_cloud_and_local_model_choices(tmp_path: Path) -> 
     assert local_options["current"]["remote_provider"] == "deepseek"
     assert local_options["current"]["remote_model"] == "deepseek-flash"
     assert local_options["current"]["remote_api_key_configured"] is True
+
+
+def test_config_setup_persists_github_and_interface_preferences(tmp_path: Path) -> None:
+    from ai_pr_review.config import AppConfig, ConfigValidationError
+
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+    github_token = "ghp_" + "x" * 40
+
+    response = asyncio.run(
+        backend.handle(
+            {
+                "id": "1",
+                "method": "config.setup",
+                "params": {
+                    "runtime_profile": "cloud",
+                    "provider_name": "deepseek",
+                    "api_key": "sk-test-not-real",
+                    "model_name": "deepseek-flash",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "api_format": "openai",
+                    "github_token": github_token,
+                    "ui_language": "en-US",
+                    "response_language": "en-US",
+                    "output_format": "markdown",
+                    "auto_publish_comment": True,
+                    "chat_layout": "split",
+                },
+            }
+        )
+    )
+
+    assert response[0]["ok"] is True
+    snapshot = response[0]["result"]
+    assert snapshot["github_token_configured"] is True
+    assert snapshot["ui_language"] == "en-US"
+    assert snapshot["response_language"] == "en-US"
+    assert snapshot["output_format"] == "markdown"
+    assert snapshot["auto_publish_comment"] is True
+    assert snapshot["chat_layout"] == "split"
+
+    reloaded = AppConfig.load(config_path)
+    assert reloaded.github_token == github_token
+    assert reloaded.preferences.ui_language == "en-US"
+    assert reloaded.preferences.language == "en-US"
+    assert reloaded.preferences.output_format == "markdown"
+    assert reloaded.preferences.auto_publish_comment is True
+    assert reloaded.preferences.chat_layout == "split"
+
+    with pytest.raises(ConfigValidationError, match="GitHub Token"):
+        backend._apply_setup({"runtime_profile": "cloud", "github_token": "bad-token"})
 
 
 def test_local_chat_disables_reasoning_channel(monkeypatch, tmp_path: Path) -> None:

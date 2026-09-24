@@ -124,7 +124,14 @@ class JsonlBackend:
             "local": local,
             "ui_language": getattr(self.config.preferences, "ui_language", "zh-CN"),
             "response_language": self.config.preferences.language,
+            "output_format": self.config.preferences.output_format,
+            "auto_publish_comment": self.config.preferences.auto_publish_comment,
+            "chat_layout": getattr(self.config.preferences, "chat_layout", "compact"),
+            "api_format": provider.api_format,
             "api_key_configured": bool(provider.api_key or local),
+            "github_token_configured": bool(
+                self.config.github_token or self.config.pr_fetcher.github_token
+            ),
             "configuration_warnings": list(getattr(self.config, "_ignored_env_overrides", [])),
             "result_store_path": self.config.result_store.db_path,
         }
@@ -178,6 +185,25 @@ class JsonlBackend:
         current = self.config.ai_client.model_provider
         return {
             "providers": providers,
+            "api_formats": [
+                {"value": "openai", "label": "OpenAI 兼容"},
+                {"value": "anthropic", "label": "Anthropic"},
+                {"value": "custom", "label": "Custom"},
+            ],
+            "ui_languages": [
+                {"value": "zh-CN", "label": "中文 / Chinese"},
+                {"value": "en-US", "label": "English"},
+            ],
+            "output_formats": [
+                {"value": "terminal", "label": "Terminal"},
+                {"value": "markdown", "label": "Markdown"},
+                {"value": "json", "label": "JSON"},
+            ],
+            "chat_layouts": [
+                {"value": "compact", "label": "紧凑 / Compact"},
+                {"value": "split", "label": "分栏 / Split"},
+                {"value": "plain", "label": "纯文本 / Plain"},
+            ],
             "local": {
                 "provider": local_provider.name,
                 "display_name": local_provider.display_name,
@@ -195,6 +221,14 @@ class JsonlBackend:
                 "base_url": current.base_url,
                 "api_format": current.api_format,
                 "api_key_configured": bool(current.api_key),
+                "github_token_configured": bool(
+                    self.config.github_token or self.config.pr_fetcher.github_token
+                ),
+                "ui_language": self.config.preferences.ui_language,
+                "response_language": self.config.preferences.language,
+                "output_format": self.config.preferences.output_format,
+                "auto_publish_comment": self.config.preferences.auto_publish_comment,
+                "chat_layout": self.config.preferences.chat_layout,
                 # The active slot can be local while a fully configured cloud
                 # slot is still persisted. The wizard must preselect the remote
                 # slot when the user switches back to Cloud/Hybrid.
@@ -294,6 +328,39 @@ class JsonlBackend:
             self.config.local_provider = ProviderConfig.from_model_provider(provider)
             self.config.preferences.hybrid_strategy = "local_only"
 
+        github_token = str(params.get("github_token", "")).strip()
+        if github_token:
+            self._validate_github_token(github_token)
+            self.config.github_token = github_token
+            self.config.pr_fetcher.github_token = github_token
+
+        preferences = self.config.preferences
+        ui_language = str(params.get("ui_language", "")).strip()
+        if ui_language:
+            if ui_language not in {"zh-CN", "en-US"}:
+                raise ConfigValidationError("界面语言仅支持 zh-CN 或 en-US。")
+            preferences.ui_language = ui_language
+        response_language = str(params.get("response_language", "")).strip()
+        if response_language:
+            if response_language not in {"zh-CN", "en-US"}:
+                raise ConfigValidationError("模型回复语言仅支持 zh-CN 或 en-US。")
+            preferences.language = response_language
+        output_format = str(params.get("output_format", "")).strip()
+        if output_format:
+            if output_format not in {"terminal", "markdown", "json"}:
+                raise ConfigValidationError("输出格式仅支持 terminal、markdown 或 json。")
+            preferences.output_format = output_format
+        chat_layout = str(params.get("chat_layout", "")).strip()
+        if chat_layout:
+            if chat_layout not in {"compact", "split", "plain"}:
+                raise ConfigValidationError("Chat 布局仅支持 compact、split 或 plain。")
+            preferences.chat_layout = chat_layout
+        if "auto_publish_comment" in params:
+            auto_publish = params["auto_publish_comment"]
+            if not isinstance(auto_publish, bool):
+                raise ConfigValidationError("auto_publish_comment 必须是布尔值。")
+            preferences.auto_publish_comment = auto_publish
+
         self.config._sync_runtime_sections()
         self.config.save(self.config_path, save_key=True)
         # Reload through the normal layered loader so the snapshot cannot claim
@@ -301,6 +368,15 @@ class JsonlBackend:
         self.config = AppConfig.load(self.config_path)
         self.runtime_profile = self._infer_runtime_profile()
         return self._config_snapshot()
+
+    @staticmethod
+    def _validate_github_token(token: str) -> None:
+        if not (token.startswith("ghp_") or token.startswith("github_pat_")):
+            raise ConfigValidationError(
+                "GitHub Token 格式不正确，必须以 ghp_ 或 github_pat_ 开头。"
+            )
+        if len(token) < 40:
+            raise ConfigValidationError("GitHub Token 长度过短，请确认输入是否完整。")
 
     async def _apply_model(self, model_name: str) -> dict[str, Any]:
         model_name = model_name.strip()
