@@ -130,6 +130,65 @@ def test_jsonl_backend_history_and_export_without_report(tmp_path: Path) -> None
     assert "没有可导出" in export[0]["result"]["text"]
 
 
+def test_history_run_becomes_the_current_report_for_report_and_export(tmp_path: Path) -> None:
+    """A run opened from history must be exportable.
+
+    The report was on screen but the backend still answered「当前会话还没有可导出的
+    审查报告。」because `current_report` was only ever set by a fresh review.
+    """
+    from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
+    from ai_pr_review.services.result_store import ResultStore
+
+    async def run() -> None:
+        backend = JsonlBackend(tmp_path / "config.json")
+        run_id = ResultStore(backend.config.result_store).save_result(
+            "https://github.com/example/repo/pull/7",
+            ReviewResult(
+                summary="stored summary",
+                findings=[
+                    Finding(
+                        severity="high",
+                        category="security",
+                        file="a.py",
+                        line_start=1,
+                        line_end=1,
+                        title="stored finding",
+                        problem="p",
+                        suggestion="s",
+                        confidence=0.9,
+                        code_snippet="x",
+                    )
+                ],
+            ),
+        )
+
+        opened = await backend.handle(
+            {
+                "id": "1",
+                "method": "command.execute",
+                "params": {"name": "history", "args": [run_id]},
+            }
+        )
+        assert opened[0]["result"]["report"]["findings"][0]["title"] == "stored finding"
+
+        report = await backend.handle(
+            {"id": "2", "method": "command.execute", "params": {"name": "report", "args": []}}
+        )
+        assert "stored finding" in report[0]["result"]["text"]
+        assert "还没有" not in report[0]["result"]["text"]
+
+        export = await backend.handle(
+            {
+                "id": "3",
+                "method": "command.execute",
+                "params": {"name": "export", "args": ["markdown"]},
+            }
+        )
+        assert "stored finding" in export[0]["result"]["text"]
+
+    asyncio.run(run())
+
+
 def test_jsonl_backend_responds_on_live_pipe() -> None:
     """The server must answer while stdin stays open.
 

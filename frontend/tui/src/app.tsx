@@ -526,7 +526,7 @@ function RuntimeDialog(props: RuntimeDialogProps) {
   })
 
   return (
-    <box position="absolute" left={10} top={4} width={58} height={17} backgroundColor="#171717" borderStyle="single" borderColor={orange} padding={2} zIndex={100} flexDirection="column">
+    <box position="absolute" left={10} top={4} width={58} height={18} backgroundColor="#171717" borderStyle="single" borderColor={orange} padding={2} zIndex={100} flexDirection="column">
       <text fg={orange}>配置助手 // RUNTIME PROFILE</text>
       <text fg={muted}>选择 Chat 的默认运行时（↑↓ / Enter，Esc 取消）</text>
       <box marginTop={1} flexGrow={1}>
@@ -535,6 +535,10 @@ function RuntimeDialog(props: RuntimeDialogProps) {
           selectedIndex={selectedIndex()}
           focused
           showDescription
+          // OpenTUI does not size a select from the flex layout: without an
+          // explicit box it renders as an empty rectangle.
+          width="100%"
+          height={8}
           selectedBackgroundColor="#5a2e1c"
           selectedTextColor="#ffffff"
           descriptionColor={muted}
@@ -563,7 +567,7 @@ function ReviewConfirmDialog(props: { url: string; onConfirm: () => void; onClos
     if (isEnterKey(key)) choose()
   })
   return (
-    <box position="absolute" left={8} top={5} width={64} height={14} backgroundColor="#171717" borderStyle="single" borderColor={orange} padding={2} zIndex={120} flexDirection="column">
+    <box position="absolute" left={8} top={5} width={64} height={15} backgroundColor="#171717" borderStyle="single" borderColor={orange} padding={2} zIndex={120} flexDirection="column">
       <text fg={orange}>开始 PR 审查 // CONFIRM</text>
       <text fg={muted}>已识别 GitHub Pull Request：</text>
       <text fg="#eeeeee">{props.url}</text>
@@ -573,6 +577,8 @@ function ReviewConfirmDialog(props: { url: string; onConfirm: () => void; onClos
           selectedIndex={selectedIndex()}
           focused
           showDescription
+          width="100%"
+          height={4}
           selectedBackgroundColor="#5a2e1c"
           selectedTextColor="#ffffff"
           descriptionColor={muted}
@@ -625,6 +631,8 @@ export function FindingsDialog(props: { findings: ReviewFinding[]; onClose: () =
           selectedIndex={Math.max(0, selectedIndex() - page() * pageSize)}
           focused
           showDescription
+          width="100%"
+          height={8}
           selectedBackgroundColor="#5a2e1c"
           selectedTextColor="#ffffff"
           descriptionColor={muted}
@@ -634,7 +642,7 @@ export function FindingsDialog(props: { findings: ReviewFinding[]; onClose: () =
       </box>
       <scrollbox
         ref={(node) => { detailScroll = node }}
-        height={8}
+        height={6}
         marginTop={1}
         scrollY
         scrollbarOptions={{ showArrows: true }}
@@ -681,7 +689,7 @@ function ReviewFailureDialog(props: { url: string; message: string; onRetry: () 
       <text fg={muted}>{props.message}</text>
       <text fg="#eeeeee">{props.url}</text>
       <box marginTop={1} flexGrow={1}>
-        <select options={options} selectedIndex={selectedIndex()} focused showDescription selectedBackgroundColor="#5a2e1c" selectedTextColor="#ffffff" descriptionColor={muted} selectedDescriptionColor="#ffd0bb" onChange={(index) => setSelectedIndex(index)} />
+        <select options={options} selectedIndex={selectedIndex()} focused showDescription width="100%" height={4} selectedBackgroundColor="#5a2e1c" selectedTextColor="#ffffff" descriptionColor={muted} selectedDescriptionColor="#ffd0bb" onChange={(index) => setSelectedIndex(index)} />
       </box>
       <text fg={muted}>↑↓ 选择 · Enter 确认 · Esc 关闭</text>
     </box>
@@ -710,6 +718,8 @@ function HistoryDialog(props: { runs: HistoryRun[]; statistics?: HistoryStats; f
           selectedIndex={selectedIndex()}
           focused
           showDescription
+          width="100%"
+          height={12}
           selectedBackgroundColor="#5a2e1c"
           selectedTextColor="#ffffff"
           descriptionColor={muted}
@@ -779,6 +789,8 @@ function ModelDialog(props: { backend: BackendClient; runtime: RuntimeSnapshot; 
           selectedIndex={selectedIndex()}
           focused
           showDescription
+          width="100%"
+          height={6}
           selectedBackgroundColor="#5a2e1c"
           selectedTextColor="#ffffff"
           descriptionColor={muted}
@@ -932,7 +944,14 @@ export function App() {
 
   const retryLastReview = () => {
     const url = reviewUrl()
-    if (url && !reviewing()) void startReview(url)
+    if (!url) {
+      appendMessage({
+        role: "assistant",
+        content: "当前会话还没有可重试的审查。粘贴一个 GitHub PR URL，或用 /history <Run ID> 打开历史记录。",
+      })
+      return
+    }
+    if (!reviewing()) void startReview(url)
   }
 
   const resetSessionUi = () => {

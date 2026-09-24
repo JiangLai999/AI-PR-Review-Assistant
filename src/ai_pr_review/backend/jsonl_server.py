@@ -469,6 +469,11 @@ class JsonlBackend:
                 "total_cost": run.get("total_cost", 0),
             },
         }
+        # A run loaded from history becomes the current report, so /report and
+        # /export work on it exactly as they do right after a fresh review.
+        # Without this they answered "当前会话还没有可导出的审查报告。" even
+        # though the report was on screen.
+        self.current_report = report
         return {
             "text": f"历史报告：{run_id}\n{result.summary}",
             "run": run,

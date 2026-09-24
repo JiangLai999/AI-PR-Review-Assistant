@@ -35580,7 +35580,7 @@ function RuntimeDialog(props) {
     setProp(_el$54, "left", 10);
     setProp(_el$54, "top", 4);
     setProp(_el$54, "width", 58);
-    setProp(_el$54, "height", 17);
+    setProp(_el$54, "height", 18);
     setProp(_el$54, "backgroundColor", "#171717");
     setProp(_el$54, "borderStyle", "single");
     setProp(_el$54, "borderColor", "#fb8147");
@@ -35597,6 +35597,8 @@ function RuntimeDialog(props) {
     setProp(_el$60, "options", runtimeOptions);
     setProp(_el$60, "focused", true);
     setProp(_el$60, "showDescription", true);
+    setProp(_el$60, "width", "100%");
+    setProp(_el$60, "height", 8);
     setProp(_el$60, "selectedBackgroundColor", "#5a2e1c");
     setProp(_el$60, "selectedTextColor", "#ffffff");
     setProp(_el$60, "descriptionColor", "#808080");
@@ -35660,7 +35662,7 @@ function ReviewConfirmDialog(props) {
     setProp(_el$63, "left", 8);
     setProp(_el$63, "top", 5);
     setProp(_el$63, "width", 64);
-    setProp(_el$63, "height", 14);
+    setProp(_el$63, "height", 15);
     setProp(_el$63, "backgroundColor", "#171717");
     setProp(_el$63, "borderStyle", "single");
     setProp(_el$63, "borderColor", "#fb8147");
@@ -35679,6 +35681,8 @@ function ReviewConfirmDialog(props) {
     setProp(_el$70, "options", options);
     setProp(_el$70, "focused", true);
     setProp(_el$70, "showDescription", true);
+    setProp(_el$70, "width", "100%");
+    setProp(_el$70, "height", 4);
     setProp(_el$70, "selectedBackgroundColor", "#5a2e1c");
     setProp(_el$70, "selectedTextColor", "#ffffff");
     setProp(_el$70, "descriptionColor", "#808080");
@@ -35741,6 +35745,8 @@ function FindingsDialog(props) {
     setProp(_el$76, "marginTop", 1);
     setProp(_el$77, "focused", true);
     setProp(_el$77, "showDescription", true);
+    setProp(_el$77, "width", "100%");
+    setProp(_el$77, "height", 8);
     setProp(_el$77, "selectedBackgroundColor", "#5a2e1c");
     setProp(_el$77, "selectedTextColor", "#ffffff");
     setProp(_el$77, "descriptionColor", "#808080");
@@ -35755,7 +35761,7 @@ function FindingsDialog(props) {
     use((node) => {
       detailScroll = node;
     }, _el$78);
-    setProp(_el$78, "height", 8);
+    setProp(_el$78, "height", 6);
     setProp(_el$78, "marginTop", 1);
     setProp(_el$78, "scrollY", true);
     setProp(_el$78, "scrollbarOptions", {
@@ -35925,6 +35931,8 @@ function ReviewFailureDialog(props) {
     setProp(_el$114, "options", options);
     setProp(_el$114, "focused", true);
     setProp(_el$114, "showDescription", true);
+    setProp(_el$114, "width", "100%");
+    setProp(_el$114, "height", 4);
     setProp(_el$114, "selectedBackgroundColor", "#5a2e1c");
     setProp(_el$114, "selectedTextColor", "#ffffff");
     setProp(_el$114, "descriptionColor", "#808080");
@@ -35987,6 +35995,8 @@ function HistoryDialog(props) {
     setProp(_el$125, "flexGrow", 1);
     setProp(_el$126, "focused", true);
     setProp(_el$126, "showDescription", true);
+    setProp(_el$126, "width", "100%");
+    setProp(_el$126, "height", 12);
     setProp(_el$126, "selectedBackgroundColor", "#5a2e1c");
     setProp(_el$126, "selectedTextColor", "#ffffff");
     setProp(_el$126, "descriptionColor", "#808080");
@@ -36091,6 +36101,8 @@ function ModelDialog(props) {
     setProp(_el$134, "flexGrow", 1);
     setProp(_el$135, "focused", true);
     setProp(_el$135, "showDescription", true);
+    setProp(_el$135, "width", "100%");
+    setProp(_el$135, "height", 6);
     setProp(_el$135, "selectedBackgroundColor", "#5a2e1c");
     setProp(_el$135, "selectedTextColor", "#ffffff");
     setProp(_el$135, "descriptionColor", "#808080");
@@ -36278,7 +36290,14 @@ function App() {
   };
   const retryLastReview = () => {
     const url = reviewUrl();
-    if (url && !reviewing())
+    if (!url) {
+      appendMessage({
+        role: "assistant",
+        content: "\u5F53\u524D\u4F1A\u8BDD\u8FD8\u6CA1\u6709\u53EF\u91CD\u8BD5\u7684\u5BA1\u67E5\u3002\u7C98\u8D34\u4E00\u4E2A GitHub PR URL\uFF0C\u6216\u7528 /history <Run ID> \u6253\u5F00\u5386\u53F2\u8BB0\u5F55\u3002"
+      });
+      return;
+    }
+    if (!reviewing())
       startReview(url);
   };
   const resetSessionUi = () => {
