@@ -63,6 +63,9 @@ pr-review = "ai_pr_review.cli:main"
 # src/ai_pr_review/web_static（React + Vite 输出，pip 安装后无需 Node 即可运行工作台）。
 packages = ["src/ai_pr_review"]
 
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "scripts/hatch_build.py"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

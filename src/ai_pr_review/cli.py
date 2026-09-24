@@ -5,17 +5,20 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import platform
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, cast
 
 import click
+from prompt_toolkit.shortcuts import radiolist_dialog
 from rich import box
 from rich.console import Console
 from rich.markdown import Markdown
@@ -93,27 +96,31 @@ from ai_pr_review.review_entry import execute_review_flow
 from ai_pr_review.services.agent import (
     ActionExecutor,
     ActionResult,
+    AgentState,
     ChatAction,
     ChatActionRouter,
     ChatContext,
 )
 from ai_pr_review.services.exceptions import AIClientError, PRFetcherError
+from ai_pr_review.services.hybrid_orchestrator import HybridReviewOrchestrator
 from ai_pr_review.services.model_providers.factory import create_model_provider
 from ai_pr_review.services.pr_fetcher import PRFetcher
 from ai_pr_review.services.prompt_assembler import ReviewResult
 from ai_pr_review.services.report_renderer import ReportRenderer
 from ai_pr_review.services.result_store import ResultStore
-from ai_pr_review.services.hybrid_orchestrator import HybridReviewOrchestrator
 from ai_pr_review.services.review_orchestrator import (
     ReviewArtifacts,
     ReviewCancelled,
     ReviewOrchestrator,
 )
+from ai_pr_review.ui.pixel_theme import pixel_menu, pixel_print_frame, pixel_step_header, tr
 from ai_pr_review.workspace_entry import (
     apply_workspace_preferences,
     build_history_output,
     build_stats_output,
 )
+
+_RENDERED_RUN_IDS: set[str] = set()
 
 
 def _configure_terminal_encoding() -> None:
@@ -376,6 +383,62 @@ def _provider_option_map() -> dict[str, dict[str, Any]]:
     return {item["key"]: item for item in PROVIDER_WIZARD_OPTIONS}
 
 
+def _provider_type_label(provider_type: str, language: str) -> str:
+    labels = {
+        "官方": ("官方", "OFFICIAL"),
+        "国内官方": ("国内官方", "CHINA OFFICIAL"),
+        "国内聚合": ("国内聚合", "CHINA AGGREGATOR"),
+        "第三方": ("第三方", "THIRD-PARTY"),
+        "本地": ("本地", "LOCAL"),
+    }
+    zh, en = labels.get(provider_type, (provider_type, provider_type.upper()))
+    return tr(language, zh, en)
+
+
+def _setup_step_label(step: str, language: str) -> str:
+    """Translate common provider setup instructions without changing provider data."""
+    exact = {
+        "注册或登录账号": "Register or sign in",
+        "进入 API Keys 页面": "Open the API Keys page",
+        "打开 API keys 页面": "Open the API keys page",
+        "进入 API Key 管理页面": "Open the API key management page",
+        "进入 Keys 页面": "Open the Keys page",
+        "创建新的 API Key": "Create a new API key",
+        "点击创建 API Key": "Create an API key",
+        "创建 API Key": "Create an API key",
+        "创建新的 Key": "Create a new key",
+        "复制生成的 Key": "Copy the generated key",
+        "开通 DashScope 服务": "Enable the DashScope service",
+        "开通模型服务并创建推理接入点": "Enable the model service and create an inference endpoint",
+        "注册或登录": "Register or sign in",
+    }
+    if not str(language).lower().startswith("en"):
+        return step
+    if step in exact:
+        return exact[step]
+    if step.startswith("访问 "):
+        return "Visit " + step[3:]
+    brand_names = {
+        "访问百川智能开放平台": "Open the Baichuan AI platform",
+        "访问 MiniMax 开放平台": "Open the MiniMax platform",
+        "访问阶跃星辰开放平台": "Open the StepFun platform",
+        "访问火山方舟控制台": "Open the Volcengine Ark console",
+        "访问腾讯混元开放平台": "Open the Tencent Hunyuan platform",
+        "访问零一万物开放平台": "Open the 01.AI platform",
+    }
+    return brand_names.get(step, step)
+
+
+def _api_key_hint_label(hint: str, language: str) -> str:
+    if not str(language).lower().startswith("en"):
+        return hint
+    if hint == "平台提供的 Key":
+        return "Key issued by the platform"
+    if hint == "或平台提供格式":
+        return "or the platform-specific format"
+    return hint
+
+
 def _default_provider_index() -> int:
     for index, item in enumerate(PROVIDER_WIZARD_OPTIONS, start=1):
         if item["default_choice"]:
@@ -383,89 +446,332 @@ def _default_provider_index() -> int:
     return 1
 
 
-def _render_welcome(console: Console) -> None:
-    steps = Table.grid(padding=(0, 1))
-    steps.add_row("欢迎使用 AI PR Review 助手！")
-    steps.add_row("本向导会同时生成 JSON 配置，并兼容环境变量覆盖。")
-    steps.add_row("请按照以下步骤完成配置：")
-    steps.add_row("")
-    steps.add_row("1. 选择模型供应商")
-    steps.add_row("2. 输入 API Key")
-    steps.add_row("3. 配置模型参数")
-    steps.add_row("4. 验证并保存配置")
-    console.print(
-        Panel(
-            steps,
-            title="AI PR Review 助手 - 配置向导",
-            border_style="cyan",
-            padding=(1, 2),
+def _pixel_select(
+    *,
+    title: str,
+    text: str,
+    values: list[tuple[str, str]],
+    default: str,
+    language: str,
+) -> str:
+    """Interactive keyboard/mouse selector with a deterministic test fallback."""
+    try:
+        import sys
+
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return default
+        result = radiolist_dialog(
+            title=title,
+            text=text,
+            ok_text=tr(language, "确认", "Confirm"),
+            cancel_text=tr(language, "取消", "Cancel"),
+            values=values,
+            default=default,
+        ).run()
+        return result if result is not None else default
+    except (EOFError, KeyboardInterrupt):
+        return default
+
+
+def _prompt_runtime_profile(
+    console: Console, current: PreferencesConfig
+) -> tuple[str, str, str | None]:
+    language = getattr(current, "ui_language", "zh-CN")
+    profiles = [
+        (
+            "cloud",
+            "云端 API 优先",
+            "CLOUD-FIRST",
+            "第三方 API 负责 Chat 与深度审查",
+            "Third-party API for Chat and deep review",
+            "remote_only",
+        ),
+        (
+            "local",
+            "本地 Ollama 优先",
+            "LOCAL-FIRST",
+            "Chat 与审查优先使用本地模型",
+            "Use local Ollama for Chat and review",
+            "local_only",
+        ),
+        (
+            "hybrid",
+            "混合模式",
+            "HYBRID",
+            "轻量任务本地，复杂任务使用 API",
+            "Local for light tasks, API for complex tasks",
+            "balanced",
+        ),
+    ]
+    current_strategy = getattr(current, "hybrid_strategy", "remote_only")
+    default_index = next(
+        (i for i, item in enumerate(profiles, 1) if item[5] == current_strategy), 1
+    )
+    rows = [
+        tr(language, "请选择模型运行场景", "SELECT MODEL RUNTIME PROFILE"),
+        "",
+    ]
+    for index, (_, zh, en, detail_zh, detail_en, _) in enumerate(profiles, 1):
+        label = tr(language, zh, en)
+        detail = tr(language, detail_zh, detail_en)
+        marker = ">" if index == default_index else " "
+        rows.append(f"{marker} [{index}] {label:<22} {detail}")
+    pixel_menu(
+        console,
+        title=tr(language, "模型场景配置", "MODEL RUNTIME PROFILE"),
+        rows=rows,
+        subtitle=tr(
+            language,
+            "首次选择将决定 Chat 与 PR 审查的默认模型路径",
+            "This choice controls the default model path for Chat and PR review",
+        ),
+        width=92,
+        border_style="bright_yellow",
+    )
+    import sys
+
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        selected_key = _pixel_select(
+            title=tr(language, "模型场景配置", "MODEL RUNTIME PROFILE"),
+            text=tr(language, "方向键/鼠标选择，Enter 确认", "Use arrows/mouse, then press Enter"),
+            values=[(item[0], tr(language, item[1], item[2])) for item in profiles],
+            default=profiles[default_index - 1][0],
+            language=language,
         )
+        selected = next(item for item in profiles if item[0] == selected_key)
+        return selected[0], selected[5], None
+
+    raw_choice = Prompt.ask(
+        tr(language, "输入场景编号", "Enter profile number"),
+        default=str(default_index),
+        console=console,
+    ).strip()
+    if raw_choice not in {"1", "2", "3"}:
+        # Backward-compatible input handling for scripted setup flows created
+        # before the runtime profile prompt existed. The consumed value is the
+        # first UI-language answer and is passed to the next stage.
+        return "cloud", "remote_only", raw_choice
+    selected = profiles[int(raw_choice) - 1]
+    return selected[0], selected[5], None
+
+
+def _render_welcome(console: Console, language: str = "zh-CN") -> None:
+    """Pixel setup welcome screen with consistent bilingual copy."""
+    english = str(language).lower().startswith("en")
+    pixel_step_header(
+        console,
+        step=1,
+        total=7,
+        title_zh="配置向导",
+        title_en="CONFIGURATION WIZARD",
+        detail_zh="准备本地模型、远程模型、GitHub 与 Chat 运行环境。",
+        detail_en="Prepare local model, remote model, GitHub, and Chat runtime.",
+        language=language,
+    )
+    rows = [
+        tr(language, "欢迎使用 AI PR 审查智能体", "Welcome to AI PR Review Agent"),
+    ]
+    if not str(language).lower().startswith("en"):
+        rows.append("AI PR Review 助手 - 配置向导")
+    rows.extend(
+        [
+            tr(
+                language,
+                "配置完成后可直接进入 Chat、离线 Demo 或 PR 审查。",
+                "After setup, open Chat, run Offline Demo, or review a PR.",
+            ),
+            "",
+        ]
+    )
+    rows.extend(
+        f"{index:02d}  {tr(language, zh, en)}"
+        for index, (zh, en) in enumerate(
+            [
+                ("运行环境扫描", "Runtime scan"),
+                ("选择模型运行场景", "Select model runtime profile"),
+                ("界面与语言", "Interface & language"),
+                ("配置模型和 API", "Configure models and API"),
+                ("配置 GitHub Token", "Configure GitHub token"),
+                ("输出偏好", "Output preferences"),
+                ("验证并保存", "Verify and save"),
+            ],
+            start=1,
+        )
+    )
+    pixel_menu(
+        console,
+        title="PIXEL SETUP",
+        rows=rows,
+        subtitle=tr(language, "↑↓ 选择   ENTER 确认", "↑↓ SELECT   ENTER CONFIRM"),
+        width=92,
+        border_style="bright_cyan",
     )
 
 
-def _render_section_header(console: Console, title: str, subtitle: str) -> None:
-    console.print(Panel(subtitle, title=title, border_style="cyan", padding=(1, 2)))
+def _render_section_header(
+    console: Console,
+    title: str,
+    subtitle: str,
+    *,
+    language: str = "zh-CN",
+    step: int | None = None,
+    title_en: str | None = None,
+    subtitle_en: str | None = None,
+) -> None:
+    if step is not None:
+        pixel_step_header(
+            console,
+            step=step,
+            total=7,
+            title_zh=title,
+            title_en=title_en or title,
+            detail_zh=subtitle,
+            detail_en=subtitle_en or subtitle,
+            language=language,
+        )
+    else:
+        console.print(
+            Panel(subtitle, title=title, border_style="cyan", padding=(1, 2), box=box.ROUNDED)
+        )
 
 
-def _select_provider(console: Console) -> str:
-    table = Table(box=box.ROUNDED, expand=True)
-    table.add_column("序号", justify="right", style="cyan", no_wrap=True)
-    table.add_column("供应商", style="bold")
-    table.add_column("类型")
-    table.add_column("推荐", justify="center")
-
+def _select_provider(console: Console, language: str = "zh-CN") -> str:
+    default_index = _default_provider_index()
+    pixel_step_header(
+        console,
+        step=4,
+        total=7,
+        title_zh="选择模型供应商",
+        title_en="SELECT MODEL PROVIDER",
+        detail_zh="选择远程 API 供应商；本地 Ollama 配置可在运行模式中直接使用。",
+        detail_en="Select a remote API provider; local Ollama can be used directly in runtime mode.",
+        language=language,
+    )
+    rows = [
+        f"{tr(language, '序号', 'NO.'):>4}  {tr(language, '供应商', 'PROVIDER'):<22} {tr(language, '类型', 'TYPE'):<18} {tr(language, '推荐', 'RECOMMENDED')}"
+    ]
     for index, item in enumerate(PROVIDER_WIZARD_OPTIONS, start=1):
         preset = MODEL_PROVIDER_PRESETS[item["key"]]
-        table.add_row(
-            str(index),
-            str(preset["display_name"]),
-            str(item["type"]),
-            str(item["recommendation"]),
+        rows.append(
+            f"{index:02d}    {str(preset['display_name']):<22} {_provider_type_label(str(item['type']), language):<18} {str(item['recommendation'])}"
         )
-
-    default_index = _default_provider_index()
-    console.print(
-        Panel(
-            table,
-            title="选择模型供应商",
-            subtitle="推荐：3（DeepSeek，国产模型，性价比高）",
-            border_style="blue",
-            padding=(1, 1),
-        )
+    pixel_menu(
+        console,
+        title=tr(language, "选择模型供应商", "SELECT MODEL PROVIDER"),
+        rows=rows,
+        subtitle=tr(
+            language,
+            "推荐：3（DeepSeek，国产模型，性价比高）",
+            "Recommended: 3 (DeepSeek, strong value)",
+        ),
+        width=92,
+        border_style="bright_blue",
     )
+
+    import sys
+
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        values = [
+            (
+                str(item["key"]),
+                f"{MODEL_PROVIDER_PRESETS[item['key']]['display_name']} · {_provider_type_label(str(item['type']), language)}",
+            )
+            for item in PROVIDER_WIZARD_OPTIONS
+        ]
+        return _pixel_select(
+            title=tr(language, "选择模型供应商", "SELECT MODEL PROVIDER"),
+            text=tr(language, "方向键/鼠标选择，Enter 确认", "Use arrows/mouse, then press Enter"),
+            values=values,
+            default=str(PROVIDER_WIZARD_OPTIONS[default_index - 1]["key"]),
+            language=language,
+        )
 
     while True:
-        choice = IntPrompt.ask("请输入数字选择", default=default_index, console=console)
+        choice = IntPrompt.ask(
+            tr(language, "请输入数字选择", "Enter selection"),
+            default=default_index,
+            console=console,
+        )
         if 1 <= choice <= len(PROVIDER_WIZARD_OPTIONS):
             return str(PROVIDER_WIZARD_OPTIONS[choice - 1]["key"])
-        console.print("请输入有效序号。", style="bold red")
+        console.print(
+            tr(language, "请输入有效序号。", "Please enter a valid number."), style="bold red"
+        )
 
 
-def _prompt_api_key(console: Console, provider: ModelProviderConfig) -> str:
+def _prompt_api_key(
+    console: Console, provider: ModelProviderConfig, language: str = "zh-CN"
+) -> str:
     provider_details = _provider_option_map()[provider.name]
+    pixel_step_header(
+        console,
+        step=5,
+        total=7,
+        title_zh="配置模型与 API",
+        title_en="CONFIGURE MODEL & API",
+        detail_zh="输入密钥、选择模型，并确认连接参数。",
+        detail_en="Enter the key, select a model, and confirm connection settings.",
+        language=language,
+    )
     instruction = Table.grid(padding=(0, 1))
     instruction.add_column()
-    instruction.add_row(f"获取 {provider.display_name} API Key：")
-    instruction.add_row("")
-    for index, step in enumerate(provider_details["steps"], start=1):
-        instruction.add_row(f"{index}. {step}")
-    instruction.add_row("")
-    instruction.add_row(f"API Key 格式参考：{provider_details['api_key_hint']}")
-    console.print(
-        Panel(
-            instruction,
-            title="输入 API Key",
-            border_style="magenta",
-            padding=(1, 2),
+    instruction.add_row(
+        tr(
+            language,
+            f"获取 {provider.display_name} API Key：",
+            f"Get an API key for {provider.display_name}:",
         )
     )
+    instruction.add_row("")
+    for index, step in enumerate(provider_details["steps"], start=1):
+        instruction.add_row(f"{index}. {_setup_step_label(step, language)}")
+    instruction.add_row("")
+    instruction.add_row(
+        tr(
+            language,
+            f"API Key 格式参考：{provider_details['api_key_hint']}",
+            f"API key format: {_api_key_hint_label(provider_details['api_key_hint'], language)}",
+        )
+    )
+    api_lines = [
+        tr(
+            language,
+            f"获取 {provider.display_name} API Key：",
+            f"Get an API key for {provider.display_name}:",
+        ),
+        *[
+            f"{index}. {_setup_step_label(step, language)}"
+            for index, step in enumerate(provider_details["steps"], start=1)
+        ],
+        tr(
+            language,
+            f"API Key 格式参考：{provider_details['api_key_hint']}",
+            f"API key format: {_api_key_hint_label(provider_details['api_key_hint'], language)}",
+        ),
+    ]
+    pixel_print_frame(
+        console,
+        tr(language, "输入 API Key", "ENTER API KEY"),
+        api_lines,
+        subtitle=tr(
+            language, "用于连接所选模型供应商。", "Used to connect to the selected model provider."
+        ),
+        width=92,
+        border_style="bright_magenta",
+    )
     api_key = click.prompt(
-        "请输入 API Key",
+        tr(language, "请输入 API Key", "Enter API key"),
         default=provider.api_key,
         hide_input=True,
         show_default=False,
     )
-    console.print(f"[green]✓[/green] 已输入 API Key（{len(api_key)} 个字符）")
+    console.print(
+        tr(
+            language,
+            f"[green]✓[/green] 已输入 API Key（{len(api_key)} 个字符）",
+            f"[green]✓[/green] API key entered ({len(api_key)} characters)",
+        )
+    )
     return api_key
 
 
@@ -477,7 +783,7 @@ def _is_likely_chat_model(model_name: str) -> bool:
 
 
 def _discover_wizard_models(
-    console: Console, provider: ModelProviderConfig, api_key: str
+    console: Console, provider: ModelProviderConfig, api_key: str, language: str = "zh-CN"
 ) -> list[ProviderModelConfig]:
     """Discover current models after a key is entered, with static fallback."""
     fallback = [
@@ -498,7 +804,13 @@ def _discover_wizard_models(
         extra_params=dict(provider.extra_params),
     )
     try:
-        console.print("[cyan]正在从供应商获取实时模型列表…[/cyan]")
+        console.print(
+            tr(
+                language,
+                "[cyan]正在从供应商获取实时模型列表…[/cyan]",
+                "[cyan]Loading live model list from provider...[/cyan]",
+            )
+        )
         remote = asyncio.run(create_model_provider(candidate).list_models(timeout_seconds=6))
         remote = [name for name in remote if _is_likely_chat_model(name)]
         if not remote:
@@ -511,43 +823,94 @@ def _discover_wizard_models(
             )
             for name in remote
         ]
-        console.print(f"[green]✓[/green] 已发现 {len(models)} 个实时模型")
+        console.print(
+            tr(
+                language,
+                f"[green]✓[/green] 已发现 {len(models)} 个实时模型",
+                f"[green]✓[/green] Discovered {len(models)} live models",
+            )
+        )
         return models
     except Exception as exc:
         if fallback:
-            console.print(f"[yellow]![/yellow] 实时模型发现失败：{exc}；将使用内置候选列表。")
+            console.print(
+                tr(
+                    language,
+                    f"[yellow]![/yellow] 实时模型发现失败：{exc}；将使用内置候选列表。",
+                    f"[yellow]![/yellow] Live model discovery failed: {exc}; using built-in candidates.",
+                )
+            )
             return fallback
-        console.print(f"[yellow]![/yellow] 无法发现模型，请手动输入模型 ID：{exc}")
+        console.print(
+            tr(
+                language,
+                f"[yellow]![/yellow] 无法发现模型，请手动输入模型 ID：{exc}",
+                f"[yellow]![/yellow] Could not discover models; enter a model ID manually: {exc}",
+            )
+        )
         return [ProviderModelConfig(name=provider.model_name)]
 
 
 def _prompt_provider_model(
-    console: Console, provider: ModelProviderConfig, api_key: str
+    console: Console, provider: ModelProviderConfig, api_key: str, language: str = "zh-CN"
 ) -> ProviderModelConfig:
-    models = _discover_wizard_models(console, provider, api_key)
+    models = _discover_wizard_models(console, provider, api_key, language)
     default_model = provider.model_name
     if default_model not in {model.name for model in models}:
         default_model = models[0].name
 
-    table = Table(box=box.ROUNDED, expand=True)
-    table.add_column("序号", justify="right", style="cyan")
-    table.add_column("模型", style="bold")
-    table.add_column("上下文窗口", justify="right")
-    table.add_column("最大输出", justify="right")
-
+    rows = [
+        f"{tr(language, '序号', 'NO.'):>4}  {tr(language, '模型', 'MODEL'):<42} {tr(language, '上下文窗口', 'CONTEXT'):>10} {tr(language, '最大输出', 'MAX OUTPUT'):>12}"
+    ]
     default_index = 1
     for index, model in enumerate(models, start=1):
         if model.name == default_model:
             default_index = index
-        table.add_row(str(index), model.name, str(model.context_window), str(model.max_output))
+        rows.append(
+            f"{index:02d}    {model.name:<42} {model.context_window:>10} {model.max_output:>12}"
+        )
+    pixel_menu(
+        console,
+        title=tr(language, "选择实时模型", "SELECT LIVE MODEL"),
+        rows=rows,
+        subtitle=tr(
+            language, "输入序号后可微调模型参数", "Enter a number, then adjust model parameters"
+        ),
+        width=92,
+        border_style="bright_green",
+    )
+    import sys
 
-    console.print(Panel(table, title="选择实时模型", border_style="green", padding=(1, 1)))
-    choice = IntPrompt.ask("请输入数字选择", default=default_index, console=console)
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        selected_key = _pixel_select(
+            title=tr(language, "选择实时模型", "SELECT LIVE MODEL"),
+            text=tr(language, "方向键/鼠标选择，Enter 确认", "Use arrows/mouse, then press Enter"),
+            values=[(str(index), model.name) for index, model in enumerate(models, start=1)],
+            default=str(default_index),
+            language=language,
+        )
+        choice = int(selected_key)
+    else:
+        choice = IntPrompt.ask(
+            tr(language, "请输入数字选择", "Enter selection"),
+            default=default_index,
+            console=console,
+        )
     selected = models[max(1, min(choice, len(models))) - 1]
 
-    model_name = Prompt.ask("模型名称", default=selected.name, console=console)
-    context_window = IntPrompt.ask("上下文窗口", default=selected.context_window, console=console)
-    max_output = IntPrompt.ask("最大输出 Token", default=selected.max_output, console=console)
+    model_name = Prompt.ask(
+        tr(language, "模型名称", "Model name"), default=selected.name, console=console
+    )
+    context_window = IntPrompt.ask(
+        tr(language, "上下文窗口", "Context window"),
+        default=selected.context_window,
+        console=console,
+    )
+    max_output = IntPrompt.ask(
+        tr(language, "最大输出 Token", "Max output tokens"),
+        default=selected.max_output,
+        console=console,
+    )
     return ProviderModelConfig(
         name=model_name, context_window=context_window, max_output=max_output
     )
@@ -558,16 +921,25 @@ def _prompt_provider_settings(
     provider: ModelProviderConfig,
     *,
     quick: bool,
+    language: str = "zh-CN",
 ) -> tuple[str, str]:
     _render_section_header(
-        console, "连接设置", "支持使用配置文件保存，也支持后续通过环境变量覆盖。"
+        console,
+        "连接设置",
+        "支持使用配置文件保存，也支持后续通过环境变量覆盖。",
+        language=language,
+        title_en="CONNECTION SETTINGS",
+        subtitle_en="Save settings in the config file or override them with environment variables.",
+        step=3,
     )
     base_url = provider.base_url
     api_format = provider.api_format
     if not quick or provider.name == "custom":
-        base_url = Prompt.ask("API Base URL", default=provider.base_url, console=console)
+        base_url = Prompt.ask(
+            tr(language, "API Base URL", "API base URL"), default=provider.base_url, console=console
+        )
         api_format = Prompt.ask(
-            "API 协议格式",
+            tr(language, "API 协议格式", "API protocol"),
             choices=["anthropic", "openai", "custom"],
             default=provider.api_format,
             console=console,
@@ -585,32 +957,77 @@ def _validate_github_token_input(github_token: str) -> None:
         raise ConfigValidationError("GitHub Token 长度过短，请确认输入是否完整。")
 
 
-def _prompt_github_token(console: Console, default_value: str) -> str:
+def _prompt_github_token(console: Console, default_value: str, language: str = "zh-CN") -> str:
+    pixel_step_header(
+        console,
+        step=6,
+        total=7,
+        title_zh="配置 GitHub Token",
+        title_en="CONFIGURE GITHUB TOKEN",
+        detail_zh="用于读取 PR 元数据，并在启用时发布审查评论。",
+        detail_en="Used to read PR metadata and publish review comments when enabled.",
+        language=language,
+    )
     instruction = Table.grid(padding=(0, 1))
     instruction.add_column()
-    instruction.add_row("获取 GitHub Token：")
+    instruction.add_row(tr(language, "获取 GitHub Token：", "Get a GitHub token:"))
     instruction.add_row("")
-    instruction.add_row("1. 访问 https://github.com/settings/tokens")
-    instruction.add_row("2. 点击 Generate new token -> Generate new token (classic)")
-    instruction.add_row('3. 填写名称（如 "AI PR Review"）')
-    instruction.add_row("4. 选择权限：repo（完整仓库访问）")
-    instruction.add_row("5. 点击 Generate token")
-    instruction.add_row("6. 复制生成的 Token")
-    instruction.add_row("")
-    instruction.add_row("Token 格式：ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
-    console.print(
-        Panel(
-            instruction,
-            title="GitHub 认证",
-            subtitle="用于读取 PR 元数据和发布评论。GitHub Token 为必填项。",
-            border_style="yellow",
-            padding=(1, 2),
+    instruction.add_row(
+        tr(
+            language,
+            "1. 访问 https://github.com/settings/tokens",
+            "1. Visit https://github.com/settings/tokens",
         )
+    )
+    instruction.add_row(
+        tr(
+            language,
+            "2. 点击 Generate new token -> Generate new token (classic)",
+            "2. Select Generate new token -> Generate new token (classic)",
+        )
+    )
+    instruction.add_row(
+        tr(
+            language,
+            '3. 填写名称（如 "AI PR Review"）',
+            '3. Enter a name (for example, "AI PR Review")',
+        )
+    )
+    instruction.add_row(
+        tr(
+            language,
+            "4. 选择权限：repo（完整仓库访问）",
+            "4. Grant the repo permission (full repository access)",
+        )
+    )
+    instruction.add_row(tr(language, "5. 点击 Generate token", "5. Select Generate token"))
+    instruction.add_row(tr(language, "6. 复制生成的 Token", "6. Copy the generated token"))
+    instruction.add_row("")
+    instruction.add_row(
+        tr(
+            language,
+            "Token 格式：ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "Token format: ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        )
+    )
+    pixel_print_frame(
+        console,
+        tr(language, "GitHub 认证", "GITHUB AUTHENTICATION"),
+        [
+            str(instruction),
+            tr(
+                language,
+                "用于读取 PR 元数据和发布评论。GitHub Token 为必填项.",
+                "Required to read PR metadata and publish comments. GitHub token is required.",
+            ),
+        ],
+        width=92,
+        border_style="bright_yellow",
     )
 
     while True:
         github_token = click.prompt(
-            "请输入 GitHub Token",
+            tr(language, "请输入 GitHub Token", "Enter GitHub token"),
             default=default_value,
             hide_input=True,
             show_default=False,
@@ -618,67 +1035,149 @@ def _prompt_github_token(console: Console, default_value: str) -> str:
         try:
             _validate_github_token_input(github_token)
         except ConfigValidationError as exc:
-            console.print(f"错误：{exc}", style="bold red")
+            console.print(tr(language, f"错误：{exc}", f"Error: {exc}"), style="bold red")
             continue
         return github_token.strip()
 
 
 def _prompt_interface_preferences(
-    console: Console, current: PreferencesConfig
+    console: Console, current: PreferencesConfig, initial_ui_language: str | None = None
 ) -> PreferencesConfig:
     _render_section_header(
         console,
         "界面与语言",
         "先选择 CLI 界面语言、聊天布局和模型默认回复语言，后续可用 preferences 命令调整。",
+        language=getattr(current, "ui_language", "zh-CN"),
+        step=2,
+        title_en="INTERFACE & LANGUAGE",
+        subtitle_en="Choose CLI language, chat layout, and the model response language.",
     )
-    ui_language = Prompt.ask(
-        "界面语言 / UI language",
-        choices=["zh-CN", "en-US"],
-        default=getattr(current, "ui_language", "zh-CN"),
-        console=console,
-    )
-    chat_layout = Prompt.ask(
-        "聊天布局 / Chat layout",
-        choices=["compact", "split", "plain"],
-        default=getattr(current, "chat_layout", "compact"),
-        console=console,
-    )
-    language = Prompt.ask(
-        "模型回复语言 / Model response language",
-        choices=["zh-CN", "en-US"],
-        default=current.language,
-        console=console,
-    )
+    import sys
+
+    language = getattr(current, "ui_language", "zh-CN")
+    response_language: str = current.language
+
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        ui_language = _pixel_select(
+            title=tr(language, "界面语言", "UI LANGUAGE"),
+            text=tr(language, "选择界面语言", "Select interface language"),
+            values=[("zh-CN", "中文 / Chinese"), ("en-US", "English")],
+            default=initial_ui_language or getattr(current, "ui_language", "zh-CN"),
+            language=language,
+        )
+        chat_layout = _pixel_select(
+            title=tr(ui_language, "聊天布局", "CHAT LAYOUT"),
+            text=tr(ui_language, "选择 Chat 布局", "Select Chat layout"),
+            values=[
+                ("compact", tr(ui_language, "紧凑", "Compact")),
+                ("split", tr(ui_language, "分栏", "Split")),
+                ("plain", tr(ui_language, "纯文本", "Plain")),
+            ],
+            default=getattr(current, "chat_layout", "compact"),
+            language=ui_language,
+        )
+        response_language = (
+            _pixel_select(
+                title=tr(ui_language, "模型回复语言", "MODEL RESPONSE LANGUAGE"),
+                text=tr(ui_language, "选择模型默认回复语言", "Select default response language"),
+                values=[("zh-CN", "中文 / Chinese"), ("en-US", "English")],
+                default=current.language,
+                language=ui_language,
+            )
+            or current.language
+        )
+    else:
+        ui_language = cast(
+            str,
+            initial_ui_language
+            or Prompt.ask(
+                "界面语言 / UI language",
+                choices=["zh-CN", "en-US"],
+                default=getattr(current, "ui_language", "zh-CN"),
+                console=console,
+            ),
+        )
+        ui_language = ui_language or getattr(current, "ui_language", "zh-CN")
+        chat_layout = Prompt.ask(
+            "聊天布局 / Chat layout",
+            choices=["compact", "split", "plain"],
+            default=getattr(current, "chat_layout", "compact"),
+            console=console,
+        )
+        response_language = Prompt.ask(
+            "模型回复语言 / Model response language",
+            choices=["zh-CN", "en-US"],
+            default=current.language,
+            console=console,
+        )
     return PreferencesConfig(
         output_format=current.output_format,
-        language=language,
+        language=response_language,
         ui_language=ui_language,
         chat_layout=chat_layout,
         auto_publish_comment=current.auto_publish_comment,
+        hybrid_strategy=getattr(current, "hybrid_strategy", "balanced"),
+        max_cost_per_review=getattr(current, "max_cost_per_review", 0.50),
     )
 
 
 def _prompt_preferences(console: Console, current: PreferencesConfig) -> PreferencesConfig:
     _render_section_header(
-        console, "输出偏好", "输出格式和默认发布行为会优先读取配置文件，并允许命令行参数覆盖。"
+        console,
+        "输出偏好",
+        "输出格式和默认发布行为会优先读取配置文件，并允许命令行参数覆盖。",
+        language=getattr(current, "ui_language", "zh-CN"),
+        step=6,
+        title_en="OUTPUT PREFERENCES",
+        subtitle_en="Choose the default output format and publishing behavior.",
     )
-    output_format = Prompt.ask(
-        "默认输出格式",
-        choices=["terminal", "markdown", "json"],
-        default=current.output_format,
-        console=console,
-    )
-    auto_publish_comment = Confirm.ask(
-        "审查完成后默认自动发布 GitHub 评论？",
-        default=current.auto_publish_comment,
-        console=console,
-    )
+    language = getattr(current, "ui_language", "zh-CN")
+    import sys
+
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        output_format = _pixel_select(
+            title=tr(language, "默认输出格式", "DEFAULT OUTPUT FORMAT"),
+            text=tr(language, "选择默认审查输出", "Select default review output"),
+            values=[("terminal", "Terminal"), ("markdown", "Markdown"), ("json", "JSON")],
+            default=current.output_format,
+            language=language,
+        )
+        publish_value = _pixel_select(
+            title=tr(language, "自动发布评论", "AUTO-PUBLISH COMMENT"),
+            text=tr(
+                language,
+                "审查完成后自动发布 GitHub 评论？",
+                "Publish a GitHub comment after review?",
+            ),
+            values=[("yes", tr(language, "是", "Yes")), ("no", tr(language, "否", "No"))],
+            default="yes" if current.auto_publish_comment else "no",
+            language=language,
+        )
+        auto_publish_comment = publish_value == "yes"
+    else:
+        output_format = Prompt.ask(
+            tr(language, "默认输出格式", "Default output format"),
+            choices=["terminal", "markdown", "json"],
+            default=current.output_format,
+            console=console,
+        )
+        auto_publish_comment = Confirm.ask(
+            tr(
+                language,
+                "审查完成后默认自动发布 GitHub 评论？",
+                "Publish a GitHub comment automatically after review?",
+            ),
+            default=current.auto_publish_comment,
+            console=console,
+        )
     return PreferencesConfig(
         output_format=output_format,
         language=current.language,
         ui_language=getattr(current, "ui_language", "zh-CN"),
         chat_layout=getattr(current, "chat_layout", "compact"),
         auto_publish_comment=auto_publish_comment,
+        hybrid_strategy=getattr(current, "hybrid_strategy", "balanced"),
+        max_cost_per_review=getattr(current, "max_cost_per_review", 0.50),
     )
 
 
@@ -688,23 +1187,29 @@ def _render_config_summary(
     github_token: str,
     preferences: PreferencesConfig,
 ) -> None:
+    language = getattr(preferences, "ui_language", "zh-CN")
     model = provider_config.models[provider_config.default_model]
-    table = Table(box=box.SIMPLE_HEAVY)
-    table.add_column("配置项", style="cyan")
-    table.add_column("当前值", style="white")
-    table.add_row("供应商", provider_config.display_name)
-    table.add_row("默认模型", provider_config.default_model)
-    table.add_row("上下文窗口", str(model.context_window))
-    table.add_row("最大输出", str(model.max_output))
-    table.add_row("API 端点", provider_config.base_url or "<自定义填写>")
-    table.add_row("协议格式", provider_config.api_format)
-    table.add_row("GitHub Token", mask_api_key(github_token))
-    table.add_row("默认输出", preferences.output_format)
-    table.add_row("界面语言", getattr(preferences, "ui_language", "zh-CN"))
-    table.add_row("模型回复语言", preferences.language)
-    table.add_row("聊天布局", getattr(preferences, "chat_layout", "compact"))
-    table.add_row("自动发布评论", "是" if preferences.auto_publish_comment else "否")
-    console.print(Panel(table, title="配置摘要", border_style="green", padding=(1, 2)))
+    summary_rows = [
+        f"{tr(language, '供应商', 'Provider'):<24} {provider_config.display_name}",
+        f"{tr(language, '默认模型', 'Default model'):<24} {provider_config.default_model}",
+        f"{tr(language, '运行策略', 'Runtime strategy'):<24} {getattr(preferences, 'hybrid_strategy', 'remote_only')}",
+        f"{tr(language, '上下文窗口', 'Context window'):<24} {model.context_window}",
+        f"{tr(language, '最大输出', 'Max output'):<24} {model.max_output}",
+        f"{tr(language, 'API 端点', 'API endpoint'):<24} {provider_config.base_url or '<custom>'}",
+        f"{tr(language, '协议格式', 'Protocol'):<24} {provider_config.api_format}",
+        f"{tr(language, 'GitHub Token', 'GitHub token'):<24} {mask_api_key(github_token)}",
+        f"{tr(language, '默认输出', 'Default output'):<24} {preferences.output_format}",
+        f"{tr(language, '界面语言', 'UI language'):<24} {getattr(preferences, 'ui_language', 'zh-CN')}",
+        f"{tr(language, '模型回复语言', 'Model language'):<24} {preferences.language}",
+        f"{tr(language, '聊天布局', 'Chat layout'):<24} {getattr(preferences, 'chat_layout', 'compact')}",
+    ]
+    pixel_print_frame(
+        console,
+        tr(language, "配置摘要", "CONFIGURATION SUMMARY"),
+        summary_rows,
+        width=92,
+        border_style="bright_green",
+    )
 
 
 def _validate_api_key_input(provider_name: str, api_key: str) -> None:
@@ -715,19 +1220,22 @@ def _validate_api_key_input(provider_name: str, api_key: str) -> None:
 
 
 def _run_provider_validation(
-    console: Console, provider: ModelProviderConfig, config_path: Path
+    console: Console,
+    provider: ModelProviderConfig,
+    config_path: Path,
+    language: str = "zh-CN",
 ) -> None:
     validation_steps = [
-        "检查 API Key 输入",
-        "验证供应商配置",
-        "检查模型参数",
-        "生成配置预览",
+        tr(language, "检查 API Key 输入", "Check API key input"),
+        tr(language, "验证供应商配置", "Validate provider configuration"),
+        tr(language, "检查模型参数", "Check model parameters"),
+        tr(language, "生成配置预览", "Generate configuration preview"),
     ]
     completed_messages = [
-        "API Key 输入检查通过",
-        "供应商配置验证通过",
-        "模型参数检查通过",
-        "配置预览生成完成",
+        tr(language, "API Key 输入检查通过", "API key input passed"),
+        tr(language, "供应商配置验证通过", "Provider configuration passed"),
+        tr(language, "模型参数检查通过", "Model parameters passed"),
+        tr(language, "配置预览生成完成", "Configuration preview generated"),
     ]
 
     with Progress(
@@ -738,10 +1246,16 @@ def _run_provider_validation(
         console=console,
         transient=True,
     ) as progress:
-        task_id = progress.add_task("正在验证配置...", total=len(validation_steps))
+        task_id = progress.add_task(
+            tr(language, "正在验证配置...", "Validating configuration..."),
+            total=len(validation_steps),
+        )
         for index, step in enumerate(validation_steps):
-            progress.update(task_id, description=f"正在验证配置... {step}")
-            if index == 0:
+            progress.update(
+                task_id,
+                description=f"{tr(language, '正在验证配置...', 'Validating configuration...')} {step}",
+            )
+            if index == 0 and provider.name.lower() not in {"ollama", "local"}:
                 _validate_api_key_input(provider.name, provider.api_key)
             elif index == 1:
                 provider.validate()
@@ -751,14 +1265,18 @@ def _run_provider_validation(
             progress.advance(task_id)
             console.print(f"[green]✓[/green] {completed_messages[index]}")
 
-    info_table = Table(box=box.ROUNDED)
-    info_table.add_column("配置项", style="cyan")
-    info_table.add_column("值")
-    info_table.add_row("供应商", provider.display_name)
-    info_table.add_row("模型", provider.model_name)
-    info_table.add_row("API 端点", provider.base_url or "<未设置>")
-    info_table.add_row("配置文件", str(config_path))
-    console.print(Panel(info_table, title="验证配置", border_style="green", padding=(1, 2)))
+    pixel_print_frame(
+        console,
+        tr(language, "验证配置", "VALIDATE CONFIGURATION"),
+        [
+            f"{tr(language, '供应商', 'Provider'):<24} {provider.display_name}",
+            f"{tr(language, '模型', 'Model'):<24} {provider.model_name}",
+            f"{tr(language, 'API 端点', 'API endpoint'):<24} {provider.base_url or '<not set>'}",
+            f"{tr(language, '配置文件', 'Config file'):<24} {config_path}",
+        ],
+        width=92,
+        border_style="bright_green",
+    )
 
 
 def _export_config_payload(
@@ -780,21 +1298,29 @@ def _export_config_payload(
     }
 
 
-def _render_completion(console: Console, config_path: Path) -> None:
-    content = Table.grid(padding=(0, 1))
-    content.add_row("配置已成功完成。")
-    content.add_row("")
-    content.add_row("现在可以使用以下命令：")
-    content.add_row("pr-review https://github.com/owner/repo/pull/123")
-    content.add_row("")
-    content.add_row("更多用法：")
-    content.add_row("pr-review config show    - 查看配置")
-    content.add_row("pr-review config test    - 测试配置")
-    content.add_row("pr-review history        - 查看历史")
-    content.add_row("pr-review stats          - 查看统计")
-    content.add_row("")
-    content.add_row(f"配置文件：{config_path}")
-    console.print(Panel(content, title="配置完成", border_style="bright_green", padding=(1, 2)))
+def _render_completion(console: Console, config_path: Path, language: str = "zh-CN") -> None:
+    rows = [
+        tr(language, "✓ 配置已完成", "✓ CONFIGURATION READY"),
+        "",
+        tr(language, "下一步：", "Next:"),
+        tr(language, "pr-review chat          - 打开 Chat", "pr-review chat          - Open Chat"),
+        tr(
+            language, "pr-review demo          - 离线演示", "pr-review demo          - Offline Demo"
+        ),
+        tr(
+            language,
+            "pr-review config test   - 验证配置",
+            "pr-review config test   - Verify config",
+        ),
+        tr(
+            language,
+            "pr-review history       - 查看历史",
+            "pr-review history       - Review history",
+        ),
+        "",
+        tr(language, f"配置文件：{config_path}", f"Config file: {config_path}"),
+    ]
+    pixel_print_frame(console, "PIXEL SETUP COMPLETE", rows, width=92, border_style="bright_green")
 
 
 class DefaultReviewGroup(click.Group):
@@ -832,12 +1358,17 @@ async def run_review(
     config: AppConfig | None = None,
     progress_console: Console | None = None,
     use_hybrid: bool = True,
+    stage_callback: Callable[[str, str], None] | None = None,
+    progress_callback: Callable[[str, str], None] | None = None,
+    file_done_callback: Callable[[str], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> ReviewArtifacts:
     """Run a review with terminal guidance and animated progress when interactive."""
     app_config = config or AppConfig.load()
 
     # 根据配置决定使用混合编排器还是标准编排器
-    if use_hybrid and hasattr(app_config.preferences, 'hybrid_strategy'):
+    orchestrator: ReviewOrchestrator | HybridReviewOrchestrator
+    if use_hybrid and hasattr(app_config.preferences, "hybrid_strategy"):
         orchestrator = HybridReviewOrchestrator(app_config)
     else:
         orchestrator = ReviewOrchestrator(app_config)
@@ -848,7 +1379,9 @@ async def run_review(
     stage_events: list[tuple[str, str, float]] = []
     total_review_files = 0
     completed_review_files = 0
-    provider_label = app_config.provider.display_name or app_config.ai_client.provider
+    provider_label = (
+        app_config._active_provider_config().display_name or app_config.ai_client.provider
+    )
     model_label = app_config.ai_client.model
     stage_labels = {
         "fetching": ("获取 PR 数据", "正在连接 GitHub，读取 PR 元数据、Diff 与文件内容"),
@@ -893,14 +1426,16 @@ async def run_review(
 
         elapsed = time.perf_counter() - started
         stage_events.append((label, text, elapsed))
+        if stage_callback is not None:
+            stage_callback(stage, text)
 
         if progress is not None and task_id is not None:
             # 更精确的进度权重分配
             stage_ranges = {
-                "fetching": (0, 5),      # 0% ~ 5%
-                "filtering": (5, 10),    # 5% ~ 10%
-                "context": (10, 20),     # 10% ~ 20%
-                "reviewing": (20, 85),   # 20% ~ 85% (主要阶段)
+                "fetching": (0, 5),  # 0% ~ 5%
+                "filtering": (5, 10),  # 5% ~ 10%
+                "context": (10, 20),  # 10% ~ 20%
+                "reviewing": (20, 85),  # 20% ~ 85% (主要阶段)
                 "cross_file": (85, 93),  # 85% ~ 93%
                 "persisting": (93, 99),  # 93% ~ 99%
             }
@@ -928,11 +1463,15 @@ async def run_review(
 
     def file_started(filename: str, active_model: str) -> None:
         update("reviewing", f"正在分析 {filename} · {provider_label} / {active_model}")
+        if progress_callback is not None:
+            progress_callback(filename, active_model)
 
     def file_done(filename: str) -> None:
         nonlocal completed_review_files
         completed_review_files += 1
         update("reviewing", f"已完成 {filename}，继续处理下一个文件")
+        if file_done_callback is not None:
+            file_done_callback(filename)
 
     try:
         result = await orchestrator.review(
@@ -941,6 +1480,7 @@ async def run_review(
             progress_callback=file_started,
             file_done_callback=file_done,
             stage_callback=update,
+            cancel_check=cancel_check,
         )
         if progress is not None and task_id is not None:
             progress.update(
@@ -1099,15 +1639,25 @@ def render_json_report(artifacts: ReviewArtifacts, config: AppConfig | None = No
 def render_terminal_report(
     console: Console, artifacts: ReviewArtifacts, config: AppConfig | None = None
 ) -> None:
+    # Render once and guard by the exact report content on this Console. The
+    # same review can pass through two adapters with different artifact/run
+    # wrappers; content-based deduplication catches both paths without hiding
+    # a later, genuinely different review.
     app_config = config or AppConfig.load()
-    console.print(
-        ReportRenderer(app_config.report_renderer).render_terminal(
-            artifacts.review_result or ReviewResult(summary="", findings=[]),
-            artifacts.pr_data,
-            language=getattr(app_config.preferences, "ui_language", "zh-CN"),
-        ),
-        end="",
+    rendered = ReportRenderer(app_config.report_renderer).render_terminal(
+        artifacts.review_result or ReviewResult(summary="", findings=[]),
+        artifacts.pr_data,
+        language=getattr(app_config.preferences, "ui_language", "zh-CN"),
     )
+    fingerprint = hash(rendered)
+    rendered_fingerprints = getattr(console, "_ai_pr_rendered_fingerprints", set())
+    if fingerprint in rendered_fingerprints:
+        return
+    rendered_fingerprints.add(fingerprint)
+    setattr(console, "_ai_pr_rendered_fingerprints", rendered_fingerprints)
+    if artifacts.run_id:
+        _RENDERED_RUN_IDS.add(artifacts.run_id)
+    console.print(rendered, end="")
 
 
 def maybe_publish_comment(
@@ -1144,18 +1694,64 @@ def _response_language_instruction(language: str) -> str:
 
 def _chat_title(config: AppConfig) -> str:
     """生成聊天窗口标题，显示供应商名和模型名。"""
-    provider = config.provider
+    provider = config._active_provider_config()
     return f"AI PR Review Chat | {provider.display_name} / {provider.default_model}"
 
 
+def _model_provider_hint(model_name: str) -> str | None:
+    """Return the provider that owns a known or obviously local model name."""
+    for provider_name, models in PROVIDER_MODEL_PRESETS.items():
+        if model_name in models:
+            return provider_name
+
+    # Ollama model tags commonly use a local quantization/tag suffix. Keep this
+    # deliberately conservative so custom remote model IDs remain supported.
+    lowered = model_name.lower()
+    local_prefixes = (
+        "qwen",
+        "llama",
+        "mistral",
+        "mixtral",
+        "gemma",
+        "phi",
+        "deepseek-r1",
+        "deepseek-coder",
+        "codellama",
+        "yi:",
+    )
+    if ":" in model_name and lowered.startswith(local_prefixes):
+        return "ollama"
+    return None
+
+
 def _set_active_model(config: AppConfig, model_name: str) -> None:
-    """设置当前活跃模型，同时更新 provider 和 ai_client 配置。"""
+    """Set the active model without silently changing its provider."""
     model_name = model_name.strip()
     if not model_name:
         raise click.ClickException("模型名称不能为空。")
-    if model_name not in config.provider.models:
-        config.provider.models[model_name] = ProviderModelConfig(name=model_name)
-    config.provider.default_model = model_name
+
+    # Write to the *active* slot: in `local_only` mode the primary slot is the
+    # remote one, so using it here reported success while changing nothing and
+    # polluted the cloud slot with a local model name.
+    slot = config._active_provider_config()
+    current_provider = slot.name.lower().strip()
+    expected_provider = _model_provider_hint(model_name)
+    if expected_provider and expected_provider != current_provider:
+        provider_label = slot.display_name or current_provider
+        if expected_provider == "ollama":
+            raise click.ClickException(
+                f"模型 {model_name} 是本地 Ollama 模型，但当前 Provider 是 {provider_label}。\n"
+                "方案 A 不会自动切换模型后端。请先运行 `pr-review config`，选择 Ollama，"
+                "再选择该模型；也可以先执行 `pr-review local-model check` 验证 Ollama。"
+            )
+        raise click.ClickException(
+            f"模型 {model_name} 属于 {expected_provider}，但当前 Provider 是 {provider_label}。\n"
+            "请先运行 `pr-review config` 切换到对应 Provider，再设置模型。"
+        )
+
+    if model_name not in slot.models:
+        slot.models[model_name] = ProviderModelConfig(name=model_name)
+    slot.default_model = model_name
     config.ai_client.model = model_name
 
 
@@ -1175,10 +1771,13 @@ def _format_chat_error(exc: Exception, config: AppConfig) -> str:
 
 def _check_config_status(config: AppConfig) -> dict[str, bool]:
     """检查配置完成状态。"""
+    active = config._active_provider_config()
+    provider_name = active.name.lower().strip()
+    local_provider = provider_name in {"ollama", "local"}
     return {
-        "api_key_configured": bool(config.provider.api_key),
+        "api_key_configured": local_provider or bool(active.api_key),
         "github_token_configured": bool(config._resolve_github_token()),
-        "provider_valid": bool(config.provider.name and config.ai_client.model),
+        "provider_valid": bool(active.name and config.ai_client.model),
     }
 
 
@@ -1356,7 +1955,7 @@ async def _handle_start_review_action(
     try:
         # Update context state
         context.current_pr_url = pr_url
-        context.state = "review_running"
+        context.state = AgentState.REVIEW_RUNNING
 
         # Execute review
         artifacts = await asyncio.to_thread(
@@ -1370,7 +1969,7 @@ async def _handle_start_review_action(
 
         # Update context with results
         context.current_run_id = artifacts.run_id
-        context.state = "review_completed"
+        context.state = AgentState.REVIEW_COMPLETED
 
         finding_count = len(artifacts.review_result.findings) if artifacts.review_result else 0
         return ActionResult(
@@ -1386,7 +1985,7 @@ async def _handle_start_review_action(
             },
         )
     except Exception as exc:
-        context.state = "error"
+        context.state = AgentState.ERROR
         context.last_error = str(exc)
         return ActionResult(
             action="start_review",
@@ -1427,7 +2026,7 @@ async def _handle_create_review_plan_action(
             )
 
         context.current_pr_url = pr_url
-        context.state = "review_planning"
+        context.state = AgentState.REVIEW_PLANNING
 
         return ActionResult(
             action="create_review_plan",
@@ -1443,7 +2042,7 @@ async def _handle_create_review_plan_action(
             },
         )
     except Exception as exc:
-        context.state = "error"
+        context.state = AgentState.ERROR
         context.last_error = str(exc)
         return ActionResult(
             action="create_review_plan",
@@ -1532,6 +2131,7 @@ def _handle_analyze_history_action(
         messages = [{"role": "user", "content": prompt}]
 
         import asyncio
+
         response = asyncio.run(ai_client.chat(messages))
         analysis = response.get("text", "")
 
@@ -1641,6 +2241,7 @@ def _handle_explain_finding_action(
         messages = [{"role": "user", "content": prompt}]
 
         import asyncio
+
         response = asyncio.run(ai_client.chat(messages))
         explanation = response.get("text", "")
 
@@ -1671,9 +2272,9 @@ def _handle_check_environment_action(
     """Check environment and configuration status."""
     try:
         status = {
-            "provider": config.provider.display_name or config.provider.name,
+            "provider": config._active_provider_config().display_name or config.ai_client.provider,
             "model": config.ai_client.model,
-            "api_key_configured": bool(config.provider.api_key),
+            "api_key_configured": _check_config_status(config)["api_key_configured"],
             "github_token_configured": bool(config._resolve_github_token()),
             "language": config.preferences.language,
         }
@@ -1698,7 +2299,7 @@ def _handle_cancel_review_action(
     context: ChatContext,
 ) -> ActionResult:
     """Cancel current review."""
-    context.state = "ready"
+    context.state = AgentState.READY
     context.current_pr_url = None
     context.current_action = None
 
@@ -1855,21 +2456,36 @@ def _handle_chat_slash_command(
 def _run_config_wizard(quick: bool, advanced: bool, save_key: bool | None) -> Path:
     console = Console()
     existing = AppConfig.load()
-    _render_welcome(console)
-    preferences = _prompt_interface_preferences(console, existing.preferences)
+    _render_welcome(console, getattr(existing.preferences, "ui_language", "zh-CN"))
+    runtime_mode, runtime_strategy, legacy_ui_language = _prompt_runtime_profile(
+        console, existing.preferences
+    )
+    preferences = _prompt_interface_preferences(
+        console, existing.preferences, initial_ui_language=legacy_ui_language
+    )
+    preferences.hybrid_strategy = runtime_strategy
 
-    provider_name = _select_provider(console)
+    language = getattr(preferences, "ui_language", "zh-CN")
+    provider_name = "ollama" if runtime_mode == "local" else _select_provider(console, language)
     provider = ModelProviderConfig.from_name(provider_name)
-    api_key = _prompt_api_key(console, provider)
-    selected_model = _prompt_provider_model(console, provider, api_key)
-    base_url, api_format = _prompt_provider_settings(console, provider, quick=quick)
+    api_key = "" if runtime_mode == "local" else _prompt_api_key(console, provider, language)
+    selected_model = _prompt_provider_model(console, provider, api_key, language)
+    base_url, api_format = _prompt_provider_settings(
+        console, provider, quick=quick, language=language
+    )
     headers: dict[str, str] = {}
     extra_params: dict[str, Any] = {}
     if advanced:
         headers = json_prompt("Headers JSON", default=provider.headers)
         extra_params = json_prompt("Extra params JSON", default=provider.extra_params)
-    github_token = _prompt_github_token(console, existing.github_token)
+    github_token = _prompt_github_token(console, existing.github_token, language)
     preferences = _prompt_preferences(console, preferences)
+    if runtime_mode == "local":
+        preferences.hybrid_strategy = "local_only"
+    elif runtime_mode == "cloud":
+        preferences.hybrid_strategy = "remote_only"
+    else:
+        preferences.hybrid_strategy = "balanced"
 
     final_provider = ModelProviderConfig(
         name=provider_name,
@@ -1891,11 +2507,19 @@ def _run_config_wizard(quick: bool, advanced: bool, save_key: bool | None) -> Pa
     )
     save_key = resolve_save_key_choice(console, save_key)
 
+    # Enforce the selected runtime profile at the persistence boundary.
+    if runtime_mode == "local":
+        preferences.hybrid_strategy = "local_only"
+    elif runtime_mode == "cloud":
+        preferences.hybrid_strategy = "remote_only"
+    else:
+        preferences.hybrid_strategy = "balanced"
+
     config_path = DEFAULT_CONFIG_PATH
-    _run_provider_validation(console, final_provider, config_path)
-    _render_config_summary(console, config.provider, github_token, preferences)
+    _run_provider_validation(console, final_provider, config_path, language)
+    _render_config_summary(console, config._active_provider_config(), github_token, preferences)
     config_path = config.save(save_key=save_key)
-    _render_completion(console, config_path)
+    _render_completion(console, config_path, language)
     return config_path
 
 
@@ -1988,9 +2612,9 @@ def doctor_command(ctx: click.Context, json_output: bool) -> None:
         {
             "key": "provider",
             "label": "Model provider",
-            "ok": bool(config and config.provider.api_key),
+            "ok": bool(config and _check_config_status(config)["api_key_configured"]),
             "detail": (
-                f"{config.provider.display_name} · {config.provider.default_model}"
+                f"{config._active_provider_config().display_name} · {config.ai_client.model}"
                 if config
                 else "unavailable"
             ),
@@ -2059,11 +2683,13 @@ def local_model_check(ctx: click.Context, json_output: bool, timeout_seconds: in
     """Check Ollama availability and installed local models."""
     config = AppConfig.load(_config_path_from_context(ctx))
     provider_config = ModelProviderConfig.from_name("ollama")
-    provider_config.model_name = (
-        config.provider.default_model
-        if config.provider.name == "ollama"
-        else provider_config.model_name
+    local_slot = (
+        config._active_provider_config()
+        if config._active_provider_config().name.lower() in {"ollama", "local"}
+        else config.local_provider
     )
+    provider_config.model_name = local_slot.default_model
+    provider_config.base_url = local_slot.base_url
     provider = create_model_provider(provider_config)
     payload: dict[str, object] = {
         "provider": "ollama",
@@ -2310,6 +2936,71 @@ def explain_command(ctx: click.Context, run_id: str) -> None:
             console.print(f"  Issues: {'; '.join(finding.evidence_issues)}")
         console.print(f"  Why: {finding.problem}")
         console.print(f"  Fix: {finding.suggestion}")
+
+
+@main.command("export-run")
+@click.argument("run_id")
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["markdown", "json"]),
+    default="markdown",
+    show_default=True,
+)
+@click.option("--output", type=click.Path(path_type=Path), required=True)
+@click.pass_context
+def export_run_command(ctx: click.Context, run_id: str, output_format: str, output: Path) -> None:
+    """Export a stored review run without contacting GitHub or a model."""
+    config = AppConfig.load(_config_path_from_context(ctx))
+    store = ResultStore(config.result_store)
+    result = store.get_result(run_id)
+    summary = store.get_run_summary(run_id)
+    if result is None or summary is None:
+        raise click.ClickException(f"Review run not found: {run_id}")
+
+    # Only the run row survives: file names and diffs are not persisted, so the
+    # count comes from the stored columns instead of an empty file list.
+    from ai_pr_review.models.pr_data import PRData
+
+    metadata_payload: Any = {}
+    try:
+        metadata_payload = json.loads(str(summary.get("metadata_json") or "{}"))
+    except json.JSONDecodeError:
+        metadata_payload = {}
+    metadata: dict[str, Any] = metadata_payload if isinstance(metadata_payload, dict) else {}
+    raw_pr_meta = metadata.get("pr")
+    pr_meta: dict[str, Any] = raw_pr_meta if isinstance(raw_pr_meta, dict) else {}
+    pr_data = PRData(
+        pr_number=int(summary.get("pr_number") or pr_meta.get("number") or 0),
+        title=str(pr_meta.get("title") or f"Stored review {run_id}"),
+        description=pr_meta.get("description"),
+        author=str(pr_meta.get("author") or "unknown"),
+        state=str(pr_meta.get("state") or "unknown"),
+        head_sha=str(summary.get("head_sha") or ""),
+        base_sha=str(pr_meta.get("base_sha") or ""),
+        head_ref=str(pr_meta.get("head_ref") or ""),
+        base_ref=str(pr_meta.get("base_ref") or ""),
+        diff="",
+        files=[],
+        url=str(summary["pr_url"]),
+        created_at=None,
+        updated_at=None,
+        merged=bool(pr_meta.get("merged", False)),
+        owner=str(summary.get("repo_owner") or ""),
+        repo=str(summary.get("repo_name") or ""),
+    )
+    files_changed = int(summary.get("total_files") or 0)
+    if output_format == "json":
+        payload = {"run": summary, "result": json.loads(result.model_dump_json())}
+        output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    else:
+        output.write_text(
+            ReportRenderer(config.report_renderer).render_markdown(
+                result, pr_data, files_changed=files_changed
+            ),
+            encoding="utf-8",
+        )
+    click.echo(f"Report written to {output}")
 
 
 @main.command("trace")
@@ -2683,6 +3374,75 @@ def preferences_command(
     click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def _open_tui_frontend(
+    *, config_path: Path | None = None, initial_message: str | None = None
+) -> bool:
+    """Launch the OpenTUI shell and return whether it started successfully."""
+    package_root = Path(__file__).resolve().parent
+    project_root = package_root.parents[1]
+    dev_root = project_root / "frontend" / "tui"
+    static_root = package_root / "tui_static"
+
+    runtime = _find_bun_runtime()
+    exe_name = "pr-review-tui.exe" if os.name == "nt" else "pr-review-tui"
+    prebuilt = static_root / exe_name
+    bundle = static_root / "tui.js"
+    dev_entry = dev_root / "src" / "main.tsx"
+    dev_ready = dev_entry.exists() and (dev_root / "node_modules").exists()
+
+    raw_command = os.getenv("AI_PR_REVIEW_TUI_COMMAND", "").strip()
+    if raw_command:
+        command = shlex.split(raw_command, posix=False)
+        tui_root = dev_root if dev_ready else static_root
+    elif prebuilt.exists():
+        # A compiled binary embeds both the JS bundle and the native DLL, so it
+        # needs neither node_modules nor a Bun install on the target machine.
+        command = [str(prebuilt)]
+        tui_root = static_root
+    elif runtime is not None and dev_ready:
+        command = [runtime, "--preload", "@opentui/solid/preload", "src/main.tsx"]
+        tui_root = dev_root
+    elif runtime is not None and bundle.exists():
+        command = [runtime, str(bundle)]
+        tui_root = static_root
+    else:
+        return False
+
+    env = os.environ.copy()
+    # In an installed layout there is no source tree, so the working directory
+    # the user launched from is the meaningful project root.
+    env["AI_PR_REVIEW_ROOT"] = str(project_root) if dev_ready else str(Path.cwd())
+    # The TUI spawns the Python JSONL backend itself; pin it to the interpreter
+    # running this CLI so a bare `python` on PATH cannot pick an environment
+    # that lacks the package.
+    env.setdefault("AI_PR_REVIEW_PYTHON", sys.executable)
+    if config_path is not None:
+        env["AI_PR_REVIEW_CONFIG"] = str(config_path)
+    if initial_message:
+        env["AI_PR_REVIEW_INITIAL_MESSAGE"] = initial_message
+
+    try:
+        completed = subprocess.run(command, cwd=tui_root, env=env, check=False)
+    except (OSError, ValueError) as exc:
+        print(f"OpenTUI 启动失败，将回退到纯 Python Chat：{exc}", file=sys.stderr)
+        return False
+    return completed.returncode == 0
+
+
+def _find_bun_runtime() -> str | None:
+    """Locate the Bun runtime used by the source and bundled launch paths."""
+    candidates = [
+        os.getenv("BUN_EXECUTABLE", "").strip(),
+        str(Path(os.getenv("APPDATA", "")) / "npm" / "node_modules" / "bun" / "bin" / "bun.exe"),
+        shutil.which("bun.exe") or "",
+        shutil.which("bun") or "",
+    ]
+    return next(
+        (candidate for candidate in candidates if candidate and Path(candidate).exists()),
+        None,
+    )
+
+
 @main.command("chat")
 @click.option("--message", "message", default=None, help="Send one message and exit.")
 @click.option("--model", "model_name", default=None, help="Override model for this chat session.")
@@ -2692,9 +3452,16 @@ def preferences_command(
     default=None,
     help="Override chat layout for this session.",
 )
+@click.option(
+    "--tui/--plain", "use_tui", default=None, help="Use OpenTUI or the legacy plain Chat."
+)
 @click.pass_context
 def chat_command(
-    ctx: click.Context, message: str | None, model_name: str | None, layout: str | None
+    ctx: click.Context,
+    message: str | None,
+    model_name: str | None,
+    layout: str | None,
+    use_tui: bool | None,
 ) -> None:
     """Open a lightweight terminal chat with the configured model."""
     try:
@@ -2704,6 +3471,23 @@ def chat_command(
     console = Console()
     config_path = _config_path_from_context(ctx)
     config = AppConfig.load(config_path)
+
+    # Interactive terminals use the MiMoCode-style OpenTUI shell by default.
+    # CliRunner, CI, and explicit --plain retain the legacy Python Chat path.
+    interactive = bool(
+        getattr(sys.stdin, "isatty", lambda: False)()
+        and getattr(sys.stdout, "isatty", lambda: False)()
+    )
+    should_use_tui = use_tui if use_tui is not None else interactive
+    if should_use_tui and model_name is None and message is None:
+        if _open_tui_frontend(config_path=config_path):
+            return
+        if use_tui:
+            raise click.ClickException(
+                "OpenTUI 未能启动。请安装 Bun，或使用 --plain 回退到纯 Python Chat。"
+            )
+        console.print("OpenTUI 不可用，将回退到纯 Python Chat。", style="yellow")
+
     if model_name is not None:
         _set_active_model(config, model_name)
     active_layout = layout or getattr(config.preferences, "chat_layout", "compact")
@@ -2727,11 +3511,13 @@ def chat_command(
                 language=config.preferences.language,
                 state=initial_state,
                 local_model=(
-                    config.ai_client.model if config.provider.name.lower() in {"ollama", "local"} else None
+                    config.ai_client.model
+                    if config.ai_client.provider.lower() in {"ollama", "local"}
+                    else None
                 ),
                 remote_model=(
                     config.ai_client.model
-                    if config.provider.name.lower() not in {"ollama", "local"}
+                    if config.ai_client.provider.lower() not in {"ollama", "local"}
                     else None
                 ),
             )
@@ -2741,11 +3527,13 @@ def chat_command(
             language=config.preferences.language,
             state=initial_state,
             local_model=(
-                config.ai_client.model if config.provider.name.lower() in {"ollama", "local"} else None
+                config.ai_client.model
+                if config.ai_client.provider.lower() in {"ollama", "local"}
+                else None
             ),
             remote_model=(
                 config.ai_client.model
-                if config.provider.name.lower() not in {"ollama", "local"}
+                if config.ai_client.provider.lower() not in {"ollama", "local"}
                 else None
             ),
         )
@@ -2834,9 +3622,13 @@ def chat_command(
                                 data = result.data
                                 response += f"**审查计划摘要**\n\n"
                                 response += f"- 风险等级: {data.get('risk_level')}\n"
-                                response += f"- 风险类别: {', '.join(data.get('risk_categories', []))}\n"
+                                response += (
+                                    f"- 风险类别: {', '.join(data.get('risk_categories', []))}\n"
+                                )
                                 response += f"- 优先文件数: {len(data.get('priority_files', []))}\n"
-                                response += f"- 预计审查文件数: {data.get('estimated_file_reviews')}\n"
+                                response += (
+                                    f"- 预计审查文件数: {data.get('estimated_file_reviews')}\n"
+                                )
                                 response += f"- 策略: {', '.join(data.get('strategies', []))}\n"
                             elif action.action == "start_review":
                                 data = result.data
@@ -2848,14 +3640,16 @@ def chat_command(
                             elif action.action == "list_history":
                                 data = result.data
                                 response += f"**历史记录** ({data.get('count')} 条)\n\n"
-                                for run in data.get('runs', [])[:5]:
+                                for run in data.get("runs", [])[:5]:
                                     response += f"- {run.get('timestamp', 'N/A')}: {run.get('pr_url', 'N/A')}\n"
                             elif action.action == "check_environment":
                                 data = result.data
                                 response += f"**环境状态**\n\n"
                                 response += f"- 供应商: {data.get('provider')}\n"
                                 response += f"- 模型: {data.get('model')}\n"
-                                response += f"- API Key: {'✓' if data.get('api_key_configured') else '✗'}\n"
+                                response += (
+                                    f"- API Key: {'✓' if data.get('api_key_configured') else '✗'}\n"
+                                )
                                 response += f"- GitHub Token: {'✓' if data.get('github_token_configured') else '✗'}\n"
                                 response += f"- 语言: {data.get('language')}\n"
                             elif action.action == "configure_provider":
@@ -3043,7 +3837,9 @@ def showcase_command(ctx: click.Context, json_output: bool, interactive: bool) -
         "title": "AI PR Review Assistant · Competition Showcase",
         "offline_ready": True,
         "real_review_ready": bool(
-            config and config.provider.api_key and config._resolve_github_token()
+            config
+            and _check_config_status(config)["api_key_configured"]
+            and config._resolve_github_token()
         ),
         "steps": steps,
     }
@@ -3249,8 +4045,11 @@ def serve_command(ctx: click.Context, host: str, port: int) -> None:
     """Start the local browser workbench."""
     from ai_pr_review.web_server import serve
 
-    config = AppConfig.load(_config_path_from_context(ctx))
-    serve(config, host=host, port=port)
+    explicit_path = _config_path_from_context(ctx)
+    config = AppConfig.load(explicit_path)
+    # 把解析后的落盘目标交给 Web 设置页（--config > AI_PR_REVIEW_CONFIG > 默认路径），
+    # 否则设置页会静默读写默认用户配置。
+    serve(config, host=host, port=port, config_path=resolve_config_path(explicit_path))
 
 
 @main.command("stats")
@@ -3284,3 +4083,7 @@ __all__ = [
     "render_terminal_report",
     "run_review",
 ]
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised through the console script
+    main()

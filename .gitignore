@@ -34,8 +34,24 @@ web/.vite/
 web/.shots/
 .distcheck/
 
+# OpenTUI frontend build output. The small staged bundle lives in
+# src/ai_pr_review/tui_static/ and is committed so `pip install` can run the
+# TUI with Bun; the ~90 MB compiled single-file binary stays local.
+frontend/tui/dist/
+# Frontend toolchain dependencies. The only payload that ships is the staged
+# copy under src/ai_pr_review/tui_static/, which IS committed.
+frontend/tui/node_modules/
+src/ai_pr_review/tui_static/pr-review-tui
+src/ai_pr_review/tui_static/pr-review-tui.exe
+
 # OS/editor files
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+
+# Local P5 installation and frame captures
+_p5_verify/
+
+# Raw transcripts from delegated agent CLIs
+_agent_out/
