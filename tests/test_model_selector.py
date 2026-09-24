@@ -18,7 +18,9 @@ def test_model_selector_evaluates_complexity_correctly():
 
     # 高风险文件
     assert selector.evaluate_file_complexity("auth.py", 50, 20) == TaskComplexity.CRITICAL
-    assert selector.evaluate_file_complexity("payment_handler.py", 100, 50) == TaskComplexity.CRITICAL
+    assert (
+        selector.evaluate_file_complexity("payment_handler.py", 100, 50) == TaskComplexity.CRITICAL
+    )
     assert selector.evaluate_file_complexity("security/token.py", 80, 30) == TaskComplexity.CRITICAL
 
     # 简单文件
@@ -62,9 +64,7 @@ def test_model_selector_cost_optimized_strategy():
     selector = ModelSelector(config)
 
     # 简单任务用本地
-    provider, model, is_local = selector.select_model_for_task(
-        "file_review", TaskComplexity.SIMPLE
-    )
+    provider, model, is_local = selector.select_model_for_task("file_review", TaskComplexity.SIMPLE)
     assert is_local is True
 
     # 中等任务也用本地（成本优先）
@@ -93,9 +93,7 @@ def test_model_selector_local_only_strategy():
 
     # 所有任务都用本地
     for complexity in TaskComplexity:
-        provider, model, is_local = selector.select_model_for_task(
-            "file_review", complexity
-        )
+        provider, model, is_local = selector.select_model_for_task("file_review", complexity)
         # 如果本地模型可用，应该是 True
         if selector.local_provider:
             assert is_local is True
@@ -109,9 +107,7 @@ def test_model_selector_remote_only_strategy():
 
     # 所有任务都用远程
     for complexity in TaskComplexity:
-        provider, model, is_local = selector.select_model_for_task(
-            "file_review", complexity
-        )
+        provider, model, is_local = selector.select_model_for_task("file_review", complexity)
         assert is_local is False
 
 
@@ -178,3 +174,67 @@ def test_model_selector_respects_cost_budget():
     # 即使是中等复杂度，也应该用本地（预算耗尽）
     context = {"risk_level": "low"}
     assert selector._should_use_remote(context) is False
+
+
+def test_model_selector_reads_persisted_local_slot():
+    """本地模型必须来自持久化槽位，而不是硬编码的 Ollama 预设。"""
+    config = AppConfig()
+    config.local_provider.base_url = "http://127.0.0.1:11435/v1"
+    config.local_provider.default_model = "gemma3:4b"
+    config.local_provider.ensure_default_model_present()
+    config.preferences = PreferencesConfig(hybrid_strategy="balanced")
+
+    selector = ModelSelector(config)
+    assert selector.local_model == "gemma3:4b"
+
+    provider, model, is_local = selector.select_model_for_task(
+        "result_formatting", TaskComplexity.TRIVIAL
+    )
+    assert is_local is True
+    assert model == "gemma3:4b"
+    assert provider.config.base_url == "http://127.0.0.1:11435/v1"
+
+
+def test_model_selector_keeps_remote_slot_while_running_local():
+    """local_only 运行时 ai_client 指向本地，但远程槽位不能被带跑偏。"""
+    config = AppConfig()
+    config.provider.name = "deepseek"
+    config.provider.display_name = "DeepSeek"
+    config.provider.base_url = "https://api.deepseek.com/v1"
+    config.provider.api_format = "openai"
+    config.provider.default_model = "deepseek-chat"
+    config.provider.api_key = "sk-test-not-real"
+    config.provider.ensure_default_model_present()
+    config.preferences = PreferencesConfig(hybrid_strategy="local_only")
+    config._sync_runtime_sections()
+    assert config.ai_client.model_provider.name == "ollama"
+
+    selector = ModelSelector(config)
+    assert selector.strategy is HybridStrategy.LOCAL_ONLY
+    assert selector.remote_model == "deepseek-chat"
+
+    _, model, is_local = selector.select_model_for_task("file_review", TaskComplexity.CRITICAL)
+    assert is_local is True
+    assert model == "qwen3.5:4b"
+
+
+def test_local_only_never_falls_back_to_cloud_when_local_provider_fails():
+    """Offline means no PR content may be sent to a remote model."""
+    import pytest
+
+    config = AppConfig()
+    config.preferences = PreferencesConfig(hybrid_strategy="local_only")
+    config.local_provider.api_format = "invalid-format"
+
+    with pytest.raises(RuntimeError, match="禁止回退到云端"):
+        ModelSelector(config)
+
+
+def test_local_only_guard_rejects_missing_local_provider():
+    config = AppConfig()
+    config.preferences = PreferencesConfig(hybrid_strategy="local_only")
+    selector = ModelSelector(config)
+    selector.local_provider = None
+    with pytest.raises(RuntimeError, match="禁止回退到云端"):
+        selector.select_model_for_task("file_review", TaskComplexity.CRITICAL)
+    assert selector.remote_calls == 0

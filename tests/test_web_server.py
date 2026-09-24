@@ -535,3 +535,27 @@ class TestPrPayload:
         temp_db = Path(tempfile.gettempdir()) / "pytest-xxx" / "results.db"
         assert _is_temp_dir_path(temp_db) is True
         assert _is_temp_dir_path(Path.home() / ".ai_pr_review" / "results.db") is False
+
+
+def test_serve_command_hands_the_resolved_config_path_to_the_web_layer(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """F19：`pr-review --config X serve` 的设置页必须读写 X，而不是默认用户配置。"""
+    from click.testing import CliRunner
+
+    from ai_pr_review.cli import main
+
+    captured: dict[str, object] = {}
+
+    def fake_serve(config, host="127.0.0.1", port=8787, config_path=None):
+        captured["config_path"] = config_path
+        captured["port"] = port
+
+    monkeypatch.setattr("ai_pr_review.web_server.serve", fake_serve)
+    config_path = tmp_path / "workspace-config.json"
+
+    result = CliRunner().invoke(main, ["--config", str(config_path), "serve", "--port", "9123"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["config_path"] == config_path
+    assert captured["port"] == 9123

@@ -41,8 +41,10 @@ class TestDefaultPath:
 
         monkeypatch.setattr(Path, "mkdir", refuse)
 
-        with pytest.raises(OSError):
+        with pytest.raises(OSError, match="历史数据库路径不可写") as raised:
             ResultStore(ResultStoreConfig(db_path=str(boom)))
+        assert str(boom) in str(raised.value)
+        assert "result_store.db_path" in str(raised.value)
 
 
 class TestFallbackPath:
@@ -62,11 +64,15 @@ class TestFallbackPath:
         fallback_dir = tmp_path / "cwd"
         fallback_dir.mkdir()
         monkeypatch.chdir(fallback_dir)
-        blocked = Path("~/.ai_pr_review").expanduser()
+        blocked = tmp_path / "blocked-default"
         self._block_home_dir(monkeypatch, blocked)
+        monkeypatch.setattr(
+            "ai_pr_review.services.result_store._default_result_store_path",
+            lambda: blocked / "results.db",
+        )
 
-        with pytest.warns(RuntimeWarning, match="Configured result store is not writable"):
-            store = ResultStore(ResultStoreConfig(db_path="~/.ai_pr_review/results.db"))
+        with pytest.warns(RuntimeWarning, match="Result store path is not writable"):
+            store = ResultStore(ResultStoreConfig(db_path=str(blocked / "results.db")))
 
         assert store.using_fallback_path is True
         assert store.db_path == fallback_dir / ".ai_pr_review" / "results.db"
@@ -75,10 +81,15 @@ class TestFallbackPath:
         from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
 
         monkeypatch.chdir(tmp_path)
-        self._block_home_dir(monkeypatch, Path("~/.ai_pr_review").expanduser())
+        blocked = tmp_path / "blocked-default"
+        self._block_home_dir(monkeypatch, blocked)
+        monkeypatch.setattr(
+            "ai_pr_review.services.result_store._default_result_store_path",
+            lambda: blocked / "results.db",
+        )
 
         with pytest.warns(RuntimeWarning):
-            store = ResultStore(ResultStoreConfig(db_path="~/.ai_pr_review/results.db"))
+            store = ResultStore(ResultStoreConfig(db_path=str(blocked / "results.db")))
 
         run_id = store.save_result(
             "https://github.com/owner/repo/pull/1",
@@ -103,3 +114,26 @@ class TestFallbackPath:
 
         assert store.get_result(run_id) is not None
         assert store.get_statistics()["total_runs"] == 1
+
+
+def test_stale_fixed_probe_does_not_force_fallback(tmp_path: Path) -> None:
+    (tmp_path / ".write-probe").write_text("leftover", encoding="utf-8")
+    store = ResultStore(ResultStoreConfig(db_path=str(tmp_path / "history.db")))
+    assert store.db_path == tmp_path / "history.db"
+    assert store.using_fallback_path is False
+
+
+def test_explicit_legacy_tilde_path_failure_never_redirects(monkeypatch, tmp_path: Path) -> None:
+    requested = Path("~/.ai_pr_review/results.db").expanduser()
+    real_mkdir = Path.mkdir
+
+    def guarded(self: Path, *args, **kwargs):
+        if self == requested.parent:
+            raise OSError("blocked for test")
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", guarded)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(OSError, match="历史数据库路径不可写"):
+        ResultStore(ResultStoreConfig(db_path="~/.ai_pr_review/results.db"))
+    assert not (tmp_path / ".ai_pr_review" / "results.db").exists()

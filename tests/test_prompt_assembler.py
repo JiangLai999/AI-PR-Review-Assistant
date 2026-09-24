@@ -120,3 +120,21 @@ class TestPromptAssembler:
 
         english = PromptAssembler(response_language="en-US").build_system_prompt("python")
         assert "in English" in english
+
+
+def test_finding_normalizes_human_readable_category_labels() -> None:
+    from ai_pr_review.services.prompt_assembler import Finding
+
+    finding = Finding(
+        severity="critical",
+        category="安全性",
+        file="website/index.html",
+        line_start=1,
+        line_end=1,
+        title="credential",
+        problem="problem",
+        suggestion="suggestion",
+        confidence=0.9,
+        code_snippet="x",
+    )
+    assert finding.category == "security"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -1188,6 +1189,53 @@ def test_cli_config_model_updates_active_model(monkeypatch, tmp_path: Path):
     assert saved.ai_client.api_key == "custom-key"
 
 
+def test_cli_rejects_local_model_for_remote_provider(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+    config = config_module.AppConfig.from_env()
+    config.provider = config_module.ProviderConfig.from_model_provider(
+        config_module.ModelProviderConfig.from_name("deepseek", api_key="deepseek-test-key")
+    )
+    config.ai_client = config_module.AIClientConfig(
+        provider="deepseek",
+        api_key="deepseek-test-key",
+        model="deepseek-flash",
+        base_url="https://api.deepseek.com/v1",
+        api_format="openai",
+    )
+    config.save(config_path, save_key=True)
+
+    result = CliRunner().invoke(main, ["config", "model", "--name", "qwen3.5:4b"])
+
+    assert result.exit_code != 0
+    assert "本地 Ollama 模型" in result.output
+    saved = config_module.AppConfig.load(config_path)
+    assert saved.provider.name == "deepseek"
+    assert saved.ai_client.model == "deepseek-flash"
+
+
+def test_set_active_model_allows_custom_provider_model():
+    config = config_module.AppConfig.from_env()
+    config.provider = config_module.ProviderConfig.from_model_provider(
+        config_module.ModelProviderConfig.from_name(
+            "custom", api_key="custom-key", base_url="https://example.com/v1"
+        )
+    )
+    config.ai_client = config_module.AIClientConfig(
+        provider="custom",
+        api_key="custom-key",
+        model="old-model",
+        base_url="https://example.com/v1",
+        api_format="openai",
+    )
+
+    cli_module._set_active_model(config, "new-model")
+
+    assert config.ai_client.model == "new-model"
+    assert config.provider.default_model == "new-model"
+
+
 def test_cli_config_models_discovers_and_sets_first(monkeypatch, tmp_path: Path):
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
@@ -1779,3 +1827,116 @@ def test_cli_rejects_multiple_short_circuit_modes(monkeypatch, tmp_path: Path):
 
     assert result.exit_code != 0
     assert "不能同时使用" in result.output
+
+
+def test_plain_chat_status_uses_active_local_slot(tmp_path: Path) -> None:
+    from ai_pr_review.chat_runtime import _render_status_bar
+
+    config = AppConfig.load(tmp_path / "config.json")
+    config.preferences.hybrid_strategy = "local_only"
+    config._sync_runtime_sections()
+
+    assert cli_module._check_config_status(config)["api_key_configured"] is True
+    assert "Ollama" in cli_module._chat_title(config)
+    assert "qwen3.5:4b" in cli_module._chat_title(config)
+    status = _render_status_bar(config, 0).plain
+    assert "Ollama" in status
+    assert "Anthropic" not in status
+
+
+def test_explicit_tui_without_bun_reports_actionable_error(monkeypatch, tmp_path: Path) -> None:
+    """A lean install without Bun or a compiled TUI must fail visibly."""
+    real_exists = Path.exists
+    monkeypatch.setattr(
+        Path,
+        "exists",
+        lambda path: False if path.name == "pr-review-tui.exe" else real_exists(path),
+    )
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "empty-appdata"))
+    monkeypatch.delenv("BUN_EXECUTABLE", raising=False)
+    assert cli_module._find_bun_runtime() is None
+    monkeypatch.setenv("AI_PR_REVIEW_CONFIG", str(tmp_path / "config.json"))
+    result = CliRunner().invoke(main, ["chat", "--tui"])
+    assert result.exit_code != 0
+    assert "OpenTUI" in result.output
+    assert "Bun" in result.output
+    assert "--plain" in result.output
+
+
+def test_export_run_rebuilds_markdown_and_json_from_history(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+    config = config_module.AppConfig.from_env()
+    from ai_pr_review.models.pr_data import PRData
+    from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
+    from ai_pr_review.services.result_store import ResultStore
+
+    config.result_store = ResultStoreConfig(db_path=str(tmp_path / "results.db"))
+    result = ReviewResult(
+        summary="stored summary",
+        findings=[
+            Finding(
+                severity="high",
+                category="安全性",
+                file="a.py",
+                line_start=1,
+                line_end=1,
+                title="t",
+                problem="p",
+                suggestion="s",
+                confidence=0.9,
+                code_snippet="x",
+            )
+        ],
+    )
+    run_id = ResultStore(config.result_store).save_result(
+        "https://github.com/o/r/pull/9",
+        result,
+        head_sha="sha",
+        total_files=2,
+        included_files=1,
+        excluded_files=1,
+        model="qwen3.5:4b",
+    )
+    md = tmp_path / "report.md"
+    js = tmp_path / "report.json"
+    runner = CliRunner()
+    assert (
+        runner.invoke(
+            main,
+            [
+                "--config",
+                str(config_path),
+                "export-run",
+                run_id,
+                "--format",
+                "markdown",
+                "--output",
+                str(md),
+            ],
+        ).exit_code
+        == 0
+    )
+    assert (
+        runner.invoke(
+            main,
+            [
+                "--config",
+                str(config_path),
+                "export-run",
+                run_id,
+                "--format",
+                "json",
+                "--output",
+                str(js),
+            ],
+        ).exit_code
+        == 0
+    )
+    assert "stored summary" in md.read_text(encoding="utf-8")
+    assert (
+        json.loads(js.read_text(encoding="utf-8"))["result"]["findings"][0]["category"]
+        == "security"
+    )
