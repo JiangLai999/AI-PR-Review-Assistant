@@ -207,6 +207,8 @@ pr-review chat --model "gpt-4" --message "你好"
 
 Chat 快捷键：`Ctrl+C` 在存在选区时复制到剪贴板；无选区时第一次提示、1.5 秒内再按一次退出；运行中按 `Ctrl+C` 取消当前任务。输入框内可用 `Ctrl+A` 全选。
 
+Findings 详情：`Ctrl+O` 打开；列表模式下 `↑↓` 选择、`←→` 翻页、`Ctrl/Alt+↑↓` 或 `PgUp/PgDn` 滚动详情；按 `Tab` 可把焦点切到详情，再用 `↑↓ / PgUp / PgDn / Home / End` 阅读完整问题、建议、证据和代码片段。
+
 ---
 
 ## 配置文件

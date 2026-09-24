@@ -11,6 +11,11 @@ test("plain arrows keep moving the finding selection", () => {
   expect(detailScrollDelta("down", false)).toBeUndefined()
 })
 
+test("Ctrl/Alt+Up/Down also scroll the detail panel", () => {
+  expect(detailScrollDelta("up", false, true)).toBe(-1)
+  expect(detailScrollDelta("down", false, false, true)).toBe(1)
+})
+
 test("unrelated keys never scroll the detail panel", () => {
   expect(detailScrollDelta("left", true)).toBeUndefined()
   expect(detailScrollDelta("pageup", true)).toBeUndefined()

@@ -938,33 +938,96 @@ export function FindingsDialog(props: { findings: ReviewFinding[]; onClose: () =
   const pageSize = 8
   const [selectedIndex, setSelectedIndex] = createSignal(0)
   const [page, setPage] = createSignal(0)
+  const [detailFocused, setDetailFocused] = createSignal(false)
   let detailScroll: ScrollBoxRenderable | undefined
   const pageCount = () => Math.max(1, Math.ceil(props.findings.length / pageSize))
   const pageFindings = () => props.findings.slice(page() * pageSize, (page() + 1) * pageSize)
   const selected = () => props.findings[selectedIndex()] ?? {}
   useKeyboard((key) => {
-    if (key.name === "escape") props.onClose()
-    const detailDelta = detailScrollDelta(key.name, key.shift === true)
+    if (key.name === "escape") {
+      props.onClose()
+      return
+    }
+    if (key.name === "tab") {
+      setDetailFocused((current) => !current)
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
+    if (detailFocused()) {
+      if (key.name === "up" || key.name === "k") {
+        detailScroll?.scrollBy(-1)
+      } else if (key.name === "down" || key.name === "j") {
+        detailScroll?.scrollBy(1)
+      } else if (key.name === "pageup") {
+        detailScroll?.scrollBy(-0.5, "viewport")
+      } else if (key.name === "pagedown") {
+        detailScroll?.scrollBy(0.5, "viewport")
+      } else if (key.name === "home") {
+        detailScroll?.scrollTo(0)
+      } else if (key.name === "end") {
+        detailScroll?.scrollTo(Number.MAX_SAFE_INTEGER)
+      } else {
+        return
+      }
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
+    // The focused Select consumes plain and Shift+arrows. Use modifier/page
+    // keys that it leaves alone so the detail pane remains reachable without
+    // switching focus first.
+    const detailDelta = detailScrollDelta(
+      key.name,
+      key.shift === true,
+      key.ctrl === true,
+      key.meta === true,
+    )
     if (detailDelta !== undefined) {
-      // The footer promised "详情滚动" but only the mouse could scroll it.
       detailScroll?.scrollBy(detailDelta)
       key.preventDefault()
       key.stopPropagation()
       return
     }
-    if (key.name === "pageup" || key.name === "left") {
+    if (key.name === "pageup") {
+      detailScroll?.scrollBy(-0.5, "viewport")
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
+    if (key.name === "pagedown") {
+      detailScroll?.scrollBy(0.5, "viewport")
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
+    if (key.name === "home") {
+      detailScroll?.scrollTo(0)
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
+    if (key.name === "end") {
+      detailScroll?.scrollTo(Number.MAX_SAFE_INTEGER)
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
+    if (key.name === "left") {
       setPage((current) => Math.max(0, current - 1))
       setSelectedIndex((current) => Math.max(0, current - pageSize))
+      detailScroll?.scrollTo(0)
     }
-    if (key.name === "pagedown" || key.name === "right") {
+    if (key.name === "right") {
       setPage((current) => Math.min(pageCount() - 1, current + 1))
       setSelectedIndex((current) => Math.min(props.findings.length - 1, current + pageSize))
+      detailScroll?.scrollTo(0)
     }
   })
   return (
     <box position="absolute" left={5} top={2} width={70} height={22} backgroundColor="#171717" borderStyle="single" borderColor={orange} padding={2} zIndex={130} flexDirection="column">
-      <text fg={orange}>FINDINGS // DETAIL</text>
-      <box height={8} marginTop={1}>
+      <text fg={orange}>FINDINGS // DETAIL {detailFocused() ? "· 详情滚动" : "· 列表选择"}</text>
+      <box height={6} marginTop={1}>
         <select
           options={pageFindings().map((finding, offset) => ({
             name: `[${String(finding.severity ?? "info").toUpperCase()}] ${finding.title ?? finding.message ?? "未命名问题"}`,
@@ -972,20 +1035,23 @@ export function FindingsDialog(props: { findings: ReviewFinding[]; onClose: () =
             value: page() * pageSize + offset,
           }))}
           selectedIndex={Math.max(0, selectedIndex() - page() * pageSize)}
-          focused
+          focused={!detailFocused()}
           showDescription
           width="100%"
-          height={8}
+          height={6}
           selectedBackgroundColor="#5a2e1c"
           selectedTextColor="#ffffff"
           descriptionColor={muted}
           selectedDescriptionColor="#ffd0bb"
-          onChange={(index) => setSelectedIndex(page() * pageSize + index)}
+          onChange={(index) => {
+            setSelectedIndex(page() * pageSize + index)
+            detailScroll?.scrollTo(0)
+          }}
         />
       </box>
       <scrollbox
         ref={(node) => { detailScroll = node }}
-        height={6}
+        height={8}
         marginTop={1}
         scrollY
         scrollbarOptions={{ showArrows: true }}
@@ -1011,7 +1077,11 @@ export function FindingsDialog(props: { findings: ReviewFinding[]; onClose: () =
           }</For>
         </Show>
       </scrollbox>
-      <text fg={muted}>↑↓ 选择 · Shift+↑↓ 详情 · ←→/Pg 翻页 ({page() + 1}/{pageCount()}) · Esc 返回</text>
+      <text fg={muted}>
+        {detailFocused()
+          ? "↑↓/Pg 滚动 · Home/End 首尾 · Tab 列表 · Esc 返回"
+          : `↑↓ 选择 · Tab 详情 · Ctrl/Alt+↑↓ 滚动 · ←→ 翻页 (${page() + 1}/${pageCount()}) · Esc`}
+      </text>
     </box>
   )
 }
