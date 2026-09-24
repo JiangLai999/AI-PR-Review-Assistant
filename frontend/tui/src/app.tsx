@@ -436,6 +436,13 @@ function Composer(props: {
       showCopyNotice("没有选中文本；再按一次 Ctrl+C 退出", 1600)
       return
     }
+    // Ctrl+O must work even while another dialog owns the focus, otherwise it
+    // silently does nothing until the user finds and closes that dialog.
+    if (isCtrlKey(key, "o")) {
+      props.onOpenFindings()
+      key.stopPropagation?.()
+      return
+    }
     if (props.focused === false) return
     if (key.name === "tab" && matches().length === 0) {
       key.preventDefault()
@@ -448,10 +455,6 @@ function Composer(props: {
     }
     if (isCtrlKey(key, "p")) {
       props.onSetup()
-      return
-    }
-    if (isCtrlKey(key, "o") && !props.busy) {
-      props.onOpenFindings()
       return
     }
     if (isCtrlKey(key, "l") && !props.busy) {
@@ -1646,7 +1649,20 @@ export function App() {
         onNewSession={resetSessionUi}
         onReviewReport={applyReviewReport}
         onReviewRequest={(url) => setPendingReviewUrl(url)}
-        onOpenFindings={() => { if (reviewFindings().length > 0) setFindingsOpen(true) }}
+        onOpenFindings={() => {
+          setHistoryOpen(false)
+          setModelOpen(false)
+          setSetupOpen(false)
+          setPendingReviewUrl("")
+          if (reviewFindings().length > 0) {
+            setFindingsOpen(true)
+          } else {
+            appendMessage({
+              role: "assistant",
+              content: "当前没有 Findings。请先执行 /review <PR_URL>，或使用 /history <run_id> 加载包含 findings 的历史报告。",
+            })
+          }
+        }}
         onOpenHistory={() => void openHistory()}
         onOpenModel={() => setModelOpen(true)}
         onRetry={retryLastReview}

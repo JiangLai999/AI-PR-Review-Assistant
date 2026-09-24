@@ -35347,6 +35347,11 @@ function Composer(props) {
       showCopyNotice("\u6CA1\u6709\u9009\u4E2D\u6587\u672C\uFF1B\u518D\u6309\u4E00\u6B21 Ctrl+C \u9000\u51FA", 1600);
       return;
     }
+    if (isCtrlKey2(key, "o")) {
+      props.onOpenFindings();
+      key.stopPropagation?.();
+      return;
+    }
     if (props.focused === false)
       return;
     if (key.name === "tab" && matches().length === 0) {
@@ -35360,10 +35365,6 @@ function Composer(props) {
     }
     if (isCtrlKey2(key, "p")) {
       props.onSetup();
-      return;
-    }
-    if (isCtrlKey2(key, "o") && !props.busy) {
-      props.onOpenFindings();
       return;
     }
     if (isCtrlKey2(key, "l") && !props.busy) {
@@ -37406,8 +37407,18 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
       onReviewReport: applyReviewReport,
       onReviewRequest: (url) => setPendingReviewUrl(url),
       onOpenFindings: () => {
-        if (reviewFindings().length > 0)
+        setHistoryOpen(false);
+        setModelOpen(false);
+        setSetupOpen(false);
+        setPendingReviewUrl("");
+        if (reviewFindings().length > 0) {
           setFindingsOpen(true);
+        } else {
+          appendMessage({
+            role: "assistant",
+            content: "\u5F53\u524D\u6CA1\u6709 Findings\u3002\u8BF7\u5148\u6267\u884C /review <PR_URL>\uFF0C\u6216\u4F7F\u7528 /history <run_id> \u52A0\u8F7D\u5305\u542B findings \u7684\u5386\u53F2\u62A5\u544A\u3002"
+          });
+        }
       },
       onOpenHistory: () => void openHistory(),
       onOpenModel: () => setModelOpen(true),
