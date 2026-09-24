@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import tempfile
 import uuid
 import warnings
 from collections.abc import Iterator
@@ -55,30 +56,37 @@ class ResultStore:
         requested = Path(configured_path).expanduser()
         try:
             requested.parent.mkdir(parents=True, exist_ok=True)
-            probe = requested.parent / ".write-probe"
-            probe.touch(exist_ok=False)
-            probe.unlink()
+            # A fixed `.write-probe` falsely reports unwritable when a process
+            # crashes before unlink or two checks overlap. Unique temp files
+            # avoid both collisions and leave no probe after normal exit.
+            with tempfile.NamedTemporaryFile(
+                dir=requested.parent, prefix=".write-probe-", delete=True
+            ):
+                pass
             return requested
-        except OSError:
+        except OSError as exc:
             # The platform default may be unavailable in a restricted runtime (for
-            # example a sandbox). In that case fall back silently because this is
-            # an environment limitation, not a user misconfiguration. Keep the
-            # warning for the legacy tilde path so existing callers can discover
-            # that their explicitly configured history location was not used.
+            # example a sandbox). We still fall back so the CLI can start, but the
+            # redirect must never be silent: a moved history database reads as
+            # "my past reviews disappeared".
             default_path = _default_result_store_path()
             is_platform_default = requested == default_path
-            is_legacy_default = configured_path == "~/.ai_pr_review/results.db"
-            if not (is_platform_default or is_legacy_default):
-                raise
+            # The legacy tilde spelling can also be an explicitly chosen
+            # location. It is not safe to silently redirect it to CWD.
+            if not is_platform_default:
+                # An explicit/workspace-derived history location is a data
+                # boundary. Never silently redirect it into an unrelated CWD.
+                raise OSError(
+                    f"历史数据库路径不可写：{requested}。请检查目录权限，或在配置中指定可写的 result_store.db_path。"
+                ) from exc
             fallback = Path.cwd() / ".ai_pr_review" / "results.db"
             fallback.parent.mkdir(parents=True, exist_ok=True)
-            if is_legacy_default:
-                warnings.warn(
-                    f"Configured result store is not writable: {requested}; using fallback: {fallback}. "
-                    "History will be stored at the fallback path.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+            warnings.warn(
+                f"Result store path is not writable: {requested}; using fallback: {fallback}. "
+                "History will be stored at the fallback path.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             return fallback
 
     def save_result(
@@ -203,6 +211,18 @@ class ResultStore:
                 (run_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_run_summary(self, run_id: str) -> dict | None:
+        """Return persisted PR/run fields and metadata needed to rebuild a report."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT id, pr_url, pr_number, repo_owner, repo_name, head_sha,
+                          total_files, included_files, excluded_files, created_at,
+                          model, duration_seconds, total_cost, metadata_json
+                   FROM runs WHERE id = ?""",
+                (run_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def get_result(self, run_id: str) -> ReviewResult | None:
         """获取 Review 结果。"""

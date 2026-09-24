@@ -596,12 +596,22 @@ def _is_temp_dir_path(path: Path) -> bool:
         return False
 
 
-def serve(config: AppConfig, host: str = "127.0.0.1", port: int = 8787) -> None:
+def serve(
+    config: AppConfig,
+    host: str = "127.0.0.1",
+    port: int = 8787,
+    config_path: Path | None = None,
+) -> None:
     """Run the local web workbench."""
     handler = type(
         "ConfiguredReviewWebHandler",
         (ReviewWebHandler,),
-        {"config": config, "jobs": ReviewJobManager(config)},
+        {
+            "config": config,
+            "jobs": ReviewJobManager(config),
+            # 否则 `pr-review --config X serve` 的配置页会读写默认用户配置。
+            "config_path": config_path,
+        },
     )
     server = ThreadingHTTPServer((host, port), handler)
     print(f"PR智审 Web 工作台已启动：http://{host}:{port}")

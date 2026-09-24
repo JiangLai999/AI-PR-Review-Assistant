@@ -25,71 +25,43 @@ from rich.syntax import Syntax
 from rich.text import Text
 
 from ai_pr_review.config import AppConfig
+from ai_pr_review.ui.pixel_theme import pixel_header, runtime_mode_label, tr
 
 CODE_BLOCK_RE = re.compile(r"```(?P<lang>[\w+-]*)\n(?P<code>.*?)```", re.DOTALL)
 
 
-def _pixel_brand() -> Text:
-    """大像素品牌横幅 - PR REVIEW."""
-    lines = [
-        "██████  ██████      ██████  ███████ ██    ██ ██ ███████ ██  ██",
-        "██   ██ ██   ██     ██   ██ ██      ██    ██ ██ ██      ██  ██",
-        "██████  ██████      ██████  █████   ██    ██ ██ █████   ██████",
-        "██      ██   ██     ██   ██ ██       ██  ██  ██ ██      ██  ██",
-        "██      ██   ██     ██   ██ ███████   ████   ██ ███████ ██  ██",
-    ]
-
-    brand = Text()
-    for line in lines:
-        brand.append(line + "\n", style="bold white")
-    return brand
-
-
-def _render_header(config: AppConfig) -> Panel:
-    """品牌头部 - 大像素横幅 + 副标题."""
-    subtitle = Text()
-    subtitle.append("Terminal Workspace", style="grey70")
-    subtitle.append("  ·  ", style="dim")
-    subtitle.append("AI PR REVIEW ASSISTANT", style="grey50")
-    subtitle.append("  ·  ", style="dim")
-    subtitle.append("EVIDENCE-FIRST", style="grey50")
-
-    content = Group(
-        Text(""),
-        Align.center(_pixel_brand()),
-        Text(""),
-        Align.center(subtitle),
-        Text(""),
+def _render_header(config: AppConfig) -> Text:
+    """Pixel brand header shared by Chat and configuration experiences."""
+    language = getattr(config.preferences, "ui_language", "zh-CN")
+    title = tr(language, "AI PR 审查智能体", "AI PR REVIEW AGENT")
+    subtitle = "  ·  ".join(
+        [
+            "Terminal Workspace",
+            tr(language, "证据优先", "EVIDENCE-FIRST"),
+            tr(language, "多模型协作", "MULTI-MODEL"),
+        ]
     )
-
-    inner = Panel(
-        content,
-        border_style="grey58",
-        padding=(0, 2),
-        style="white on black",
-        box=DOUBLE,
-    )
-    return Panel(
-        inner,
-        border_style="grey35",
-        padding=(0, 1),
-        style="white on black",
-        box=SQUARE,
-    )
+    return pixel_header(title, subtitle, language=language)
 
 
 def _render_status_bar(config: AppConfig, message_count: int) -> Text:
-    """状态栏 - 极简连接信息."""
-    provider = config.provider.display_name or config.ai_client.provider
+    """Dynamic bilingual runtime status bar."""
+    language = getattr(config.preferences, "ui_language", "zh-CN")
+    provider = config._active_provider_config().display_name or config.ai_client.provider
     model = config.ai_client.model
-
+    mode = runtime_mode_label(config, language)
     status = Text()
-    status.append("  ● LOCAL ", style="bold green")
+    status.append("  ● ", style="bold green")
+    status.append(mode, style="bold green")
+    status.append("  ", style="dim")
     status.append(provider, style="bold white")
     status.append(" / ", style="dim")
     status.append(model, style="grey70")
     status.append("    ", style="dim")
-    status.append(f"{message_count} messages", style="grey70")
+    status.append(
+        tr(language, f"{message_count} 条消息", f"{message_count} messages"),
+        style="grey70",
+    )
     status.append("    ", style="dim")
     status.append("EVIDENCE-FIRST", style="grey62")
     status.append("    ", style="dim")
@@ -189,37 +161,39 @@ def _render_message(
         return _render_assistant_message(text, time_str, duration_seconds)
 
 
-def _render_welcome() -> Panel:
-    """欢迎消息 - 引导用户开始使用."""
-    welcome = Text()
-    welcome.append("\n")
-    welcome.append("  Welcome to AI PR Review", style="bold white")
+def _render_welcome(language: str = "zh-CN") -> Panel:
+    """Pixel welcome card with language-consistent copy."""
+    english = str(language).lower().startswith("en")
+    welcome = Text("\n")
+    welcome.append(
+        "  Welcome to AI PR Review Agent" if english else "  欢迎使用 AI PR 审查智能体",
+        style="bold white",
+    )
     welcome.append("\n\n")
-    welcome.append("  ", style="grey70")
-    welcome.append("▶", style="green")
-    welcome.append("  Paste a ", style="grey70")
-    welcome.append("GitHub PR URL", style="bold cyan")
-    welcome.append(" to auto-review code\n", style="grey70")
-    welcome.append("  ", style="grey70")
-    welcome.append("▶", style="green")
-    welcome.append("  Type ", style="grey70")
-    welcome.append("/", style="bold cyan")
-    welcome.append(" to see available commands\n", style="grey70")
-    welcome.append("  ", style="grey70")
-    welcome.append("▶", style="green")
-    welcome.append("  Type ", style="grey70")
-    welcome.append("/help", style="bold cyan")
-    welcome.append(" for full help\n", style="grey70")
-    welcome.append("  ", style="grey70")
-    welcome.append("▶", style="green")
-    welcome.append("  Type ", style="grey70")
-    welcome.append("/exit", style="bold cyan")
-    welcome.append(" to quit\n", style="grey70")
+    items = (
+        [
+            ("Paste a ", "GitHub PR URL", " to start a review"),
+            ("Type ", "/", " to view commands"),
+            ("Type ", "/help", " for help"),
+            ("Type ", "/exit", " to quit"),
+        ]
+        if english
+        else [
+            ("粘贴 ", "GitHub PR URL", " 开始审查"),
+            ("输入 ", "/", " 查看命令"),
+            ("输入 ", "/help", " 查看帮助"),
+            ("输入 ", "/exit", " 退出"),
+        ]
+    )
+    for prefix, accent, suffix in items:
+        welcome.append("  ▶  ", style="green")
+        welcome.append(prefix, style="grey70")
+        welcome.append(accent, style="bold cyan")
+        welcome.append(suffix + "\n", style="grey70")
     welcome.append("\n")
-
     return Panel(
         welcome,
-        title=" Welcome ",
+        title=" Welcome " if english else " 欢迎 ",
         title_align="left",
         border_style="grey42",
         padding=(0, 2),
@@ -228,10 +202,10 @@ def _render_welcome() -> Panel:
     )
 
 
-def _render_transcript(messages: list[dict[str, Any]]) -> Panel:
+def _render_transcript(messages: list[dict[str, Any]], language: str = "zh-CN") -> Panel:
     """渲染消息历史."""
     if not messages:
-        return _render_welcome()
+        return _render_welcome(language)
 
     recent = messages[-12:]
     renderables: list[Any] = []
@@ -283,7 +257,7 @@ def _render_workspace(
     return Group(
         _render_header(config),
         _render_status_bar(config, len(messages)),
-        _render_transcript(messages),
+        _render_transcript(messages, getattr(config.preferences, "ui_language", "zh-CN")),
     )
 
 
@@ -437,7 +411,7 @@ def run_chat_session(
     console.print(_render_header(config))
     console.print()
     console.print(_render_status_bar(config, 0))
-    console.print(_render_welcome())
+    console.print(_render_welcome(getattr(config.preferences, "ui_language", "zh-CN")))
     console.print()
 
     def send_once(user_text: str) -> None:

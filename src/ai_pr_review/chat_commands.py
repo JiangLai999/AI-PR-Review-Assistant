@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import click
 from rich.box import ASCII
 from rich.console import Console
 from rich.panel import Panel
@@ -211,7 +212,11 @@ def handle_basic_chat_slash_command(
         if not argument:
             console.print("[red]用法: /model <模型ID>[/red]")
             return True
-        set_active_model(config, argument)
+        try:
+            set_active_model(config, argument)
+        except click.ClickException as exc:
+            console.print(Panel(str(exc), title="Model Switch Blocked", border_style="yellow"))
+            return True
         console.print(f"[green]✓[/green] 模型已切换为: [bold]{config.ai_client.model}[/bold]")
         return True
     if command == "/status":
@@ -221,7 +226,9 @@ def handle_basic_chat_slash_command(
         table = Table(box=None, expand=True, show_header=False)
         table.add_column("Key", style="bold white", width=14)
         table.add_column("Value", style="grey70")
-        table.add_row("Provider", config.provider.display_name or config.ai_client.provider)
+        table.add_row(
+            "Provider", config._active_provider_config().display_name or config.ai_client.provider
+        )
         table.add_row("Model", config.ai_client.model)
         table.add_row("Base URL", config.ai_client.base_url or "default")
         table.add_row("Language", config.preferences.language)

@@ -22,8 +22,13 @@ def validate_provider_for_test(
     *,
     missing_api_key_message: Callable[[str], str],
 ) -> None:
-    provider = config.provider.to_model_provider()
+    # Validate the slot that will actually serve requests; checking the remote
+    # slot here reported "Missing API key" for a provider the local-only user
+    # never configured.
+    provider = config.ai_client.model_provider
     provider.validate()
+    if provider.name.lower() in {"ollama", "local"}:
+        return
     if not provider.api_key:
         raise ConfigValidationError(missing_api_key_message(provider.name))
 

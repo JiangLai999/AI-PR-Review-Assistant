@@ -130,7 +130,16 @@ def active_config_paths(path: Path | None = None) -> list[Path]:
     user_config_path = resolve_config_path(path)
     if path is not None:
         return [user_config_path]
-    return [user_config_path, *project_config_paths()]
+    project_paths = project_config_paths()
+    if user_config_path == _default_config_path():
+        return [user_config_path, *project_paths]
+    # Test/portable overrides should not accidentally inherit the repository's
+    # own project config. Keep project overlays only when the overridden config
+    # root owns the current project (the explicit project-isolation case).
+    project_root = _find_project_root()
+    if project_root is not None and user_config_path.parent in project_root.parents:
+        return [user_config_path, *project_paths]
+    return [user_config_path]
 
 
 def _deep_merge_dicts(base: dict[str, object], override: dict[str, object]) -> dict[str, object]:
@@ -668,20 +677,7 @@ class AIClientConfig:
 
     @property
     def model_provider(self) -> ModelProviderConfig:
-        """返回 ModelProviderConfig 实例供 AIClient 使用"""
-        return ModelProviderConfig(
-            name=self.provider,
-            display_name=self.provider,
-            api_key=self.api_key,
-            base_url=self.base_url,
-            model_name=self.model,
-            api_format=self.api_format,
-            headers=dict(self.headers),
-            extra_params=dict(self.extra_params),
-        )
-
-    @property
-    def model_provider(self) -> ModelProviderConfig:
+        """返回 ModelProviderConfig 实例供 AIClient 使用。"""
         return ModelProviderConfig(
             name=self.provider,
             display_name=MODEL_PROVIDER_PRESETS.get(self.provider, {}).get(
@@ -746,11 +742,22 @@ class ReportRendererConfig:
     include_code_snippets_in_github_comment: bool = False
 
 
+def _default_local_provider() -> "ProviderConfig":
+    """Local slot default (Ollama).
+
+    Kept as a separate slot so switching the runtime profile to ``local`` never
+    overwrites the user's cloud provider (endpoint, model list and API key).
+    """
+    return ProviderConfig.from_model_provider(ModelProviderConfig.from_name("ollama"))
+
+
 @dataclass
 class AppConfig:
     """应用全局配置。"""
 
     provider: ProviderConfig = field(default_factory=ProviderConfig)
+    # 本地槽位：只有 hybrid_strategy == "local_only" 时才会被激活。
+    local_provider: ProviderConfig = field(default_factory=_default_local_provider)
     github_token: str = field(default_factory=lambda: os.getenv("GITHUB_TOKEN", ""))
     preferences: PreferencesConfig = field(default_factory=PreferencesConfig)
     pr_fetcher: PRFetcherConfig = field(default_factory=PRFetcherConfig)
@@ -793,11 +800,34 @@ class AppConfig:
         config._sync_runtime_sections()
         return config
 
+    def _active_provider_config(self) -> ProviderConfig:
+        """Provider slot currently in effect.
+
+        ``local_only`` activates the local slot, but a user whose *primary*
+        provider already is Ollama keeps using the primary slot so a runtime
+        profile round trip neither duplicates nor drops their custom endpoint
+        and model list.
+
+        An explicit ``AI_PR_REVIEW_PROVIDER`` override always activates the
+        primary slot for this process; it is never persisted back into
+        ``preferences.hybrid_strategy``.
+        """
+        if getattr(self, "_env_provider_override", False):
+            return self.provider
+        strategy = str(getattr(self.preferences, "hybrid_strategy", "") or "").strip().lower()
+        if strategy == "local_only" and self.provider.name.lower() not in {"ollama", "local"}:
+            return self.local_provider
+        return self.provider
+
     def _sync_runtime_sections(self) -> None:
-        provider = self.provider.to_model_provider()
-        api_key = provider.api_key or self.ai_client.api_key
+        active = self._active_provider_config()
+        provider = active.to_model_provider()
+        # A key from the previous provider must never be copied into a newly
+        # selected provider (especially when switching cloud -> local).
+        same_provider = self.ai_client.provider.lower() == provider.name.lower()
+        api_key = provider.api_key or (self.ai_client.api_key if same_provider else "")
         if api_key:
-            self.provider.api_key = api_key
+            active.api_key = api_key
             provider.api_key = api_key
         self.github_token = self._resolve_github_token()
         self.pr_fetcher.github_token = self.github_token
@@ -813,7 +843,35 @@ class AppConfig:
         )
 
     def _apply_env_overrides(self) -> None:
-        provider_name = os.getenv("AI_PR_REVIEW_PROVIDER", "").strip() or self.provider.name
+        provider_override = os.getenv("AI_PR_REVIEW_PROVIDER", "").strip()
+        override_applied = False
+        if provider_override:
+            name_matches = provider_override.lower() == self.provider.name.lower()
+            try:
+                # Validate even when names match: a legacy/custom provider name
+                # must not bypass the preset allow-list and be displayed raw.
+                validated = ModelProviderConfig.from_name(provider_override)
+                # Rebuild the whole provider when the name changes; a name-only
+                # replacement would retain the previous endpoint/key/model.
+                override_config = None if name_matches else validated
+            except ConfigValidationError:
+                # Do not echo the raw environment value: it could contain a
+                # pasted secret or terminal control characters. The CLI warns,
+                # while TUI consumes the same safe message through snapshot.
+                warning = "AI_PR_REVIEW_PROVIDER 的值不受支持，已忽略该覆盖；请检查环境变量。"
+                self._ignored_env_overrides = [warning]
+                warnings.warn(warning, RuntimeWarning, stacklevel=2)
+            else:
+                if override_config is not None:
+                    self.provider = ProviderConfig.from_model_provider(override_config)
+                    self.ai_client.api_key = ""
+                # An explicit provider override must win over a persisted
+                # `local_only` profile — but only for this process. Writing it
+                # back to `preferences.hybrid_strategy` silently and permanently
+                # overwrote the user's "prefer local" choice on the next save.
+                self._env_provider_override = True
+                override_applied = True
+        provider_name = (provider_override if override_applied else "") or self.provider.name
         model_name = os.getenv("AI_PR_REVIEW_MODEL", "").strip() or self.provider.default_model
         api_key = os.getenv("AI_PR_REVIEW_API_KEY", "").strip()
         base_url = os.getenv("AI_PR_REVIEW_BASE_URL", "").strip()
@@ -886,6 +944,9 @@ class AppConfig:
         provider_data = data.get("provider")
         if isinstance(provider_data, dict):
             self.provider = ProviderConfig.from_dict(provider_data)
+        local_provider_data = data.get("local_provider")
+        if isinstance(local_provider_data, dict):
+            self.local_provider = ProviderConfig.from_dict(local_provider_data)
         if isinstance(data.get("github_token"), str):
             self.github_token = str(data["github_token"])
         if isinstance(data.get("preferences"), dict):
@@ -909,6 +970,17 @@ class AppConfig:
             merged_payload = _deep_merge_dicts(merged_payload, data)
         if merged_payload:
             config._apply_payload(merged_payload)
+        raw_store = merged_payload.get("result_store")
+        explicit_db = isinstance(raw_store, dict) and bool(raw_store.get("db_path"))
+        config._config_source_path = path
+        config._explicit_result_store_db_path = explicit_db
+        if not explicit_db:
+            # Any config outside the real per-user default is a workspace
+            # boundary: keep history next to it instead of leaking into the
+            # shared per-user database (or reading someone else's runs).
+            derived = config._derived_result_store_default()
+            if derived is not None:
+                config.result_store.db_path = str(derived)
         config._sync_runtime_sections()
         config._apply_env_overrides()
         return config
@@ -916,18 +988,24 @@ class AppConfig:
     def save(self, path: Path | None = None, *, save_key: bool = False) -> Path:
         config_path = resolve_config_path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        if self.ai_client.api_key or self.provider.api_key:
-            api_key = self.ai_client.api_key or self.provider.api_key
-            self.provider.api_key = api_key
+        active = self._active_provider_config()
+        if self.ai_client.api_key or active.api_key:
+            api_key = self.ai_client.api_key or active.api_key
+            active.api_key = api_key
             self.ai_client.api_key = api_key
-        self.provider = ProviderConfig.from_model_provider(self.ai_client.model_provider)
+        # Rebuilding a slot from `ai_client` is only meaningful for the active
+        # slot. Doing it to the remote slot while the runtime profile is local
+        # silently replaced the cloud endpoint, model list and key with the
+        # Ollama preset, permanently destroying the user's configuration.
+        if active is self.provider:
+            self.provider = ProviderConfig.from_model_provider(self.ai_client.model_provider)
         self._sync_runtime_sections()
         if not save_key:
             payload_api_key = ""
             # 默认不落盘密钥是刻意的安全设计，但必须让人知道这件事发生了：
             # 调用方若按常规 `save(path)` 保存，密钥会被静默丢弃，
             # 下次启动就变成"未配置"，而现场没有任何线索。
-            if self.ai_client.api_key or self.provider.api_key:
+            if self.ai_client.api_key or self.provider.api_key or self.local_provider.api_key:
                 warnings.warn(
                     "save_key=False：API Key 未写入配置文件（这是默认的安全行为）。"
                     "若希望持久化密钥，请调用 save(path, save_key=True)，"
@@ -936,9 +1014,10 @@ class AppConfig:
                     stacklevel=2,
                 )
         else:
-            payload_api_key = self.provider.api_key or self.ai_client.api_key or ""
+            payload_api_key = self.ai_client.api_key or active.api_key or ""
         payload = {
             "provider": self.provider.to_dict(),
+            "local_provider": self.local_provider.to_dict(),
             "github_token": self.github_token,
             "preferences": asdict(self.preferences),
             "pr_fetcher": {
@@ -952,14 +1031,49 @@ class AppConfig:
             "ai_client": asdict(self.ai_client),
             "cost_controller": asdict(self.cost_controller),
             "post_processor": asdict(self.post_processor),
-            "result_store": asdict(self.result_store),
+            "result_store": self._result_store_payload(),
             "report_renderer": asdict(self.report_renderer),
         }
-        if not payload_api_key:
-            payload["provider"].pop("api_key", None)
-            payload["ai_client"].pop("api_key", None)
-        else:
-            payload["provider"]["api_key"] = payload_api_key
+        # 每个槽位只携带自己的 Key；`ai_client` 跟随当前激活槽位。
+        # save_key=False 时不落盘任何 Key（安全默认）。
+        if save_key and payload_api_key:
             payload["ai_client"]["api_key"] = payload_api_key
+        else:
+            payload["ai_client"].pop("api_key", None)
+        for slot in ("provider", "local_provider"):
+            if not save_key or not payload[slot].get("api_key"):
+                payload[slot].pop("api_key", None)
         config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return config_path
+
+    def _derived_result_store_default(self) -> Path | None:
+        """Per-workspace history path, or None when using the real default config."""
+        resolved_config = resolve_config_path(getattr(self, "_config_source_path", None))
+        try:
+            resolved_config = resolved_config.expanduser().resolve()
+            default_config = _default_config_path().expanduser().resolve()
+        except OSError:
+            return None
+        if resolved_config == default_config:
+            return None
+        return resolved_config.parent / "results.db"
+
+    def _result_store_payload(self) -> dict[str, object]:
+        """Persist a user-chosen database, never a value we derived ourselves.
+
+        Freezing a derived path would make the isolation one-shot and would
+        leave a moved workspace pointing at the old machine path.
+        """
+        payload = asdict(self.result_store)
+        try:
+            current = Path(self.result_store.db_path).expanduser().resolve()
+            platform_default = _default_result_store_path().expanduser().resolve()
+            derived = self._derived_result_store_default()
+        except (OSError, TypeError, ValueError):
+            return payload
+        explicit_db = getattr(self, "_explicit_result_store_db_path", False)
+        if not explicit_db and (
+            current == platform_default or (derived is not None and current == derived)
+        ):
+            payload.pop("db_path", None)
+        return payload

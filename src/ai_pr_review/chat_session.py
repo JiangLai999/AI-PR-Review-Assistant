@@ -83,8 +83,7 @@ def save_chat_context(config_path: Path | None, context: dict[str, Any]) -> None
     context_with_meta["_saved_at"] = datetime.now().isoformat()
 
     context_path.write_text(
-        json.dumps(context_with_meta, ensure_ascii=False, indent=2),
-        encoding="utf-8"
+        json.dumps(context_with_meta, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
 
@@ -93,4 +92,3 @@ def clear_chat_context(config_path: Path | None) -> None:
     context_path = chat_context_path(config_path)
     if context_path.exists():
         context_path.unlink()
-

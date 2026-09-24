@@ -38,21 +38,36 @@ class ChatActionRouter:
         action: str | None = None
 
         # Configuration actions
-        if any(keyword in normalized for keyword in ["开始配置", "配置模型", "配置供应商", "configure provider", "setup"]):
+        if any(
+            keyword in normalized
+            for keyword in ["开始配置", "配置模型", "配置供应商", "configure provider", "setup"]
+        ):
             action = "configure_provider"
-        elif any(keyword in normalized for keyword in ["配置 github", "github token", "configure github"]):
+        elif any(
+            keyword in normalized for keyword in ["配置 github", "github token", "configure github"]
+        ):
             action = "configure_github"
         # Analysis actions
-        elif any(keyword in normalized for keyword in ["历史分析", "分析历史", "趋势分析", "analyze history", "history trend"]):
+        elif any(
+            keyword in normalized
+            for keyword in ["历史分析", "分析历史", "趋势分析", "analyze history", "history trend"]
+        ):
             action = "analyze_history"
         # Review actions
-        elif "生成审查计划" in normalized or "只看计划" in normalized or "review plan" in normalized:
+        elif (
+            "生成审查计划" in normalized or "只看计划" in normalized or "review plan" in normalized
+        ):
             action = "create_review_plan"
         elif "解释" in normalized and ("问题" in normalized or "finding" in normalized):
             action = "explain_finding"
         elif "历史" in normalized or "上一次审查" in normalized or "审查记录" in normalized:
             action = "list_history"
-        elif "环境" in normalized or "配置状态" in normalized or "模型状态" in normalized or "检查环境" in normalized:
+        elif (
+            "环境" in normalized
+            or "配置状态" in normalized
+            or "模型状态" in normalized
+            or "检查环境" in normalized
+        ):
             action = "check_environment"
         else:
             action = (
@@ -72,8 +87,13 @@ class ChatActionRouter:
         return ChatAction(
             action=action,
             arguments=args,
-            requires_confirmation=action in {"start_review", "create_review_plan", "configure_provider", "configure_github"},
-            risk_level="high" if action in {"start_review", "configure_provider", "configure_github"} else "low",
+            requires_confirmation=action
+            in {"start_review", "create_review_plan", "configure_provider", "configure_github"},
+            risk_level=(
+                "high"
+                if action in {"start_review", "configure_provider", "configure_github"}
+                else "low"
+            ),
             source="deterministic",
         )
 

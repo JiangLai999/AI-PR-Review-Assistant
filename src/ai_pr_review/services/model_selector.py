@@ -71,24 +71,41 @@ class ModelSelector:
     def __init__(self, config: AppConfig):
         self.config = config
         self.ai_config = config.ai_client
-
-        # 创建本地模型 provider
-        try:
-            from ai_pr_review.config import ModelProviderConfig
-
-            local_config = ModelProviderConfig.from_name("ollama")
-            self.local_provider = create_model_provider(local_config)
-            self.local_model = getattr(self.ai_config, "local_model", "qwen3.5:4b")
-        except Exception:
-            self.local_provider = None
-            self.local_model = None
-
-        # 创建远程模型 provider
-        self.remote_provider = create_model_provider(self.ai_config.model_provider)
-        self.remote_model = self.ai_config.model
-
-        # 获取策略
         self.strategy = self._get_strategy()
+
+        # 创建本地模型 provider：主 Provider 本身就是 Ollama 时以它为准，
+        # 否则读取持久化的本地槽位（local_provider）。
+        self.local_provider: BaseModelProvider | None = None
+        self.local_model: str = ""
+        try:
+            local_slot = (
+                config.provider
+                if config.provider.name.lower() in {"ollama", "local"}
+                else getattr(config, "local_provider", None)
+            )
+            if local_slot is None:
+                from ai_pr_review.config import ModelProviderConfig
+
+                local_config = ModelProviderConfig.from_name("ollama")
+            else:
+                local_config = local_slot.to_model_provider()
+            self.local_provider = create_model_provider(local_config)
+            self.local_model = local_config.model_name or getattr(
+                self.ai_config, "local_model", "qwen3.5:4b"
+            )
+        except Exception as exc:
+            # Offline/local-only is a privacy boundary. Never send code to a
+            # remote provider if local configuration cannot be constructed.
+            if self.strategy == HybridStrategy.LOCAL_ONLY:
+                raise RuntimeError("本地模型配置不可用；local_only 模式禁止回退到云端。") from exc
+
+        # 远程槽位始终指向持久化的主 Provider：即使当前是 local_only 运行
+        # （`ai_client` 已被切到本地），云端引用也不能丢。
+        remote_config = config.provider.to_model_provider()
+        if remote_config.name.lower() in {"ollama", "local"}:
+            remote_config = self.ai_config.model_provider
+        self.remote_provider = create_model_provider(remote_config)
+        self.remote_model = remote_config.model_name
 
         # 成本追踪
         self.total_cost = 0.0
@@ -130,9 +147,8 @@ class ModelSelector:
             if self.local_provider:
                 self.local_calls += 1
                 return self.local_provider, self.local_model, True
-            # 如果本地不可用，降级到远程
-            self.remote_calls += 1
-            return self.remote_provider, self.remote_model, False
+            # An offline promise must never silently route the PR to the cloud.
+            raise RuntimeError("本地模型不可用；local_only 模式禁止回退到云端。")
 
         if self.strategy == HybridStrategy.REMOTE_ONLY:
             self.remote_calls += 1
@@ -169,7 +185,11 @@ class ModelSelector:
         # 5. 根据复杂度和策略决策
         if self.strategy == HybridStrategy.QUALITY_FIRST:
             # 质量优先：中等以上用远程
-            if complexity in {TaskComplexity.MODERATE, TaskComplexity.COMPLEX, TaskComplexity.CRITICAL}:
+            if complexity in {
+                TaskComplexity.MODERATE,
+                TaskComplexity.COMPLEX,
+                TaskComplexity.CRITICAL,
+            }:
                 self.remote_calls += 1
                 return self.remote_provider, self.remote_model, False
             self.local_calls += 1
