@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ai_pr_review.config import PromptAssemblerConfig
 from ai_pr_review.models.pr_data import FileDiff
@@ -76,6 +76,31 @@ class Finding(BaseModel):
     evidence: list[Evidence] = Field(default_factory=list)
     evidence_status: str = "unverified"
     evidence_issues: list[str] = Field(default_factory=list)
+
+    @field_validator("category", mode="before")
+    @classmethod
+    def normalize_category(cls, value: object) -> object:
+        """Accept model-facing human labels while storing stable enum codes."""
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip().lower()
+        aliases = {
+            "正确性": "correctness",
+            "安全性": "security",
+            "资源": "resource",
+            "错误处理": "error_handling",
+            "性能": "performance",
+            "并发": "concurrency",
+            "架构": "architecture",
+            "correctness": "correctness",
+            "security": "security",
+            "resource": "resource",
+            "error handling": "error_handling",
+            "performance": "performance",
+            "concurrency": "concurrency",
+            "architecture": "architecture",
+        }
+        return aliases.get(normalized, value)
 
 
 class ReviewResult(BaseModel):

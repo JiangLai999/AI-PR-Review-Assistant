@@ -28,6 +28,10 @@ class OllamaProvider(OpenAICompatibleProvider):
         kwargs["structured_output"] = False
         return await super().chat(messages, **kwargs)
 
+    async def stream_chat(self, messages, on_delta, **kwargs: Any):
+        kwargs.setdefault("think", False)
+        return await super().stream_chat(messages, on_delta, **kwargs)
+
     async def health_check(self, **kwargs: Any) -> bool:
         return await asyncio.to_thread(self._health_check_sync, **kwargs)
 

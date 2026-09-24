@@ -230,6 +230,10 @@ class ReviewOrchestrator:
         stage("persisting", "正在写入本地 SQLite 历史与反馈数据")
         duration_seconds = time.perf_counter() - start_time
         total_cost = getattr(ai_client, "total_run_cost", 0.0)
+        # Re-check right before persisting: cancelling after the last stage
+        # callback used to still write a run into history and report completion.
+        if cancel_check is not None and cancel_check():
+            raise ReviewCancelled()
         run_id = ResultStore(config=app_config.result_store).save_result(
             pr_url,
             review_result,
