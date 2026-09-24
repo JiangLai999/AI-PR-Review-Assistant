@@ -460,6 +460,9 @@ def test_cli_config_init_creates_project_template(tmp_path: Path):
     assert payload["provider"]["base_url"] == "https://api.siliconflow.cn/v1"
     assert payload["provider"]["default_model"] == "deepseek-ai/DeepSeek-V3"
     assert "api_key" not in payload["provider"]
+    # Personal runtime/profile choices belong to the user (or project-local)
+    # config; a project-shared template must not pin them.
+    assert "preferences" not in payload
     assert ".ai_pr_review/config.local.json" in gitignore_path.read_text(encoding="utf-8")
     assert "SILICONFLOW_API_KEY" in result.output
 

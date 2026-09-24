@@ -3394,16 +3394,19 @@ def _open_tui_frontend(
     if raw_command:
         command = shlex.split(raw_command, posix=False)
         tui_root = dev_root if dev_ready else static_root
-    elif prebuilt.exists():
-        # A compiled binary embeds both the JS bundle and the native DLL, so it
-        # needs neither node_modules nor a Bun install on the target machine.
-        command = [str(prebuilt)]
-        tui_root = static_root
     elif runtime is not None and dev_ready:
+        # Source is authoritative during development. The ignored compiled exe
+        # is often older than the committed bundle/source, so it must not win
+        # just because it exists.
         command = [runtime, "--preload", "@opentui/solid/preload", "src/main.tsx"]
         tui_root = dev_root
     elif runtime is not None and bundle.exists():
         command = [runtime, str(bundle)]
+        tui_root = static_root
+    elif prebuilt.exists():
+        # A compiled binary embeds both the JS bundle and the native DLL, so it
+        # needs neither node_modules nor a Bun install on the target machine.
+        command = [str(prebuilt)]
         tui_root = static_root
     else:
         return False

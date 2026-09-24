@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import json
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +12,6 @@ from ai_pr_review.config import (
     MODEL_PROVIDER_PRESETS,
     PROJECT_LOCAL_CONFIG_FILENAME,
     ModelProviderConfig,
-    PreferencesConfig,
     ProviderConfig,
 )
 
@@ -43,7 +40,6 @@ def build_project_config_payload(
     provider_payload.pop("api_key", None)
     return {
         "provider": provider_payload,
-        "preferences": asdict(PreferencesConfig()),
     }
 
 

@@ -877,3 +877,106 @@ def test_matching_provider_env_override_activates_cloud_only_for_process(
     restored = JsonlBackend(config_path)
     assert restored.runtime_profile == "local"
     assert restored.config.ai_client.provider == "ollama"
+
+
+def test_config_setup_persists_cloud_key_and_survives_local_round_trip(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+
+    configured = asyncio.run(
+        backend.handle(
+            {
+                "id": "1",
+                "method": "config.setup",
+                "params": {
+                    "runtime_profile": "cloud",
+                    "provider_name": "deepseek",
+                    "api_key": "sk-test-not-real",
+                    "model_name": "deepseek-flash",
+                },
+            }
+        )
+    )
+    assert configured[0]["ok"] is True
+    cloud_snapshot = configured[0]["result"]
+    assert cloud_snapshot["runtime_profile"] == "cloud"
+    assert cloud_snapshot["provider"] == "deepseek"
+    assert cloud_snapshot["model"] == "deepseek-flash"
+    assert cloud_snapshot["api_key_configured"] is True
+
+    local = asyncio.run(
+        backend.handle(
+            {
+                "id": "2",
+                "method": "config.setup",
+                "params": {
+                    "runtime_profile": "local",
+                    "local_model": "qwen3.5:4b",
+                },
+            }
+        )
+    )
+    assert local[0]["ok"] is True
+    assert local[0]["result"]["local"] is True
+    assert local[0]["result"]["provider"] == "ollama"
+
+    # The remote slot and its key must survive the local switch; switching back
+    # without re-entering the key is the exact regression users hit in Chat.
+    restarted = JsonlBackend(config_path)
+    assert restarted.config.provider.api_key == "sk-test-not-real"
+    reloaded_cloud = asyncio.run(
+        restarted.handle(
+            {
+                "id": "3",
+                "method": "config.setup",
+                "params": {"runtime_profile": "cloud"},
+            }
+        )
+    )
+    assert reloaded_cloud[0]["ok"] is True
+    assert reloaded_cloud[0]["result"]["provider"] == "deepseek"
+    assert reloaded_cloud[0]["result"]["model"] == "deepseek-flash"
+    assert reloaded_cloud[0]["result"]["api_key_configured"] is True
+
+
+def test_config_setup_requires_a_key_for_a_new_cloud_provider(tmp_path: Path) -> None:
+    from ai_pr_review.config import ConfigValidationError
+
+    backend = JsonlBackend(tmp_path / "config.json")
+    with pytest.raises(ConfigValidationError, match="API Key"):
+        backend._apply_setup(
+            {
+                "runtime_profile": "cloud",
+                "provider_name": "openai",
+                "model_name": "gpt-4o-mini",
+            }
+        )
+
+
+def test_config_options_expose_cloud_and_local_model_choices(tmp_path: Path) -> None:
+    backend = JsonlBackend(tmp_path / "config.json")
+    options = backend._setup_options()
+    providers = {item["name"]: item for item in options["providers"]}
+
+    assert "deepseek" in providers
+    assert "ollama" not in providers
+    assert "deepseek-flash" in providers["deepseek"]["models"]
+    assert options["local"]["provider"] == "ollama"
+    assert options["local"]["models"]
+
+    backend._apply_setup(
+        {
+            "runtime_profile": "cloud",
+            "provider_name": "deepseek",
+            "api_key": "sk-test-not-real",
+            "model_name": "deepseek-flash",
+        }
+    )
+    backend._apply_setup({"runtime_profile": "local", "local_model": "qwen3.5:4b"})
+    local_options = backend._setup_options()
+    assert local_options["current"]["provider"] == "ollama"
+    assert local_options["current"]["remote_provider"] == "deepseek"
+    assert local_options["current"]["remote_model"] == "deepseek-flash"
+    assert local_options["current"]["remote_api_key_configured"] is True

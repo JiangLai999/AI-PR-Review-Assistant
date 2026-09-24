@@ -248,6 +248,8 @@ pr-review chat --model "gpt-4" --message "你好"
 
 随后应用 `AI_PR_REVIEW_*` 和 `GITHUB_TOKEN` 环境变量覆盖。`--config <path>` 用于指定用户级配置文件路径，不会绕过环境变量覆盖。
 
+> `hybrid_strategy`、`ui_language`、`chat_layout` 等属于个人偏好：在项目内通过 Chat / `pr-review config` 保存时，会写入最高优先级的 `.ai_pr_review/config.local.json`（私有且默认忽略），不会被项目共享的 `config.json` 重新覆盖。`pr-review config init` 生成的共享模板只包含 Provider 默认值，不再写个人偏好。
+
 ---
 
 ## 支持的模型供应商

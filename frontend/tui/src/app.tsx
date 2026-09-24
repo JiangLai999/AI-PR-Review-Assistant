@@ -7,7 +7,7 @@ import { commandCompletion, commandEnterAction, commandMatches } from "./command
 import { truncateMiddle, workspaceRootLabel } from "./format"
 import { detailScrollDelta } from "./keymap"
 import { reviewReportPanels } from "./review-report"
-import type { TextareaRenderable, KeyBinding, ScrollBoxRenderable } from "@opentui/core"
+import type { InputRenderable, TextareaRenderable, KeyBinding, ScrollBoxRenderable } from "@opentui/core"
 
 const orange = "#fb8147"
 const muted = "#808080"
@@ -481,12 +481,49 @@ function Composer(props: {
   )
 }
 
-type RuntimeDialogProps = {
+type SetupDialogProps = {
   backend: BackendClient
   runtime: RuntimeSnapshot
   onClose: () => void
   onApplied: (snapshot: RuntimeSnapshot) => void
 }
+
+type ProviderSetupOption = {
+  name: string
+  display_name: string
+  base_url: string
+  api_format: string
+  env_var: string
+  default_model: string
+  models: string[]
+}
+
+type LocalSetupOption = {
+  provider: string
+  display_name: string
+  base_url: string
+  api_format: string
+  default_model: string
+  models: string[]
+}
+
+type SetupOptions = {
+  providers: ProviderSetupOption[]
+  local: LocalSetupOption
+  current: {
+    runtime_profile?: string
+    provider?: string
+    model?: string
+    api_key_configured?: boolean
+    remote_provider?: string
+    remote_model?: string
+    remote_base_url?: string
+    remote_api_key_configured?: boolean
+    local_model?: string
+  }
+}
+
+type SetupStep = "runtime" | "provider" | "model" | "key" | "local" | "summary"
 
 const runtimeOptions = [
   { name: "Cloud", description: "第三方 API：适合高质量审查与远程模型", value: "cloud" },
@@ -495,59 +532,304 @@ const runtimeOptions = [
   { name: "Offline", description: "离线优先：只使用本地运行时", value: "offline" },
 ]
 
-function RuntimeDialog(props: RuntimeDialogProps) {
-  const initial = runtimeOptions.findIndex((option) => option.value === props.runtime.runtime_profile)
-  const [selectedIndex, setSelectedIndex] = createSignal(initial >= 0 ? initial : 0)
+const stepTitles: Record<SetupStep, string> = {
+  runtime: "1 / 4 · 选择运行方式",
+  provider: "2 / 4 · 选择云端 Provider",
+  model: "3 / 4 · 选择模型",
+  key: "4 / 4 · 配置 API Key",
+  local: "2 / 4 · 选择本地模型",
+  summary: "确认并保存",
+}
+
+function SetupDialog(props: SetupDialogProps) {
+  const dimensions = useTerminalDimensions()
+  const initialRuntime = runtimeOptions.findIndex((option) => option.value === props.runtime.runtime_profile)
+  const [step, setStep] = createSignal<SetupStep>("runtime")
+  const [options, setOptions] = createSignal<SetupOptions>()
+  const [runtimeIndex, setRuntimeIndex] = createSignal(initialRuntime >= 0 ? initialRuntime : 0)
+  const [providerIndex, setProviderIndex] = createSignal(0)
+  const [modelIndex, setModelIndex] = createSignal(0)
+  const [localModelIndex, setLocalModelIndex] = createSignal(0)
+  const [apiKey, setApiKey] = createSignal("")
+  const [keyFocused, setKeyFocused] = createSignal(false)
   const [busy, setBusy] = createSignal(false)
+  const [loading, setLoading] = createSignal(true)
   const [error, setError] = createSignal("")
+  let apiInput: InputRenderable | undefined
+
+  const selectedRuntime = () => runtimeOptions[runtimeIndex()]?.value ?? "cloud"
+  const needsCloud = () => selectedRuntime() === "cloud" || selectedRuntime() === "hybrid"
+  const providers = () => options()?.providers ?? []
+  const selectedProvider = () => providers()[Math.min(providerIndex(), Math.max(0, providers().length - 1))]
+  const cloudModels = () => selectedProvider()?.models ?? []
+  const selectedModel = () => cloudModels()[Math.min(modelIndex(), Math.max(0, cloudModels().length - 1))]
+    ?? props.runtime.model
+    ?? "deepseek-flash"
+  const localModels = () => options()?.local.models ?? []
+  const selectedLocalModel = () => localModels()[Math.min(localModelIndex(), Math.max(0, localModels().length - 1))]
+    ?? props.runtime.model
+    ?? "qwen3.5:4b"
+  const remoteProviderName = () => options()?.current.remote_provider ?? options()?.current.provider
+  const remoteKeyConfigured = () =>
+    options()?.current.remote_api_key_configured ?? options()?.current.api_key_configured ?? false
+  const keyState = () => {
+    const provider = selectedProvider()
+    if (provider && provider.name === remoteProviderName() && remoteKeyConfigured()) {
+      return "已配置（留空保留现有 Key）"
+    }
+    return apiKey().trim() ? "将保存到本地私有配置" : "未配置"
+  }
+
+  onMount(async () => {
+    try {
+      const response = await props.backend.request("config.options", {}, { timeoutMs: PROBE_TIMEOUT_MS })
+      if (!response.ok) throw new Error(response.error?.message ?? "无法读取配置选项")
+      const payload = response.result as SetupOptions
+      setOptions(payload)
+      const currentProvider = payload.providers.findIndex(
+        (item) => item.name === (payload.current.remote_provider ?? payload.current.provider),
+      )
+      setProviderIndex(currentProvider >= 0 ? currentProvider : 0)
+      const provider = payload.providers[currentProvider >= 0 ? currentProvider : 0]
+      const currentModel = provider?.models.indexOf(
+        payload.current.remote_model ?? payload.current.model ?? "",
+      ) ?? -1
+      setModelIndex(currentModel >= 0 ? currentModel : 0)
+      const currentLocal = payload.local.models.indexOf(payload.current.local_model ?? "")
+      setLocalModelIndex(currentLocal >= 0 ? currentLocal : 0)
+    } catch (cause) {
+      setError(String(cause))
+    } finally {
+      setLoading(false)
+    }
+  })
+
+  const next = () => {
+    setError("")
+    const current = step()
+    if (current === "runtime") setStep(needsCloud() ? "provider" : "local")
+    else if (current === "provider") setStep("model")
+    else if (current === "model") {
+      // Moving focus during the same key event that opened this step lets the
+      // new input swallow Enter and skip the API-key field entirely. Focus on
+      // the next tick instead.
+      setKeyFocused(false)
+      setStep("key")
+      setTimeout(() => setKeyFocused(true), 50)
+    } else if (current === "local" || current === "key") {
+      setKeyFocused(false)
+      setStep("summary")
+    }
+  }
+
+  const previous = () => {
+    setError("")
+    setKeyFocused(false)
+    const current = step()
+    if (current === "provider") setStep("runtime")
+    else if (current === "model") setStep("provider")
+    else if (current === "key") setStep("model")
+    else if (current === "local") setStep("runtime")
+    else if (current === "summary") setStep(needsCloud() ? "key" : "local")
+  }
 
   const apply = async () => {
-    const option = runtimeOptions[selectedIndex()]
+    if (busy()) return
     setBusy(true)
     setError("")
     try {
-      const response = await props.backend.request("config.apply", { section: "runtime", value: option.value })
-      if (!response.ok) {
-        setError(response.error?.message ?? "配置保存失败")
-        return
+      const payload: Record<string, unknown> = { runtime_profile: selectedRuntime() }
+      if (needsCloud()) {
+        const provider = selectedProvider()
+        if (!provider) throw new Error("没有可用的云端 Provider 配置。")
+        payload.provider_name = provider.name
+        payload.model_name = selectedModel()
+        payload.base_url = provider.base_url
+        payload.api_format = provider.api_format
+        if (apiKey().trim()) payload.api_key = apiKey().trim()
+      } else {
+        const local = options()?.local
+        if (!local) throw new Error("没有可用的本地模型配置。")
+        payload.local_provider = local.provider
+        payload.local_model = selectedLocalModel()
+        payload.local_base_url = local.base_url
       }
+      const response = await props.backend.request("config.setup", payload)
+      if (!response.ok) throw new Error(response.error?.message ?? "配置保存失败")
       props.onApplied(response.result as RuntimeSnapshot)
       props.onClose()
     } catch (cause) {
-      setError(String(cause))
+      const message = String(cause)
+      setError(message)
+      if (needsCloud() && message.includes("API Key")) {
+        setKeyFocused(false)
+        setStep("key")
+        setTimeout(() => setKeyFocused(true), 50)
+      }
     } finally {
       setBusy(false)
     }
   }
 
   useKeyboard((key) => {
-    if (key.name === "escape") props.onClose()
-    if (isEnterKey(key) && !busy()) void apply()
+    if (key.name === "escape" && !busy()) {
+      props.onClose()
+      return
+    }
+    if (key.name === "left" && !busy() && step() !== "key") {
+      previous()
+      return
+    }
+    if (isEnterKey(key) && !busy()) {
+      // The API-key input owns Enter so the wizard does not skip the field.
+      if (step() === "key") return
+      if (step() === "summary") void apply()
+      else next()
+    }
   })
 
+  const dialogWidth = 70
+  const dialogHeight = step() === "provider" ? 24 : 20
+  const left = Math.max(2, Math.floor((dimensions().width - dialogWidth) / 2))
+  const top = Math.max(2, Math.floor((dimensions().height - dialogHeight) / 2))
+
   return (
-    <box position="absolute" left={10} top={4} width={58} height={18} backgroundColor="#171717" borderStyle="single" borderColor={orange} padding={2} zIndex={100} flexDirection="column">
-      <text fg={orange}>配置助手 // RUNTIME PROFILE</text>
-      <text fg={muted}>选择 Chat 的默认运行时（↑↓ / Enter，Esc 取消）</text>
-      <box marginTop={1} flexGrow={1}>
-        <select
-          options={runtimeOptions}
-          selectedIndex={selectedIndex()}
-          focused
-          showDescription
-          // OpenTUI does not size a select from the flex layout: without an
-          // explicit box it renders as an empty rectangle.
-          width="100%"
-          height={8}
-          selectedBackgroundColor="#5a2e1c"
-          selectedTextColor="#ffffff"
-          descriptionColor={muted}
-          selectedDescriptionColor="#ffd0bb"
-          onChange={(index) => setSelectedIndex(index)}
-        />
-      </box>
+    <box position="absolute" left={left} top={top} width={dialogWidth} height={dialogHeight} backgroundColor="#171717" borderStyle="single" borderColor={orange} padding={2} zIndex={100} flexDirection="column">
+      <text fg={orange}>配置助手 // SETUP WIZARD</text>
+      <text fg={muted}>{stepTitles[step()]} · ↑↓ 选择 · Enter 下一步 · Esc 取消</text>
+      <Show when={loading()}><text fg={muted}>读取配置选项中...</text></Show>
+      <Show when={!loading() && step() === "runtime"}>
+        <box marginTop={1} flexGrow={1}>
+          <select
+            options={runtimeOptions}
+            selectedIndex={runtimeIndex()}
+            focused
+            showDescription
+            width="100%"
+            height={8}
+            selectedBackgroundColor="#5a2e1c"
+            selectedTextColor="#ffffff"
+            descriptionColor={muted}
+            selectedDescriptionColor="#ffd0bb"
+            onChange={(index) => setRuntimeIndex(index)}
+          />
+        </box>
+      </Show>
+      <Show when={!loading() && step() === "provider"}>
+        <box marginTop={1} flexGrow={1}>
+          <select
+            options={providers().map((provider) => ({
+              name: provider.display_name,
+              description: `${provider.default_model} · ${provider.base_url || "需要填写 Endpoint"}`,
+              value: provider.name,
+            }))}
+            selectedIndex={providerIndex()}
+            focused
+            showDescription
+            width="100%"
+            height={12}
+            selectedBackgroundColor="#5a2e1c"
+            selectedTextColor="#ffffff"
+            descriptionColor={muted}
+            selectedDescriptionColor="#ffd0bb"
+            onChange={(index) => {
+              setProviderIndex(index)
+              setModelIndex(0)
+              setApiKey("")
+            }}
+          />
+          <text fg={muted}>自定义 Endpoint / headers 等高级项请使用 pr-review config 配置。</text>
+        </box>
+      </Show>
+      <Show when={!loading() && step() === "model"}>
+        <box marginTop={1} flexGrow={1}>
+          <select
+            options={cloudModels().map((model) => ({
+              name: model,
+              description: model === selectedProvider()?.default_model ? "Provider 默认模型" : "预设模型",
+              value: model,
+            }))}
+            selectedIndex={modelIndex()}
+            focused
+            showDescription
+            width="100%"
+            height={Math.min(12, Math.max(4, cloudModels().length * 2))}
+            selectedBackgroundColor="#5a2e1c"
+            selectedTextColor="#ffffff"
+            descriptionColor={muted}
+            selectedDescriptionColor="#ffd0bb"
+            onChange={(index) => setModelIndex(index)}
+          />
+        </box>
+      </Show>
+      <Show when={!loading() && step() === "key"}>
+        <box marginTop={1} flexDirection="column">
+          <text fg="#eeeeee">{selectedProvider()?.display_name ?? "Provider"} API Key</text>
+          <text fg={muted}>{keyState()}</text>
+          <box marginTop={1} backgroundColor="#202020" paddingLeft={1} paddingRight={1}>
+            <input
+              ref={(node) => { apiInput = node }}
+              placeholder={remoteKeyConfigured() ? "留空保留现有 Key，或粘贴新 Key" : "粘贴 API Key"}
+              focused={keyFocused()}
+              onContentChange={() => setApiKey(apiInput?.value ?? "")}
+              onSubmit={() => {
+                setKeyFocused(false)
+                setStep("summary")
+              }}
+              flexGrow={1}
+            />
+          </box>
+          <text fg={muted}>Key 写入私有配置；项目内优先写入 .ai_pr_review/config.local.json（已默认 gitignore）。</text>
+        </box>
+      </Show>
+      <Show when={!loading() && step() === "local"}>
+        <box marginTop={1} flexGrow={1}>
+          <select
+            options={localModels().map((model) => ({
+              name: model,
+              description: model === options()?.local.default_model ? "本地默认模型" : "Ollama 本地模型",
+              value: model,
+            }))}
+            selectedIndex={localModelIndex()}
+            focused
+            showDescription
+            width="100%"
+            height={Math.min(12, Math.max(4, localModels().length * 2))}
+            selectedBackgroundColor="#5a2e1c"
+            selectedTextColor="#ffffff"
+            descriptionColor={muted}
+            selectedDescriptionColor="#ffd0bb"
+            onChange={(index) => setLocalModelIndex(index)}
+          />
+          <text fg={muted}>Endpoint: {options()?.local.base_url ?? "http://127.0.0.1:11434/v1"}</text>
+        </box>
+      </Show>
+      <Show when={!loading() && step() === "summary"}>
+        <box marginTop={1} flexDirection="column">
+          <text><span style={{ fg: orange }}>运行方式  </span><span style={{ fg: "#eeeeee" }}>{runtimeOptions[runtimeIndex()]?.name}</span></text>
+          <Show when={needsCloud()}>
+            <text><span style={{ fg: orange }}>Provider  </span><span style={{ fg: "#eeeeee" }}>{selectedProvider()?.display_name}</span></text>
+            <text><span style={{ fg: orange }}>模型       </span><span style={{ fg: "#eeeeee" }}>{selectedModel()}</span></text>
+            <text><span style={{ fg: orange }}>API Key    </span><span style={{ fg: "#eeeeee" }}>{keyState()}</span></text>
+          </Show>
+          <Show when={!needsCloud()}>
+            <text><span style={{ fg: orange }}>本地模型  </span><span style={{ fg: "#eeeeee" }}>{selectedLocalModel()}</span></text>
+            <text><span style={{ fg: orange }}>Endpoint  </span><span style={{ fg: "#eeeeee" }}>{options()?.local.base_url}</span></text>
+          </Show>
+          <text fg={muted}>保存后 Chat 会立即使用新配置；如需微调可再次打开 Ctrl+P。</text>
+        </box>
+      </Show>
+      <box flexGrow={1} />
       <Show when={error()}><text fg="#ff6b6b">{error()}</text></Show>
-      <text fg={busy() ? orange : muted}>{busy() ? "保存中..." : "Enter 保存 · Esc 取消"}</text>
+      <text fg={busy() ? orange : muted}>
+        {busy()
+          ? "保存中..."
+          : step() === "summary"
+            ? "Enter 保存 · ← 返回修改 · Esc 取消"
+            : step() === "key"
+              ? "Enter 确认 Key · Esc 取消"
+              : "Enter 下一步 · ← 返回 · Esc 取消"}
+      </text>
     </box>
   )
 }
@@ -1272,14 +1554,25 @@ export function App() {
         />
       </Show>
       <Show when={setupOpen()}>
-        <RuntimeDialog
+        <SetupDialog
           backend={backend}
           runtime={runtime()}
           onClose={() => setSetupOpen(false)}
           onApplied={(snapshot) => {
             setRuntime(snapshot)
             setBackendStatus("READY")
-            appendMessage({ role: "assistant", content: `运行时已切换为 ${snapshot.runtime_profile ?? "unknown"}` })
+            appendMessage({
+              role: "assistant",
+              content: `配置已保存：${snapshot.provider_display ?? snapshot.provider ?? "provider"} / ${snapshot.model ?? "model"} · ${snapshot.runtime_profile ?? "runtime"}`,
+            })
+            void backend
+              .request("model.status", {}, { timeoutMs: PROBE_TIMEOUT_MS })
+              .then((status) => {
+                if (status.ok) setRuntime((current) => ({ ...current, ...(status.result as RuntimeSnapshot) }))
+              })
+              .catch(() => {
+                // The saved configuration is still valid when probing is offline.
+              })
           }}
         />
       </Show>

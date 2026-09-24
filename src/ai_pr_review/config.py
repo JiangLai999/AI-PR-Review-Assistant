@@ -92,6 +92,36 @@ def resolve_config_path(path: Path | None = None) -> Path:
     return DEFAULT_CONFIG_PATH
 
 
+def resolve_save_path(path: Path | None = None, *, source_path: Path | None = None) -> Path:
+    """Resolve the highest-precedence writable config path.
+
+    Loading is intentionally layered (user -> project shared -> project local),
+    so saving personal settings back to the user config is not enough: a project
+    shared file would keep shadowing them on the next load. When a project-level
+    config exists, personal edits therefore go to the highest-precedence
+    project-local file, which is private and gitignored by convention.
+    """
+    if path is not None:
+        return path
+    override = os.getenv(CONFIG_PATH_ENV_VAR, "").strip()
+    if override:
+        return Path(override).expanduser()
+    if source_path is not None:
+        return Path(source_path).expanduser()
+    try:
+        default_is_authoritative = (
+            DEFAULT_CONFIG_PATH.expanduser().resolve()
+            == _default_config_path().expanduser().resolve()
+        )
+    except OSError:
+        default_is_authoritative = False
+    if default_is_authoritative:
+        project_paths = project_config_paths()
+        if any(project_path.exists() for project_path in project_paths):
+            return project_paths[-1]
+    return DEFAULT_CONFIG_PATH
+
+
 def _find_project_root(start: Path | None = None) -> Path | None:
     """从指定目录向上查找包含 .git 的项目根目录。"""
     current = (start or Path.cwd()).resolve()
@@ -986,7 +1016,9 @@ class AppConfig:
         return config
 
     def save(self, path: Path | None = None, *, save_key: bool = False) -> Path:
-        config_path = resolve_config_path(path)
+        config_path = resolve_save_path(
+            path, source_path=getattr(self, "_config_source_path", None)
+        )
         config_path.parent.mkdir(parents=True, exist_ok=True)
         active = self._active_provider_config()
         if self.ai_client.api_key or active.api_key:

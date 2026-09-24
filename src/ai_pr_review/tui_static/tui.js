@@ -35538,93 +35538,504 @@ var runtimeOptions = [{
   description: "\u79BB\u7EBF\u4F18\u5148\uFF1A\u53EA\u4F7F\u7528\u672C\u5730\u8FD0\u884C\u65F6",
   value: "offline"
 }];
-function RuntimeDialog(props) {
-  const initial = runtimeOptions.findIndex((option) => option.value === props.runtime.runtime_profile);
-  const [selectedIndex, setSelectedIndex] = createSignal(initial >= 0 ? initial : 0);
+var stepTitles = {
+  runtime: "1 / 4 \xB7 \u9009\u62E9\u8FD0\u884C\u65B9\u5F0F",
+  provider: "2 / 4 \xB7 \u9009\u62E9\u4E91\u7AEF Provider",
+  model: "3 / 4 \xB7 \u9009\u62E9\u6A21\u578B",
+  key: "4 / 4 \xB7 \u914D\u7F6E API Key",
+  local: "2 / 4 \xB7 \u9009\u62E9\u672C\u5730\u6A21\u578B",
+  summary: "\u786E\u8BA4\u5E76\u4FDD\u5B58"
+};
+function SetupDialog(props) {
+  const dimensions = useTerminalDimensions();
+  const initialRuntime = runtimeOptions.findIndex((option) => option.value === props.runtime.runtime_profile);
+  const [step, setStep] = createSignal("runtime");
+  const [options, setOptions] = createSignal();
+  const [runtimeIndex, setRuntimeIndex] = createSignal(initialRuntime >= 0 ? initialRuntime : 0);
+  const [providerIndex, setProviderIndex] = createSignal(0);
+  const [modelIndex, setModelIndex] = createSignal(0);
+  const [localModelIndex, setLocalModelIndex] = createSignal(0);
+  const [apiKey, setApiKey] = createSignal("");
+  const [keyFocused, setKeyFocused] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
+  const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal("");
+  let apiInput;
+  const selectedRuntime = () => runtimeOptions[runtimeIndex()]?.value ?? "cloud";
+  const needsCloud = () => selectedRuntime() === "cloud" || selectedRuntime() === "hybrid";
+  const providers = () => options()?.providers ?? [];
+  const selectedProvider = () => providers()[Math.min(providerIndex(), Math.max(0, providers().length - 1))];
+  const cloudModels = () => selectedProvider()?.models ?? [];
+  const selectedModel = () => cloudModels()[Math.min(modelIndex(), Math.max(0, cloudModels().length - 1))] ?? props.runtime.model ?? "deepseek-flash";
+  const localModels = () => options()?.local.models ?? [];
+  const selectedLocalModel = () => localModels()[Math.min(localModelIndex(), Math.max(0, localModels().length - 1))] ?? props.runtime.model ?? "qwen3.5:4b";
+  const remoteProviderName = () => options()?.current.remote_provider ?? options()?.current.provider;
+  const remoteKeyConfigured = () => options()?.current.remote_api_key_configured ?? options()?.current.api_key_configured ?? false;
+  const keyState = () => {
+    const provider = selectedProvider();
+    if (provider && provider.name === remoteProviderName() && remoteKeyConfigured()) {
+      return "\u5DF2\u914D\u7F6E\uFF08\u7559\u7A7A\u4FDD\u7559\u73B0\u6709 Key\uFF09";
+    }
+    return apiKey().trim() ? "\u5C06\u4FDD\u5B58\u5230\u672C\u5730\u79C1\u6709\u914D\u7F6E" : "\u672A\u914D\u7F6E";
+  };
+  onMount(async () => {
+    try {
+      const response = await props.backend.request("config.options", {}, {
+        timeoutMs: PROBE_TIMEOUT_MS
+      });
+      if (!response.ok)
+        throw new Error(response.error?.message ?? "\u65E0\u6CD5\u8BFB\u53D6\u914D\u7F6E\u9009\u9879");
+      const payload = response.result;
+      setOptions(payload);
+      const currentProvider = payload.providers.findIndex((item) => item.name === (payload.current.remote_provider ?? payload.current.provider));
+      setProviderIndex(currentProvider >= 0 ? currentProvider : 0);
+      const provider = payload.providers[currentProvider >= 0 ? currentProvider : 0];
+      const currentModel = provider?.models.indexOf(payload.current.remote_model ?? payload.current.model ?? "") ?? -1;
+      setModelIndex(currentModel >= 0 ? currentModel : 0);
+      const currentLocal = payload.local.models.indexOf(payload.current.local_model ?? "");
+      setLocalModelIndex(currentLocal >= 0 ? currentLocal : 0);
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setLoading(false);
+    }
+  });
+  const next = () => {
+    setError("");
+    const current = step();
+    if (current === "runtime")
+      setStep(needsCloud() ? "provider" : "local");
+    else if (current === "provider")
+      setStep("model");
+    else if (current === "model") {
+      setKeyFocused(false);
+      setStep("key");
+      setTimeout(() => setKeyFocused(true), 50);
+    } else if (current === "local" || current === "key") {
+      setKeyFocused(false);
+      setStep("summary");
+    }
+  };
+  const previous = () => {
+    setError("");
+    setKeyFocused(false);
+    const current = step();
+    if (current === "provider")
+      setStep("runtime");
+    else if (current === "model")
+      setStep("provider");
+    else if (current === "key")
+      setStep("model");
+    else if (current === "local")
+      setStep("runtime");
+    else if (current === "summary")
+      setStep(needsCloud() ? "key" : "local");
+  };
   const apply = async () => {
-    const option = runtimeOptions[selectedIndex()];
+    if (busy())
+      return;
     setBusy(true);
     setError("");
     try {
-      const response = await props.backend.request("config.apply", {
-        section: "runtime",
-        value: option.value
-      });
-      if (!response.ok) {
-        setError(response.error?.message ?? "\u914D\u7F6E\u4FDD\u5B58\u5931\u8D25");
-        return;
+      const payload = {
+        runtime_profile: selectedRuntime()
+      };
+      if (needsCloud()) {
+        const provider = selectedProvider();
+        if (!provider)
+          throw new Error("\u6CA1\u6709\u53EF\u7528\u7684\u4E91\u7AEF Provider \u914D\u7F6E\u3002");
+        payload.provider_name = provider.name;
+        payload.model_name = selectedModel();
+        payload.base_url = provider.base_url;
+        payload.api_format = provider.api_format;
+        if (apiKey().trim())
+          payload.api_key = apiKey().trim();
+      } else {
+        const local = options()?.local;
+        if (!local)
+          throw new Error("\u6CA1\u6709\u53EF\u7528\u7684\u672C\u5730\u6A21\u578B\u914D\u7F6E\u3002");
+        payload.local_provider = local.provider;
+        payload.local_model = selectedLocalModel();
+        payload.local_base_url = local.base_url;
       }
+      const response = await props.backend.request("config.setup", payload);
+      if (!response.ok)
+        throw new Error(response.error?.message ?? "\u914D\u7F6E\u4FDD\u5B58\u5931\u8D25");
       props.onApplied(response.result);
       props.onClose();
     } catch (cause) {
-      setError(String(cause));
+      const message = String(cause);
+      setError(message);
+      if (needsCloud() && message.includes("API Key")) {
+        setKeyFocused(false);
+        setStep("key");
+        setTimeout(() => setKeyFocused(true), 50);
+      }
     } finally {
       setBusy(false);
     }
   };
   useKeyboard((key) => {
-    if (key.name === "escape")
+    if (key.name === "escape" && !busy()) {
       props.onClose();
-    if (isEnterKey(key) && !busy())
-      apply();
+      return;
+    }
+    if (key.name === "left" && !busy() && step() !== "key") {
+      previous();
+      return;
+    }
+    if (isEnterKey(key) && !busy()) {
+      if (step() === "key")
+        return;
+      if (step() === "summary")
+        apply();
+      else
+        next();
+    }
   });
+  const dialogWidth = 70;
+  const dialogHeight = step() === "provider" ? 24 : 20;
+  const left = Math.max(2, Math.floor((dimensions().width - dialogWidth) / 2));
+  const top = Math.max(2, Math.floor((dimensions().height - dialogHeight) / 2));
   return (() => {
-    var _el$54 = createElement("box"), _el$55 = createElement("text"), _el$57 = createElement("text"), _el$59 = createElement("box"), _el$60 = createElement("select"), _el$62 = createElement("text");
+    var _el$54 = createElement("box"), _el$55 = createElement("text"), _el$57 = createElement("text"), _el$58 = createTextNode(` \xB7 \u2191\u2193 \u9009\u62E9 \xB7 Enter \u4E0B\u4E00\u6B65 \xB7 Esc \u53D6\u6D88`), _el$108 = createElement("box"), _el$110 = createElement("text");
     insertNode(_el$54, _el$55);
     insertNode(_el$54, _el$57);
-    insertNode(_el$54, _el$59);
-    insertNode(_el$54, _el$62);
+    insertNode(_el$54, _el$108);
+    insertNode(_el$54, _el$110);
     setProp(_el$54, "position", "absolute");
-    setProp(_el$54, "left", 10);
-    setProp(_el$54, "top", 4);
-    setProp(_el$54, "width", 58);
-    setProp(_el$54, "height", 18);
+    setProp(_el$54, "left", left);
+    setProp(_el$54, "top", top);
+    setProp(_el$54, "width", 70);
+    setProp(_el$54, "height", dialogHeight);
     setProp(_el$54, "backgroundColor", "#171717");
     setProp(_el$54, "borderStyle", "single");
     setProp(_el$54, "borderColor", "#fb8147");
     setProp(_el$54, "padding", 2);
     setProp(_el$54, "zIndex", 100);
     setProp(_el$54, "flexDirection", "column");
-    insertNode(_el$55, createTextNode(`\u914D\u7F6E\u52A9\u624B // RUNTIME PROFILE`));
+    insertNode(_el$55, createTextNode(`\u914D\u7F6E\u52A9\u624B // SETUP WIZARD`));
     setProp(_el$55, "fg", "#fb8147");
-    insertNode(_el$57, createTextNode(`\u9009\u62E9 Chat \u7684\u9ED8\u8BA4\u8FD0\u884C\u65F6\uFF08\u2191\u2193 / Enter\uFF0CEsc \u53D6\u6D88\uFF09`));
+    insertNode(_el$57, _el$58);
     setProp(_el$57, "fg", "#808080");
-    insertNode(_el$59, _el$60);
-    setProp(_el$59, "marginTop", 1);
-    setProp(_el$59, "flexGrow", 1);
-    setProp(_el$60, "options", runtimeOptions);
-    setProp(_el$60, "focused", true);
-    setProp(_el$60, "showDescription", true);
-    setProp(_el$60, "width", "100%");
-    setProp(_el$60, "height", 8);
-    setProp(_el$60, "selectedBackgroundColor", "#5a2e1c");
-    setProp(_el$60, "selectedTextColor", "#ffffff");
-    setProp(_el$60, "descriptionColor", "#808080");
-    setProp(_el$60, "selectedDescriptionColor", "#ffd0bb");
-    setProp(_el$60, "onChange", (index) => setSelectedIndex(index));
+    insert(_el$57, () => stepTitles[step()], _el$58);
+    insert(_el$54, createComponent2(Show, {
+      get when() {
+        return loading();
+      },
+      get children() {
+        var _el$59 = createElement("text");
+        insertNode(_el$59, createTextNode(`\u8BFB\u53D6\u914D\u7F6E\u9009\u9879\u4E2D...`));
+        setProp(_el$59, "fg", "#808080");
+        return _el$59;
+      }
+    }), _el$108);
+    insert(_el$54, createComponent2(Show, {
+      get when() {
+        return memo2(() => !!!loading())() && step() === "runtime";
+      },
+      get children() {
+        var _el$61 = createElement("box"), _el$62 = createElement("select");
+        insertNode(_el$61, _el$62);
+        setProp(_el$61, "marginTop", 1);
+        setProp(_el$61, "flexGrow", 1);
+        setProp(_el$62, "options", runtimeOptions);
+        setProp(_el$62, "focused", true);
+        setProp(_el$62, "showDescription", true);
+        setProp(_el$62, "width", "100%");
+        setProp(_el$62, "height", 8);
+        setProp(_el$62, "selectedBackgroundColor", "#5a2e1c");
+        setProp(_el$62, "selectedTextColor", "#ffffff");
+        setProp(_el$62, "descriptionColor", "#808080");
+        setProp(_el$62, "selectedDescriptionColor", "#ffd0bb");
+        setProp(_el$62, "onChange", (index) => setRuntimeIndex(index));
+        effect((_$p) => setProp(_el$62, "selectedIndex", runtimeIndex(), _$p));
+        return _el$61;
+      }
+    }), _el$108);
+    insert(_el$54, createComponent2(Show, {
+      get when() {
+        return memo2(() => !!!loading())() && step() === "provider";
+      },
+      get children() {
+        var _el$63 = createElement("box"), _el$64 = createElement("select"), _el$65 = createElement("text");
+        insertNode(_el$63, _el$64);
+        insertNode(_el$63, _el$65);
+        setProp(_el$63, "marginTop", 1);
+        setProp(_el$63, "flexGrow", 1);
+        setProp(_el$64, "focused", true);
+        setProp(_el$64, "showDescription", true);
+        setProp(_el$64, "width", "100%");
+        setProp(_el$64, "height", 12);
+        setProp(_el$64, "selectedBackgroundColor", "#5a2e1c");
+        setProp(_el$64, "selectedTextColor", "#ffffff");
+        setProp(_el$64, "descriptionColor", "#808080");
+        setProp(_el$64, "selectedDescriptionColor", "#ffd0bb");
+        setProp(_el$64, "onChange", (index) => {
+          setProviderIndex(index);
+          setModelIndex(0);
+          setApiKey("");
+        });
+        insertNode(_el$65, createTextNode(`\u81EA\u5B9A\u4E49 Endpoint / headers \u7B49\u9AD8\u7EA7\u9879\u8BF7\u4F7F\u7528 pr-review config \u914D\u7F6E\u3002`));
+        setProp(_el$65, "fg", "#808080");
+        effect((_p$) => {
+          var _v$7 = providers().map((provider) => ({
+            name: provider.display_name,
+            description: `${provider.default_model} \xB7 ${provider.base_url || "\u9700\u8981\u586B\u5199 Endpoint"}`,
+            value: provider.name
+          })), _v$8 = providerIndex();
+          _v$7 !== _p$.e && (_p$.e = setProp(_el$64, "options", _v$7, _p$.e));
+          _v$8 !== _p$.t && (_p$.t = setProp(_el$64, "selectedIndex", _v$8, _p$.t));
+          return _p$;
+        }, {
+          e: undefined,
+          t: undefined
+        });
+        return _el$63;
+      }
+    }), _el$108);
+    insert(_el$54, createComponent2(Show, {
+      get when() {
+        return memo2(() => !!!loading())() && step() === "model";
+      },
+      get children() {
+        var _el$67 = createElement("box"), _el$68 = createElement("select");
+        insertNode(_el$67, _el$68);
+        setProp(_el$67, "marginTop", 1);
+        setProp(_el$67, "flexGrow", 1);
+        setProp(_el$68, "focused", true);
+        setProp(_el$68, "showDescription", true);
+        setProp(_el$68, "width", "100%");
+        setProp(_el$68, "selectedBackgroundColor", "#5a2e1c");
+        setProp(_el$68, "selectedTextColor", "#ffffff");
+        setProp(_el$68, "descriptionColor", "#808080");
+        setProp(_el$68, "selectedDescriptionColor", "#ffd0bb");
+        setProp(_el$68, "onChange", (index) => setModelIndex(index));
+        effect((_p$) => {
+          var _v$9 = cloudModels().map((model) => ({
+            name: model,
+            description: model === selectedProvider()?.default_model ? "Provider \u9ED8\u8BA4\u6A21\u578B" : "\u9884\u8BBE\u6A21\u578B",
+            value: model
+          })), _v$0 = modelIndex(), _v$1 = Math.min(12, Math.max(4, cloudModels().length * 2));
+          _v$9 !== _p$.e && (_p$.e = setProp(_el$68, "options", _v$9, _p$.e));
+          _v$0 !== _p$.t && (_p$.t = setProp(_el$68, "selectedIndex", _v$0, _p$.t));
+          _v$1 !== _p$.a && (_p$.a = setProp(_el$68, "height", _v$1, _p$.a));
+          return _p$;
+        }, {
+          e: undefined,
+          t: undefined,
+          a: undefined
+        });
+        return _el$67;
+      }
+    }), _el$108);
+    insert(_el$54, createComponent2(Show, {
+      get when() {
+        return memo2(() => !!!loading())() && step() === "key";
+      },
+      get children() {
+        var _el$69 = createElement("box"), _el$70 = createElement("text"), _el$71 = createTextNode(` API Key`), _el$72 = createElement("text"), _el$73 = createElement("box"), _el$74 = createElement("input"), _el$75 = createElement("text");
+        insertNode(_el$69, _el$70);
+        insertNode(_el$69, _el$72);
+        insertNode(_el$69, _el$73);
+        insertNode(_el$69, _el$75);
+        setProp(_el$69, "marginTop", 1);
+        setProp(_el$69, "flexDirection", "column");
+        insertNode(_el$70, _el$71);
+        setProp(_el$70, "fg", "#eeeeee");
+        insert(_el$70, () => selectedProvider()?.display_name ?? "Provider", _el$71);
+        setProp(_el$72, "fg", "#808080");
+        insert(_el$72, keyState);
+        insertNode(_el$73, _el$74);
+        setProp(_el$73, "marginTop", 1);
+        setProp(_el$73, "backgroundColor", "#202020");
+        setProp(_el$73, "paddingLeft", 1);
+        setProp(_el$73, "paddingRight", 1);
+        use((node) => {
+          apiInput = node;
+        }, _el$74);
+        setProp(_el$74, "onContentChange", () => setApiKey(apiInput?.value ?? ""));
+        setProp(_el$74, "onSubmit", () => {
+          setKeyFocused(false);
+          setStep("summary");
+        });
+        setProp(_el$74, "flexGrow", 1);
+        insertNode(_el$75, createTextNode(`Key \u5199\u5165\u79C1\u6709\u914D\u7F6E\uFF1B\u9879\u76EE\u5185\u4F18\u5148\u5199\u5165 .ai_pr_review/config.local.json\uFF08\u5DF2\u9ED8\u8BA4 gitignore\uFF09\u3002`));
+        setProp(_el$75, "fg", "#808080");
+        effect((_p$) => {
+          var _v$10 = remoteKeyConfigured() ? "\u7559\u7A7A\u4FDD\u7559\u73B0\u6709 Key\uFF0C\u6216\u7C98\u8D34\u65B0 Key" : "\u7C98\u8D34 API Key", _v$11 = keyFocused();
+          _v$10 !== _p$.e && (_p$.e = setProp(_el$74, "placeholder", _v$10, _p$.e));
+          _v$11 !== _p$.t && (_p$.t = setProp(_el$74, "focused", _v$11, _p$.t));
+          return _p$;
+        }, {
+          e: undefined,
+          t: undefined
+        });
+        return _el$69;
+      }
+    }), _el$108);
+    insert(_el$54, createComponent2(Show, {
+      get when() {
+        return memo2(() => !!!loading())() && step() === "local";
+      },
+      get children() {
+        var _el$77 = createElement("box"), _el$78 = createElement("select"), _el$79 = createElement("text"), _el$80 = createTextNode(`Endpoint: `);
+        insertNode(_el$77, _el$78);
+        insertNode(_el$77, _el$79);
+        setProp(_el$77, "marginTop", 1);
+        setProp(_el$77, "flexGrow", 1);
+        setProp(_el$78, "focused", true);
+        setProp(_el$78, "showDescription", true);
+        setProp(_el$78, "width", "100%");
+        setProp(_el$78, "selectedBackgroundColor", "#5a2e1c");
+        setProp(_el$78, "selectedTextColor", "#ffffff");
+        setProp(_el$78, "descriptionColor", "#808080");
+        setProp(_el$78, "selectedDescriptionColor", "#ffd0bb");
+        setProp(_el$78, "onChange", (index) => setLocalModelIndex(index));
+        insertNode(_el$79, _el$80);
+        setProp(_el$79, "fg", "#808080");
+        insert(_el$79, () => options()?.local.base_url ?? "http://127.0.0.1:11434/v1", null);
+        effect((_p$) => {
+          var _v$12 = localModels().map((model) => ({
+            name: model,
+            description: model === options()?.local.default_model ? "\u672C\u5730\u9ED8\u8BA4\u6A21\u578B" : "Ollama \u672C\u5730\u6A21\u578B",
+            value: model
+          })), _v$13 = localModelIndex(), _v$14 = Math.min(12, Math.max(4, localModels().length * 2));
+          _v$12 !== _p$.e && (_p$.e = setProp(_el$78, "options", _v$12, _p$.e));
+          _v$13 !== _p$.t && (_p$.t = setProp(_el$78, "selectedIndex", _v$13, _p$.t));
+          _v$14 !== _p$.a && (_p$.a = setProp(_el$78, "height", _v$14, _p$.a));
+          return _p$;
+        }, {
+          e: undefined,
+          t: undefined,
+          a: undefined
+        });
+        return _el$77;
+      }
+    }), _el$108);
+    insert(_el$54, createComponent2(Show, {
+      get when() {
+        return memo2(() => !!!loading())() && step() === "summary";
+      },
+      get children() {
+        var _el$81 = createElement("box"), _el$82 = createElement("text"), _el$83 = createElement("span"), _el$85 = createElement("span"), _el$106 = createElement("text");
+        insertNode(_el$81, _el$82);
+        insertNode(_el$81, _el$106);
+        setProp(_el$81, "marginTop", 1);
+        setProp(_el$81, "flexDirection", "column");
+        insertNode(_el$82, _el$83);
+        insertNode(_el$82, _el$85);
+        insertNode(_el$83, createTextNode(`\u8FD0\u884C\u65B9\u5F0F `));
+        setProp(_el$83, "style", {
+          fg: "#fb8147"
+        });
+        setProp(_el$85, "style", {
+          fg: "#eeeeee"
+        });
+        insert(_el$85, () => runtimeOptions[runtimeIndex()]?.name);
+        insert(_el$81, createComponent2(Show, {
+          get when() {
+            return needsCloud();
+          },
+          get children() {
+            return [(() => {
+              var _el$86 = createElement("text"), _el$87 = createElement("span"), _el$89 = createElement("span");
+              insertNode(_el$86, _el$87);
+              insertNode(_el$86, _el$89);
+              insertNode(_el$87, createTextNode(`Provider `));
+              setProp(_el$87, "style", {
+                fg: "#fb8147"
+              });
+              setProp(_el$89, "style", {
+                fg: "#eeeeee"
+              });
+              insert(_el$89, () => selectedProvider()?.display_name);
+              return _el$86;
+            })(), (() => {
+              var _el$90 = createElement("text"), _el$91 = createElement("span"), _el$93 = createElement("span");
+              insertNode(_el$90, _el$91);
+              insertNode(_el$90, _el$93);
+              insertNode(_el$91, createTextNode(`\u6A21\u578B `));
+              setProp(_el$91, "style", {
+                fg: "#fb8147"
+              });
+              setProp(_el$93, "style", {
+                fg: "#eeeeee"
+              });
+              insert(_el$93, selectedModel);
+              return _el$90;
+            })(), (() => {
+              var _el$94 = createElement("text"), _el$95 = createElement("span"), _el$97 = createElement("span");
+              insertNode(_el$94, _el$95);
+              insertNode(_el$94, _el$97);
+              insertNode(_el$95, createTextNode(`API Key `));
+              setProp(_el$95, "style", {
+                fg: "#fb8147"
+              });
+              setProp(_el$97, "style", {
+                fg: "#eeeeee"
+              });
+              insert(_el$97, keyState);
+              return _el$94;
+            })()];
+          }
+        }), _el$106);
+        insert(_el$81, createComponent2(Show, {
+          get when() {
+            return !needsCloud();
+          },
+          get children() {
+            return [(() => {
+              var _el$98 = createElement("text"), _el$99 = createElement("span"), _el$101 = createElement("span");
+              insertNode(_el$98, _el$99);
+              insertNode(_el$98, _el$101);
+              insertNode(_el$99, createTextNode(`\u672C\u5730\u6A21\u578B `));
+              setProp(_el$99, "style", {
+                fg: "#fb8147"
+              });
+              setProp(_el$101, "style", {
+                fg: "#eeeeee"
+              });
+              insert(_el$101, selectedLocalModel);
+              return _el$98;
+            })(), (() => {
+              var _el$102 = createElement("text"), _el$103 = createElement("span"), _el$105 = createElement("span");
+              insertNode(_el$102, _el$103);
+              insertNode(_el$102, _el$105);
+              insertNode(_el$103, createTextNode(`Endpoint `));
+              setProp(_el$103, "style", {
+                fg: "#fb8147"
+              });
+              setProp(_el$105, "style", {
+                fg: "#eeeeee"
+              });
+              insert(_el$105, () => options()?.local.base_url);
+              return _el$102;
+            })()];
+          }
+        }), _el$106);
+        insertNode(_el$106, createTextNode(`\u4FDD\u5B58\u540E Chat \u4F1A\u7ACB\u5373\u4F7F\u7528\u65B0\u914D\u7F6E\uFF1B\u5982\u9700\u5FAE\u8C03\u53EF\u518D\u6B21\u6253\u5F00 Ctrl+P\u3002`));
+        setProp(_el$106, "fg", "#808080");
+        return _el$81;
+      }
+    }), _el$108);
+    setProp(_el$108, "flexGrow", 1);
     insert(_el$54, createComponent2(Show, {
       get when() {
         return error();
       },
       get children() {
-        var _el$61 = createElement("text");
-        setProp(_el$61, "fg", "#ff6b6b");
-        insert(_el$61, error);
-        return _el$61;
+        var _el$109 = createElement("text");
+        setProp(_el$109, "fg", "#ff6b6b");
+        insert(_el$109, error);
+        return _el$109;
       }
-    }), _el$62);
-    insert(_el$62, () => busy() ? "\u4FDD\u5B58\u4E2D..." : "Enter \u4FDD\u5B58 \xB7 Esc \u53D6\u6D88");
-    effect((_p$) => {
-      var _v$7 = selectedIndex(), _v$8 = busy() ? orange : muted;
-      _v$7 !== _p$.e && (_p$.e = setProp(_el$60, "selectedIndex", _v$7, _p$.e));
-      _v$8 !== _p$.t && (_p$.t = setProp(_el$62, "fg", _v$8, _p$.t));
-      return _p$;
-    }, {
-      e: undefined,
-      t: undefined
-    });
+    }), _el$110);
+    insert(_el$110, (() => {
+      var _c$2 = memo2(() => !!busy());
+      return () => _c$2() ? "\u4FDD\u5B58\u4E2D..." : memo2(() => step() === "summary")() ? "Enter \u4FDD\u5B58 \xB7 \u2190 \u8FD4\u56DE\u4FEE\u6539 \xB7 Esc \u53D6\u6D88" : step() === "key" ? "Enter \u786E\u8BA4 Key \xB7 Esc \u53D6\u6D88" : "Enter \u4E0B\u4E00\u6B65 \xB7 \u2190 \u8FD4\u56DE \xB7 Esc \u53D6\u6D88";
+    })());
+    effect((_$p) => setProp(_el$110, "fg", busy() ? orange : muted, _$p));
     return _el$54;
   })();
 }
@@ -35652,49 +36063,49 @@ function ReviewConfirmDialog(props) {
       choose();
   });
   return (() => {
-    var _el$63 = createElement("box"), _el$64 = createElement("text"), _el$66 = createElement("text"), _el$68 = createElement("text"), _el$69 = createElement("box"), _el$70 = createElement("select"), _el$71 = createElement("text");
-    insertNode(_el$63, _el$64);
-    insertNode(_el$63, _el$66);
-    insertNode(_el$63, _el$68);
-    insertNode(_el$63, _el$69);
-    insertNode(_el$63, _el$71);
-    setProp(_el$63, "position", "absolute");
-    setProp(_el$63, "left", 8);
-    setProp(_el$63, "top", 5);
-    setProp(_el$63, "width", 64);
-    setProp(_el$63, "height", 15);
-    setProp(_el$63, "backgroundColor", "#171717");
-    setProp(_el$63, "borderStyle", "single");
-    setProp(_el$63, "borderColor", "#fb8147");
-    setProp(_el$63, "padding", 2);
-    setProp(_el$63, "zIndex", 120);
-    setProp(_el$63, "flexDirection", "column");
-    insertNode(_el$64, createTextNode(`\u5F00\u59CB PR \u5BA1\u67E5 // CONFIRM`));
-    setProp(_el$64, "fg", "#fb8147");
-    setProp(_el$64, "height", 1);
-    insertNode(_el$66, createTextNode(`\u5DF2\u8BC6\u522B GitHub Pull Request\uFF1A`));
-    setProp(_el$66, "fg", "#808080");
-    setProp(_el$66, "height", 1);
-    setProp(_el$68, "fg", "#eeeeee");
-    insert(_el$68, () => props.url);
-    insertNode(_el$69, _el$70);
-    setProp(_el$69, "marginTop", 1);
-    setProp(_el$69, "flexGrow", 1);
-    setProp(_el$70, "options", options);
-    setProp(_el$70, "focused", true);
-    setProp(_el$70, "showDescription", true);
-    setProp(_el$70, "width", "100%");
-    setProp(_el$70, "height", 4);
-    setProp(_el$70, "selectedBackgroundColor", "#5a2e1c");
-    setProp(_el$70, "selectedTextColor", "#ffffff");
-    setProp(_el$70, "descriptionColor", "#808080");
-    setProp(_el$70, "selectedDescriptionColor", "#ffd0bb");
-    setProp(_el$70, "onChange", (index) => setSelectedIndex(index));
-    insertNode(_el$71, createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Enter \u786E\u8BA4 \xB7 Esc \u8FD4\u56DE`));
-    setProp(_el$71, "fg", "#808080");
-    setProp(_el$71, "height", 1);
-    effect((_$p) => setProp(_el$70, "selectedIndex", selectedIndex(), _$p));
-    return _el$63;
+    var _el$111 = createElement("box"), _el$112 = createElement("text"), _el$114 = createElement("text"), _el$116 = createElement("text"), _el$117 = createElement("box"), _el$118 = createElement("select"), _el$119 = createElement("text");
+    insertNode(_el$111, _el$112);
+    insertNode(_el$111, _el$114);
+    insertNode(_el$111, _el$116);
+    insertNode(_el$111, _el$117);
+    insertNode(_el$111, _el$119);
+    setProp(_el$111, "position", "absolute");
+    setProp(_el$111, "left", 8);
+    setProp(_el$111, "top", 5);
+    setProp(_el$111, "width", 64);
+    setProp(_el$111, "height", 15);
+    setProp(_el$111, "backgroundColor", "#171717");
+    setProp(_el$111, "borderStyle", "single");
+    setProp(_el$111, "borderColor", "#fb8147");
+    setProp(_el$111, "padding", 2);
+    setProp(_el$111, "zIndex", 120);
+    setProp(_el$111, "flexDirection", "column");
+    insertNode(_el$112, createTextNode(`\u5F00\u59CB PR \u5BA1\u67E5 // CONFIRM`));
+    setProp(_el$112, "fg", "#fb8147");
+    setProp(_el$112, "height", 1);
+    insertNode(_el$114, createTextNode(`\u5DF2\u8BC6\u522B GitHub Pull Request\uFF1A`));
+    setProp(_el$114, "fg", "#808080");
+    setProp(_el$114, "height", 1);
+    setProp(_el$116, "fg", "#eeeeee");
+    insert(_el$116, () => props.url);
+    insertNode(_el$117, _el$118);
+    setProp(_el$117, "marginTop", 1);
+    setProp(_el$117, "flexGrow", 1);
+    setProp(_el$118, "options", options);
+    setProp(_el$118, "focused", true);
+    setProp(_el$118, "showDescription", true);
+    setProp(_el$118, "width", "100%");
+    setProp(_el$118, "height", 4);
+    setProp(_el$118, "selectedBackgroundColor", "#5a2e1c");
+    setProp(_el$118, "selectedTextColor", "#ffffff");
+    setProp(_el$118, "descriptionColor", "#808080");
+    setProp(_el$118, "selectedDescriptionColor", "#ffd0bb");
+    setProp(_el$118, "onChange", (index) => setSelectedIndex(index));
+    insertNode(_el$119, createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Enter \u786E\u8BA4 \xB7 Esc \u8FD4\u56DE`));
+    setProp(_el$119, "fg", "#808080");
+    setProp(_el$119, "height", 1);
+    effect((_$p) => setProp(_el$118, "selectedIndex", selectedIndex(), _$p));
+    return _el$111;
   })();
 }
 function FindingsDialog(props) {
@@ -35725,166 +36136,166 @@ function FindingsDialog(props) {
     }
   });
   return (() => {
-    var _el$73 = createElement("box"), _el$74 = createElement("text"), _el$76 = createElement("box"), _el$77 = createElement("select"), _el$78 = createElement("scrollbox"), _el$79 = createElement("text"), _el$80 = createElement("text"), _el$81 = createTextNode(`\u6587\u4EF6\uFF1A`), _el$82 = createTextNode(`:`), _el$83 = createTextNode(`-`), _el$84 = createElement("text"), _el$85 = createTextNode(`\u7C7B\u522B\uFF1A`), _el$86 = createTextNode(` \xB7 \u7F6E\u4FE1\u5EA6\uFF1A`), _el$87 = createElement("text"), _el$88 = createTextNode(`\u95EE\u9898\uFF1A`), _el$89 = createElement("text"), _el$90 = createTextNode(`\u5EFA\u8BAE\uFF1A`), _el$91 = createElement("text"), _el$92 = createTextNode(`\u8BC1\u636E\uFF1A`), _el$93 = createTextNode(` \xB7 \u72B6\u6001\uFF1A`), _el$100 = createElement("text"), _el$101 = createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Shift+\u2191\u2193 \u8BE6\u60C5 \xB7 \u2190\u2192/Pg \u7FFB\u9875 (`), _el$102 = createTextNode(`/`), _el$103 = createTextNode(`) \xB7 Esc \u8FD4\u56DE`);
-    insertNode(_el$73, _el$74);
-    insertNode(_el$73, _el$76);
-    insertNode(_el$73, _el$78);
-    insertNode(_el$73, _el$100);
-    setProp(_el$73, "position", "absolute");
-    setProp(_el$73, "left", 5);
-    setProp(_el$73, "top", 2);
-    setProp(_el$73, "width", 70);
-    setProp(_el$73, "height", 22);
-    setProp(_el$73, "backgroundColor", "#171717");
-    setProp(_el$73, "borderStyle", "single");
-    setProp(_el$73, "borderColor", "#fb8147");
-    setProp(_el$73, "padding", 2);
-    setProp(_el$73, "zIndex", 130);
-    setProp(_el$73, "flexDirection", "column");
-    insertNode(_el$74, createTextNode(`FINDINGS // DETAIL`));
-    setProp(_el$74, "fg", "#fb8147");
-    insertNode(_el$76, _el$77);
-    setProp(_el$76, "height", 8);
-    setProp(_el$76, "marginTop", 1);
-    setProp(_el$77, "focused", true);
-    setProp(_el$77, "showDescription", true);
-    setProp(_el$77, "width", "100%");
-    setProp(_el$77, "height", 8);
-    setProp(_el$77, "selectedBackgroundColor", "#5a2e1c");
-    setProp(_el$77, "selectedTextColor", "#ffffff");
-    setProp(_el$77, "descriptionColor", "#808080");
-    setProp(_el$77, "selectedDescriptionColor", "#ffd0bb");
-    setProp(_el$77, "onChange", (index) => setSelectedIndex(page() * pageSize + index));
-    insertNode(_el$78, _el$79);
-    insertNode(_el$78, _el$80);
-    insertNode(_el$78, _el$84);
-    insertNode(_el$78, _el$87);
-    insertNode(_el$78, _el$89);
-    insertNode(_el$78, _el$91);
+    var _el$121 = createElement("box"), _el$122 = createElement("text"), _el$124 = createElement("box"), _el$125 = createElement("select"), _el$126 = createElement("scrollbox"), _el$127 = createElement("text"), _el$128 = createElement("text"), _el$129 = createTextNode(`\u6587\u4EF6\uFF1A`), _el$130 = createTextNode(`:`), _el$131 = createTextNode(`-`), _el$132 = createElement("text"), _el$133 = createTextNode(`\u7C7B\u522B\uFF1A`), _el$134 = createTextNode(` \xB7 \u7F6E\u4FE1\u5EA6\uFF1A`), _el$135 = createElement("text"), _el$136 = createTextNode(`\u95EE\u9898\uFF1A`), _el$137 = createElement("text"), _el$138 = createTextNode(`\u5EFA\u8BAE\uFF1A`), _el$139 = createElement("text"), _el$140 = createTextNode(`\u8BC1\u636E\uFF1A`), _el$141 = createTextNode(` \xB7 \u72B6\u6001\uFF1A`), _el$148 = createElement("text"), _el$149 = createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Shift+\u2191\u2193 \u8BE6\u60C5 \xB7 \u2190\u2192/Pg \u7FFB\u9875 (`), _el$150 = createTextNode(`/`), _el$151 = createTextNode(`) \xB7 Esc \u8FD4\u56DE`);
+    insertNode(_el$121, _el$122);
+    insertNode(_el$121, _el$124);
+    insertNode(_el$121, _el$126);
+    insertNode(_el$121, _el$148);
+    setProp(_el$121, "position", "absolute");
+    setProp(_el$121, "left", 5);
+    setProp(_el$121, "top", 2);
+    setProp(_el$121, "width", 70);
+    setProp(_el$121, "height", 22);
+    setProp(_el$121, "backgroundColor", "#171717");
+    setProp(_el$121, "borderStyle", "single");
+    setProp(_el$121, "borderColor", "#fb8147");
+    setProp(_el$121, "padding", 2);
+    setProp(_el$121, "zIndex", 130);
+    setProp(_el$121, "flexDirection", "column");
+    insertNode(_el$122, createTextNode(`FINDINGS // DETAIL`));
+    setProp(_el$122, "fg", "#fb8147");
+    insertNode(_el$124, _el$125);
+    setProp(_el$124, "height", 8);
+    setProp(_el$124, "marginTop", 1);
+    setProp(_el$125, "focused", true);
+    setProp(_el$125, "showDescription", true);
+    setProp(_el$125, "width", "100%");
+    setProp(_el$125, "height", 8);
+    setProp(_el$125, "selectedBackgroundColor", "#5a2e1c");
+    setProp(_el$125, "selectedTextColor", "#ffffff");
+    setProp(_el$125, "descriptionColor", "#808080");
+    setProp(_el$125, "selectedDescriptionColor", "#ffd0bb");
+    setProp(_el$125, "onChange", (index) => setSelectedIndex(page() * pageSize + index));
+    insertNode(_el$126, _el$127);
+    insertNode(_el$126, _el$128);
+    insertNode(_el$126, _el$132);
+    insertNode(_el$126, _el$135);
+    insertNode(_el$126, _el$137);
+    insertNode(_el$126, _el$139);
     use((node) => {
       detailScroll = node;
-    }, _el$78);
-    setProp(_el$78, "height", 6);
-    setProp(_el$78, "marginTop", 1);
-    setProp(_el$78, "scrollY", true);
-    setProp(_el$78, "scrollbarOptions", {
+    }, _el$126);
+    setProp(_el$126, "height", 6);
+    setProp(_el$126, "marginTop", 1);
+    setProp(_el$126, "scrollY", true);
+    setProp(_el$126, "scrollbarOptions", {
       showArrows: true
     });
-    setProp(_el$78, "flexDirection", "column");
-    setProp(_el$79, "fg", "#f3c742");
-    insert(_el$79, () => String(selected().title ?? selected().message ?? "\u672A\u547D\u540D\u95EE\u9898"));
-    insertNode(_el$80, _el$81);
-    insertNode(_el$80, _el$82);
-    insertNode(_el$80, _el$83);
-    setProp(_el$80, "fg", "#808080");
-    insert(_el$80, () => selected().file ?? "unknown", _el$82);
-    insert(_el$80, () => selected().line_start ?? "?", _el$83);
-    insert(_el$80, () => selected().line_end ?? selected().line_start ?? "?", null);
-    insertNode(_el$84, _el$85);
-    insertNode(_el$84, _el$86);
-    setProp(_el$84, "fg", "#808080");
-    insert(_el$84, () => selected().category ?? "unknown", _el$86);
-    insert(_el$84, (() => {
-      var _c$2 = memo2(() => selected().confidence !== undefined);
-      return () => _c$2() ? `${Math.round((selected().confidence ?? 0) * 100)}%` : "?";
+    setProp(_el$126, "flexDirection", "column");
+    setProp(_el$127, "fg", "#f3c742");
+    insert(_el$127, () => String(selected().title ?? selected().message ?? "\u672A\u547D\u540D\u95EE\u9898"));
+    insertNode(_el$128, _el$129);
+    insertNode(_el$128, _el$130);
+    insertNode(_el$128, _el$131);
+    setProp(_el$128, "fg", "#808080");
+    insert(_el$128, () => selected().file ?? "unknown", _el$130);
+    insert(_el$128, () => selected().line_start ?? "?", _el$131);
+    insert(_el$128, () => selected().line_end ?? selected().line_start ?? "?", null);
+    insertNode(_el$132, _el$133);
+    insertNode(_el$132, _el$134);
+    setProp(_el$132, "fg", "#808080");
+    insert(_el$132, () => selected().category ?? "unknown", _el$134);
+    insert(_el$132, (() => {
+      var _c$3 = memo2(() => selected().confidence !== undefined);
+      return () => _c$3() ? `${Math.round((selected().confidence ?? 0) * 100)}%` : "?";
     })(), null);
-    insertNode(_el$87, _el$88);
-    setProp(_el$87, "fg", "#eeeeee");
-    insert(_el$87, () => String(selected().problem ?? selected().message ?? "\u6682\u65E0\u8BE6\u7EC6\u63CF\u8FF0"), null);
-    insertNode(_el$89, _el$90);
-    setProp(_el$89, "fg", "#7edc92");
-    insert(_el$89, () => String(selected().suggestion ?? "\u6682\u65E0\u4FEE\u590D\u5EFA\u8BAE"), null);
-    insertNode(_el$91, _el$92);
-    insertNode(_el$91, _el$93);
-    setProp(_el$91, "fg", "#808080");
-    insert(_el$91, () => (selected().sources ?? []).join(", ") || "ai_analysis", _el$93);
-    insert(_el$91, () => selected().evidence_status ?? "unverified", null);
-    insert(_el$78, createComponent2(Show, {
+    insertNode(_el$135, _el$136);
+    setProp(_el$135, "fg", "#eeeeee");
+    insert(_el$135, () => String(selected().problem ?? selected().message ?? "\u6682\u65E0\u8BE6\u7EC6\u63CF\u8FF0"), null);
+    insertNode(_el$137, _el$138);
+    setProp(_el$137, "fg", "#7edc92");
+    insert(_el$137, () => String(selected().suggestion ?? "\u6682\u65E0\u4FEE\u590D\u5EFA\u8BAE"), null);
+    insertNode(_el$139, _el$140);
+    insertNode(_el$139, _el$141);
+    setProp(_el$139, "fg", "#808080");
+    insert(_el$139, () => (selected().sources ?? []).join(", ") || "ai_analysis", _el$141);
+    insert(_el$139, () => selected().evidence_status ?? "unverified", null);
+    insert(_el$126, createComponent2(Show, {
       get when() {
         return selected().evidence_issues?.length;
       },
       get children() {
-        var _el$94 = createElement("text"), _el$95 = createTextNode(`\u8BC1\u636E\u63D0\u793A\uFF1A`);
-        insertNode(_el$94, _el$95);
-        setProp(_el$94, "fg", "#f3c742");
-        insert(_el$94, () => selected().evidence_issues?.join("\uFF1B"), null);
-        return _el$94;
+        var _el$142 = createElement("text"), _el$143 = createTextNode(`\u8BC1\u636E\u63D0\u793A\uFF1A`);
+        insertNode(_el$142, _el$143);
+        setProp(_el$142, "fg", "#f3c742");
+        insert(_el$142, () => selected().evidence_issues?.join("\uFF1B"), null);
+        return _el$142;
       }
     }), null);
-    insert(_el$78, createComponent2(Show, {
+    insert(_el$126, createComponent2(Show, {
       get when() {
         return selected().code_snippet;
       },
       get children() {
         return [(() => {
-          var _el$96 = createElement("text");
-          insertNode(_el$96, createTextNode(`\u4EE3\u7801\u7247\u6BB5\uFF1A`));
-          setProp(_el$96, "fg", "#b0b0b0");
-          return _el$96;
+          var _el$144 = createElement("text");
+          insertNode(_el$144, createTextNode(`\u4EE3\u7801\u7247\u6BB5\uFF1A`));
+          setProp(_el$144, "fg", "#b0b0b0");
+          return _el$144;
         })(), createComponent2(For, {
           get each() {
             return String(selected().code_snippet ?? "").split(`
 `);
           },
           children: (line, index) => (() => {
-            var _el$104 = createElement("text");
-            setProp(_el$104, "fg", "#b0b0b0");
-            insert(_el$104, () => `${String((selected().line_start ?? 0) + index())} \u2502 ${line}`);
-            return _el$104;
+            var _el$152 = createElement("text");
+            setProp(_el$152, "fg", "#b0b0b0");
+            insert(_el$152, () => `${String((selected().line_start ?? 0) + index())} \u2502 ${line}`);
+            return _el$152;
           })()
         })];
       }
     }), null);
-    insert(_el$78, createComponent2(Show, {
+    insert(_el$126, createComponent2(Show, {
       get when() {
         return selected().evidence?.length;
       },
       get children() {
         return [(() => {
-          var _el$98 = createElement("text");
-          insertNode(_el$98, createTextNode(`\u8BC1\u636E\u660E\u7EC6\uFF1A`));
-          setProp(_el$98, "fg", "#f3c742");
-          return _el$98;
+          var _el$146 = createElement("text");
+          insertNode(_el$146, createTextNode(`\u8BC1\u636E\u660E\u7EC6\uFF1A`));
+          setProp(_el$146, "fg", "#f3c742");
+          return _el$146;
         })(), createComponent2(For, {
           get each() {
             return selected().evidence ?? [];
           },
           children: (evidence) => (() => {
-            var _el$105 = createElement("text"), _el$106 = createTextNode(`\xB7 `), _el$107 = createTextNode(` / `);
-            insertNode(_el$105, _el$106);
-            insertNode(_el$105, _el$107);
-            setProp(_el$105, "fg", "#808080");
-            insert(_el$105, () => evidence.source ?? "unknown", _el$107);
-            insert(_el$105, () => evidence.validation_status ?? "unknown", null);
-            insert(_el$105, (() => {
-              var _c$3 = memo2(() => !!evidence.validation_messages?.length);
-              return () => _c$3() ? ` \xB7 ${evidence.validation_messages.join("\uFF1B")}` : "";
+            var _el$153 = createElement("text"), _el$154 = createTextNode(`\xB7 `), _el$155 = createTextNode(` / `);
+            insertNode(_el$153, _el$154);
+            insertNode(_el$153, _el$155);
+            setProp(_el$153, "fg", "#808080");
+            insert(_el$153, () => evidence.source ?? "unknown", _el$155);
+            insert(_el$153, () => evidence.validation_status ?? "unknown", null);
+            insert(_el$153, (() => {
+              var _c$4 = memo2(() => !!evidence.validation_messages?.length);
+              return () => _c$4() ? ` \xB7 ${evidence.validation_messages.join("\uFF1B")}` : "";
             })(), null);
-            return _el$105;
+            return _el$153;
           })()
         })];
       }
     }), null);
-    insertNode(_el$100, _el$101);
-    insertNode(_el$100, _el$102);
-    insertNode(_el$100, _el$103);
-    setProp(_el$100, "fg", "#808080");
-    insert(_el$100, () => page() + 1, _el$102);
-    insert(_el$100, pageCount, _el$103);
+    insertNode(_el$148, _el$149);
+    insertNode(_el$148, _el$150);
+    insertNode(_el$148, _el$151);
+    setProp(_el$148, "fg", "#808080");
+    insert(_el$148, () => page() + 1, _el$150);
+    insert(_el$148, pageCount, _el$151);
     effect((_p$) => {
-      var _v$9 = pageFindings().map((finding, offset) => ({
+      var _v$15 = pageFindings().map((finding, offset) => ({
         name: `[${String(finding.severity ?? "info").toUpperCase()}] ${finding.title ?? finding.message ?? "\u672A\u547D\u540D\u95EE\u9898"}`,
         description: `${finding.file ?? "unknown"}:${finding.line_start ?? "?"}-${finding.line_end ?? finding.line_start ?? "?"}`,
         value: page() * pageSize + offset
-      })), _v$0 = Math.max(0, selectedIndex() - page() * pageSize);
-      _v$9 !== _p$.e && (_p$.e = setProp(_el$77, "options", _v$9, _p$.e));
-      _v$0 !== _p$.t && (_p$.t = setProp(_el$77, "selectedIndex", _v$0, _p$.t));
+      })), _v$16 = Math.max(0, selectedIndex() - page() * pageSize);
+      _v$15 !== _p$.e && (_p$.e = setProp(_el$125, "options", _v$15, _p$.e));
+      _v$16 !== _p$.t && (_p$.t = setProp(_el$125, "selectedIndex", _v$16, _p$.t));
       return _p$;
     }, {
       e: undefined,
       t: undefined
     });
-    return _el$73;
+    return _el$121;
   })();
 }
 function ReviewFailureDialog(props) {
@@ -35905,46 +36316,46 @@ function ReviewFailureDialog(props) {
       selectedIndex() === 0 ? props.onRetry() : props.onClose();
   });
   return (() => {
-    var _el$108 = createElement("box"), _el$109 = createElement("text"), _el$111 = createElement("text"), _el$112 = createElement("text"), _el$113 = createElement("box"), _el$114 = createElement("select"), _el$115 = createElement("text");
-    insertNode(_el$108, _el$109);
-    insertNode(_el$108, _el$111);
-    insertNode(_el$108, _el$112);
-    insertNode(_el$108, _el$113);
-    insertNode(_el$108, _el$115);
-    setProp(_el$108, "position", "absolute");
-    setProp(_el$108, "left", 10);
-    setProp(_el$108, "top", 5);
-    setProp(_el$108, "width", 60);
-    setProp(_el$108, "height", 15);
-    setProp(_el$108, "backgroundColor", "#171717");
-    setProp(_el$108, "borderStyle", "single");
-    setProp(_el$108, "borderColor", "#ff6b6b");
-    setProp(_el$108, "padding", 2);
-    setProp(_el$108, "zIndex", 125);
-    setProp(_el$108, "flexDirection", "column");
-    insertNode(_el$109, createTextNode(`\u5BA1\u67E5\u5931\u8D25 // RETRY`));
-    setProp(_el$109, "fg", "#ff6b6b");
-    setProp(_el$111, "fg", "#808080");
-    insert(_el$111, () => props.message);
-    setProp(_el$112, "fg", "#eeeeee");
-    insert(_el$112, () => props.url);
-    insertNode(_el$113, _el$114);
-    setProp(_el$113, "marginTop", 1);
-    setProp(_el$113, "flexGrow", 1);
-    setProp(_el$114, "options", options);
-    setProp(_el$114, "focused", true);
-    setProp(_el$114, "showDescription", true);
-    setProp(_el$114, "width", "100%");
-    setProp(_el$114, "height", 4);
-    setProp(_el$114, "selectedBackgroundColor", "#5a2e1c");
-    setProp(_el$114, "selectedTextColor", "#ffffff");
-    setProp(_el$114, "descriptionColor", "#808080");
-    setProp(_el$114, "selectedDescriptionColor", "#ffd0bb");
-    setProp(_el$114, "onChange", (index) => setSelectedIndex(index));
-    insertNode(_el$115, createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Enter \u786E\u8BA4 \xB7 Esc \u5173\u95ED`));
-    setProp(_el$115, "fg", "#808080");
-    effect((_$p) => setProp(_el$114, "selectedIndex", selectedIndex(), _$p));
-    return _el$108;
+    var _el$156 = createElement("box"), _el$157 = createElement("text"), _el$159 = createElement("text"), _el$160 = createElement("text"), _el$161 = createElement("box"), _el$162 = createElement("select"), _el$163 = createElement("text");
+    insertNode(_el$156, _el$157);
+    insertNode(_el$156, _el$159);
+    insertNode(_el$156, _el$160);
+    insertNode(_el$156, _el$161);
+    insertNode(_el$156, _el$163);
+    setProp(_el$156, "position", "absolute");
+    setProp(_el$156, "left", 10);
+    setProp(_el$156, "top", 5);
+    setProp(_el$156, "width", 60);
+    setProp(_el$156, "height", 15);
+    setProp(_el$156, "backgroundColor", "#171717");
+    setProp(_el$156, "borderStyle", "single");
+    setProp(_el$156, "borderColor", "#ff6b6b");
+    setProp(_el$156, "padding", 2);
+    setProp(_el$156, "zIndex", 125);
+    setProp(_el$156, "flexDirection", "column");
+    insertNode(_el$157, createTextNode(`\u5BA1\u67E5\u5931\u8D25 // RETRY`));
+    setProp(_el$157, "fg", "#ff6b6b");
+    setProp(_el$159, "fg", "#808080");
+    insert(_el$159, () => props.message);
+    setProp(_el$160, "fg", "#eeeeee");
+    insert(_el$160, () => props.url);
+    insertNode(_el$161, _el$162);
+    setProp(_el$161, "marginTop", 1);
+    setProp(_el$161, "flexGrow", 1);
+    setProp(_el$162, "options", options);
+    setProp(_el$162, "focused", true);
+    setProp(_el$162, "showDescription", true);
+    setProp(_el$162, "width", "100%");
+    setProp(_el$162, "height", 4);
+    setProp(_el$162, "selectedBackgroundColor", "#5a2e1c");
+    setProp(_el$162, "selectedTextColor", "#ffffff");
+    setProp(_el$162, "descriptionColor", "#808080");
+    setProp(_el$162, "selectedDescriptionColor", "#ffd0bb");
+    setProp(_el$162, "onChange", (index) => setSelectedIndex(index));
+    insertNode(_el$163, createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Enter \u786E\u8BA4 \xB7 Esc \u5173\u95ED`));
+    setProp(_el$163, "fg", "#808080");
+    effect((_$p) => setProp(_el$162, "selectedIndex", selectedIndex(), _$p));
+    return _el$156;
   })();
 }
 function HistoryDialog(props) {
@@ -35957,70 +36368,70 @@ function HistoryDialog(props) {
       props.onOpen(selected());
   });
   return (() => {
-    var _el$117 = createElement("box"), _el$118 = createElement("text"), _el$120 = createElement("text"), _el$121 = createTextNode(`Runs `), _el$122 = createTextNode(` \xB7 PRs `), _el$123 = createTextNode(` \xB7 Findings `), _el$125 = createElement("box"), _el$126 = createElement("select"), _el$127 = createElement("text");
-    insertNode(_el$117, _el$118);
-    insertNode(_el$117, _el$120);
-    insertNode(_el$117, _el$125);
-    insertNode(_el$117, _el$127);
-    setProp(_el$117, "position", "absolute");
-    setProp(_el$117, "left", 6);
-    setProp(_el$117, "top", 2);
-    setProp(_el$117, "width", 72);
-    setProp(_el$117, "height", 22);
-    setProp(_el$117, "backgroundColor", "#171717");
-    setProp(_el$117, "borderStyle", "single");
-    setProp(_el$117, "borderColor", "#fb8147");
-    setProp(_el$117, "padding", 2);
-    setProp(_el$117, "zIndex", 135);
-    setProp(_el$117, "flexDirection", "column");
-    insertNode(_el$118, createTextNode(`REVIEW HISTORY`));
-    setProp(_el$118, "fg", "#fb8147");
-    insertNode(_el$120, _el$121);
-    insertNode(_el$120, _el$122);
-    insertNode(_el$120, _el$123);
-    setProp(_el$120, "fg", "#808080");
-    insert(_el$120, () => props.statistics?.total_runs ?? props.runs.length, _el$122);
-    insert(_el$120, () => props.statistics?.unique_prs ?? "?", _el$123);
-    insert(_el$120, () => props.statistics?.total_findings ?? "?", null);
-    insert(_el$117, createComponent2(Show, {
+    var _el$165 = createElement("box"), _el$166 = createElement("text"), _el$168 = createElement("text"), _el$169 = createTextNode(`Runs `), _el$170 = createTextNode(` \xB7 PRs `), _el$171 = createTextNode(` \xB7 Findings `), _el$173 = createElement("box"), _el$174 = createElement("select"), _el$175 = createElement("text");
+    insertNode(_el$165, _el$166);
+    insertNode(_el$165, _el$168);
+    insertNode(_el$165, _el$173);
+    insertNode(_el$165, _el$175);
+    setProp(_el$165, "position", "absolute");
+    setProp(_el$165, "left", 6);
+    setProp(_el$165, "top", 2);
+    setProp(_el$165, "width", 72);
+    setProp(_el$165, "height", 22);
+    setProp(_el$165, "backgroundColor", "#171717");
+    setProp(_el$165, "borderStyle", "single");
+    setProp(_el$165, "borderColor", "#fb8147");
+    setProp(_el$165, "padding", 2);
+    setProp(_el$165, "zIndex", 135);
+    setProp(_el$165, "flexDirection", "column");
+    insertNode(_el$166, createTextNode(`REVIEW HISTORY`));
+    setProp(_el$166, "fg", "#fb8147");
+    insertNode(_el$168, _el$169);
+    insertNode(_el$168, _el$170);
+    insertNode(_el$168, _el$171);
+    setProp(_el$168, "fg", "#808080");
+    insert(_el$168, () => props.statistics?.total_runs ?? props.runs.length, _el$170);
+    insert(_el$168, () => props.statistics?.unique_prs ?? "?", _el$171);
+    insert(_el$168, () => props.statistics?.total_findings ?? "?", null);
+    insert(_el$165, createComponent2(Show, {
       get when() {
         return props.fallbackNote;
       },
       get children() {
-        var _el$124 = createElement("text");
-        setProp(_el$124, "fg", "#f3c742");
-        insert(_el$124, () => props.fallbackNote);
-        return _el$124;
+        var _el$172 = createElement("text");
+        setProp(_el$172, "fg", "#f3c742");
+        insert(_el$172, () => props.fallbackNote);
+        return _el$172;
       }
-    }), _el$125);
-    insertNode(_el$125, _el$126);
-    setProp(_el$125, "marginTop", 1);
-    setProp(_el$125, "flexGrow", 1);
-    setProp(_el$126, "focused", true);
-    setProp(_el$126, "showDescription", true);
-    setProp(_el$126, "width", "100%");
-    setProp(_el$126, "height", 12);
-    setProp(_el$126, "selectedBackgroundColor", "#5a2e1c");
-    setProp(_el$126, "selectedTextColor", "#ffffff");
-    setProp(_el$126, "descriptionColor", "#808080");
-    setProp(_el$126, "selectedDescriptionColor", "#ffd0bb");
-    setProp(_el$126, "onChange", (index) => setSelectedIndex(index));
-    insertNode(_el$127, createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Enter \u67E5\u770B Run \xB7 Esc \u8FD4\u56DE`));
-    setProp(_el$127, "fg", "#808080");
+    }), _el$173);
+    insertNode(_el$173, _el$174);
+    setProp(_el$173, "marginTop", 1);
+    setProp(_el$173, "flexGrow", 1);
+    setProp(_el$174, "focused", true);
+    setProp(_el$174, "showDescription", true);
+    setProp(_el$174, "width", "100%");
+    setProp(_el$174, "height", 12);
+    setProp(_el$174, "selectedBackgroundColor", "#5a2e1c");
+    setProp(_el$174, "selectedTextColor", "#ffffff");
+    setProp(_el$174, "descriptionColor", "#808080");
+    setProp(_el$174, "selectedDescriptionColor", "#ffd0bb");
+    setProp(_el$174, "onChange", (index) => setSelectedIndex(index));
+    insertNode(_el$175, createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Enter \u67E5\u770B Run \xB7 Esc \u8FD4\u56DE`));
+    setProp(_el$175, "fg", "#808080");
     effect((_p$) => {
-      var _v$1 = props.runs.map((run) => ({
+      var _v$17 = props.runs.map((run) => ({
         name: `${run.id ?? "?"} \xB7 ${run.repo_owner ?? "?"}/${run.repo_name ?? "?"}`,
         description: `findings=${run.total_findings ?? 0} \xB7 ${run.created_at ?? ""}`,
         value: run.id
-      })), _v$10 = selectedIndex();
-      _v$1 !== _p$.e && (_p$.e = setProp(_el$126, "options", _v$1, _p$.e));
-      _v$10 !== _p$.t && (_p$.t = setProp(_el$126, "selectedIndex", _v$10, _p$.t));
+      })), _v$18 = selectedIndex();
+      _v$17 !== _p$.e && (_p$.e = setProp(_el$174, "options", _v$17, _p$.e));
+      _v$18 !== _p$.t && (_p$.t = setProp(_el$174, "selectedIndex", _v$18, _p$.t));
       return _p$;
     }, {
       e: undefined,
       t: undefined
     });
-    return _el$117;
+    return _el$165;
   })();
 }
 function ModelDialog(props) {
@@ -36074,81 +36485,81 @@ function ModelDialog(props) {
       apply();
   });
   return (() => {
-    var _el$129 = createElement("box"), _el$130 = createElement("text"), _el$132 = createElement("text"), _el$133 = createTextNode(` \xB7 \u2191\u2193 \u9009\u62E9\u6A21\u578B \xB7 `), _el$134 = createElement("box"), _el$135 = createElement("select"), _el$139 = createElement("text");
-    insertNode(_el$129, _el$130);
-    insertNode(_el$129, _el$132);
-    insertNode(_el$129, _el$134);
-    insertNode(_el$129, _el$139);
-    setProp(_el$129, "position", "absolute");
-    setProp(_el$129, "left", 9);
-    setProp(_el$129, "top", 4);
-    setProp(_el$129, "width", 62);
-    setProp(_el$129, "height", 17);
-    setProp(_el$129, "backgroundColor", "#171717");
-    setProp(_el$129, "borderStyle", "single");
-    setProp(_el$129, "borderColor", "#fb8147");
-    setProp(_el$129, "padding", 2);
-    setProp(_el$129, "zIndex", 140);
-    setProp(_el$129, "flexDirection", "column");
-    insertNode(_el$130, createTextNode(`\u6A21\u578B\u9009\u62E9 // MODEL SELECTOR`));
-    setProp(_el$130, "fg", "#fb8147");
-    insertNode(_el$132, _el$133);
-    setProp(_el$132, "fg", "#808080");
-    insert(_el$132, () => props.runtime.provider_display ?? props.runtime.provider ?? "Provider", _el$133);
-    insert(_el$132, (() => {
-      var _c$4 = memo2(() => availability() === true);
-      return () => _c$4() ? "ONLINE" : availability() === false ? "OFFLINE" : "\u68C0\u6D4B\u4E2D";
+    var _el$177 = createElement("box"), _el$178 = createElement("text"), _el$180 = createElement("text"), _el$181 = createTextNode(` \xB7 \u2191\u2193 \u9009\u62E9\u6A21\u578B \xB7 `), _el$182 = createElement("box"), _el$183 = createElement("select"), _el$187 = createElement("text");
+    insertNode(_el$177, _el$178);
+    insertNode(_el$177, _el$180);
+    insertNode(_el$177, _el$182);
+    insertNode(_el$177, _el$187);
+    setProp(_el$177, "position", "absolute");
+    setProp(_el$177, "left", 9);
+    setProp(_el$177, "top", 4);
+    setProp(_el$177, "width", 62);
+    setProp(_el$177, "height", 17);
+    setProp(_el$177, "backgroundColor", "#171717");
+    setProp(_el$177, "borderStyle", "single");
+    setProp(_el$177, "borderColor", "#fb8147");
+    setProp(_el$177, "padding", 2);
+    setProp(_el$177, "zIndex", 140);
+    setProp(_el$177, "flexDirection", "column");
+    insertNode(_el$178, createTextNode(`\u6A21\u578B\u9009\u62E9 // MODEL SELECTOR`));
+    setProp(_el$178, "fg", "#fb8147");
+    insertNode(_el$180, _el$181);
+    setProp(_el$180, "fg", "#808080");
+    insert(_el$180, () => props.runtime.provider_display ?? props.runtime.provider ?? "Provider", _el$181);
+    insert(_el$180, (() => {
+      var _c$5 = memo2(() => availability() === true);
+      return () => _c$5() ? "ONLINE" : availability() === false ? "OFFLINE" : "\u68C0\u6D4B\u4E2D";
     })(), null);
-    insertNode(_el$134, _el$135);
-    setProp(_el$134, "marginTop", 1);
-    setProp(_el$134, "flexGrow", 1);
-    setProp(_el$135, "focused", true);
-    setProp(_el$135, "showDescription", true);
-    setProp(_el$135, "width", "100%");
-    setProp(_el$135, "height", 6);
-    setProp(_el$135, "selectedBackgroundColor", "#5a2e1c");
-    setProp(_el$135, "selectedTextColor", "#ffffff");
-    setProp(_el$135, "descriptionColor", "#808080");
-    setProp(_el$135, "selectedDescriptionColor", "#ffd0bb");
-    setProp(_el$135, "onChange", (index) => setSelectedIndex(index));
-    insert(_el$129, createComponent2(Show, {
+    insertNode(_el$182, _el$183);
+    setProp(_el$182, "marginTop", 1);
+    setProp(_el$182, "flexGrow", 1);
+    setProp(_el$183, "focused", true);
+    setProp(_el$183, "showDescription", true);
+    setProp(_el$183, "width", "100%");
+    setProp(_el$183, "height", 6);
+    setProp(_el$183, "selectedBackgroundColor", "#5a2e1c");
+    setProp(_el$183, "selectedTextColor", "#ffffff");
+    setProp(_el$183, "descriptionColor", "#808080");
+    setProp(_el$183, "selectedDescriptionColor", "#ffd0bb");
+    setProp(_el$183, "onChange", (index) => setSelectedIndex(index));
+    insert(_el$177, createComponent2(Show, {
       get when() {
         return error();
       },
       get children() {
-        var _el$136 = createElement("text");
-        setProp(_el$136, "fg", "#ff6b6b");
-        insert(_el$136, error);
-        return _el$136;
+        var _el$184 = createElement("text");
+        setProp(_el$184, "fg", "#ff6b6b");
+        insert(_el$184, error);
+        return _el$184;
       }
-    }), _el$139);
-    insert(_el$129, createComponent2(Show, {
+    }), _el$187);
+    insert(_el$177, createComponent2(Show, {
       get when() {
         return availability() === false;
       },
       get children() {
-        var _el$137 = createElement("text");
-        insertNode(_el$137, createTextNode(`\u5EFA\u8BAE\uFF1A/model local \u6216 /model cloud \u5FEB\u901F\u5207\u6362`));
-        setProp(_el$137, "fg", "#f3c742");
-        return _el$137;
+        var _el$185 = createElement("text");
+        insertNode(_el$185, createTextNode(`\u5EFA\u8BAE\uFF1A/model local \u6216 /model cloud \u5FEB\u901F\u5207\u6362`));
+        setProp(_el$185, "fg", "#f3c742");
+        return _el$185;
       }
-    }), _el$139);
-    setProp(_el$139, "fg", "#808080");
-    insert(_el$139, () => busy() ? "\u8BFB\u53D6\u6A21\u578B\u5217\u8868..." : "Enter \u4FDD\u5B58 \xB7 Esc \u53D6\u6D88");
+    }), _el$187);
+    setProp(_el$187, "fg", "#808080");
+    insert(_el$187, () => busy() ? "\u8BFB\u53D6\u6A21\u578B\u5217\u8868..." : "Enter \u4FDD\u5B58 \xB7 Esc \u53D6\u6D88");
     effect((_p$) => {
-      var _v$11 = models().map((model) => ({
+      var _v$19 = models().map((model) => ({
         name: model,
         description: model === props.runtime.model ? "\u5F53\u524D\u6A21\u578B" : "\u53EF\u5207\u6362\u6A21\u578B",
         value: model
-      })), _v$12 = selectedIndex();
-      _v$11 !== _p$.e && (_p$.e = setProp(_el$135, "options", _v$11, _p$.e));
-      _v$12 !== _p$.t && (_p$.t = setProp(_el$135, "selectedIndex", _v$12, _p$.t));
+      })), _v$20 = selectedIndex();
+      _v$19 !== _p$.e && (_p$.e = setProp(_el$183, "options", _v$19, _p$.e));
+      _v$20 !== _p$.t && (_p$.t = setProp(_el$183, "selectedIndex", _v$20, _p$.t));
       return _p$;
     }, {
       e: undefined,
       t: undefined
     });
-    return _el$129;
+    return _el$177;
   })();
 }
 function App() {
@@ -36509,34 +36920,34 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
   });
   onCleanup(() => void backend.stop());
   return (() => {
-    var _el$140 = createElement("box"), _el$141 = createElement("scrollbox"), _el$142 = createElement("box"), _el$190 = createElement("box"), _el$191 = createElement("text"), _el$192 = createElement("text"), _el$193 = createTextNode(` \xB7 `), _el$194 = createTextNode(` \xB7 `), _el$195 = createTextNode(` \xB7 `);
-    insertNode(_el$140, _el$141);
-    insertNode(_el$140, _el$190);
-    setProp(_el$140, "width", "100%");
-    setProp(_el$140, "height", "100%");
-    setProp(_el$140, "backgroundColor", "#0a0a0a");
-    setProp(_el$140, "alignItems", "center");
-    setProp(_el$140, "flexDirection", "column");
-    insert(_el$140, createComponent2(Show, {
+    var _el$188 = createElement("box"), _el$189 = createElement("scrollbox"), _el$190 = createElement("box"), _el$238 = createElement("box"), _el$239 = createElement("text"), _el$240 = createElement("text"), _el$241 = createTextNode(` \xB7 `), _el$242 = createTextNode(` \xB7 `), _el$243 = createTextNode(` \xB7 `);
+    insertNode(_el$188, _el$189);
+    insertNode(_el$188, _el$238);
+    setProp(_el$188, "width", "100%");
+    setProp(_el$188, "height", "100%");
+    setProp(_el$188, "backgroundColor", "#0a0a0a");
+    setProp(_el$188, "alignItems", "center");
+    setProp(_el$188, "flexDirection", "column");
+    insert(_el$188, createComponent2(Show, {
       get when() {
         return memo2(() => !!(messages().length === 0 && !reviewStage() && !errorMessage()))() && !compactHome();
       },
       get fallback() {
         return (() => {
-          var _el$196 = createElement("box"), _el$197 = createElement("text"), _el$199 = createElement("text"), _el$200 = createTextNode(` \xB7 `);
-          insertNode(_el$196, _el$197);
-          insertNode(_el$196, _el$199);
-          setProp(_el$196, "width", 76);
-          setProp(_el$196, "marginTop", 1);
-          setProp(_el$196, "flexDirection", "row");
-          setProp(_el$196, "justifyContent", "space-between");
-          insertNode(_el$197, createTextNode(`PR REVIEW / CHAT`));
-          setProp(_el$197, "fg", "#fb8147");
-          insertNode(_el$199, _el$200);
-          setProp(_el$199, "fg", "#808080");
-          insert(_el$199, () => runtime().provider_display ?? runtime().provider ?? "", _el$200);
-          insert(_el$199, () => runtime().model ?? "", null);
-          return _el$196;
+          var _el$244 = createElement("box"), _el$245 = createElement("text"), _el$247 = createElement("text"), _el$248 = createTextNode(` \xB7 `);
+          insertNode(_el$244, _el$245);
+          insertNode(_el$244, _el$247);
+          setProp(_el$244, "width", 76);
+          setProp(_el$244, "marginTop", 1);
+          setProp(_el$244, "flexDirection", "row");
+          setProp(_el$244, "justifyContent", "space-between");
+          insertNode(_el$245, createTextNode(`PR REVIEW / CHAT`));
+          setProp(_el$245, "fg", "#fb8147");
+          insertNode(_el$247, _el$248);
+          setProp(_el$247, "fg", "#808080");
+          insert(_el$247, () => runtime().provider_display ?? runtime().provider ?? "", _el$248);
+          insert(_el$247, () => runtime().model ?? "", null);
+          return _el$244;
         })();
       },
       get children() {
@@ -36546,20 +36957,20 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           }
         });
       }
-    }), _el$141);
-    insertNode(_el$141, _el$142);
-    setProp(_el$141, "width", "100%");
-    setProp(_el$141, "flexGrow", 1);
-    setProp(_el$141, "scrollY", true);
-    setProp(_el$141, "stickyScroll", true);
-    setProp(_el$141, "stickyStart", "bottom");
-    setProp(_el$141, "scrollbarOptions", {
+    }), _el$189);
+    insertNode(_el$189, _el$190);
+    setProp(_el$189, "width", "100%");
+    setProp(_el$189, "flexGrow", 1);
+    setProp(_el$189, "scrollY", true);
+    setProp(_el$189, "stickyScroll", true);
+    setProp(_el$189, "stickyStart", "bottom");
+    setProp(_el$189, "scrollbarOptions", {
       showArrows: false
     });
-    setProp(_el$142, "width", "100%");
-    setProp(_el$142, "alignItems", "center");
-    setProp(_el$142, "flexDirection", "column");
-    insert(_el$142, createComponent2(Show, {
+    setProp(_el$190, "width", "100%");
+    setProp(_el$190, "alignItems", "center");
+    setProp(_el$190, "flexDirection", "column");
+    insert(_el$190, createComponent2(Show, {
       get when() {
         return memo2(() => !!(messages().length === 0 && !composerDraft() && !streamingAssistant() && !errorMessage() && !reviewStage()))() && !compactHome();
       },
@@ -36571,282 +36982,282 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
         });
       }
     }), null);
-    insert(_el$142, createComponent2(Show, {
+    insert(_el$190, createComponent2(Show, {
       get when() {
         return errorMessage();
       },
       get children() {
-        var _el$143 = createElement("box"), _el$144 = createElement("text"), _el$146 = createElement("text"), _el$147 = createElement("text"), _el$149 = createElement("text");
-        insertNode(_el$143, _el$144);
-        insertNode(_el$143, _el$146);
-        insertNode(_el$143, _el$147);
-        insertNode(_el$143, _el$149);
-        setProp(_el$143, "width", 76);
-        setProp(_el$143, "backgroundColor", "#241616");
-        setProp(_el$143, "borderStyle", "single");
-        setProp(_el$143, "borderColor", "#ff6b6b");
-        setProp(_el$143, "paddingLeft", 2);
-        setProp(_el$143, "paddingRight", 2);
-        setProp(_el$143, "marginTop", 2);
-        setProp(_el$143, "flexDirection", "column");
-        insertNode(_el$144, createTextNode(`ERROR // RECOVERY`));
-        setProp(_el$144, "fg", "#ff6b6b");
-        setProp(_el$146, "fg", "#eeeeee");
-        insert(_el$146, errorMessage);
-        insertNode(_el$147, createTextNode(`\u5EFA\u8BAE\uFF1A\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u3001\u914D\u7F6E Endpoint\uFF0C\u6216\u4F7F\u7528 Ctrl+P \u5207\u6362\u8FD0\u884C\u65F6\u3002`));
-        setProp(_el$147, "fg", "#808080");
-        insertNode(_el$149, createTextNode(`\u53EF\u7528\u6062\u590D\uFF1ACtrl+R /retry \xB7 /model status \xB7 /model local \xB7 /model cloud \xB7 /new`));
-        setProp(_el$149, "fg", "#808080");
-        return _el$143;
+        var _el$191 = createElement("box"), _el$192 = createElement("text"), _el$194 = createElement("text"), _el$195 = createElement("text"), _el$197 = createElement("text");
+        insertNode(_el$191, _el$192);
+        insertNode(_el$191, _el$194);
+        insertNode(_el$191, _el$195);
+        insertNode(_el$191, _el$197);
+        setProp(_el$191, "width", 76);
+        setProp(_el$191, "backgroundColor", "#241616");
+        setProp(_el$191, "borderStyle", "single");
+        setProp(_el$191, "borderColor", "#ff6b6b");
+        setProp(_el$191, "paddingLeft", 2);
+        setProp(_el$191, "paddingRight", 2);
+        setProp(_el$191, "marginTop", 2);
+        setProp(_el$191, "flexDirection", "column");
+        insertNode(_el$192, createTextNode(`ERROR // RECOVERY`));
+        setProp(_el$192, "fg", "#ff6b6b");
+        setProp(_el$194, "fg", "#eeeeee");
+        insert(_el$194, errorMessage);
+        insertNode(_el$195, createTextNode(`\u5EFA\u8BAE\uFF1A\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u3001\u914D\u7F6E Endpoint\uFF0C\u6216\u4F7F\u7528 Ctrl+P \u5207\u6362\u8FD0\u884C\u65F6\u3002`));
+        setProp(_el$195, "fg", "#808080");
+        insertNode(_el$197, createTextNode(`\u53EF\u7528\u6062\u590D\uFF1ACtrl+R /retry \xB7 /model status \xB7 /model local \xB7 /model cloud \xB7 /new`));
+        setProp(_el$197, "fg", "#808080");
+        return _el$191;
       }
     }), null);
-    insert(_el$142, createComponent2(Show, {
+    insert(_el$190, createComponent2(Show, {
       get when() {
         return reviewStage();
       },
       get children() {
-        var _el$151 = createElement("box"), _el$152 = createElement("box"), _el$153 = createElement("text"), _el$154 = createTextNode(`\u25CF `), _el$155 = createElement("text"), _el$156 = createTextNode(`% \xB7 `), _el$157 = createElement("text");
-        insertNode(_el$151, _el$152);
-        insertNode(_el$151, _el$157);
-        setProp(_el$151, "width", 76);
-        setProp(_el$151, "backgroundColor", "#161616");
-        setProp(_el$151, "borderStyle", "single");
-        setProp(_el$151, "paddingLeft", 2);
-        setProp(_el$151, "paddingRight", 2);
-        setProp(_el$151, "marginTop", 2);
-        setProp(_el$151, "flexDirection", "column");
-        insertNode(_el$152, _el$153);
-        insertNode(_el$152, _el$155);
-        setProp(_el$152, "flexDirection", "row");
-        setProp(_el$152, "justifyContent", "space-between");
-        insertNode(_el$153, _el$154);
-        insert(_el$153, reviewStage, null);
-        insertNode(_el$155, _el$156);
-        setProp(_el$155, "fg", "#808080");
-        insert(_el$155, reviewProgress, _el$156);
-        insert(_el$155, (() => {
-          var _c$5 = memo2(() => reviewFilesDone() > 0);
-          return () => _c$5() ? `\u5DF2\u5B8C\u6210 ${reviewFilesDone()} \u4E2A\u6587\u4EF6` : "";
+        var _el$199 = createElement("box"), _el$200 = createElement("box"), _el$201 = createElement("text"), _el$202 = createTextNode(`\u25CF `), _el$203 = createElement("text"), _el$204 = createTextNode(`% \xB7 `), _el$205 = createElement("text");
+        insertNode(_el$199, _el$200);
+        insertNode(_el$199, _el$205);
+        setProp(_el$199, "width", 76);
+        setProp(_el$199, "backgroundColor", "#161616");
+        setProp(_el$199, "borderStyle", "single");
+        setProp(_el$199, "paddingLeft", 2);
+        setProp(_el$199, "paddingRight", 2);
+        setProp(_el$199, "marginTop", 2);
+        setProp(_el$199, "flexDirection", "column");
+        insertNode(_el$200, _el$201);
+        insertNode(_el$200, _el$203);
+        setProp(_el$200, "flexDirection", "row");
+        setProp(_el$200, "justifyContent", "space-between");
+        insertNode(_el$201, _el$202);
+        insert(_el$201, reviewStage, null);
+        insertNode(_el$203, _el$204);
+        setProp(_el$203, "fg", "#808080");
+        insert(_el$203, reviewProgress, _el$204);
+        insert(_el$203, (() => {
+          var _c$6 = memo2(() => reviewFilesDone() > 0);
+          return () => _c$6() ? `\u5DF2\u5B8C\u6210 ${reviewFilesDone()} \u4E2A\u6587\u4EF6` : "";
         })(), null);
-        setProp(_el$157, "fg", "#b0b0b0");
-        insert(_el$157, (() => {
-          var _c$6 = memo2(() => !!reviewFile());
-          return () => _c$6() ? `\u6B63\u5728\u5206\u6790 ${reviewFile()}` : reviewDetail();
+        setProp(_el$205, "fg", "#b0b0b0");
+        insert(_el$205, (() => {
+          var _c$7 = memo2(() => !!reviewFile());
+          return () => _c$7() ? `\u6B63\u5728\u5206\u6790 ${reviewFile()}` : reviewDetail();
         })());
-        insert(_el$151, createComponent2(Show, {
+        insert(_el$199, createComponent2(Show, {
           get when() {
             return reviewProgress() > 0;
           },
           get children() {
-            var _el$158 = createElement("text");
-            setProp(_el$158, "fg", "#808080");
-            insert(_el$158, () => `${"\u2588".repeat(Math.max(1, Math.floor(reviewProgress() / 5)))}${"\u2591".repeat(20 - Math.max(1, Math.floor(reviewProgress() / 5)))} ${reviewProgress()}%`);
-            return _el$158;
+            var _el$206 = createElement("text");
+            setProp(_el$206, "fg", "#808080");
+            insert(_el$206, () => `${"\u2588".repeat(Math.max(1, Math.floor(reviewProgress() / 5)))}${"\u2591".repeat(20 - Math.max(1, Math.floor(reviewProgress() / 5)))} ${reviewProgress()}%`);
+            return _el$206;
           }
         }), null);
-        insert(_el$151, createComponent2(Show, {
+        insert(_el$199, createComponent2(Show, {
           get when() {
             return reviewUrl();
           },
           get children() {
-            var _el$159 = createElement("text");
-            setProp(_el$159, "fg", "#808080");
-            insert(_el$159, () => truncateMiddle(reviewUrl(), 68));
-            return _el$159;
+            var _el$207 = createElement("text");
+            setProp(_el$207, "fg", "#808080");
+            insert(_el$207, () => truncateMiddle(reviewUrl(), 68));
+            return _el$207;
           }
         }), null);
         effect((_p$) => {
-          var _v$13 = reviewStage() === "\u5BA1\u67E5\u5B8C\u6210" ? "#5b9b6d" : orange, _v$14 = reviewStage() === "\u5BA1\u67E5\u5B8C\u6210" ? "#7edc92" : reviewStage() === "\u5BA1\u67E5\u5931\u8D25" ? "#ff6b6b" : orange;
-          _v$13 !== _p$.e && (_p$.e = setProp(_el$151, "borderColor", _v$13, _p$.e));
-          _v$14 !== _p$.t && (_p$.t = setProp(_el$153, "fg", _v$14, _p$.t));
+          var _v$21 = reviewStage() === "\u5BA1\u67E5\u5B8C\u6210" ? "#5b9b6d" : orange, _v$22 = reviewStage() === "\u5BA1\u67E5\u5B8C\u6210" ? "#7edc92" : reviewStage() === "\u5BA1\u67E5\u5931\u8D25" ? "#ff6b6b" : orange;
+          _v$21 !== _p$.e && (_p$.e = setProp(_el$199, "borderColor", _v$21, _p$.e));
+          _v$22 !== _p$.t && (_p$.t = setProp(_el$201, "fg", _v$22, _p$.t));
           return _p$;
         }, {
           e: undefined,
           t: undefined
         });
-        return _el$151;
+        return _el$199;
       }
     }), null);
-    insert(_el$142, createComponent2(Show, {
+    insert(_el$190, createComponent2(Show, {
       get when() {
         return messages().length > 0 || streamingAssistant();
       },
       get children() {
-        var _el$160 = createElement("box");
-        setProp(_el$160, "width", 76);
-        setProp(_el$160, "marginTop", 2);
-        setProp(_el$160, "flexDirection", "column");
-        insert(_el$160, createComponent2(For, {
+        var _el$208 = createElement("box");
+        setProp(_el$208, "width", 76);
+        setProp(_el$208, "marginTop", 2);
+        setProp(_el$208, "flexDirection", "column");
+        insert(_el$208, createComponent2(For, {
           get each() {
             return messages();
           },
           children: (message) => (() => {
-            var _el$201 = createElement("box"), _el$202 = createElement("text"), _el$203 = createElement("text");
-            insertNode(_el$201, _el$202);
-            insertNode(_el$201, _el$203);
-            setProp(_el$201, "flexDirection", "row");
-            setProp(_el$201, "gap", 1);
-            setProp(_el$201, "paddingBottom", 1);
-            insert(_el$202, () => message.role === "user" ? ">" : "\u25CF");
-            setProp(_el$203, "width", 70);
-            insert(_el$203, () => message.content);
+            var _el$249 = createElement("box"), _el$250 = createElement("text"), _el$251 = createElement("text");
+            insertNode(_el$249, _el$250);
+            insertNode(_el$249, _el$251);
+            setProp(_el$249, "flexDirection", "row");
+            setProp(_el$249, "gap", 1);
+            setProp(_el$249, "paddingBottom", 1);
+            insert(_el$250, () => message.role === "user" ? ">" : "\u25CF");
+            setProp(_el$251, "width", 70);
+            insert(_el$251, () => message.content);
             effect((_p$) => {
-              var _v$15 = message.role === "user" ? orange : "#eeeeee", _v$16 = message.role === "user" ? "#eeeeee" : muted;
-              _v$15 !== _p$.e && (_p$.e = setProp(_el$202, "fg", _v$15, _p$.e));
-              _v$16 !== _p$.t && (_p$.t = setProp(_el$203, "fg", _v$16, _p$.t));
+              var _v$23 = message.role === "user" ? orange : "#eeeeee", _v$24 = message.role === "user" ? "#eeeeee" : muted;
+              _v$23 !== _p$.e && (_p$.e = setProp(_el$250, "fg", _v$23, _p$.e));
+              _v$24 !== _p$.t && (_p$.t = setProp(_el$251, "fg", _v$24, _p$.t));
               return _p$;
             }, {
               e: undefined,
               t: undefined
             });
-            return _el$201;
+            return _el$249;
           })()
         }), null);
-        insert(_el$160, createComponent2(Show, {
+        insert(_el$208, createComponent2(Show, {
           get when() {
             return streamingAssistant();
           },
           get children() {
-            var _el$161 = createElement("box"), _el$162 = createElement("text"), _el$164 = createElement("text");
-            insertNode(_el$161, _el$162);
-            insertNode(_el$161, _el$164);
-            setProp(_el$161, "flexDirection", "row");
-            setProp(_el$161, "gap", 1);
-            insertNode(_el$162, createTextNode(`\u25CF`));
-            setProp(_el$162, "fg", "#fb8147");
-            setProp(_el$164, "width", 70);
-            setProp(_el$164, "fg", "#eeeeee");
-            insert(_el$164, streamingAssistant);
-            return _el$161;
+            var _el$209 = createElement("box"), _el$210 = createElement("text"), _el$212 = createElement("text");
+            insertNode(_el$209, _el$210);
+            insertNode(_el$209, _el$212);
+            setProp(_el$209, "flexDirection", "row");
+            setProp(_el$209, "gap", 1);
+            insertNode(_el$210, createTextNode(`\u25CF`));
+            setProp(_el$210, "fg", "#fb8147");
+            setProp(_el$212, "width", 70);
+            setProp(_el$212, "fg", "#eeeeee");
+            insert(_el$212, streamingAssistant);
+            return _el$209;
           }
         }), null);
-        return _el$160;
+        return _el$208;
       }
     }), null);
-    insert(_el$142, createComponent2(Show, {
+    insert(_el$190, createComponent2(Show, {
       get when() {
         return reviewReport().pr || reviewReport().counts;
       },
       get children() {
-        var _el$165 = createElement("box"), _el$166 = createElement("text"), _el$167 = createTextNode(`REVIEW SUMMARY `), _el$168 = createElement("text"), _el$169 = createElement("text"), _el$170 = createTextNode(`Files `), _el$171 = createTextNode(` reviewed \xB7 `), _el$172 = createTextNode(` skipped \xB7 Findings `), _el$173 = createElement("text"), _el$174 = createTextNode(`Critical `), _el$175 = createTextNode(` \xB7 High `), _el$176 = createTextNode(` \xB7 Medium `), _el$177 = createTextNode(` \xB7 Low `), _el$178 = createElement("text"), _el$179 = createTextNode(`\u8017\u65F6 `), _el$180 = createTextNode(`s \xB7 \u6210\u672C $`), _el$181 = createTextNode(` \xB7 Run `);
-        insertNode(_el$165, _el$166);
-        insertNode(_el$165, _el$168);
-        insertNode(_el$165, _el$169);
-        insertNode(_el$165, _el$173);
-        insertNode(_el$165, _el$178);
-        setProp(_el$165, "width", 76);
-        setProp(_el$165, "backgroundColor", "#141414");
-        setProp(_el$165, "borderStyle", "single");
-        setProp(_el$165, "borderColor", "#5b9b6d");
-        setProp(_el$165, "paddingLeft", 2);
-        setProp(_el$165, "paddingRight", 2);
-        setProp(_el$165, "marginTop", 1);
-        setProp(_el$165, "flexDirection", "column");
-        insertNode(_el$166, _el$167);
-        setProp(_el$166, "fg", "#7edc92");
-        insert(_el$166, (() => {
-          var _c$7 = memo2(() => !!reviewReport().pr?.repository);
-          return () => _c$7() ? `\xB7 ${reviewReport().pr?.repository}` : "";
+        var _el$213 = createElement("box"), _el$214 = createElement("text"), _el$215 = createTextNode(`REVIEW SUMMARY `), _el$216 = createElement("text"), _el$217 = createElement("text"), _el$218 = createTextNode(`Files `), _el$219 = createTextNode(` reviewed \xB7 `), _el$220 = createTextNode(` skipped \xB7 Findings `), _el$221 = createElement("text"), _el$222 = createTextNode(`Critical `), _el$223 = createTextNode(` \xB7 High `), _el$224 = createTextNode(` \xB7 Medium `), _el$225 = createTextNode(` \xB7 Low `), _el$226 = createElement("text"), _el$227 = createTextNode(`\u8017\u65F6 `), _el$228 = createTextNode(`s \xB7 \u6210\u672C $`), _el$229 = createTextNode(` \xB7 Run `);
+        insertNode(_el$213, _el$214);
+        insertNode(_el$213, _el$216);
+        insertNode(_el$213, _el$217);
+        insertNode(_el$213, _el$221);
+        insertNode(_el$213, _el$226);
+        setProp(_el$213, "width", 76);
+        setProp(_el$213, "backgroundColor", "#141414");
+        setProp(_el$213, "borderStyle", "single");
+        setProp(_el$213, "borderColor", "#5b9b6d");
+        setProp(_el$213, "paddingLeft", 2);
+        setProp(_el$213, "paddingRight", 2);
+        setProp(_el$213, "marginTop", 1);
+        setProp(_el$213, "flexDirection", "column");
+        insertNode(_el$214, _el$215);
+        setProp(_el$214, "fg", "#7edc92");
+        insert(_el$214, (() => {
+          var _c$8 = memo2(() => !!reviewReport().pr?.repository);
+          return () => _c$8() ? `\xB7 ${reviewReport().pr?.repository}` : "";
         })(), null);
-        setProp(_el$168, "fg", "#eeeeee");
-        insert(_el$168, () => reviewReport().pr?.title ?? "Pull Request");
-        insertNode(_el$169, _el$170);
-        insertNode(_el$169, _el$171);
-        insertNode(_el$169, _el$172);
-        setProp(_el$169, "fg", "#808080");
-        insert(_el$169, (() => {
-          var _c$8 = memo2(() => !!reviewReport().pr?.author);
-          return () => _c$8() ? `Author ${reviewReport().pr?.author} \xB7 ` : "";
-        })(), _el$170);
-        insert(_el$169, () => reviewReport().pr?.files_reviewed ?? "?", _el$171);
-        insert(_el$169, () => reviewReport().pr?.files_skipped ?? "?", _el$172);
-        insert(_el$169, () => reviewReport().counts?.total_findings ?? reviewFindings().length, null);
-        insertNode(_el$173, _el$174);
-        insertNode(_el$173, _el$175);
-        insertNode(_el$173, _el$176);
-        insertNode(_el$173, _el$177);
-        setProp(_el$173, "fg", "#808080");
-        insert(_el$173, () => reviewReport().counts?.by_severity?.critical ?? 0, _el$175);
-        insert(_el$173, () => reviewReport().counts?.by_severity?.high ?? 0, _el$176);
-        insert(_el$173, () => reviewReport().counts?.by_severity?.medium ?? 0, _el$177);
-        insert(_el$173, () => reviewReport().counts?.by_severity?.low ?? 0, null);
-        insertNode(_el$178, _el$179);
-        insertNode(_el$178, _el$180);
-        insertNode(_el$178, _el$181);
-        setProp(_el$178, "fg", "#808080");
-        insert(_el$178, () => reviewReport().run?.duration_seconds?.toFixed(1) ?? "?", _el$180);
-        insert(_el$178, () => reviewReport().run?.total_cost?.toFixed(4) ?? "?", _el$181);
-        insert(_el$178, () => reviewReport().run?.id ?? "?", null);
-        return _el$165;
+        setProp(_el$216, "fg", "#eeeeee");
+        insert(_el$216, () => reviewReport().pr?.title ?? "Pull Request");
+        insertNode(_el$217, _el$218);
+        insertNode(_el$217, _el$219);
+        insertNode(_el$217, _el$220);
+        setProp(_el$217, "fg", "#808080");
+        insert(_el$217, (() => {
+          var _c$9 = memo2(() => !!reviewReport().pr?.author);
+          return () => _c$9() ? `Author ${reviewReport().pr?.author} \xB7 ` : "";
+        })(), _el$218);
+        insert(_el$217, () => reviewReport().pr?.files_reviewed ?? "?", _el$219);
+        insert(_el$217, () => reviewReport().pr?.files_skipped ?? "?", _el$220);
+        insert(_el$217, () => reviewReport().counts?.total_findings ?? reviewFindings().length, null);
+        insertNode(_el$221, _el$222);
+        insertNode(_el$221, _el$223);
+        insertNode(_el$221, _el$224);
+        insertNode(_el$221, _el$225);
+        setProp(_el$221, "fg", "#808080");
+        insert(_el$221, () => reviewReport().counts?.by_severity?.critical ?? 0, _el$223);
+        insert(_el$221, () => reviewReport().counts?.by_severity?.high ?? 0, _el$224);
+        insert(_el$221, () => reviewReport().counts?.by_severity?.medium ?? 0, _el$225);
+        insert(_el$221, () => reviewReport().counts?.by_severity?.low ?? 0, null);
+        insertNode(_el$226, _el$227);
+        insertNode(_el$226, _el$228);
+        insertNode(_el$226, _el$229);
+        setProp(_el$226, "fg", "#808080");
+        insert(_el$226, () => reviewReport().run?.duration_seconds?.toFixed(1) ?? "?", _el$228);
+        insert(_el$226, () => reviewReport().run?.total_cost?.toFixed(4) ?? "?", _el$229);
+        insert(_el$226, () => reviewReport().run?.id ?? "?", null);
+        return _el$213;
       }
     }), null);
-    insert(_el$142, createComponent2(Show, {
+    insert(_el$190, createComponent2(Show, {
       get when() {
         return reviewFindings().length > 0;
       },
       get children() {
-        var _el$182 = createElement("box"), _el$183 = createElement("text"), _el$184 = createTextNode(`FINDINGS `), _el$188 = createElement("text");
-        insertNode(_el$182, _el$183);
-        insertNode(_el$182, _el$188);
-        setProp(_el$182, "width", 76);
-        setProp(_el$182, "backgroundColor", "#141414");
-        setProp(_el$182, "borderStyle", "single");
-        setProp(_el$182, "borderColor", "#6b6b6b");
-        setProp(_el$182, "paddingLeft", 2);
-        setProp(_el$182, "paddingRight", 2);
-        setProp(_el$182, "marginTop", 1);
-        setProp(_el$182, "flexDirection", "column");
-        insertNode(_el$183, _el$184);
-        setProp(_el$183, "fg", "#f3c742");
-        insert(_el$183, (() => {
-          var _c$9 = memo2(() => !!reviewSummary());
-          return () => _c$9() ? `\xB7 ${reviewSummary()}` : "";
+        var _el$230 = createElement("box"), _el$231 = createElement("text"), _el$232 = createTextNode(`FINDINGS `), _el$236 = createElement("text");
+        insertNode(_el$230, _el$231);
+        insertNode(_el$230, _el$236);
+        setProp(_el$230, "width", 76);
+        setProp(_el$230, "backgroundColor", "#141414");
+        setProp(_el$230, "borderStyle", "single");
+        setProp(_el$230, "borderColor", "#6b6b6b");
+        setProp(_el$230, "paddingLeft", 2);
+        setProp(_el$230, "paddingRight", 2);
+        setProp(_el$230, "marginTop", 1);
+        setProp(_el$230, "flexDirection", "column");
+        insertNode(_el$231, _el$232);
+        setProp(_el$231, "fg", "#f3c742");
+        insert(_el$231, (() => {
+          var _c$0 = memo2(() => !!reviewSummary());
+          return () => _c$0() ? `\xB7 ${reviewSummary()}` : "";
         })(), null);
-        insert(_el$182, createComponent2(For, {
+        insert(_el$230, createComponent2(For, {
           get each() {
             return reviewFindings().slice(0, 5);
           },
           children: (finding) => (() => {
-            var _el$204 = createElement("box"), _el$205 = createElement("text"), _el$206 = createTextNode(`[`), _el$207 = createTextNode(`]`), _el$208 = createElement("text"), _el$209 = createElement("text");
-            insertNode(_el$204, _el$205);
-            insertNode(_el$204, _el$208);
-            insertNode(_el$204, _el$209);
-            setProp(_el$204, "flexDirection", "row");
-            setProp(_el$204, "gap", 1);
-            insertNode(_el$205, _el$206);
-            insertNode(_el$205, _el$207);
-            insert(_el$205, () => String(finding.severity ?? "info").toUpperCase(), _el$207);
-            setProp(_el$208, "width", 42);
-            setProp(_el$208, "fg", "#eeeeee");
-            insert(_el$208, () => String(finding.title ?? finding.message ?? "\u672A\u547D\u540D\u95EE\u9898"));
-            setProp(_el$209, "fg", "#808080");
-            insert(_el$209, (() => {
-              var _c$1 = memo2(() => !!finding.file);
-              return () => _c$1() ? `${finding.file}:${finding.line_start ?? "?"}` : "";
+            var _el$252 = createElement("box"), _el$253 = createElement("text"), _el$254 = createTextNode(`[`), _el$255 = createTextNode(`]`), _el$256 = createElement("text"), _el$257 = createElement("text");
+            insertNode(_el$252, _el$253);
+            insertNode(_el$252, _el$256);
+            insertNode(_el$252, _el$257);
+            setProp(_el$252, "flexDirection", "row");
+            setProp(_el$252, "gap", 1);
+            insertNode(_el$253, _el$254);
+            insertNode(_el$253, _el$255);
+            insert(_el$253, () => String(finding.severity ?? "info").toUpperCase(), _el$255);
+            setProp(_el$256, "width", 42);
+            setProp(_el$256, "fg", "#eeeeee");
+            insert(_el$256, () => String(finding.title ?? finding.message ?? "\u672A\u547D\u540D\u95EE\u9898"));
+            setProp(_el$257, "fg", "#808080");
+            insert(_el$257, (() => {
+              var _c$10 = memo2(() => !!finding.file);
+              return () => _c$10() ? `${finding.file}:${finding.line_start ?? "?"}` : "";
             })());
-            effect((_$p) => setProp(_el$205, "fg", finding.severity === "critical" || finding.severity === "high" ? "#ff6b6b" : orange, _$p));
-            return _el$204;
+            effect((_$p) => setProp(_el$253, "fg", finding.severity === "critical" || finding.severity === "high" ? "#ff6b6b" : orange, _$p));
+            return _el$252;
           })()
-        }), _el$188);
-        insert(_el$182, createComponent2(Show, {
+        }), _el$236);
+        insert(_el$230, createComponent2(Show, {
           get when() {
             return reviewFindings().length > 5;
           },
           get children() {
-            var _el$185 = createElement("text"), _el$186 = createTextNode(`\u8FD8\u6709 `), _el$187 = createTextNode(` \u4E2A\u95EE\u9898\uFF0C\u53EF\u901A\u8FC7\u62A5\u544A\u8BE6\u60C5\u67E5\u770B\u3002`);
-            insertNode(_el$185, _el$186);
-            insertNode(_el$185, _el$187);
-            setProp(_el$185, "fg", "#808080");
-            insert(_el$185, () => reviewFindings().length - 5, _el$187);
-            return _el$185;
+            var _el$233 = createElement("text"), _el$234 = createTextNode(`\u8FD8\u6709 `), _el$235 = createTextNode(` \u4E2A\u95EE\u9898\uFF0C\u53EF\u901A\u8FC7\u62A5\u544A\u8BE6\u60C5\u67E5\u770B\u3002`);
+            insertNode(_el$233, _el$234);
+            insertNode(_el$233, _el$235);
+            setProp(_el$233, "fg", "#808080");
+            insert(_el$233, () => reviewFindings().length - 5, _el$235);
+            return _el$233;
           }
-        }), _el$188);
-        insertNode(_el$188, createTextNode(`Ctrl+O Finding \xB7 Ctrl+L \u5386\u53F2 \xB7 Ctrl+K \u6A21\u578B`));
-        setProp(_el$188, "fg", "#808080");
-        return _el$182;
+        }), _el$236);
+        insertNode(_el$236, createTextNode(`Ctrl+O Finding \xB7 Ctrl+L \u5386\u53F2 \xB7 Ctrl+K \u6A21\u578B`));
+        setProp(_el$236, "fg", "#808080");
+        return _el$230;
       }
     }), null);
-    insert(_el$140, createComponent2(Composer, {
+    insert(_el$188, createComponent2(Composer, {
       get mode() {
         return mode();
       },
@@ -36888,8 +37299,8 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
       get focused() {
         return memo2(() => !!(!findingsOpen() && !historyOpen() && !modelOpen() && !setupOpen() && pendingReviewUrl() === ""))() && reviewStage() !== "\u5BA1\u67E5\u5931\u8D25";
       }
-    }), _el$190);
-    insert(_el$140, createComponent2(Show, {
+    }), _el$238);
+    insert(_el$188, createComponent2(Show, {
       get when() {
         return modelOpen();
       },
@@ -36909,8 +37320,8 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           }
         });
       }
-    }), _el$190);
-    insert(_el$140, createComponent2(Show, {
+    }), _el$238);
+    insert(_el$188, createComponent2(Show, {
       get when() {
         return historyOpen();
       },
@@ -36929,8 +37340,8 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setHistoryOpen(false)
         });
       }
-    }), _el$190);
-    insert(_el$140, createComponent2(Show, {
+    }), _el$238);
+    insert(_el$188, createComponent2(Show, {
       get when() {
         return findingsOpen();
       },
@@ -36942,8 +37353,8 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setFindingsOpen(false)
         });
       }
-    }), _el$190);
-    insert(_el$140, createComponent2(Show, {
+    }), _el$238);
+    insert(_el$188, createComponent2(Show, {
       get when() {
         return memo2(() => reviewStage() === "\u5BA1\u67E5\u5931\u8D25")() && reviewUrl();
       },
@@ -36962,13 +37373,13 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setReviewStage("")
         });
       }
-    }), _el$190);
-    insert(_el$140, createComponent2(Show, {
+    }), _el$238);
+    insert(_el$188, createComponent2(Show, {
       get when() {
         return setupOpen();
       },
       get children() {
-        return createComponent2(RuntimeDialog, {
+        return createComponent2(SetupDialog, {
           backend,
           get runtime() {
             return runtime();
@@ -36979,13 +37390,22 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
             setBackendStatus("READY");
             appendMessage({
               role: "assistant",
-              content: `\u8FD0\u884C\u65F6\u5DF2\u5207\u6362\u4E3A ${snapshot.runtime_profile ?? "unknown"}`
+              content: `\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF1A${snapshot.provider_display ?? snapshot.provider ?? "provider"} / ${snapshot.model ?? "model"} \xB7 ${snapshot.runtime_profile ?? "runtime"}`
             });
+            backend.request("model.status", {}, {
+              timeoutMs: PROBE_TIMEOUT_MS
+            }).then((status) => {
+              if (status.ok)
+                setRuntime((current) => ({
+                  ...current,
+                  ...status.result
+                }));
+            }).catch(() => {});
           }
         });
       }
-    }), _el$190);
-    insert(_el$140, createComponent2(Show, {
+    }), _el$238);
+    insert(_el$188, createComponent2(Show, {
       get when() {
         return pendingReviewUrl();
       },
@@ -36998,29 +37418,29 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setPendingReviewUrl("")
         });
       }
-    }), _el$190);
-    insertNode(_el$190, _el$191);
-    insertNode(_el$190, _el$192);
-    setProp(_el$190, "width", "100%");
-    setProp(_el$190, "flexShrink", 0);
-    setProp(_el$190, "justifyContent", "space-between");
-    setProp(_el$190, "paddingLeft", 2);
-    setProp(_el$190, "paddingRight", 2);
-    setProp(_el$190, "paddingBottom", 1);
-    setProp(_el$191, "fg", "#808080");
-    insert(_el$191, workspaceRootLabel);
-    insertNode(_el$192, _el$193);
-    insertNode(_el$192, _el$194);
-    insertNode(_el$192, _el$195);
-    insert(_el$192, () => runtime().runtime_profile ?? "RUNTIME", _el$193);
-    insert(_el$192, () => statusLabels[backendStatus()], _el$194);
-    insert(_el$192, () => runtime().model ?? "model", _el$195);
-    insert(_el$192, (() => {
-      var _c$0 = memo2(() => runtime().available === false);
-      return () => _c$0() ? "OFFLINE" : runtime().available === true ? "ONLINE" : "0.1.0";
+    }), _el$238);
+    insertNode(_el$238, _el$239);
+    insertNode(_el$238, _el$240);
+    setProp(_el$238, "width", "100%");
+    setProp(_el$238, "flexShrink", 0);
+    setProp(_el$238, "justifyContent", "space-between");
+    setProp(_el$238, "paddingLeft", 2);
+    setProp(_el$238, "paddingRight", 2);
+    setProp(_el$238, "paddingBottom", 1);
+    setProp(_el$239, "fg", "#808080");
+    insert(_el$239, workspaceRootLabel);
+    insertNode(_el$240, _el$241);
+    insertNode(_el$240, _el$242);
+    insertNode(_el$240, _el$243);
+    insert(_el$240, () => runtime().runtime_profile ?? "RUNTIME", _el$241);
+    insert(_el$240, () => statusLabels[backendStatus()], _el$242);
+    insert(_el$240, () => runtime().model ?? "model", _el$243);
+    insert(_el$240, (() => {
+      var _c$1 = memo2(() => runtime().available === false);
+      return () => _c$1() ? "OFFLINE" : runtime().available === true ? "ONLINE" : "0.1.0";
     })(), null);
-    effect((_$p) => setProp(_el$192, "fg", statusColors[backendStatus()], _$p));
-    return _el$140;
+    effect((_$p) => setProp(_el$240, "fg", statusColors[backendStatus()], _$p));
+    return _el$188;
   })();
 }
 

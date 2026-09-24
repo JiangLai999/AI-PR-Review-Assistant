@@ -17,7 +17,15 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, cast
 
-from ai_pr_review.config import MODEL_PROVIDER_PRESETS, AppConfig, resolve_config_path
+from ai_pr_review.config import (
+    MODEL_PROVIDER_PRESETS,
+    PROVIDER_MODEL_PRESETS,
+    AppConfig,
+    ConfigValidationError,
+    ModelProviderConfig,
+    ProviderConfig,
+    resolve_config_path,
+)
 from ai_pr_review.services.model_providers.factory import create_model_provider
 
 # Use the orchestrator's exception class itself. A *subclass* here would NOT
@@ -120,6 +128,179 @@ class JsonlBackend:
             "configuration_warnings": list(getattr(self.config, "_ignored_env_overrides", [])),
             "result_store_path": self.config.result_store.db_path,
         }
+
+    @staticmethod
+    def _provider_model_names(provider_name: str) -> list[str]:
+        preset = MODEL_PROVIDER_PRESETS.get(provider_name, {})
+        models = list(PROVIDER_MODEL_PRESETS.get(provider_name, {}))
+        default_model = str(preset.get("model_name", "")).strip()
+        if default_model and default_model not in models:
+            models.insert(0, default_model)
+        return models
+
+    def _setup_options(self) -> dict[str, Any]:
+        """Return provider/model choices for the TUI setup wizard.
+
+        The wizard must not hard-code provider presets: the Python layer owns
+        validation, env-var names and model metadata.
+        """
+        providers: list[dict[str, Any]] = []
+        for name, preset in MODEL_PROVIDER_PRESETS.items():
+            if name.lower() in {"ollama", "local", "custom"}:
+                continue
+            providers.append(
+                {
+                    "name": name,
+                    "display_name": str(preset.get("display_name", name)),
+                    "base_url": str(preset.get("base_url", "")),
+                    "api_format": str(preset.get("api_format", "openai")),
+                    "env_var": str(preset.get("env_var", "")),
+                    "default_model": str(preset.get("model_name", "")),
+                    "models": self._provider_model_names(name),
+                }
+            )
+        # A user may have added a custom model to the active remote slot. Keep
+        # it in the list so an unrelated wizard round trip cannot silently
+        # replace it with a preset.
+        remote_provider_name = self.config.provider.name.lower()
+        remote_model = self.config.provider.default_model
+        for provider in providers:
+            if (
+                provider["name"] == remote_provider_name
+                and remote_model
+                and remote_model not in provider["models"]
+            ):
+                provider["models"].insert(0, remote_model)
+        local_provider = self.config.local_provider
+        local_models = list(local_provider.models) or self._provider_model_names("ollama")
+        if local_provider.default_model not in local_models:
+            local_models.insert(0, local_provider.default_model)
+        current = self.config.ai_client.model_provider
+        return {
+            "providers": providers,
+            "local": {
+                "provider": local_provider.name,
+                "display_name": local_provider.display_name,
+                "base_url": local_provider.base_url,
+                "api_format": local_provider.api_format,
+                "default_model": local_provider.default_model,
+                "models": local_models,
+            },
+            "current": {
+                "runtime_profile": self.runtime_profile,
+                "strategy": self.config.preferences.hybrid_strategy,
+                "provider": current.name,
+                "provider_display": current.display_name,
+                "model": current.model_name,
+                "base_url": current.base_url,
+                "api_format": current.api_format,
+                "api_key_configured": bool(current.api_key),
+                # The active slot can be local while a fully configured cloud
+                # slot is still persisted. The wizard must preselect the remote
+                # slot when the user switches back to Cloud/Hybrid.
+                "remote_provider": self.config.provider.name,
+                "remote_model": self.config.provider.default_model,
+                "remote_base_url": self.config.provider.base_url,
+                "remote_api_key_configured": bool(self.config.provider.api_key),
+                "local_provider": local_provider.name,
+                "local_model": local_provider.default_model,
+                "local_base_url": local_provider.base_url,
+                "local_models": local_models,
+            },
+        }
+
+    def _apply_setup(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Apply the TUI wizard atomically and reload the persisted result."""
+        profile = (
+            str(params.get("runtime_profile", "")).strip().lower() or self.runtime_profile
+        )
+        if profile not in {"cloud", "local", "hybrid", "offline"}:
+            raise ValueError(f"Unsupported runtime profile: {profile}")
+
+        if profile in {"cloud", "hybrid"}:
+            provider_name = (
+                str(params.get("provider_name", "")).strip().lower()
+                or self.config.provider.name.lower()
+            )
+            preset = MODEL_PROVIDER_PRESETS.get(provider_name)
+            if preset is None:
+                raise ConfigValidationError(f"不支持的模型供应商: {provider_name}")
+            same_provider = self.config.provider.name.lower() == provider_name
+            existing = self.config.provider if same_provider else None
+
+            api_key = str(params.get("api_key", "")).strip()
+            if not api_key and existing is not None:
+                api_key = existing.api_key
+            if not api_key:
+                env_var = str(preset.get("env_var", "")).strip()
+                api_key = os.getenv(env_var, "").strip() if env_var else ""
+            if not api_key and provider_name != "custom":
+                env_var = str(preset.get("env_var", "")).strip()
+                hint = f"，或设置 {env_var} 环境变量" if env_var else ""
+                raise ConfigValidationError(
+                    f"请填写 {preset.get('display_name', provider_name)} API Key{hint}。"
+                )
+
+            model_name = str(
+                params.get("model_name", "")
+                or (existing.default_model if existing is not None else "")
+                or preset.get("model_name", "")
+            ).strip()
+            base_url = str(
+                params.get("base_url", "")
+                or (existing.base_url if existing is not None else "")
+                or preset.get("base_url", "")
+            ).strip()
+            api_format = str(
+                params.get("api_format", "")
+                or (existing.api_format if existing is not None else "")
+                or preset.get("api_format", "openai")
+            ).strip()
+            provider = ModelProviderConfig.from_name(
+                provider_name,
+                api_key=api_key,
+                model_name=model_name,
+                base_url=base_url,
+                api_format=api_format,
+            )
+            provider.validate()
+            self.config.provider = ProviderConfig.from_model_provider(provider)
+            self.config.preferences.hybrid_strategy = (
+                "remote_only" if profile == "cloud" else "balanced"
+            )
+        else:
+            local = self.config.local_provider
+            local_name = (
+                str(params.get("local_provider", "")).strip().lower() or local.name.lower()
+            )
+            if local_name not in {"ollama", "local"}:
+                raise ConfigValidationError("本地模型目前仅支持 Ollama/Local 预设。")
+            model_name = str(
+                params.get("local_model", "") or local.default_model or "qwen3.5:4b"
+            ).strip()
+            base_url = str(
+                params.get("local_base_url", "")
+                or local.base_url
+                or "http://127.0.0.1:11434/v1"
+            ).strip()
+            provider = ModelProviderConfig.from_name(
+                "ollama",
+                api_key="",
+                model_name=model_name,
+                base_url=base_url,
+                api_format="openai",
+            )
+            provider.validate()
+            self.config.local_provider = ProviderConfig.from_model_provider(provider)
+            self.config.preferences.hybrid_strategy = "local_only"
+
+        self.config._sync_runtime_sections()
+        self.config.save(self.config_path, save_key=True)
+        # Reload through the normal layered loader so the snapshot cannot claim
+        # a setting that the next process would not actually read.
+        self.config = AppConfig.load(self.config_path)
+        self.runtime_profile = self._infer_runtime_profile()
+        return self._config_snapshot()
 
     async def _apply_model(self, model_name: str) -> dict[str, Any]:
         model_name = model_name.strip()
@@ -539,6 +720,10 @@ class JsonlBackend:
                 )
             elif method == "config.snapshot":
                 result(self._config_snapshot())
+            elif method == "config.options":
+                result(self._setup_options())
+            elif method == "config.setup":
+                result(self._apply_setup(params))
             elif method == "model.status":
                 status = await self._model_status()
                 result(status)
