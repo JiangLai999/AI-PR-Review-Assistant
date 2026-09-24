@@ -568,8 +568,8 @@ function ReviewConfirmDialog(props: { url: string; onConfirm: () => void; onClos
   })
   return (
     <box position="absolute" left={8} top={5} width={64} height={15} backgroundColor="#171717" borderStyle="single" borderColor={orange} padding={2} zIndex={120} flexDirection="column">
-      <text fg={orange}>开始 PR 审查 // CONFIRM</text>
-      <text fg={muted}>已识别 GitHub Pull Request：</text>
+      <text fg={orange} height={1}>开始 PR 审查 // CONFIRM</text>
+      <text fg={muted} height={1}>已识别 GitHub Pull Request：</text>
       <text fg="#eeeeee">{props.url}</text>
       <box marginTop={1} flexGrow={1}>
         <select
@@ -586,7 +586,7 @@ function ReviewConfirmDialog(props: { url: string; onConfirm: () => void; onClos
           onChange={(index) => setSelectedIndex(index)}
         />
       </box>
-      <text fg={muted}>↑↓ 选择 · Enter 确认 · Esc 返回</text>
+      <text fg={muted} height={1}>↑↓ 选择 · Enter 确认 · Esc 返回</text>
     </box>
   )
 }
@@ -1297,6 +1297,8 @@ export function App() {
     </box>
   )
 }
+
+
 
 
 

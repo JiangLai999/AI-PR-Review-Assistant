@@ -35671,8 +35671,10 @@ function ReviewConfirmDialog(props) {
     setProp(_el$63, "flexDirection", "column");
     insertNode(_el$64, createTextNode(`\u5F00\u59CB PR \u5BA1\u67E5 // CONFIRM`));
     setProp(_el$64, "fg", "#fb8147");
+    setProp(_el$64, "height", 1);
     insertNode(_el$66, createTextNode(`\u5DF2\u8BC6\u522B GitHub Pull Request\uFF1A`));
     setProp(_el$66, "fg", "#808080");
+    setProp(_el$66, "height", 1);
     setProp(_el$68, "fg", "#eeeeee");
     insert(_el$68, () => props.url);
     insertNode(_el$69, _el$70);
@@ -35690,6 +35692,7 @@ function ReviewConfirmDialog(props) {
     setProp(_el$70, "onChange", (index) => setSelectedIndex(index));
     insertNode(_el$71, createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Enter \u786E\u8BA4 \xB7 Esc \u8FD4\u56DE`));
     setProp(_el$71, "fg", "#808080");
+    setProp(_el$71, "height", 1);
     effect((_$p) => setProp(_el$70, "selectedIndex", selectedIndex(), _$p));
     return _el$63;
   })();
