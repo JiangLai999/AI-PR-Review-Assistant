@@ -7,16 +7,38 @@ import { commandCompletion, commandEnterAction, commandMatches } from "./command
 import { truncateMiddle, workspaceRootLabel } from "./format"
 import { detailScrollDelta } from "./keymap"
 import {
+  demoPanelFromPayload,
+  publishPreviewFromPayload,
   reviewReportPanels,
   reviewWorkspaceFromReport,
+  showcasePanelFromPayload,
+  type DemoPanelData,
   type EvidenceCounts,
+  type PublishPreviewData,
   type ReviewWorkspaceData,
   type SeverityCounts,
+  type ShowcasePanelData,
 } from "./review-report"
 import { ReviewProgressPanel } from "./review-ui/ReviewProgressPanel"
 import { ReviewSummaryPanel } from "./review-ui/ReviewSummaryPanel"
 import { ReviewActionBar } from "./review-ui/ReviewActionBar"
 import { ReviewWorkspace } from "./review-ui/ReviewWorkspace"
+import { DemoResultPanel } from "./review-ui/DemoResultPanel"
+import { FindingsFilterBar } from "./review-ui/FindingsFilterBar"
+import { PublishConfirmDialog } from "./review-ui/PublishConfirmDialog"
+import { ShowcasePanel } from "./review-ui/ShowcasePanel"
+import type { PublishDialogState } from "./review-ui/panel-model"
+import {
+  applyFindingsFilter,
+  cycleEvidence,
+  cycleSeverity,
+  cycleSort,
+  describeFilter,
+  emptyFindingsFilter,
+  filterCounts,
+  hasActiveCriteria,
+  type FindingsFilterState,
+} from "./findings-filter"
 import type { InputRenderable, TextareaRenderable, KeyBinding, ScrollBoxRenderable } from "@opentui/core"
 
 const orange = "#fb8147"
@@ -249,6 +271,13 @@ function Composer(props: {
   onExplain: () => void
   onFeedback: () => void
   onExport: () => void
+  /** Publish flow: preview first, then confirm (contract §12.2). */
+  onPublish: (args: string) => void
+  /** Offline demo panel; empty string runs the default case. */
+  onDemo: (caseKey: string) => void
+  onShowcase: () => void
+  /** Focus the findings filter overlay (`Ctrl+F`). */
+  onFilterFindings: () => void
   onRetry: () => void
   reviewing: boolean
   busy: boolean
@@ -388,6 +417,23 @@ function Composer(props: {
     }
     if (text === "/retry") {
       props.onRetry()
+      submitLock = false
+      return
+    }
+    // P5 commands own their own panels, so they never reach `chat.send` and
+    // never leave the user staring at a bare text reply.
+    if (text === "/showcase") {
+      props.onShowcase()
+      submitLock = false
+      return
+    }
+    if (text === "/demo" || text.startsWith("/demo ")) {
+      props.onDemo(text.slice("/demo".length).trim())
+      submitLock = false
+      return
+    }
+    if (text === "/publish" || text.startsWith("/publish ")) {
+      props.onPublish(text.slice("/publish".length).trim())
       submitLock = false
       return
     }
@@ -534,6 +580,23 @@ function Composer(props: {
     }
     if (key.meta === true && key.name === "x") {
       props.onExport()
+      key.stopPropagation?.()
+      return
+    }
+    // The P5 shortcuts only fire while the composer owns the focus; a dialog
+    // that is already open must not restart the flow underneath the user.
+    if (props.focused !== false && key.meta === true && key.name === "p") {
+      props.onPublish("")
+      key.stopPropagation?.()
+      return
+    }
+    if (props.focused !== false && key.meta === true && key.name === "d") {
+      props.onDemo("")
+      key.stopPropagation?.()
+      return
+    }
+    if (props.focused !== false && isCtrlKey(key, "f")) {
+      props.onFilterFindings()
       key.stopPropagation?.()
       return
     }
@@ -2026,6 +2089,221 @@ function ModelDialog(props: { backend: BackendClient; runtime: RuntimeSnapshot; 
   )
 }
 
+/**
+ * Publish confirmation overlay.
+ *
+ * Enter confirms a pending preview; `Esc` cancels a pending preview and closes
+ * the finished states. `publishing` cannot be undone from the UI, so `Esc`
+ * only dismisses the dialog and says so.
+ */
+export function PublishOverlay(props: {
+  state: PublishDialogState
+  preview?: PublishPreviewData
+  message?: string
+  language?: string
+  busy: boolean
+  onConfirm: () => void
+  onCancel: () => void
+  onClose: () => void
+}) {
+  useKeyboard((key) => {
+    if (key.name === "escape") {
+      key.stopPropagation?.()
+      if (props.state === "preview" || props.state === "publishing") props.onCancel()
+      else props.onClose()
+      return
+    }
+    if (!isEnterKey(key)) return
+    key.stopPropagation?.()
+    if (props.state === "preview") {
+      if (!props.busy) props.onConfirm()
+      return
+    }
+    props.onClose()
+  })
+
+  return (
+    // Height leaves room for the title, the default 8-line body window, the
+    // truncation marker and the confirm/cancel footer: a shorter dialog clipped
+    // the footer, so the confirm key was never visible.
+    <box position="absolute" left={8} top={2} width={64} height={19} zIndex={170} flexDirection="column">
+      <PublishConfirmDialog
+        open
+        state={props.state}
+        preview={props.preview}
+        message={props.message}
+        language={props.language}
+      />
+    </box>
+  )
+}
+
+/** Offline demo result overlay; `Esc`/Enter closes it. */
+export function DemoOverlay(props: {
+  data?: DemoPanelData
+  language?: string
+  onClose: () => void
+}) {
+  useKeyboard((key) => {
+    if (key.name === "escape" || isEnterKey(key)) {
+      key.stopPropagation?.()
+      props.onClose()
+    }
+  })
+  return (
+    <box
+      position="absolute"
+      left={8}
+      top={2}
+      width={64}
+      height={20}
+      zIndex={170}
+      flexDirection="column"
+    >
+      <box flexGrow={1} minHeight={0} flexDirection="column">
+        <DemoResultPanel
+          caseKey={props.data?.caseKey}
+          title={props.data?.title}
+          description={props.data?.description}
+          riskLevel={props.data?.riskLevel}
+          priorityFiles={props.data?.priorityFiles}
+          findings={props.data?.findings ?? []}
+          evidence={props.data?.evidence}
+          durationMs={props.data?.durationMs}
+          language={props.language}
+        />
+      </box>
+      <text height={1} fg={muted}>
+        Esc / Enter 关闭 · 离线运行，不调用模型与 GitHub
+      </text>
+    </box>
+  )
+}
+
+/** Offline showcase script overlay. */
+export function ShowcaseOverlay(props: {
+  data?: ShowcasePanelData
+  language?: string
+  onClose: () => void
+}) {
+  useKeyboard((key) => {
+    if (key.name === "escape" || isEnterKey(key)) {
+      key.stopPropagation?.()
+      props.onClose()
+    }
+  })
+  return (
+    <box
+      position="absolute"
+      left={8}
+      top={3}
+      width={64}
+      height={16}
+      zIndex={170}
+      flexDirection="column"
+    >
+      <box flexGrow={1} minHeight={0} flexDirection="column">
+        <ShowcasePanel
+          title={props.data?.title}
+          offlineReady={props.data?.offlineReady}
+          realReviewReady={props.data?.realReviewReady}
+          steps={props.data?.steps ?? []}
+          language={props.language}
+        />
+      </box>
+      <text height={1} fg={muted}>
+        Esc / Enter 关闭 · 演示脚本不会改变项目状态
+      </text>
+    </box>
+  )
+}
+
+/**
+ * Findings filter overlay: one text input plus keyboard cycling of severity,
+ * evidence health and sort order. `Enter` applies, `Esc` clears and closes.
+ */
+export function FindingsFilterOverlay(props: {
+  state: FindingsFilterState
+  shown: number
+  total: number
+  language?: string
+  onQuery: (query: string) => void
+  onShortcut: (action: "severity" | "evidence" | "sort") => void
+  onApply: () => void
+  onClear: () => void
+}) {
+  let filterInput: InputRenderable | undefined
+  useKeyboard((key) => {
+    if (key.name === "escape") {
+      key.stopPropagation?.()
+      props.onClear()
+      return
+    }
+    if (isEnterKey(key)) {
+      key.stopPropagation?.()
+      props.onApply()
+      return
+    }
+    if (key.name === "tab") {
+      key.stopPropagation?.()
+      props.onShortcut(key.shift === true ? "evidence" : "severity")
+      return
+    }
+    if (isCtrlKey(key, "s")) {
+      key.stopPropagation?.()
+      props.onShortcut("sort")
+    }
+  })
+  onMount(() => {
+    filterInput?.focus?.()
+  })
+  return (
+    <box
+      position="absolute"
+      left={9}
+      top={3}
+      width={62}
+      height={14}
+      backgroundColor="#171717"
+      borderStyle="single"
+      borderColor={orange}
+      paddingLeft={2}
+      paddingRight={2}
+      zIndex={170}
+      flexDirection="column"
+    >
+      <text fg={orange}>FINDINGS FILTER // 筛选</text>
+      <text fg={muted}>输入关键词实时过滤；Tab 严重级别 · Shift+Tab 证据 · Ctrl+S 排序</text>
+      <box marginTop={1} backgroundColor="#202020" paddingLeft={1} paddingRight={1}>
+        <input
+          ref={(node) => {
+            filterInput = node
+          }}
+          placeholder="关键词 / 文件 / 标题"
+          focused
+          onContentChange={() => props.onQuery(filterInput?.value ?? "")}
+          flexGrow={1}
+        />
+      </box>
+      <box marginTop={1} flexDirection="column">
+        <FindingsFilterBar
+          active={props.state.active}
+          query={props.state.query}
+          severity={props.state.severity}
+          evidence={props.state.evidence}
+          sort={props.state.sort}
+          shown={props.shown}
+          total={props.total}
+          language={props.language}
+        />
+      </box>
+      <text fg={muted} marginTop={1}>
+        Enter 应用 · Esc 清除并关闭
+      </text>
+    </box>
+  )
+}
+
 export function App() {
   const [mode, setMode] = createSignal("Build")
   const [composerDraft, setComposerDraft] = createSignal("")
@@ -2067,6 +2345,19 @@ export function App() {
   const [historyStats, setHistoryStats] = createSignal<HistoryStats>({})
   const [historyStoreNote, setHistoryStoreNote] = createSignal("")
   const [modelOpen, setModelOpen] = createSignal(false)
+  // P5 surfaces: GitHub publish confirmation, offline demo/showcase panels and
+  // the findings filter overlay.
+  const [findingsFilter, setFindingsFilter] = createSignal<FindingsFilterState>(emptyFindingsFilter())
+  const [filterOpen, setFilterOpen] = createSignal(false)
+  const [publishOpen, setPublishOpen] = createSignal(false)
+  const [publishState, setPublishState] = createSignal<PublishDialogState>("preview")
+  const [publishPreview, setPublishPreview] = createSignal<PublishPreviewData | undefined>()
+  const [publishMessage, setPublishMessage] = createSignal("")
+  const [publishBusy, setPublishBusy] = createSignal(false)
+  const [demoOpen, setDemoOpen] = createSignal(false)
+  const [demoData, setDemoData] = createSignal<DemoPanelData | undefined>()
+  const [showcaseOpen, setShowcaseOpen] = createSignal(false)
+  const [showcaseData, setShowcaseData] = createSignal<ShowcasePanelData | undefined>()
   const [reviewReport, setReviewReport] = createSignal<ReviewReport>({})
   const [pendingReviewUrl, setPendingReviewUrl] = createSignal("")
   const [reviewing, setReviewing] = createSignal(false)
@@ -2257,6 +2548,160 @@ export function App() {
   }
 
   const currentRunId = () => reviewWorkspace().runId ?? reviewReport().run?.id ?? ""
+
+  // ---------------------------------------------------------------------
+  // P5: findings filter, offline demo/showcase, GitHub publish
+  // ---------------------------------------------------------------------
+  const visibleFindings = () => applyFindingsFilter(reviewFindings(), findingsFilter())
+  const visibleFindingCounts = () => filterCounts(reviewFindings(), findingsFilter())
+
+  const updateFindingsFilter = (next: FindingsFilterState) =>
+    setFindingsFilter({ ...next, active: hasActiveCriteria(next) })
+
+  const clearFindingsFilter = () => {
+    setFindingsFilter(emptyFindingsFilter())
+    setFilterOpen(false)
+    setReviewActionMessage("已清除 Findings 筛选。")
+  }
+
+  const openFindingsFilter = () => {
+    if (reviewFindings().length === 0) {
+      appendMessage({
+        role: "assistant",
+        content: "当前没有可筛选的 Findings。先执行 /review <PR_URL> 或 /history <run_id>。",
+      })
+      return
+    }
+    setFindingsOpen(false)
+    setFilterOpen(true)
+  }
+
+  const applyFindingsFilterShortcut = (action: "severity" | "evidence" | "sort") => {
+    const current = findingsFilter()
+    const next =
+      action === "severity"
+        ? cycleSeverity(current)
+        : action === "evidence"
+          ? cycleEvidence(current)
+          : cycleSort(current)
+    updateFindingsFilter(next)
+  }
+
+  const closeFindingsFilter = () => {
+    setFilterOpen(false)
+    const state = findingsFilter()
+    if (hasActiveCriteria(state)) {
+      setReviewActionMessage(
+        `Findings 筛选已应用：${describeFilter(state)}（${visibleFindingCounts().shown}/${visibleFindingCounts().total}）`,
+      )
+    }
+  }
+
+  const runDemo = async (caseKey: string) => {
+    const key = caseKey.trim()
+    const response = await backend.request("command.execute", {
+      name: "demo",
+      args: key ? [key] : [],
+      session_id: sessionId(),
+    })
+    if (!response.ok) {
+      setDemoOpen(true)
+      setDemoData(undefined)
+      setReviewActionMessage(String(response.error?.message ?? "离线 Demo 运行失败。"))
+      return
+    }
+    setDemoData(demoPanelFromPayload(response.result))
+    setDemoOpen(true)
+    if (response.result?.text) {
+      appendMessage({ role: "assistant", content: String(response.result.text) })
+    }
+  }
+
+  const openShowcase = async () => {
+    const response = await backend.request("command.execute", {
+      name: "showcase",
+      args: [],
+      session_id: sessionId(),
+    })
+    if (!response.ok) {
+      setReviewActionMessage(String(response.error?.message ?? "演示路径读取失败。"))
+      return
+    }
+    setShowcaseData(showcasePanelFromPayload(response.result))
+    setShowcaseOpen(true)
+    if (response.result?.text) {
+      appendMessage({ role: "assistant", content: String(response.result.text) })
+    }
+  }
+
+  /**
+   * Publish is two-phase: without `--confirm` the backend only previews, and
+   * the dialog is what turns a preview into a real GitHub comment. Posting
+   * straight from a keystroke is not an option.
+   */
+  const startPublish = async (args: string) => {
+    const tokens = args.split(/\s+/).filter((token) => token.length > 0)
+    const confirm = tokens.some((token) => token === "--confirm" || token === "-c")
+    const runId = tokens.find((token) => !token.startsWith("-")) ?? ""
+    if (publishBusy()) return
+    setPublishOpen(true)
+    setPublishState("publishing")
+    setPublishMessage(confirm ? "正在发布审查评论…" : "正在读取发布预览…")
+    setPublishBusy(true)
+    try {
+      const response = await backend.request("command.execute", {
+        name: "publish",
+        args: [...(runId ? [runId] : []), ...(confirm ? ["--confirm"] : [])],
+        session_id: sessionId(),
+      })
+      if (!response.ok) {
+        setPublishState("failed")
+        setPublishMessage(String(response.error?.message ?? "发布失败。"))
+        setReviewActionMessage(String(response.error?.message ?? "发布失败。"))
+        return
+      }
+      const payload = response.result ?? {}
+      setPublishPreview(publishPreviewFromPayload(payload))
+      setPublishMessage(String(payload.text ?? ""))
+      if (String(payload.status) === "published") {
+        setPublishState("published")
+        setReviewActionMessage(String(payload.text ?? "审查评论已发布。"))
+        appendMessage({ role: "assistant", content: String(payload.text ?? "审查评论已发布。") })
+      } else {
+        setPublishState("preview")
+      }
+    } catch (error) {
+      setPublishState("failed")
+      setPublishMessage(String(error))
+      setReviewActionMessage(String(error))
+    } finally {
+      setPublishBusy(false)
+    }
+  }
+
+  const confirmPublish = () => {
+    const runId = publishPreview()?.runId ?? ""
+    void startPublish(runId ? `${runId} --confirm` : "--confirm")
+  }
+
+  const dismissPublish = () => {
+    setPublishOpen(false)
+    setPublishState("preview")
+    setPublishMessage("")
+  }
+
+  const cancelPublish = () => {
+    // `publishing` cannot be interrupted client-side; the backend request owns
+    // that lifecycle, so only a pending preview can be cancelled.
+    if (publishState() === "publishing") {
+      dismissPublish()
+      setReviewActionMessage("已关闭发布对话框；若请求仍在进行，结果会写入对话记录。")
+      return
+    }
+    setPublishState("cancelled")
+    setPublishMessage("已取消发布：没有向 GitHub 写入任何内容。")
+    setReviewActionMessage("已取消发布：没有向 GitHub 写入任何内容。")
+  }
 
   const explainCurrentRun = async () => {
     const runId = currentRunId()
@@ -2685,17 +3130,33 @@ export function App() {
           <text fg={muted}>可用恢复：Ctrl+R /retry · /model status · /model local · /model cloud · /new</text>
         </box>
       </Show>
+      <Show when={reviewFindings().length > 0}>
+        <box width={76} marginTop={1} flexDirection="column">
+          <FindingsFilterBar
+            active={hasActiveCriteria(findingsFilter()) || findingsFilter().sort !== "severity"}
+            query={findingsFilter().query}
+            severity={findingsFilter().severity === "all" ? undefined : findingsFilter().severity}
+            evidence={findingsFilter().evidence === "all" ? undefined : findingsFilter().evidence}
+            sort={findingsFilter().sort}
+            shown={visibleFindingCounts().shown}
+            total={visibleFindingCounts().total}
+            language={runtime().ui_language}
+          />
+        </box>
+      </Show>
       <Show when={isWideReview() && (reviewing() || reviewReport().pr || reviewReport().counts)}>
         <box width={76} height={Math.max(20, dimensions().height - 8)} marginTop={2}>
           <ReviewWorkspace
             layout="wide"
             progress={reviewProgressProps()}
             summary={reviewSummaryProps()}
-            findings={reviewFindings()}
+            findings={visibleFindings()}
             onOpenFindings={openFindings}
             onExplain={() => void explainCurrentRun()}
             onFeedback={() => openFeedback()}
             onExport={() => void exportCurrentReport()}
+            onPublish={() => void startPublish("")}
+            onFilter={openFindingsFilter}
             language={runtime().ui_language}
           />
         </box>
@@ -2755,7 +3216,7 @@ export function App() {
             evidence={reviewWorkspace().evidence}
             filesReviewed={reviewWorkspace().filesReviewed}
             filesSkipped={reviewWorkspace().filesSkipped}
-            findings={reviewFindings()}
+            findings={visibleFindings()}
             durationSeconds={reviewWorkspace().durationSeconds}
             cost={reviewWorkspace().cost}
             runId={reviewWorkspace().runId}
@@ -2772,6 +3233,8 @@ export function App() {
             onExplain={() => void explainCurrentRun()}
             onFeedback={() => openFeedback()}
             onExport={() => void exportCurrentReport()}
+            onPublish={() => void startPublish("")}
+            onFilter={openFindingsFilter}
             language={runtime().ui_language}
           />
         </box>
@@ -2805,6 +3268,10 @@ export function App() {
         onExplain={() => void explainCurrentRun()}
         onFeedback={() => openFeedback()}
         onExport={() => void exportCurrentReport()}
+        onPublish={(args) => void startPublish(args)}
+        onDemo={(caseKey) => void runDemo(caseKey)}
+        onShowcase={() => void openShowcase()}
+        onFilterFindings={openFindingsFilter}
         onRetry={retryLastReview}
         reviewing={reviewing()}
         onCancel={cancelCurrentTask}
@@ -2813,7 +3280,19 @@ export function App() {
         onChatRequestEnd={() => setActiveChatRequestId(undefined)}
         hasRenderedAssistantReply={hasRenderedAssistantReply}
         busy={backendStatus() === "THINKING" || backendStatus() === "REVIEWING" || backendStatus() === "CANCELLING"}
-        focused={!findingsOpen() && !feedbackOpen() && !historyOpen() && !modelOpen() && !setupOpen() && pendingReviewUrl() === "" && reviewStage() !== "审查失败"}
+        focused={
+          !findingsOpen() &&
+          !feedbackOpen() &&
+          !historyOpen() &&
+          !modelOpen() &&
+          !setupOpen() &&
+          !filterOpen() &&
+          !publishOpen() &&
+          !demoOpen() &&
+          !showcaseOpen() &&
+          pendingReviewUrl() === "" &&
+          reviewStage() !== "审查失败"
+        }
       />
       <Show when={modelOpen()}>
         <ModelDialog
@@ -2864,6 +3343,40 @@ export function App() {
           message={reviewDetail()}
           onRetry={() => { setFindingsOpen(false); void startReview(reviewUrl()) }}
           onClose={() => setReviewStage("")}
+        />
+      </Show>
+      <Show when={filterOpen()}>
+        <FindingsFilterOverlay
+          state={findingsFilter()}
+          shown={visibleFindingCounts().shown}
+          total={visibleFindingCounts().total}
+          language={runtime().ui_language}
+          onQuery={(query) => updateFindingsFilter({ ...findingsFilter(), query })}
+          onShortcut={applyFindingsFilterShortcut}
+          onApply={closeFindingsFilter}
+          onClear={clearFindingsFilter}
+        />
+      </Show>
+      <Show when={publishOpen()}>
+        <PublishOverlay
+          state={publishState()}
+          preview={publishPreview()}
+          message={publishMessage()}
+          language={runtime().ui_language}
+          busy={publishBusy()}
+          onConfirm={confirmPublish}
+          onCancel={cancelPublish}
+          onClose={dismissPublish}
+        />
+      </Show>
+      <Show when={demoOpen()}>
+        <DemoOverlay data={demoData()} language={runtime().ui_language} onClose={() => setDemoOpen(false)} />
+      </Show>
+      <Show when={showcaseOpen()}>
+        <ShowcaseOverlay
+          data={showcaseData()}
+          language={runtime().ui_language}
+          onClose={() => setShowcaseOpen(false)}
         />
       </Show>
       <Show when={setupOpen()}>

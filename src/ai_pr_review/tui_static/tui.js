@@ -34928,6 +34928,11 @@ var chatCommands = [
   { name: "/report", description: "\u67E5\u770B\u5F53\u524D\u62A5\u544A" },
   { name: "/export", description: "\u5BFC\u51FA\u5F53\u524D\u62A5\u544A", argument: "<json|markdown> [\u8DEF\u5F84]" },
   { name: "/history", description: "\u67E5\u770B\u5386\u53F2\u8BB0\u5F55", argument: "[\u6570\u91CF\u6216 Run ID]" },
+  { name: "/explain", description: "\u89E3\u91CA\u5F53\u524D Run \u7684\u95EE\u9898\u4E0E\u8BC1\u636E", argument: "<run_id>" },
+  { name: "/feedback", description: "\u8BB0\u5F55\u95EE\u9898\u53CD\u9988", argument: "<run_id> <finding_id> <status>" },
+  { name: "/publish", description: "\u9884\u89C8\u5E76\u53D1\u5E03\u5BA1\u67E5\u8BC4\u8BBA\u5230 GitHub", argument: "[run_id] [--confirm]" },
+  { name: "/demo", description: "\u8FD0\u884C\u79BB\u7EBF\u6F14\u793A\u7528\u4F8B", argument: "[case_key|list]" },
+  { name: "/showcase", description: "\u67E5\u770B\u53C2\u8D5B\u6F14\u793A\u8DEF\u5F84" },
   { name: "/new", description: "\u5F00\u59CB\u65B0\u4F1A\u8BDD" }
 ];
 function commandMatches(draft, commands = chatCommands) {
@@ -35072,6 +35077,72 @@ function reviewWorkspaceFromReport(report) {
     title: typeof pr.title === "string" ? pr.title : undefined
   };
 }
+var asText = (value) => typeof value === "string" && value.length > 0 ? value : undefined;
+var REDACTION_PATTERNS = [
+  /\bgh[pousr]_[A-Za-z0-9]{16,}\b/g,
+  /\bgithub_pat_[A-Za-z0-9_]{16,}\b/g,
+  /\bsk-[A-Za-z0-9_-]{16,}\b/g,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b/gi
+];
+function redactCredentials(text) {
+  let output = text;
+  for (const pattern of REDACTION_PATTERNS)
+    output = output.replace(pattern, "[redacted]");
+  return output;
+}
+function showcasePanelFromPayload(payload) {
+  const record = asRecord(payload);
+  const rawSteps = Array.isArray(record.steps) ? record.steps : [];
+  if (Object.keys(record).length === 0)
+    return;
+  return {
+    title: asText(record.title),
+    offlineReady: typeof record.offline_ready === "boolean" ? record.offline_ready : undefined,
+    realReviewReady: typeof record.real_review_ready === "boolean" ? record.real_review_ready : undefined,
+    steps: rawSteps.map((raw, index) => {
+      const step = asRecord(raw);
+      return {
+        step: typeof step.step === "number" || typeof step.step === "string" ? step.step : index + 1,
+        command: String(step.command ?? ""),
+        purpose: asText(step.purpose)
+      };
+    })
+  };
+}
+function demoPanelFromPayload(payload) {
+  const record = asRecord(payload);
+  if (Object.keys(record).length === 0)
+    return;
+  const caseInfo = asRecord(record.case);
+  const plan = asRecord(record.plan);
+  const findings = Array.isArray(record.findings) ? record.findings : [];
+  const priorityFiles = Array.isArray(plan.priority_files) ? plan.priority_files.length : undefined;
+  return {
+    caseKey: asText(caseInfo.key),
+    title: asText(caseInfo.title),
+    description: asText(caseInfo.description),
+    riskLevel: asText(plan.risk_level),
+    priorityFiles,
+    findings,
+    evidence: findings.length > 0 ? evidenceCountsFromFindings(findings) : undefined
+  };
+}
+function publishPreviewFromPayload(payload) {
+  const record = asRecord(payload);
+  const body = asText(record.comment_body);
+  const repository = asText(record.repository);
+  if (!body && !repository)
+    return;
+  return {
+    runId: asText(record.run_id),
+    repository,
+    prNumber: typeof record.pr_number === "number" ? record.pr_number : undefined,
+    url: asText(record.url),
+    commentBody: body ? redactCredentials(body) : undefined,
+    findings: typeof record.findings === "number" ? record.findings : undefined,
+    alreadyPublished: typeof record.already_published === "boolean" ? record.already_published : undefined
+  };
+}
 
 // src/review-ui/helpers.ts
 var SEVERITY_COLORS = {
@@ -35202,6 +35273,62 @@ function formatConfidence(confidence) {
 function evidenceTotals(counts) {
   return clampCount(counts?.valid) + clampCount(counts?.needsReview) + clampCount(counts?.invalid) + clampCount(counts?.unverified);
 }
+var isFindingObject = (value) => typeof value === "object" && value !== null;
+var searchableText = (finding) => [finding.title, finding.message, finding.problem, finding.file, finding.category, finding.suggestion].map((part) => String(part ?? "")).join(" ").toLowerCase();
+function filterFindings(findings, filter) {
+  const list = Array.isArray(findings) ? findings : [];
+  const severity = normalizeToken(filter?.severity ?? "");
+  const evidence = normalizeToken(filter?.evidence ?? "");
+  const query = String(filter?.query ?? "").trim().toLowerCase();
+  return list.filter((finding) => {
+    if (!isFindingObject(finding))
+      return false;
+    if (severity && normalizeToken(finding.severity) !== severity)
+      return false;
+    if (evidence && normalizeToken(finding.evidence_status) !== evidence)
+      return false;
+    if (query && !searchableText(finding).includes(query))
+      return false;
+    return true;
+  });
+}
+var compareIndex = (a, b) => a.index - b.index;
+var confidenceValue = (finding) => {
+  const value = finding?.confidence;
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+};
+function sortFindings(findings, key = "severity") {
+  const list = Array.isArray(findings) ? findings : [];
+  const entries = list.map((finding, index) => ({ finding, index }));
+  entries.sort((a, b) => {
+    if (key === "file") {
+      const fileA = String(a.finding?.file ?? "");
+      const fileB = String(b.finding?.file ?? "");
+      if (!fileA && !fileB)
+        return compareIndex(a, b);
+      if (!fileA)
+        return 1;
+      if (!fileB)
+        return -1;
+      return fileA.localeCompare(fileB) || compareIndex(a, b);
+    }
+    if (key === "confidence") {
+      const confA = confidenceValue(a.finding);
+      const confB = confidenceValue(b.finding);
+      if (confA === undefined && confB === undefined)
+        return compareIndex(a, b);
+      if (confA === undefined)
+        return 1;
+      if (confB === undefined)
+        return -1;
+      return confB - confA || compareIndex(a, b);
+    }
+    const rankA = SEVERITY_RANK[normalizeToken(a.finding?.severity)] ?? UNKNOWN_RANK;
+    const rankB = SEVERITY_RANK[normalizeToken(b.finding?.severity)] ?? UNKNOWN_RANK;
+    return rankA - rankB || compareIndex(a, b);
+  });
+  return entries.map((entry) => entry.finding);
+}
 
 // src/review-ui/ReviewProgressPanel.tsx
 var STATUS_GLYPH = {
@@ -35248,13 +35375,8 @@ function ReviewProgressPanel(props) {
   const metaLine = () => `${en() ? "Elapsed" : "\u5DF2\u7528\u65F6"} ${formatDuration(props.elapsedMs, props.language)} \xB7 ${en() ? "Cost" : "\u6210\u672C"} ${formatCost(props.cost)}`;
   const hasRouting = () => Boolean(props.routing?.runtimeProfile || props.routing?.routerModel || props.routing?.deepModel);
   return (() => {
-    var _el$ = createElement("box"), _el$2 = createElement("text"), _el$3 = createElement("text"), _el$4 = createElement("text"), _el$5 = createElement("text"), _el$6 = createElement("span"), _el$7 = createElement("span"), _el$8 = createElement("text"), _el$9 = createElement("text");
+    var _el$ = createElement("box"), _el$2 = createElement("box"), _el$3 = createElement("text"), _el$4 = createElement("text"), _el$5 = createElement("text"), _el$6 = createElement("text"), _el$7 = createElement("span"), _el$8 = createElement("span"), _el$9 = createElement("text"), _el$0 = createElement("text");
     insertNode(_el$, _el$2);
-    insertNode(_el$, _el$3);
-    insertNode(_el$, _el$4);
-    insertNode(_el$, _el$5);
-    insertNode(_el$, _el$8);
-    insertNode(_el$, _el$9);
     setProp(_el$, "width", "100%");
     setProp(_el$, "backgroundColor", "#1e1e1e");
     setProp(_el$, "borderStyle", "single");
@@ -35262,44 +35384,57 @@ function ReviewProgressPanel(props) {
     setProp(_el$, "paddingLeft", 1);
     setProp(_el$, "paddingRight", 1);
     setProp(_el$, "flexDirection", "column");
-    setProp(_el$2, "height", 1);
-    setProp(_el$2, "fg", "#fb8147");
-    insert(_el$2, title);
+    setProp(_el$, "overflow", "hidden");
+    setProp(_el$, "flexShrink", 1);
+    setProp(_el$, "minHeight", 0);
+    insertNode(_el$2, _el$3);
+    insertNode(_el$2, _el$4);
+    insertNode(_el$2, _el$5);
+    insertNode(_el$2, _el$6);
+    insertNode(_el$2, _el$9);
+    insertNode(_el$2, _el$0);
+    setProp(_el$2, "flexGrow", 1);
+    setProp(_el$2, "minHeight", 0);
+    setProp(_el$2, "overflow", "hidden");
+    setProp(_el$2, "flexDirection", "column");
     setProp(_el$3, "height", 1);
-    setProp(_el$3, "fg", "#eeeeee");
-    insert(_el$3, () => props.url || "\u2014");
+    setProp(_el$3, "fg", "#fb8147");
+    insert(_el$3, title);
     setProp(_el$4, "height", 1);
-    setProp(_el$4, "fg", "#808080");
-    insert(_el$4, stageLine);
-    insertNode(_el$5, _el$6);
-    insertNode(_el$5, _el$7);
+    setProp(_el$4, "fg", "#eeeeee");
+    insert(_el$4, () => props.url || "\u2014");
     setProp(_el$5, "height", 1);
-    setProp(_el$6, "style", {
+    setProp(_el$5, "fg", "#808080");
+    insert(_el$5, stageLine);
+    insertNode(_el$6, _el$7);
+    insertNode(_el$6, _el$8);
+    setProp(_el$6, "height", 1);
+    setProp(_el$7, "style", {
       fg: "#fb8147"
     });
-    insert(_el$6, () => progressBar(percent(), 16));
-    setProp(_el$7, "style", {
+    insert(_el$7, () => progressBar(percent(), 16));
+    setProp(_el$8, "style", {
       fg: "#eeeeee"
     });
-    insert(_el$7, () => ` ${percent().toFixed(0)}%`);
-    setProp(_el$8, "height", 1);
-    setProp(_el$8, "fg", "#808080");
-    insert(_el$8, filesLine);
+    insert(_el$8, () => ` ${percent().toFixed(0)}%`);
     setProp(_el$9, "height", 1);
     setProp(_el$9, "fg", "#808080");
-    insert(_el$9, metaLine);
-    insert(_el$, createComponent2(Show, {
+    insert(_el$9, filesLine);
+    setProp(_el$0, "height", 1);
+    setProp(_el$0, "fg", "#808080");
+    insert(_el$0, metaLine);
+    insert(_el$2, createComponent2(Show, {
       get when() {
         return stages().length > 0;
       },
       get children() {
         return [(() => {
-          var _el$0 = createElement("text");
-          setProp(_el$0, "height", 1);
-          setProp(_el$0, "fg", "#f3c742");
-          setProp(_el$0, "marginTop", 1);
-          insert(_el$0, () => en() ? "Stages" : "\u9636\u6BB5");
-          return _el$0;
+          var _el$1 = createElement("text");
+          setProp(_el$1, "height", 1);
+          setProp(_el$1, "fg", "#f3c742");
+          setProp(_el$1, "marginTop", 1);
+          insert(_el$1, () => en() ? "Stages" : "\u9636\u6BB5");
+          return _el$1;
         })(), createComponent2(For, {
           get each() {
             return stages();
@@ -35315,41 +35450,41 @@ function ReviewProgressPanel(props) {
               return parts.join(" \xB7 ");
             };
             return (() => {
-              var _el$14 = createElement("box"), _el$15 = createElement("text"), _el$16 = createElement("text"), _el$17 = createElement("text");
-              insertNode(_el$14, _el$15);
-              insertNode(_el$14, _el$16);
-              insertNode(_el$14, _el$17);
-              setProp(_el$14, "height", 1);
-              setProp(_el$14, "flexDirection", "row");
-              setProp(_el$15, "width", 2);
+              var _el$15 = createElement("box"), _el$16 = createElement("text"), _el$17 = createElement("text"), _el$18 = createElement("text");
+              insertNode(_el$15, _el$16);
+              insertNode(_el$15, _el$17);
+              insertNode(_el$15, _el$18);
               setProp(_el$15, "height", 1);
-              insert(_el$15, () => STATUS_GLYPH[stage.status] ?? "\xB7");
+              setProp(_el$15, "flexDirection", "row");
+              setProp(_el$16, "width", 2);
               setProp(_el$16, "height", 1);
-              setProp(_el$16, "flexGrow", 1);
-              setProp(_el$16, "fg", "#eeeeee");
-              insert(_el$16, () => stage.label || stage.id);
+              insert(_el$16, () => STATUS_GLYPH[stage.status] ?? "\xB7");
               setProp(_el$17, "height", 1);
-              setProp(_el$17, "fg", "#808080");
-              insert(_el$17, tail);
-              effect((_$p) => setProp(_el$15, "fg", STATUS_COLOR[stage.status] ?? "#808080", _$p));
-              return _el$14;
+              setProp(_el$17, "flexGrow", 1);
+              setProp(_el$17, "fg", "#eeeeee");
+              insert(_el$17, () => stage.label || stage.id);
+              setProp(_el$18, "height", 1);
+              setProp(_el$18, "fg", "#808080");
+              insert(_el$18, tail);
+              effect((_$p) => setProp(_el$16, "fg", STATUS_COLOR[stage.status] ?? "#808080", _$p));
+              return _el$15;
             })();
           }
         })];
       }
     }), null);
-    insert(_el$, createComponent2(Show, {
+    insert(_el$2, createComponent2(Show, {
       get when() {
         return fileStates().length > 0;
       },
       get children() {
         return [(() => {
-          var _el$1 = createElement("text");
-          setProp(_el$1, "height", 1);
-          setProp(_el$1, "fg", "#f3c742");
-          setProp(_el$1, "marginTop", 1);
-          insert(_el$1, () => en() ? "File list" : "\u6587\u4EF6\u5217\u8868");
-          return _el$1;
+          var _el$10 = createElement("text");
+          setProp(_el$10, "height", 1);
+          setProp(_el$10, "fg", "#f3c742");
+          setProp(_el$10, "marginTop", 1);
+          insert(_el$10, () => en() ? "File list" : "\u6587\u4EF6\u5217\u8868");
+          return _el$10;
         })(), createComponent2(For, {
           get each() {
             return fileStates();
@@ -35367,79 +35502,79 @@ function ReviewProgressPanel(props) {
               return parts.join(" \xB7 ");
             };
             return (() => {
-              var _el$18 = createElement("box"), _el$19 = createElement("text"), _el$20 = createElement("text"), _el$21 = createElement("text");
-              insertNode(_el$18, _el$19);
-              insertNode(_el$18, _el$20);
-              insertNode(_el$18, _el$21);
-              setProp(_el$18, "height", 1);
-              setProp(_el$18, "flexDirection", "row");
-              setProp(_el$19, "width", 2);
+              var _el$19 = createElement("box"), _el$20 = createElement("text"), _el$21 = createElement("text"), _el$22 = createElement("text");
+              insertNode(_el$19, _el$20);
+              insertNode(_el$19, _el$21);
+              insertNode(_el$19, _el$22);
               setProp(_el$19, "height", 1);
-              insert(_el$19, () => FILE_GLYPH[file.status] ?? "\xB7");
+              setProp(_el$19, "flexDirection", "row");
+              setProp(_el$20, "width", 2);
               setProp(_el$20, "height", 1);
-              setProp(_el$20, "flexGrow", 1);
-              setProp(_el$20, "fg", "#eeeeee");
-              insert(_el$20, () => file.filename);
+              insert(_el$20, () => FILE_GLYPH[file.status] ?? "\xB7");
               setProp(_el$21, "height", 1);
-              insert(_el$21, tail);
+              setProp(_el$21, "flexGrow", 1);
+              setProp(_el$21, "fg", "#eeeeee");
+              insert(_el$21, () => file.filename);
+              setProp(_el$22, "height", 1);
+              insert(_el$22, tail);
               effect((_p$) => {
                 var _v$ = file.status === "failed" ? "#ff6b6b" : "#808080", _v$2 = file.error ? "#ff6b6b" : "#808080";
-                _v$ !== _p$.e && (_p$.e = setProp(_el$19, "fg", _v$, _p$.e));
-                _v$2 !== _p$.t && (_p$.t = setProp(_el$21, "fg", _v$2, _p$.t));
+                _v$ !== _p$.e && (_p$.e = setProp(_el$20, "fg", _v$, _p$.e));
+                _v$2 !== _p$.t && (_p$.t = setProp(_el$22, "fg", _v$2, _p$.t));
                 return _p$;
               }, {
                 e: undefined,
                 t: undefined
               });
-              return _el$18;
+              return _el$19;
             })();
           }
         })];
       }
     }), null);
-    insert(_el$, createComponent2(Show, {
+    insert(_el$2, createComponent2(Show, {
       get when() {
         return hasRouting();
       },
       get children() {
         return [(() => {
-          var _el$10 = createElement("text");
-          setProp(_el$10, "height", 1);
-          setProp(_el$10, "fg", "#f3c742");
-          setProp(_el$10, "marginTop", 1);
-          insert(_el$10, () => en() ? "Routing" : "\u6A21\u578B\u8DEF\u7531");
-          return _el$10;
-        })(), (() => {
           var _el$11 = createElement("text");
           setProp(_el$11, "height", 1);
-          setProp(_el$11, "fg", "#eeeeee");
-          insert(_el$11, () => [props.routing?.runtimeProfile, props.routing?.routerModel ? `router ${props.routing.routerModel}` : "", props.routing?.deepModel ? `deep ${props.routing.deepModel}` : ""].filter(Boolean).join(" \xB7 "));
+          setProp(_el$11, "fg", "#f3c742");
+          setProp(_el$11, "marginTop", 1);
+          insert(_el$11, () => en() ? "Routing" : "\u6A21\u578B\u8DEF\u7531");
           return _el$11;
+        })(), (() => {
+          var _el$12 = createElement("text");
+          setProp(_el$12, "height", 1);
+          setProp(_el$12, "fg", "#eeeeee");
+          insert(_el$12, () => [props.routing?.runtimeProfile, props.routing?.routerModel ? `router ${props.routing.routerModel}` : "", props.routing?.deepModel ? `deep ${props.routing.deepModel}` : ""].filter(Boolean).join(" \xB7 "));
+          return _el$12;
         })(), createComponent2(Show, {
           get when() {
             return props.routing?.reason;
           },
           get children() {
-            var _el$12 = createElement("text");
-            setProp(_el$12, "height", 1);
-            setProp(_el$12, "fg", "#808080");
-            insert(_el$12, () => props.routing?.reason);
-            return _el$12;
+            var _el$13 = createElement("text");
+            setProp(_el$13, "height", 1);
+            setProp(_el$13, "fg", "#808080");
+            insert(_el$13, () => props.routing?.reason);
+            return _el$13;
           }
         })];
       }
     }), null);
-    insert(_el$, createComponent2(Show, {
+    insert(_el$2, createComponent2(Show, {
       get when() {
         return Boolean(props.onCancel);
       },
       get children() {
-        var _el$13 = createElement("text");
-        setProp(_el$13, "height", 1);
-        setProp(_el$13, "fg", "#808080");
-        setProp(_el$13, "marginTop", 1);
-        insert(_el$13, () => en() ? "Esc Cancel" : "Esc \u53D6\u6D88\u5BA1\u67E5");
-        return _el$13;
+        var _el$14 = createElement("text");
+        setProp(_el$14, "height", 1);
+        setProp(_el$14, "fg", "#808080");
+        setProp(_el$14, "marginTop", 1);
+        insert(_el$14, () => en() ? "Esc Cancel" : "Esc \u53D6\u6D88\u5BA1\u67E5");
+        return _el$14;
       }
     }), null);
     return _el$;
@@ -35509,16 +35644,8 @@ function ReviewSummaryPanel(props) {
     return bits.join(" \xB7 ");
   };
   return (() => {
-    var _el$ = createElement("box"), _el$2 = createElement("text"), _el$3 = createElement("text"), _el$4 = createElement("text"), _el$5 = createElement("span"), _el$6 = createElement("span"), _el$7 = createElement("span"), _el$8 = createElement("span"), _el$9 = createElement("text"), _el$0 = createElement("text"), _el$1 = createElement("span"), _el$10 = createElement("span"), _el$11 = createTextNode(` `), _el$12 = createElement("text"), _el$13 = createElement("text"), _el$14 = createElement("text"), _el$15 = createElement("text");
+    var _el$ = createElement("box"), _el$2 = createElement("box"), _el$3 = createElement("text"), _el$4 = createElement("text"), _el$5 = createElement("text"), _el$6 = createElement("span"), _el$7 = createElement("span"), _el$8 = createElement("span"), _el$9 = createElement("span"), _el$0 = createElement("text"), _el$1 = createElement("text"), _el$10 = createElement("span"), _el$11 = createElement("span"), _el$12 = createTextNode(` `), _el$13 = createElement("text"), _el$14 = createElement("text"), _el$15 = createElement("text"), _el$16 = createElement("text");
     insertNode(_el$, _el$2);
-    insertNode(_el$, _el$3);
-    insertNode(_el$, _el$4);
-    insertNode(_el$, _el$9);
-    insertNode(_el$, _el$0);
-    insertNode(_el$, _el$12);
-    insertNode(_el$, _el$13);
-    insertNode(_el$, _el$14);
-    insertNode(_el$, _el$15);
     setProp(_el$, "width", "100%");
     setProp(_el$, "backgroundColor", "#1e1e1e");
     setProp(_el$, "borderStyle", "single");
@@ -35526,103 +35653,119 @@ function ReviewSummaryPanel(props) {
     setProp(_el$, "paddingLeft", 1);
     setProp(_el$, "paddingRight", 1);
     setProp(_el$, "flexDirection", "column");
-    setProp(_el$2, "height", 1);
-    setProp(_el$2, "fg", "#fb8147");
-    insert(_el$2, title);
+    setProp(_el$, "overflow", "hidden");
+    setProp(_el$, "flexShrink", 1);
+    setProp(_el$, "minHeight", 0);
+    insertNode(_el$2, _el$3);
+    insertNode(_el$2, _el$4);
+    insertNode(_el$2, _el$5);
+    insertNode(_el$2, _el$0);
+    insertNode(_el$2, _el$1);
+    insertNode(_el$2, _el$13);
+    insertNode(_el$2, _el$14);
+    insertNode(_el$2, _el$15);
+    insertNode(_el$2, _el$16);
+    setProp(_el$2, "flexGrow", 1);
+    setProp(_el$2, "minHeight", 0);
+    setProp(_el$2, "overflow", "hidden");
+    setProp(_el$2, "flexDirection", "column");
     setProp(_el$3, "height", 1);
-    setProp(_el$3, "fg", "#eeeeee");
-    insert(_el$3, identityLine);
-    insertNode(_el$4, _el$5);
-    insertNode(_el$4, _el$6);
-    insertNode(_el$4, _el$7);
-    insertNode(_el$4, _el$8);
+    setProp(_el$3, "fg", "#fb8147");
+    insert(_el$3, title);
     setProp(_el$4, "height", 1);
-    setProp(_el$4, "marginTop", 1);
-    setProp(_el$5, "style", {
+    setProp(_el$4, "fg", "#eeeeee");
+    insert(_el$4, identityLine);
+    insertNode(_el$5, _el$6);
+    insertNode(_el$5, _el$7);
+    insertNode(_el$5, _el$8);
+    insertNode(_el$5, _el$9);
+    setProp(_el$5, "height", 1);
+    setProp(_el$5, "marginTop", 1);
+    setProp(_el$6, "style", {
       fg: "#f3c742"
     });
-    insert(_el$5, () => en() ? "Severity " : "\u4E25\u91CD\u7EA7\u522B ");
-    setProp(_el$6, "style", {
+    insert(_el$6, () => en() ? "Severity " : "\u4E25\u91CD\u7EA7\u522B ");
+    setProp(_el$7, "style", {
       fg: "#fb8147"
     });
-    insert(_el$6, () => severityBar(severity(), 16));
-    setProp(_el$7, "style", {
+    insert(_el$7, () => severityBar(severity(), 16));
+    setProp(_el$8, "style", {
       fg: "#eeeeee"
     });
-    insert(_el$7, () => ` ${severityPercent(severity())}%`);
-    setProp(_el$8, "style", {
+    insert(_el$8, () => ` ${severityPercent(severity())}%`);
+    setProp(_el$9, "style", {
       fg: "#808080"
     });
-    insert(_el$8, () => en() ? " high+" : " \u9AD8\u5371\u53CA\u4EE5\u4E0A");
-    setProp(_el$9, "height", 1);
-    insert(_el$9, createComponent2(For, {
+    insert(_el$9, () => en() ? " high+" : " \u9AD8\u5371\u53CA\u4EE5\u4E0A");
+    setProp(_el$0, "height", 1);
+    insert(_el$0, createComponent2(For, {
       each: SEVERITY_KEYS,
       children: (key, index) => (() => {
-        var _el$17 = createElement("span"), _el$18 = createTextNode(` `);
-        insertNode(_el$17, _el$18);
-        insert(_el$17, () => index() > 0 ? "  " : "", _el$18);
-        insert(_el$17, key, _el$18);
-        insert(_el$17, () => severity()[key] ?? 0, null);
-        effect((_$p) => setProp(_el$17, "style", {
+        var _el$18 = createElement("span"), _el$19 = createTextNode(` `);
+        insertNode(_el$18, _el$19);
+        insert(_el$18, () => index() > 0 ? "  " : "", _el$19);
+        insert(_el$18, key, _el$19);
+        insert(_el$18, () => severity()[key] ?? 0, null);
+        effect((_$p) => setProp(_el$18, "style", {
           fg: severityColor(key)
         }, _$p));
-        return _el$17;
+        return _el$18;
       })()
     }));
-    insertNode(_el$0, _el$1);
-    insertNode(_el$0, _el$10);
-    setProp(_el$0, "height", 1);
-    setProp(_el$0, "marginTop", 1);
-    setProp(_el$1, "style", {
+    insertNode(_el$1, _el$10);
+    insertNode(_el$1, _el$11);
+    setProp(_el$1, "height", 1);
+    setProp(_el$1, "marginTop", 1);
+    setProp(_el$10, "style", {
       fg: "#f3c742"
     });
-    insert(_el$1, () => en() ? "Evidence " : "\u8BC1\u636E\u5065\u5EB7 ");
-    insertNode(_el$10, _el$11);
-    setProp(_el$10, "style", {
+    insert(_el$10, () => en() ? "Evidence " : "\u8BC1\u636E\u5065\u5EB7 ");
+    insertNode(_el$11, _el$12);
+    setProp(_el$11, "style", {
       fg: "#808080"
     });
-    insert(_el$10, () => en() ? "total" : "\u5408\u8BA1", _el$11);
-    insert(_el$10, () => evidenceTotals(evidence()), null);
-    setProp(_el$12, "height", 1);
-    insert(_el$12, createComponent2(For, {
+    insert(_el$11, () => en() ? "total" : "\u5408\u8BA1", _el$12);
+    insert(_el$11, () => evidenceTotals(evidence()), null);
+    setProp(_el$13, "height", 1);
+    insert(_el$13, createComponent2(For, {
       each: EVIDENCE_KEYS,
       children: (key, index) => {
         const meta = EVIDENCE_LABEL[key];
         return (() => {
-          var _el$19 = createElement("span"), _el$20 = createTextNode(` `);
-          insertNode(_el$19, _el$20);
-          insert(_el$19, () => index() > 0 ? "  " : "", _el$20);
-          insert(_el$19, () => evidenceBadge(meta.status, props.language), _el$20);
-          insert(_el$19, () => evidence()[key] ?? 0, null);
-          effect((_$p) => setProp(_el$19, "style", {
+          var _el$20 = createElement("span"), _el$21 = createTextNode(` `);
+          insertNode(_el$20, _el$21);
+          insert(_el$20, () => index() > 0 ? "  " : "", _el$21);
+          insert(_el$20, () => evidenceBadge(meta.status, props.language), _el$21);
+          insert(_el$20, () => evidence()[key] ?? 0, null);
+          effect((_$p) => setProp(_el$20, "style", {
             fg: evidenceColor(meta.status)
           }, _$p));
-          return _el$19;
+          return _el$20;
         })();
       }
     }));
-    setProp(_el$13, "height", 1);
-    setProp(_el$13, "fg", "#808080");
-    setProp(_el$13, "marginTop", 1);
-    insert(_el$13, filesLine);
     setProp(_el$14, "height", 1);
     setProp(_el$14, "fg", "#808080");
-    insert(_el$14, metaLine);
+    setProp(_el$14, "marginTop", 1);
+    insert(_el$14, filesLine);
     setProp(_el$15, "height", 1);
-    setProp(_el$15, "fg", "#f3c742");
-    setProp(_el$15, "marginTop", 1);
-    insert(_el$15, () => en() ? "Top findings" : "\u91CD\u70B9\u95EE\u9898");
-    insert(_el$, createComponent2(Show, {
+    setProp(_el$15, "fg", "#808080");
+    insert(_el$15, metaLine);
+    setProp(_el$16, "height", 1);
+    setProp(_el$16, "fg", "#f3c742");
+    setProp(_el$16, "marginTop", 1);
+    insert(_el$16, () => en() ? "Top findings" : "\u91CD\u70B9\u95EE\u9898");
+    insert(_el$2, createComponent2(Show, {
       get when() {
         return ranked().length > 0;
       },
       get fallback() {
         return (() => {
-          var _el$21 = createElement("text");
-          setProp(_el$21, "height", 1);
-          setProp(_el$21, "fg", "#808080");
-          insert(_el$21, () => en() ? "No findings." : "\u6682\u65E0\u95EE\u9898\u3002");
-          return _el$21;
+          var _el$22 = createElement("text");
+          setProp(_el$22, "height", 1);
+          setProp(_el$22, "fg", "#808080");
+          insert(_el$22, () => en() ? "No findings." : "\u6682\u65E0\u95EE\u9898\u3002");
+          return _el$22;
         })();
       },
       get children() {
@@ -35637,109 +35780,447 @@ function ReviewSummaryPanel(props) {
               return typeof finding.line_start === "number" ? `${base}:${finding.line_start}` : base;
             };
             return (() => {
-              var _el$22 = createElement("box"), _el$23 = createElement("text"), _el$24 = createElement("span"), _el$25 = createElement("span"), _el$26 = createElement("span"), _el$27 = createElement("text");
-              insertNode(_el$22, _el$23);
-              insertNode(_el$22, _el$27);
-              setProp(_el$22, "flexDirection", "column");
+              var _el$23 = createElement("box"), _el$24 = createElement("text"), _el$25 = createElement("span"), _el$26 = createElement("span"), _el$27 = createElement("span"), _el$28 = createElement("text");
               insertNode(_el$23, _el$24);
-              insertNode(_el$23, _el$25);
-              insertNode(_el$23, _el$26);
-              setProp(_el$23, "height", 1);
-              setProp(_el$24, "style", {
+              insertNode(_el$23, _el$28);
+              setProp(_el$23, "flexDirection", "column");
+              insertNode(_el$24, _el$25);
+              insertNode(_el$24, _el$26);
+              insertNode(_el$24, _el$27);
+              setProp(_el$24, "height", 1);
+              setProp(_el$25, "style", {
                 fg: "#808080"
               });
-              insert(_el$24, () => `${index() + 1}. `);
-              insert(_el$25, () => `[${String(finding.severity ?? "info").toUpperCase()}]`);
-              setProp(_el$26, "style", {
+              insert(_el$25, () => `${index() + 1}. `);
+              insert(_el$26, () => `[${String(finding.severity ?? "info").toUpperCase()}]`);
+              setProp(_el$27, "style", {
                 fg: "#eeeeee"
               });
-              insert(_el$26, () => ` ${finding.title ?? finding.message ?? (en() ? "Untitled" : "\u672A\u547D\u540D\u95EE\u9898")}`);
-              setProp(_el$27, "height", 1);
-              setProp(_el$27, "fg", "#808080");
-              insert(_el$27, location, null);
-              insert(_el$27, createComponent2(Show, {
+              insert(_el$27, () => ` ${finding.title ?? finding.message ?? (en() ? "Untitled" : "\u672A\u547D\u540D\u95EE\u9898")}`);
+              setProp(_el$28, "height", 1);
+              setProp(_el$28, "fg", "#808080");
+              insert(_el$28, location, null);
+              insert(_el$28, createComponent2(Show, {
                 get when() {
                   return confidence();
                 },
                 get children() {
-                  var _el$28 = createElement("span");
-                  setProp(_el$28, "style", {
+                  var _el$29 = createElement("span");
+                  setProp(_el$29, "style", {
                     fg: "#7edc92"
                   });
-                  insert(_el$28, () => ` \xB7 ${confidence()}`);
-                  return _el$28;
+                  insert(_el$29, () => ` \xB7 ${confidence()}`);
+                  return _el$29;
                 }
               }), null);
-              insert(_el$27, createComponent2(Show, {
+              insert(_el$28, createComponent2(Show, {
                 get when() {
                   return finding.evidence_status;
                 },
                 get children() {
-                  var _el$29 = createElement("span");
-                  insert(_el$29, () => ` \xB7 ${evidenceBadge(finding.evidence_status ?? "", props.language)}`);
-                  effect((_$p) => setProp(_el$29, "style", {
+                  var _el$30 = createElement("span");
+                  insert(_el$30, () => ` \xB7 ${evidenceBadge(finding.evidence_status ?? "", props.language)}`);
+                  effect((_$p) => setProp(_el$30, "style", {
                     fg: evidenceColor(finding.evidence_status ?? "")
                   }, _$p));
-                  return _el$29;
+                  return _el$30;
                 }
               }), null);
-              effect((_$p) => setProp(_el$25, "style", {
+              effect((_$p) => setProp(_el$26, "style", {
                 fg: severityColor(finding.severity ?? "info")
               }, _$p));
-              return _el$22;
+              return _el$23;
             })();
           }
         });
       }
     }), null);
-    insert(_el$, createComponent2(Show, {
+    insert(_el$2, createComponent2(Show, {
       get when() {
         return Boolean(props.onOpenFindings);
       },
       get children() {
-        var _el$16 = createElement("text");
-        setProp(_el$16, "height", 1);
-        setProp(_el$16, "fg", "#808080");
-        setProp(_el$16, "marginTop", 1);
-        insert(_el$16, () => en() ? "Ctrl+O Open findings" : "Ctrl+O \u6253\u5F00 Findings");
-        return _el$16;
+        var _el$17 = createElement("text");
+        setProp(_el$17, "height", 1);
+        setProp(_el$17, "fg", "#808080");
+        setProp(_el$17, "marginTop", 1);
+        insert(_el$17, () => en() ? "Ctrl+O Open findings" : "Ctrl+O \u6253\u5F00 Findings");
+        return _el$17;
       }
     }), null);
     return _el$;
   })();
 }
 
+// src/review-ui/panel-model.ts
+function displayWidth(value) {
+  let width = 0;
+  for (const char of String(value ?? "")) {
+    const code = char.codePointAt(0) ?? 0;
+    width += code >= 4352 && code <= 4447 || code >= 11904 && code <= 42191 || code >= 44032 && code <= 55203 || code >= 63744 && code <= 64255 || code >= 65072 && code <= 65135 || code >= 65280 && code <= 65376 || code >= 65504 && code <= 65510 ? 2 : 1;
+  }
+  return width;
+}
+function clampLine(value, max) {
+  const text = String(value ?? "").replace(/[\r\n]+/g, " ");
+  const limit = Number.isFinite(max) && max > 0 ? Math.floor(max) : 0;
+  if (limit === 0)
+    return "";
+  if (displayWidth(text) <= limit)
+    return text;
+  if (limit === 1)
+    return "\u2026";
+  const budget = limit - 1;
+  let out = "";
+  let used = 0;
+  for (const char of text) {
+    const w = displayWidth(char);
+    if (used + w > budget)
+      break;
+    out += char;
+    used += w;
+  }
+  return `${out}\u2026`;
+}
+function safeCount(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+}
+function filterBarView(model) {
+  const en = isEnLanguage(model?.language);
+  const shown = safeCount(model?.shown);
+  const total = safeCount(model?.total);
+  const countText = `${shown}/${total}`;
+  const active = model?.active === true;
+  if (!active) {
+    const hint = en ? "Ctrl+F to filter" : "Ctrl+F \u8FC7\u6EE4";
+    return {
+      text: `${hint} \xB7 ${countText}`,
+      tokens: [
+        { text: hint, active: false },
+        { text: `\xB7 ${countText}`, active: false }
+      ],
+      hintOnly: true
+    };
+  }
+  const tokens = [];
+  const query = String(model?.query ?? "").trim();
+  const severity = String(model?.severity ?? "").trim();
+  const evidence = String(model?.evidence ?? "").trim();
+  const sort = model?.sort;
+  if (query) {
+    const label = en ? "q:" : "\u641C:";
+    tokens.push({ text: `${label}${clampLine(query, 24)}`, active: true });
+  }
+  if (severity) {
+    const label = en ? "sev:" : "\u7EA7:";
+    tokens.push({ text: `${label}${clampLine(severity, 12)}`, active: true });
+  }
+  if (evidence) {
+    const label = en ? "ev:" : "\u8BC1:";
+    tokens.push({ text: `${label}${clampLine(evidence, 12)}`, active: true });
+  }
+  if (sort) {
+    const label = en ? "sort:" : "\u5E8F:";
+    tokens.push({ text: `${label}${sort}`, active: true });
+  }
+  if (tokens.length === 0) {
+    tokens.push({ text: en ? "filter on" : "\u7B5B\u9009\u5F00\u542F", active: true });
+  }
+  const countToken = { text: countText, active: false };
+  const joined = [...tokens, countToken].map((token) => token.text).join("  ");
+  return {
+    text: clampLine(joined, 78),
+    tokens: [...tokens, countToken],
+    hintOnly: false
+  };
+}
+var PUBLISH_DIALOG_STATES = [
+  "preview",
+  "publishing",
+  "published",
+  "failed",
+  "cancelled"
+];
+var CREDENTIAL_PATTERNS = [
+  /\bgh[pousr]_[A-Za-z0-9]{16,}\b/g,
+  /\bgithub_pat_[A-Za-z0-9_]{16,}\b/g,
+  /\bsk-[A-Za-z0-9_-]{16,}\b/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b/gi,
+  /\b(api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|password|passwd|secret)\s*[=:]\s*("[^"]+"|'[^']+'|\S+)/gi,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g
+];
+function scrubCredentials(value) {
+  let text = String(value ?? "");
+  for (const pattern of CREDENTIAL_PATTERNS) {
+    text = text.replace(pattern, "[redacted]");
+  }
+  return text;
+}
+function truncateCommentBody(body, maxLines = 8) {
+  const raw = String(body ?? "");
+  const all = raw.length === 0 ? [] : raw.replace(/\r\n/g, `
+`).split(`
+`);
+  const limit = Number.isFinite(maxLines) && maxLines > 0 ? Math.floor(maxLines) : 8;
+  if (all.length <= limit) {
+    return { lines: all.map((line) => clampLine(scrubCredentials(line), 76)), truncated: false, totalLines: all.length };
+  }
+  return {
+    lines: all.slice(0, limit).map((line) => clampLine(scrubCredentials(line), 76)),
+    truncated: true,
+    totalLines: all.length
+  };
+}
+function targetLine(preview, en) {
+  const repo = String(preview?.repository ?? "").trim();
+  const number = typeof preview?.prNumber === "number" && Number.isFinite(preview.prNumber) ? preview.prNumber : undefined;
+  if (repo && number !== undefined)
+    return `${repo}#${number}`;
+  if (repo)
+    return repo;
+  if (number !== undefined)
+    return `#${number}`;
+  return en ? "unknown target" : "\u672A\u77E5\u76EE\u6807";
+}
+function publishDialogView(opts) {
+  const en = isEnLanguage(opts?.language);
+  const requested = opts?.state;
+  const state = requested && PUBLISH_DIALOG_STATES.includes(requested) ? requested : "preview";
+  const preview = opts?.preview ?? null;
+  const message = scrubCredentials(String(opts?.message ?? ""));
+  const maxBodyLines = opts?.maxBodyLines;
+  const target = targetLine(preview, en);
+  const url = String(preview?.url ?? "").trim();
+  const findings = typeof preview?.findings === "number" && Number.isFinite(preview.findings) ? Math.max(0, Math.floor(preview.findings)) : undefined;
+  if (state === "publishing") {
+    return {
+      state,
+      title: en ? "PUBLISHING" : "\u53D1\u5E03\u4E2D",
+      lines: [
+        en ? `Posting review comment to ${target}\u2026` : `\u6B63\u5728\u5411 ${target} \u53D1\u5E03\u5BA1\u67E5\u8BC4\u8BBA\u2026`,
+        ...url ? [clampLine(url, 76)] : []
+      ],
+      footer: en ? "Please wait." : "\u8BF7\u7A0D\u5019\u3002",
+      success: false
+    };
+  }
+  if (state === "published") {
+    return {
+      state,
+      title: en ? "PUBLISHED" : "\u5DF2\u53D1\u5E03",
+      lines: [
+        en ? `Review comment posted to ${target}.` : `\u5BA1\u67E5\u8BC4\u8BBA\u5DF2\u53D1\u5E03\u5230 ${target}\u3002`,
+        ...url ? [clampLine(url, 76)] : [],
+        ...findings !== undefined ? [en ? `Findings: ${findings}` : `\u95EE\u9898\u6570\uFF1A${findings}`] : [],
+        ...preview?.alreadyPublished ? [
+          en ? "Warning: this run was already published; a second comment was created." : "\u8B66\u544A\uFF1A\u8BE5 run \u6B64\u524D\u5DF2\u53D1\u5E03\u8FC7\uFF0C\u672C\u6B21\u53C8\u521B\u5EFA\u4E86\u4E00\u6761\u65B0\u8BC4\u8BBA\u3002"
+        ] : []
+      ],
+      footer: en ? "Esc Close" : "Esc \u5173\u95ED",
+      success: true
+    };
+  }
+  if (state === "failed") {
+    return {
+      state,
+      title: en ? "PUBLISH FAILED" : "\u53D1\u5E03\u5931\u8D25",
+      lines: message ? [message] : [en ? "Publish failed with no error message." : "\u53D1\u5E03\u5931\u8D25\uFF0C\u4E14\u672A\u63D0\u4F9B\u9519\u8BEF\u4FE1\u606F\u3002"],
+      footer: en ? "Esc Close \xB7 /publish to retry" : "Esc \u5173\u95ED \xB7 /publish \u91CD\u8BD5",
+      success: false
+    };
+  }
+  if (state === "cancelled") {
+    return {
+      state,
+      title: en ? "PUBLISH CANCELLED" : "\u53D1\u5E03\u5DF2\u53D6\u6D88",
+      lines: [
+        en ? `No review comment was created for ${target}.` : `\u672A\u5411 ${target} \u53D1\u5E03\u4EFB\u4F55\u8BC4\u8BBA\u3002`,
+        ...url ? [clampLine(url, 76)] : []
+      ],
+      footer: en ? "Esc Close \xB7 /publish to retry" : "Esc \u5173\u95ED \xB7 /publish \u91CD\u8BD5",
+      success: false
+    };
+  }
+  const body = truncateCommentBody(preview?.commentBody, maxBodyLines ?? 8);
+  const lines = [
+    en ? `Target: ${target}` : `\u76EE\u6807\uFF1A${target}`,
+    en ? `Findings: ${findings ?? 0}` : `\u95EE\u9898\u6570\uFF1A${findings ?? 0}`,
+    ...url ? [en ? `URL: ${clampLine(url, 68)}` : `\u94FE\u63A5\uFF1A${clampLine(url, 68)}`] : [],
+    ...preview?.alreadyPublished ? [
+      en ? "Warning: already published once in this session; confirming posts a second comment." : "\u8B66\u544A\uFF1A\u672C\u4F1A\u8BDD\u5DF2\u53D1\u5E03\u8FC7\u4E00\u6B21\uFF0C\u786E\u8BA4\u540E\u4F1A\u518D\u53D1\u4E00\u6761\u8BC4\u8BBA\u3002"
+    ] : [],
+    en ? `Comment body (${body.totalLines} lines):` : `\u8BC4\u8BBA\u6B63\u6587\uFF08${body.totalLines} \u884C\uFF09\uFF1A`,
+    ...body.lines.length > 0 ? body.lines : [en ? "(empty comment body)" : "\uFF08\u8BC4\u8BBA\u6B63\u6587\u4E3A\u7A7A\uFF09"],
+    ...body.truncated ? [
+      en ? `\u2026 truncated, showing ${body.lines.length}/${body.totalLines} lines` : `\u2026 \u5DF2\u622A\u65AD\uFF0C\u663E\u793A ${body.lines.length}/${body.totalLines} \u884C`
+    ] : []
+  ];
+  return {
+    state: "preview",
+    title: en ? "PUBLISH PREVIEW" : "\u53D1\u5E03\u9884\u89C8",
+    lines: lines.map((line) => scrubCredentials(line)),
+    footer: en ? "Enter Publish \xB7 Esc Cancel" : "Enter \u53D1\u5E03 \xB7 Esc \u53D6\u6D88",
+    success: false
+  };
+}
+function readinessBadge(ready, en, readyText, waitText) {
+  const isReady = ready === true;
+  return {
+    text: isReady ? readyText : waitText,
+    color: isReady ? "#7edc92" : "#f3c742",
+    ready: isReady
+  };
+}
+function showcaseView(opts) {
+  const en = isEnLanguage(opts?.language);
+  const steps = Array.isArray(opts?.steps) ? opts.steps : [];
+  return {
+    title: clampLine(String(opts?.title ?? (en ? "SHOWCASE" : "\u6F14\u793A\u8DEF\u7EBF")), 76),
+    readiness: [
+      readinessBadge(opts?.offlineReady, en, en ? "Offline ready" : "\u79BB\u7EBF\u6F14\u793A\u5C31\u7EEA", en ? "Offline pending" : "\u79BB\u7EBF\u6F14\u793A\u672A\u5C31\u7EEA"),
+      readinessBadge(opts?.realReviewReady, en, en ? "Real review ready" : "\u771F\u5B9E\u5BA1\u67E5\u5C31\u7EEA", en ? "Real review pending" : "\u771F\u5B9E\u5BA1\u67E5\u672A\u5C31\u7EEA")
+    ],
+    steps: steps.map((step, index) => {
+      const number = step?.step ?? index + 1;
+      const command = clampLine(String(step?.command ?? ""), 56);
+      const purpose = step?.purpose ? clampLine(String(step.purpose), 40) : undefined;
+      return {
+        index: index + 1,
+        line: `${String(number)}. ${command}`,
+        purpose
+      };
+    })
+  };
+}
+var RISK_COLORS = {
+  critical: "#ff6b6b",
+  high: "#fb8147",
+  medium: "#f3c742",
+  low: "#7edc92",
+  info: "#808080"
+};
+function riskBadge(riskLevel, language) {
+  const en = isEnLanguage(language);
+  const raw = String(riskLevel ?? "").trim();
+  if (!raw) {
+    return { text: en ? "Risk: unknown" : "\u98CE\u9669\uFF1A\u672A\u77E5", color: "#808080" };
+  }
+  const key = raw.toLowerCase();
+  const color = RISK_COLORS[key] ?? severityColor(raw);
+  return { text: en ? `Risk: ${raw}` : `\u98CE\u9669\uFF1A${raw}`, color };
+}
+function evidenceLineOf(evidence, language) {
+  const en = isEnLanguage(language);
+  const parts = [
+    `${evidenceBadge("valid", language)} ${evidence?.valid ?? 0}`,
+    `${evidenceBadge("needs_review", language)} ${evidence?.needsReview ?? 0}`,
+    `${evidenceBadge("invalid", language)} ${evidence?.invalid ?? 0}`,
+    `${evidenceBadge("unverified", language)} ${evidence?.unverified ?? 0}`
+  ];
+  return en ? `Evidence ${parts.join("  ")}` : `\u8BC1\u636E\u5065\u5EB7 ${parts.join("  ")}`;
+}
+function toFindingLine(finding, language) {
+  const severity = String(finding?.severity ?? "info");
+  const base = String(finding?.file ?? "\u2014");
+  const location = typeof finding?.line_start === "number" && Number.isFinite(finding.line_start) ? `${base}:${finding.line_start}` : base;
+  const evidenceStatus = String(finding?.evidence_status ?? "");
+  return {
+    title: clampLine(String(finding?.title ?? finding?.message ?? (isEnLanguage(language) ? "Untitled" : "\u672A\u547D\u540D\u95EE\u9898")), 56),
+    location: clampLine(location, 48),
+    severity: severity.toUpperCase(),
+    severityColor: severityColor(severity),
+    evidenceText: evidenceStatus ? evidenceBadge(evidenceStatus, language) : "",
+    evidenceColor: evidenceStatus ? evidenceColor(evidenceStatus) : "#808080"
+  };
+}
+function demoView(opts) {
+  const en = isEnLanguage(opts?.language);
+  const findings = Array.isArray(opts?.findings) ? opts.findings : [];
+  const ranked = rankFindings(findings);
+  const evidence = {
+    valid: safeCount(opts?.evidence?.valid),
+    needsReview: safeCount(opts?.evidence?.needsReview),
+    invalid: safeCount(opts?.evidence?.invalid),
+    unverified: safeCount(opts?.evidence?.unverified)
+  };
+  const priorityFiles = safeCount(opts?.priorityFiles);
+  const durationMs = typeof opts?.durationMs === "number" && Number.isFinite(opts.durationMs) && opts.durationMs >= 0 ? opts.durationMs : undefined;
+  return {
+    title: clampLine(String(opts?.title ?? (en ? "DEMO RESULT" : "\u6F14\u793A\u7ED3\u679C")), 76),
+    caseKey: opts?.caseKey ? clampLine(String(opts.caseKey), 32) : undefined,
+    description: opts?.description ? clampLine(String(opts.description), 76) : undefined,
+    risk: riskBadge(opts?.riskLevel, opts?.language),
+    priorityFiles,
+    evidence,
+    evidenceLine: evidenceLineOf(evidence, opts?.language),
+    durationLine: durationMs === undefined ? undefined : en ? `Duration ${formatDuration(durationMs, opts?.language)}` : `\u8017\u65F6 ${formatDuration(durationMs, opts?.language)}`,
+    findings: ranked.map((finding) => toFindingLine(finding, opts?.language)),
+    empty: ranked.length === 0
+  };
+}
+function actionBarView(opts) {
+  const en = isEnLanguage(opts?.language);
+  const has = (value) => typeof value === "function";
+  const specs = [
+    {
+      id: "findings",
+      keyHint: "Ctrl+O",
+      label: en ? "Findings" : "\u6253\u5F00 Findings",
+      enabled: has(opts?.onOpenFindings)
+    },
+    {
+      id: "filter",
+      keyHint: "Ctrl+F",
+      label: en ? "Filter findings" : "\u7B5B\u9009\u95EE\u9898",
+      enabled: has(opts?.onFilter)
+    },
+    {
+      id: "explain",
+      keyHint: "Alt+E",
+      label: en ? "Explain" : "\u89E3\u91CA\u95EE\u9898",
+      enabled: has(opts?.onExplain)
+    },
+    {
+      id: "feedback",
+      keyHint: "Alt+F",
+      label: en ? "Feedback" : "\u53CD\u9988\u7ED3\u679C",
+      enabled: has(opts?.onFeedback)
+    },
+    {
+      id: "publish",
+      keyHint: "Alt+P",
+      label: en ? "Publish comment" : "\u53D1\u5E03\u8BC4\u8BBA\u5230 GitHub",
+      enabled: has(opts?.onPublish)
+    },
+    {
+      id: "export",
+      keyHint: "Alt+X",
+      label: en ? "Export" : "\u5BFC\u51FA\u62A5\u544A",
+      enabled: has(opts?.onExport)
+    }
+  ];
+  return {
+    title: en ? "ACTIONS" : "\u64CD\u4F5C",
+    emptyText: en ? "No actions available." : "\u6682\u65E0\u53EF\u7528\u64CD\u4F5C\u3002",
+    actions: specs.filter((spec) => spec.enabled).map(({ enabled: _enabled, ...action }) => action)
+  };
+}
+
 // src/review-ui/ReviewActionBar.tsx
 function ReviewActionBar(props) {
-  const en = () => isEnLanguage(props.language);
-  const actions = () => [{
-    id: "findings",
-    keyHint: "Ctrl+O",
-    en: "Findings",
-    zh: "\u6253\u5F00 Findings",
-    handler: props.onOpenFindings
-  }, {
-    id: "explain",
-    keyHint: "Alt+E",
-    en: "Explain",
-    zh: "\u89E3\u91CA\u95EE\u9898",
-    handler: props.onExplain
-  }, {
-    id: "feedback",
-    keyHint: "Alt+F",
-    en: "Feedback",
-    zh: "\u53CD\u9988\u7ED3\u679C",
-    handler: props.onFeedback
-  }, {
-    id: "export",
-    keyHint: "Alt+X",
-    en: "Export",
-    zh: "\u5BFC\u51FA\u62A5\u544A",
-    handler: props.onExport
-  }].filter((action) => typeof action.handler === "function");
-  const title = () => en() ? "ACTIONS" : "\u64CD\u4F5C";
+  const view = () => actionBarView({
+    onOpenFindings: props.onOpenFindings,
+    onFilter: props.onFilter,
+    onExplain: props.onExplain,
+    onFeedback: props.onFeedback,
+    onPublish: props.onPublish,
+    onExport: props.onExport,
+    language: props.language
+  });
   return (() => {
-    var _el$ = createElement("box"), _el$2 = createElement("text");
+    var _el$ = createElement("box"), _el$2 = createElement("box"), _el$3 = createElement("text");
     insertNode(_el$, _el$2);
     setProp(_el$, "width", "100%");
     setProp(_el$, "backgroundColor", "#1e1e1e");
@@ -35748,42 +36229,50 @@ function ReviewActionBar(props) {
     setProp(_el$, "paddingLeft", 1);
     setProp(_el$, "paddingRight", 1);
     setProp(_el$, "flexDirection", "column");
-    setProp(_el$2, "height", 1);
-    setProp(_el$2, "fg", "#7edc92");
-    insert(_el$2, title);
-    insert(_el$, createComponent2(Show, {
+    setProp(_el$, "overflow", "hidden");
+    setProp(_el$, "flexShrink", 1);
+    setProp(_el$, "minHeight", 0);
+    insertNode(_el$2, _el$3);
+    setProp(_el$2, "flexGrow", 1);
+    setProp(_el$2, "minHeight", 0);
+    setProp(_el$2, "overflow", "hidden");
+    setProp(_el$2, "flexDirection", "column");
+    setProp(_el$3, "height", 1);
+    setProp(_el$3, "fg", "#7edc92");
+    insert(_el$3, () => view().title);
+    insert(_el$2, createComponent2(Show, {
       get when() {
-        return actions().length > 0;
+        return view().actions.length > 0;
       },
       get fallback() {
         return (() => {
-          var _el$3 = createElement("text");
-          setProp(_el$3, "height", 1);
-          setProp(_el$3, "fg", "#808080");
-          insert(_el$3, () => en() ? "No actions available." : "\u6682\u65E0\u53EF\u7528\u64CD\u4F5C\u3002");
-          return _el$3;
+          var _el$4 = createElement("text");
+          setProp(_el$4, "height", 1);
+          setProp(_el$4, "fg", "#808080");
+          insert(_el$4, () => view().emptyText);
+          return _el$4;
         })();
       },
       get children() {
         return createComponent2(For, {
           get each() {
-            return actions();
+            return view().actions;
           },
           children: (action) => (() => {
-            var _el$4 = createElement("text"), _el$5 = createElement("span"), _el$6 = createElement("span");
-            insertNode(_el$4, _el$5);
-            insertNode(_el$4, _el$6);
-            setProp(_el$4, "height", 1);
-            setProp(_el$4, "fg", "#eeeeee");
-            setProp(_el$5, "style", {
+            var _el$5 = createElement("text"), _el$6 = createElement("span"), _el$7 = createElement("span");
+            insertNode(_el$5, _el$6);
+            insertNode(_el$5, _el$7);
+            setProp(_el$5, "height", 1);
+            setProp(_el$5, "fg", "#eeeeee");
+            setProp(_el$6, "style", {
               fg: "#f3c742"
             });
-            insert(_el$5, () => action.keyHint);
-            setProp(_el$6, "style", {
+            insert(_el$6, () => action.keyHint);
+            setProp(_el$7, "style", {
               fg: "#eeeeee"
             });
-            insert(_el$6, () => ` ${en() ? action.en : action.zh}`);
-            return _el$4;
+            insert(_el$7, () => ` ${action.label}`);
+            return _el$5;
           })()
         });
       }
@@ -35797,7 +36286,7 @@ function FindingsList(props) {
   const en = () => isEnLanguage(props.language);
   const ranked = () => rankFindings(Array.isArray(props.findings) ? props.findings : []);
   return (() => {
-    var _el$ = createElement("box"), _el$2 = createElement("text");
+    var _el$ = createElement("box"), _el$2 = createElement("box"), _el$3 = createElement("text");
     insertNode(_el$, _el$2);
     setProp(_el$, "width", "100%");
     setProp(_el$, "backgroundColor", "#1e1e1e");
@@ -35808,23 +36297,30 @@ function FindingsList(props) {
     setProp(_el$, "flexDirection", "column");
     setProp(_el$, "flexGrow", 1);
     setProp(_el$, "overflow", "hidden");
-    setProp(_el$2, "height", 1);
-    setProp(_el$2, "fg", "#f3c742");
-    insert(_el$2, (() => {
+    setProp(_el$, "flexShrink", 1);
+    setProp(_el$, "minHeight", 0);
+    insertNode(_el$2, _el$3);
+    setProp(_el$2, "flexGrow", 1);
+    setProp(_el$2, "minHeight", 0);
+    setProp(_el$2, "overflow", "hidden");
+    setProp(_el$2, "flexDirection", "column");
+    setProp(_el$3, "height", 1);
+    setProp(_el$3, "fg", "#f3c742");
+    insert(_el$3, (() => {
       var _c$ = memo2(() => !!en());
       return () => _c$() ? `FINDINGS (${ranked().length})` : `\u95EE\u9898\u5217\u8868 (${ranked().length})`;
     })());
-    insert(_el$, createComponent2(Show, {
+    insert(_el$2, createComponent2(Show, {
       get when() {
         return ranked().length > 0;
       },
       get fallback() {
         return (() => {
-          var _el$3 = createElement("text");
-          setProp(_el$3, "height", 1);
-          setProp(_el$3, "fg", "#808080");
-          insert(_el$3, () => en() ? "No findings." : "\u6682\u65E0\u95EE\u9898\u3002");
-          return _el$3;
+          var _el$4 = createElement("text");
+          setProp(_el$4, "height", 1);
+          setProp(_el$4, "fg", "#808080");
+          insert(_el$4, () => en() ? "No findings." : "\u6682\u65E0\u95EE\u9898\u3002");
+          return _el$4;
         })();
       },
       get children() {
@@ -35839,56 +36335,56 @@ function FindingsList(props) {
               return typeof finding.line_start === "number" ? `${base}:${finding.line_start}` : base;
             };
             return (() => {
-              var _el$4 = createElement("box"), _el$5 = createElement("text"), _el$6 = createElement("span"), _el$7 = createElement("span"), _el$8 = createElement("span"), _el$9 = createElement("text");
-              insertNode(_el$4, _el$5);
-              insertNode(_el$4, _el$9);
-              setProp(_el$4, "flexDirection", "column");
+              var _el$5 = createElement("box"), _el$6 = createElement("text"), _el$7 = createElement("span"), _el$8 = createElement("span"), _el$9 = createElement("span"), _el$0 = createElement("text");
               insertNode(_el$5, _el$6);
-              insertNode(_el$5, _el$7);
-              insertNode(_el$5, _el$8);
-              setProp(_el$5, "height", 1);
-              setProp(_el$6, "style", {
+              insertNode(_el$5, _el$0);
+              setProp(_el$5, "flexDirection", "column");
+              insertNode(_el$6, _el$7);
+              insertNode(_el$6, _el$8);
+              insertNode(_el$6, _el$9);
+              setProp(_el$6, "height", 1);
+              setProp(_el$7, "style", {
                 fg: "#808080"
               });
-              insert(_el$6, () => `${index() + 1}. `);
-              insert(_el$7, () => `[${String(finding.severity ?? "info").toUpperCase()}]`);
-              setProp(_el$8, "style", {
+              insert(_el$7, () => `${index() + 1}. `);
+              insert(_el$8, () => `[${String(finding.severity ?? "info").toUpperCase()}]`);
+              setProp(_el$9, "style", {
                 fg: "#eeeeee"
               });
-              insert(_el$8, () => ` ${finding.title ?? finding.message ?? (en() ? "Untitled" : "\u672A\u547D\u540D\u95EE\u9898")}`);
-              setProp(_el$9, "height", 1);
-              setProp(_el$9, "fg", "#808080");
-              insert(_el$9, location, null);
-              insert(_el$9, createComponent2(Show, {
+              insert(_el$9, () => ` ${finding.title ?? finding.message ?? (en() ? "Untitled" : "\u672A\u547D\u540D\u95EE\u9898")}`);
+              setProp(_el$0, "height", 1);
+              setProp(_el$0, "fg", "#808080");
+              insert(_el$0, location, null);
+              insert(_el$0, createComponent2(Show, {
                 get when() {
                   return confidence();
                 },
                 get children() {
-                  var _el$0 = createElement("span");
-                  setProp(_el$0, "style", {
+                  var _el$1 = createElement("span");
+                  setProp(_el$1, "style", {
                     fg: "#7edc92"
                   });
-                  insert(_el$0, () => ` \xB7 ${confidence()}`);
-                  return _el$0;
+                  insert(_el$1, () => ` \xB7 ${confidence()}`);
+                  return _el$1;
                 }
               }), null);
-              insert(_el$9, createComponent2(Show, {
+              insert(_el$0, createComponent2(Show, {
                 get when() {
                   return finding.evidence_status;
                 },
                 get children() {
-                  var _el$1 = createElement("span");
-                  insert(_el$1, () => ` \xB7 ${evidenceBadge(finding.evidence_status ?? "", props.language)}`);
-                  effect((_$p) => setProp(_el$1, "style", {
+                  var _el$10 = createElement("span");
+                  insert(_el$10, () => ` \xB7 ${evidenceBadge(finding.evidence_status ?? "", props.language)}`);
+                  effect((_$p) => setProp(_el$10, "style", {
                     fg: evidenceColor(finding.evidence_status ?? "")
                   }, _$p));
-                  return _el$1;
+                  return _el$10;
                 }
               }), null);
-              effect((_$p) => setProp(_el$7, "style", {
+              effect((_$p) => setProp(_el$8, "style", {
                 fg: severityColor(finding.severity ?? "info")
               }, _$p));
-              return _el$4;
+              return _el$5;
             })();
           }
         });
@@ -35900,27 +36396,27 @@ function FindingsList(props) {
 function FindingsHint(props) {
   const en = () => isEnLanguage(props.language);
   return (() => {
-    var _el$10 = createElement("text");
-    setProp(_el$10, "height", 1);
-    setProp(_el$10, "fg", "#808080");
-    insert(_el$10, (() => {
+    var _el$11 = createElement("text");
+    setProp(_el$11, "height", 1);
+    setProp(_el$11, "fg", "#808080");
+    insert(_el$11, (() => {
       var _c$2 = memo2(() => !!en());
       return () => _c$2() ? `Findings ${props.count}` : `\u95EE\u9898 ${props.count}`;
     })(), null);
-    insert(_el$10, createComponent2(Show, {
+    insert(_el$11, createComponent2(Show, {
       get when() {
         return props.showHint;
       },
       get children() {
-        var _el$11 = createElement("span");
-        setProp(_el$11, "style", {
+        var _el$12 = createElement("span");
+        setProp(_el$12, "style", {
           fg: "#f3c742"
         });
-        insert(_el$11, () => en() ? " \xB7 Ctrl+O Open findings" : " \xB7 Ctrl+O \u6253\u5F00 Findings");
-        return _el$11;
+        insert(_el$12, () => en() ? " \xB7 Ctrl+O Open findings" : " \xB7 Ctrl+O \u6253\u5F00 Findings");
+        return _el$12;
       }
     }), null);
-    return _el$10;
+    return _el$11;
   })();
 }
 function ReviewWorkspace(props) {
@@ -35934,11 +36430,17 @@ function ReviewWorkspace(props) {
     get onOpenFindings() {
       return props.onOpenFindings;
     },
+    get onFilter() {
+      return props.onFilter;
+    },
     get onExplain() {
       return props.onExplain;
     },
     get onFeedback() {
       return props.onFeedback;
+    },
+    get onPublish() {
+      return props.onPublish;
     },
     get onExport() {
       return props.onExport;
@@ -35948,29 +36450,29 @@ function ReviewWorkspace(props) {
     }
   });
   return (() => {
-    var _el$12 = createElement("box");
-    setProp(_el$12, "width", "100%");
-    setProp(_el$12, "height", "100%");
-    setProp(_el$12, "backgroundColor", "#0a0a0a");
-    setProp(_el$12, "overflow", "hidden");
-    insert(_el$12, createComponent2(Show, {
+    var _el$13 = createElement("box");
+    setProp(_el$13, "width", "100%");
+    setProp(_el$13, "height", "100%");
+    setProp(_el$13, "backgroundColor", "#0a0a0a");
+    setProp(_el$13, "overflow", "hidden");
+    insert(_el$13, createComponent2(Show, {
       get when() {
         return isWide();
       },
       fallback: null,
       get children() {
         return [(() => {
-          var _el$13 = createElement("box"), _el$14 = createElement("box");
-          insertNode(_el$13, _el$14);
-          setProp(_el$13, "width", "50%");
-          setProp(_el$13, "height", "100%");
-          setProp(_el$13, "flexDirection", "column");
-          setProp(_el$13, "overflow", "hidden");
-          setProp(_el$14, "flexGrow", 1);
-          setProp(_el$14, "minHeight", 0);
-          setProp(_el$14, "overflow", "hidden");
+          var _el$14 = createElement("box"), _el$15 = createElement("box");
+          insertNode(_el$14, _el$15);
+          setProp(_el$14, "width", "50%");
+          setProp(_el$14, "height", "100%");
           setProp(_el$14, "flexDirection", "column");
-          insert(_el$14, createComponent2(Show, {
+          setProp(_el$14, "overflow", "hidden");
+          setProp(_el$15, "flexGrow", 1);
+          setProp(_el$15, "minHeight", 0);
+          setProp(_el$15, "overflow", "hidden");
+          setProp(_el$15, "flexDirection", "column");
+          insert(_el$15, createComponent2(Show, {
             get when() {
               return hasProgress();
             },
@@ -35982,7 +36484,7 @@ function ReviewWorkspace(props) {
               }));
             }
           }), null);
-          insert(_el$14, createComponent2(Show, {
+          insert(_el$15, createComponent2(Show, {
             get when() {
               return hasSummary();
             },
@@ -35994,34 +36496,37 @@ function ReviewWorkspace(props) {
               }));
             }
           }), null);
-          insert(_el$14, createComponent2(Show, {
+          insert(_el$15, createComponent2(Show, {
             get when() {
               return memo2(() => !!!hasProgress())() && !hasSummary();
             },
             get children() {
-              var _el$15 = createElement("box"), _el$16 = createElement("text");
-              insertNode(_el$15, _el$16);
-              setProp(_el$15, "width", "100%");
-              setProp(_el$15, "backgroundColor", "#1e1e1e");
-              setProp(_el$15, "borderStyle", "single");
-              setProp(_el$15, "borderColor", "#808080");
-              setProp(_el$15, "paddingLeft", 1);
-              setProp(_el$15, "paddingRight", 1);
-              setProp(_el$15, "flexDirection", "column");
-              setProp(_el$16, "height", 1);
-              setProp(_el$16, "fg", "#808080");
-              insert(_el$16, () => en() ? "No progress or summary yet." : "\u6682\u65E0\u8FDB\u5EA6\u6216\u6458\u8981\u3002");
-              return _el$15;
+              var _el$16 = createElement("box"), _el$17 = createElement("text");
+              insertNode(_el$16, _el$17);
+              setProp(_el$16, "width", "100%");
+              setProp(_el$16, "backgroundColor", "#1e1e1e");
+              setProp(_el$16, "borderStyle", "single");
+              setProp(_el$16, "borderColor", "#808080");
+              setProp(_el$16, "paddingLeft", 1);
+              setProp(_el$16, "paddingRight", 1);
+              setProp(_el$16, "flexDirection", "column");
+              setProp(_el$16, "overflow", "hidden");
+              setProp(_el$16, "flexShrink", 1);
+              setProp(_el$16, "minHeight", 0);
+              setProp(_el$17, "height", 1);
+              setProp(_el$17, "fg", "#808080");
+              insert(_el$17, () => en() ? "No progress or summary yet." : "\u6682\u65E0\u8FDB\u5EA6\u6216\u6458\u8981\u3002");
+              return _el$16;
             }
           }), null);
-          return _el$13;
+          return _el$14;
         })(), (() => {
-          var _el$17 = createElement("box");
-          setProp(_el$17, "width", "50%");
-          setProp(_el$17, "height", "100%");
-          setProp(_el$17, "flexDirection", "column");
-          setProp(_el$17, "overflow", "hidden");
-          insert(_el$17, createComponent2(FindingsList, {
+          var _el$18 = createElement("box");
+          setProp(_el$18, "width", "50%");
+          setProp(_el$18, "height", "100%");
+          setProp(_el$18, "flexDirection", "column");
+          setProp(_el$18, "overflow", "hidden");
+          insert(_el$18, createComponent2(FindingsList, {
             get findings() {
               return findings();
             },
@@ -36029,23 +36534,23 @@ function ReviewWorkspace(props) {
               return props.language;
             }
           }), null);
-          insert(_el$17, actionBar, null);
-          return _el$17;
+          insert(_el$18, actionBar, null);
+          return _el$18;
         })()];
       }
     }), null);
-    insert(_el$12, createComponent2(Show, {
+    insert(_el$13, createComponent2(Show, {
       get when() {
         return !isWide();
       },
       get children() {
         return [(() => {
-          var _el$18 = createElement("box");
-          setProp(_el$18, "flexGrow", 1);
-          setProp(_el$18, "minHeight", 0);
-          setProp(_el$18, "overflow", "hidden");
-          setProp(_el$18, "flexDirection", "column");
-          insert(_el$18, createComponent2(Show, {
+          var _el$19 = createElement("box");
+          setProp(_el$19, "flexGrow", 1);
+          setProp(_el$19, "minHeight", 0);
+          setProp(_el$19, "overflow", "hidden");
+          setProp(_el$19, "flexDirection", "column");
+          insert(_el$19, createComponent2(Show, {
             get when() {
               return hasProgress();
             },
@@ -36057,7 +36562,7 @@ function ReviewWorkspace(props) {
               }));
             }
           }), null);
-          insert(_el$18, createComponent2(Show, {
+          insert(_el$19, createComponent2(Show, {
             get when() {
               return hasSummary();
             },
@@ -36069,12 +36574,12 @@ function ReviewWorkspace(props) {
               }));
             }
           }), null);
-          return _el$18;
+          return _el$19;
         })(), (() => {
-          var _el$19 = createElement("box");
-          setProp(_el$19, "flexShrink", 0);
-          setProp(_el$19, "flexDirection", "column");
-          insert(_el$19, createComponent2(FindingsHint, {
+          var _el$20 = createElement("box");
+          setProp(_el$20, "flexShrink", 0);
+          setProp(_el$20, "flexDirection", "column");
+          insert(_el$20, createComponent2(FindingsHint, {
             get count() {
               return findings().length;
             },
@@ -36085,14 +36590,481 @@ function ReviewWorkspace(props) {
               return showHint();
             }
           }), null);
-          insert(_el$19, actionBar, null);
-          return _el$19;
+          insert(_el$20, actionBar, null);
+          return _el$20;
         })()];
       }
     }), null);
-    effect((_$p) => setProp(_el$12, "flexDirection", isWide() ? "row" : "column", _$p));
-    return _el$12;
+    effect((_$p) => setProp(_el$13, "flexDirection", isWide() ? "row" : "column", _$p));
+    return _el$13;
   })();
+}
+
+// src/review-ui/BorderedPanel.tsx
+function BorderedPanel(props) {
+  return (() => {
+    var _el$ = createElement("box"), _el$2 = createElement("box");
+    insertNode(_el$, _el$2);
+    setProp(_el$, "width", "100%");
+    setProp(_el$, "borderStyle", "single");
+    setProp(_el$, "paddingLeft", 1);
+    setProp(_el$, "paddingRight", 1);
+    setProp(_el$, "flexDirection", "column");
+    setProp(_el$, "overflow", "hidden");
+    setProp(_el$, "flexShrink", 1);
+    setProp(_el$, "minHeight", 0);
+    setProp(_el$2, "flexGrow", 1);
+    setProp(_el$2, "minHeight", 0);
+    setProp(_el$2, "overflow", "hidden");
+    setProp(_el$2, "flexDirection", "column");
+    insert(_el$2, () => props.children);
+    effect((_p$) => {
+      var _v$ = props.backgroundColor ?? "#1e1e1e", _v$2 = props.borderColor ?? "#808080", _v$3 = props.flexGrow;
+      _v$ !== _p$.e && (_p$.e = setProp(_el$, "backgroundColor", _v$, _p$.e));
+      _v$2 !== _p$.t && (_p$.t = setProp(_el$, "borderColor", _v$2, _p$.t));
+      _v$3 !== _p$.a && (_p$.a = setProp(_el$, "flexGrow", _v$3, _p$.a));
+      return _p$;
+    }, {
+      e: undefined,
+      t: undefined,
+      a: undefined
+    });
+    return _el$;
+  })();
+}
+
+// src/review-ui/DemoResultPanel.tsx
+function DemoResultPanel(props) {
+  const isEn = () => String(props.language ?? "zh-CN").toLowerCase().startsWith("en");
+  const view = () => demoView({
+    caseKey: props.caseKey,
+    title: props.title,
+    description: props.description,
+    riskLevel: props.riskLevel,
+    priorityFiles: props.priorityFiles,
+    findings: props.findings,
+    evidence: props.evidence,
+    durationMs: props.durationMs,
+    language: props.language
+  });
+  return createComponent2(BorderedPanel, {
+    borderColor: "#fb8147",
+    get children() {
+      return [(() => {
+        var _el$ = createElement("text");
+        setProp(_el$, "height", 1);
+        setProp(_el$, "fg", "#fb8147");
+        insert(_el$, () => view().title);
+        return _el$;
+      })(), createComponent2(Show, {
+        get when() {
+          return view().caseKey;
+        },
+        get children() {
+          var _el$2 = createElement("text");
+          setProp(_el$2, "height", 1);
+          setProp(_el$2, "fg", "#808080");
+          insert(_el$2, () => view().caseKey);
+          return _el$2;
+        }
+      }), createComponent2(Show, {
+        get when() {
+          return view().description;
+        },
+        get children() {
+          var _el$3 = createElement("text");
+          setProp(_el$3, "height", 1);
+          setProp(_el$3, "fg", "#eeeeee");
+          insert(_el$3, () => view().description);
+          return _el$3;
+        }
+      }), (() => {
+        var _el$4 = createElement("text"), _el$5 = createElement("span"), _el$6 = createElement("span");
+        insertNode(_el$4, _el$5);
+        insertNode(_el$4, _el$6);
+        setProp(_el$4, "height", 1);
+        setProp(_el$4, "marginTop", 1);
+        insert(_el$5, () => view().risk.text);
+        setProp(_el$6, "style", {
+          fg: "#808080"
+        });
+        insert(_el$6, (() => {
+          var _c$ = memo2(() => !!isEn());
+          return () => _c$() ? ` \xB7 Priority files ${view().priorityFiles}` : ` \xB7 \u4F18\u5148\u6587\u4EF6 ${view().priorityFiles}`;
+        })());
+        insert(_el$4, createComponent2(Show, {
+          get when() {
+            return view().durationLine;
+          },
+          get children() {
+            var _el$7 = createElement("span");
+            setProp(_el$7, "style", {
+              fg: "#808080"
+            });
+            insert(_el$7, () => ` \xB7 ${view().durationLine}`);
+            return _el$7;
+          }
+        }), null);
+        effect((_$p) => setProp(_el$5, "style", {
+          fg: view().risk.color
+        }, _$p));
+        return _el$4;
+      })(), (() => {
+        var _el$8 = createElement("text");
+        setProp(_el$8, "height", 1);
+        setProp(_el$8, "fg", "#808080");
+        insert(_el$8, () => view().evidenceLine);
+        return _el$8;
+      })(), (() => {
+        var _el$9 = createElement("text");
+        setProp(_el$9, "height", 1);
+        setProp(_el$9, "fg", "#f3c742");
+        setProp(_el$9, "marginTop", 1);
+        insert(_el$9, (() => {
+          var _c$2 = memo2(() => !!isEn());
+          return () => _c$2() ? `Findings (${view().findings.length})` : `\u95EE\u9898\u5217\u8868 (${view().findings.length})`;
+        })());
+        return _el$9;
+      })(), createComponent2(Show, {
+        get when() {
+          return !view().empty;
+        },
+        get fallback() {
+          return (() => {
+            var _el$0 = createElement("text");
+            setProp(_el$0, "height", 1);
+            setProp(_el$0, "fg", "#808080");
+            insert(_el$0, () => isEn() ? "No findings in this demo case." : "\u8BE5\u6F14\u793A\u7528\u4F8B\u6682\u65E0\u95EE\u9898\u3002");
+            return _el$0;
+          })();
+        },
+        get children() {
+          return createComponent2(For, {
+            get each() {
+              return view().findings;
+            },
+            children: (finding, index) => (() => {
+              var _el$1 = createElement("box"), _el$10 = createElement("text"), _el$11 = createElement("span"), _el$12 = createElement("span"), _el$13 = createElement("span"), _el$14 = createElement("text");
+              insertNode(_el$1, _el$10);
+              insertNode(_el$1, _el$14);
+              setProp(_el$1, "flexDirection", "column");
+              insertNode(_el$10, _el$11);
+              insertNode(_el$10, _el$12);
+              insertNode(_el$10, _el$13);
+              setProp(_el$10, "height", 1);
+              setProp(_el$11, "style", {
+                fg: "#808080"
+              });
+              insert(_el$11, () => `${index() + 1}. `);
+              insert(_el$12, () => `[${finding.severity}]`);
+              setProp(_el$13, "style", {
+                fg: "#eeeeee"
+              });
+              insert(_el$13, () => ` ${finding.title}`);
+              setProp(_el$14, "height", 1);
+              setProp(_el$14, "fg", "#808080");
+              insert(_el$14, () => finding.location, null);
+              insert(_el$14, createComponent2(Show, {
+                get when() {
+                  return finding.evidenceText;
+                },
+                get children() {
+                  var _el$15 = createElement("span");
+                  insert(_el$15, () => ` \xB7 ${finding.evidenceText}`);
+                  effect((_$p) => setProp(_el$15, "style", {
+                    fg: finding.evidenceColor
+                  }, _$p));
+                  return _el$15;
+                }
+              }), null);
+              effect((_$p) => setProp(_el$12, "style", {
+                fg: finding.severityColor
+              }, _$p));
+              return _el$1;
+            })()
+          });
+        }
+      })];
+    }
+  });
+}
+
+// src/review-ui/FindingsFilterBar.tsx
+function FindingsFilterBar(props) {
+  const view = () => filterBarView({
+    active: props.active === true,
+    query: props.query,
+    severity: props.severity,
+    evidence: props.evidence,
+    sort: props.sort,
+    shown: props.shown,
+    total: props.total,
+    language: props.language
+  });
+  return (() => {
+    var _el$ = createElement("box"), _el$2 = createElement("text");
+    insertNode(_el$, _el$2);
+    setProp(_el$, "width", "100%");
+    setProp(_el$, "height", 1);
+    setProp(_el$, "flexDirection", "row");
+    setProp(_el$, "overflow", "hidden");
+    setProp(_el$, "paddingLeft", 1);
+    setProp(_el$, "paddingRight", 1);
+    setProp(_el$2, "height", 1);
+    setProp(_el$2, "width", "100%");
+    insert(_el$2, createComponent2(For, {
+      get each() {
+        return view().tokens;
+      },
+      children: (token, index) => (() => {
+        var _el$3 = createElement("span");
+        insert(_el$3, (() => {
+          var _c$ = memo2(() => index() === 0);
+          return () => _c$() ? token.text : `  ${token.text}`;
+        })());
+        effect((_$p) => setProp(_el$3, "style", {
+          fg: token.active ? "#f3c742" : "#808080"
+        }, _$p));
+        return _el$3;
+      })()
+    }));
+    effect((_$p) => setProp(_el$, "backgroundColor", view().hintOnly ? "#0a0a0a" : "#1e1e1e", _$p));
+    return _el$;
+  })();
+}
+
+// src/review-ui/PublishConfirmDialog.tsx
+var STATE_BORDER = {
+  preview: "#f3c742",
+  publishing: "#fb8147",
+  published: "#7edc92",
+  failed: "#ff6b6b",
+  cancelled: "#808080"
+};
+function PublishConfirmDialog(props) {
+  const state = () => props.state ?? "preview";
+  const view = () => publishDialogView({
+    state: state(),
+    preview: props.preview,
+    message: props.message,
+    maxBodyLines: props.maxBodyLines,
+    language: props.language
+  });
+  return createComponent2(Show, {
+    get when() {
+      return props.open === true;
+    },
+    get children() {
+      return createComponent2(BorderedPanel, {
+        get borderColor() {
+          return STATE_BORDER[state()] ?? "#f3c742";
+        },
+        get children() {
+          return [(() => {
+            var _el$ = createElement("text");
+            setProp(_el$, "height", 1);
+            insert(_el$, () => view().title);
+            effect((_$p) => setProp(_el$, "fg", STATE_BORDER[state()] ?? "#f3c742", _$p));
+            return _el$;
+          })(), createComponent2(For, {
+            get each() {
+              return view().lines;
+            },
+            children: (line) => (() => {
+              var _el$3 = createElement("text");
+              setProp(_el$3, "height", 1);
+              setProp(_el$3, "fg", "#eeeeee");
+              insert(_el$3, line);
+              return _el$3;
+            })()
+          }), createComponent2(Show, {
+            get when() {
+              return view().footer;
+            },
+            get children() {
+              var _el$2 = createElement("text");
+              setProp(_el$2, "height", 1);
+              setProp(_el$2, "fg", "#808080");
+              setProp(_el$2, "marginTop", 1);
+              insert(_el$2, () => view().footer);
+              return _el$2;
+            }
+          })];
+        }
+      });
+    }
+  });
+}
+
+// src/review-ui/ShowcasePanel.tsx
+function ShowcasePanel(props) {
+  const isEn = () => String(props.language ?? "zh-CN").toLowerCase().startsWith("en");
+  const view = () => showcaseView({
+    title: props.title,
+    offlineReady: props.offlineReady,
+    realReviewReady: props.realReviewReady,
+    steps: props.steps,
+    language: props.language
+  });
+  return createComponent2(BorderedPanel, {
+    borderColor: "#7edc92",
+    get children() {
+      return [(() => {
+        var _el$ = createElement("text");
+        setProp(_el$, "height", 1);
+        setProp(_el$, "fg", "#7edc92");
+        insert(_el$, () => view().title);
+        return _el$;
+      })(), createComponent2(For, {
+        get each() {
+          return view().readiness;
+        },
+        children: (item, index) => (() => {
+          var _el$3 = createElement("text"), _el$4 = createElement("span"), _el$5 = createElement("span");
+          insertNode(_el$3, _el$4);
+          insertNode(_el$3, _el$5);
+          setProp(_el$3, "height", 1);
+          setProp(_el$4, "style", {
+            fg: "#808080"
+          });
+          insert(_el$4, () => index() === 0 ? "offline " : "real ");
+          insert(_el$5, () => item.text);
+          effect((_p$) => {
+            var _v$ = index() === 0 ? 1 : 0, _v$2 = {
+              fg: item.color
+            };
+            _v$ !== _p$.e && (_p$.e = setProp(_el$3, "marginTop", _v$, _p$.e));
+            _v$2 !== _p$.t && (_p$.t = setProp(_el$5, "style", _v$2, _p$.t));
+            return _p$;
+          }, {
+            e: undefined,
+            t: undefined
+          });
+          return _el$3;
+        })()
+      }), createComponent2(Show, {
+        get when() {
+          return view().steps.length > 0;
+        },
+        get fallback() {
+          return (() => {
+            var _el$6 = createElement("text");
+            setProp(_el$6, "height", 1);
+            setProp(_el$6, "fg", "#808080");
+            setProp(_el$6, "marginTop", 1);
+            insert(_el$6, () => isEn() ? "No showcase steps." : "\u6682\u65E0\u6F14\u793A\u6B65\u9AA4\u3002");
+            return _el$6;
+          })();
+        },
+        get children() {
+          return [(() => {
+            var _el$2 = createElement("text");
+            setProp(_el$2, "height", 1);
+            setProp(_el$2, "fg", "#f3c742");
+            setProp(_el$2, "marginTop", 1);
+            insert(_el$2, () => isEn() ? "Steps" : "\u6B65\u9AA4");
+            return _el$2;
+          })(), createComponent2(For, {
+            get each() {
+              return view().steps;
+            },
+            children: (step) => (() => {
+              var _el$7 = createElement("box"), _el$8 = createElement("text");
+              insertNode(_el$7, _el$8);
+              setProp(_el$7, "height", 1);
+              setProp(_el$7, "flexDirection", "row");
+              setProp(_el$8, "height", 1);
+              setProp(_el$8, "fg", "#eeeeee");
+              setProp(_el$8, "flexGrow", 1);
+              insert(_el$8, () => step.line);
+              insert(_el$7, createComponent2(Show, {
+                get when() {
+                  return step.purpose;
+                },
+                get children() {
+                  var _el$9 = createElement("text");
+                  setProp(_el$9, "height", 1);
+                  setProp(_el$9, "fg", "#808080");
+                  insert(_el$9, () => step.purpose);
+                  return _el$9;
+                }
+              }), null);
+              return _el$7;
+            })()
+          })];
+        }
+      })];
+    }
+  });
+}
+
+// src/findings-filter.ts
+var SEVERITY_FILTERS = ["all", "critical", "high", "medium", "low", "info"];
+var EVIDENCE_FILTERS = [
+  "all",
+  "valid",
+  "needs_review",
+  "invalid",
+  "unverified"
+];
+var SORT_KEYS = ["severity", "file", "confidence"];
+var emptyFindingsFilter = () => ({
+  active: false,
+  query: "",
+  severity: "all",
+  evidence: "all",
+  sort: "severity"
+});
+function cycleValue(cycle, current) {
+  const index = cycle.indexOf(current);
+  if (index < 0)
+    return cycle[0];
+  return cycle[(index + 1) % cycle.length];
+}
+function cycleSeverity(state) {
+  return { ...state, severity: cycleValue(SEVERITY_FILTERS, state.severity) };
+}
+function cycleEvidence(state) {
+  return { ...state, evidence: cycleValue(EVIDENCE_FILTERS, state.evidence) };
+}
+function cycleSort(state) {
+  return { ...state, sort: cycleValue(SORT_KEYS, state.sort) };
+}
+function normalizeSort(key) {
+  return SORT_KEYS.includes(key) ? key : "severity";
+}
+function hasActiveCriteria(state) {
+  if (!state)
+    return false;
+  if (String(state.query ?? "").trim())
+    return true;
+  return String(state.severity ?? "all") !== "all" || String(state.evidence ?? "all") !== "all";
+}
+function applyFindingsFilter(findings, state) {
+  const list = Array.isArray(findings) ? findings : [];
+  const severity = state?.severity && state.severity !== "all" ? state.severity : "";
+  const evidence = state?.evidence && state.evidence !== "all" ? state.evidence : "";
+  const filtered = filterFindings(list, {
+    severity,
+    evidence,
+    query: String(state?.query ?? "")
+  });
+  return sortFindings(filtered, normalizeSort(state?.sort));
+}
+function filterCounts(findings, state) {
+  const total = Array.isArray(findings) ? findings.length : 0;
+  return { shown: applyFindingsFilter(findings, state).length, total };
+}
+function describeFilter(state) {
+  const parts = [];
+  if (String(state.query ?? "").trim())
+    parts.push(`query="${state.query.trim()}"`);
+  if (state.severity !== "all")
+    parts.push(`severity=${state.severity}`);
+  if (state.evidence !== "all")
+    parts.push(`evidence=${state.evidence}`);
+  parts.push(`sort=${normalizeSort(state.sort)}`);
+  return parts.join(" \xB7 ");
 }
 
 // src/app.tsx
@@ -36371,6 +37343,21 @@ function Composer(props) {
       submitLock = false;
       return;
     }
+    if (text === "/showcase") {
+      props.onShowcase();
+      submitLock = false;
+      return;
+    }
+    if (text === "/demo" || text.startsWith("/demo ")) {
+      props.onDemo(text.slice("/demo".length).trim());
+      submitLock = false;
+      return;
+    }
+    if (text === "/publish" || text.startsWith("/publish ")) {
+      props.onPublish(text.slice("/publish".length).trim());
+      submitLock = false;
+      return;
+    }
     const commandParts = text.split(/\s+/);
     const reviewUrl = commandParts[0].toLowerCase() === "/review" ? commandParts[1] : isGithubPrUrl(text) ? text : undefined;
     if (reviewUrl && isGithubPrUrl(reviewUrl)) {
@@ -36513,6 +37500,21 @@ function Composer(props) {
     }
     if (key.meta === true && key.name === "x") {
       props.onExport();
+      key.stopPropagation?.();
+      return;
+    }
+    if (props.focused !== false && key.meta === true && key.name === "p") {
+      props.onPublish("");
+      key.stopPropagation?.();
+      return;
+    }
+    if (props.focused !== false && key.meta === true && key.name === "d") {
+      props.onDemo("");
+      key.stopPropagation?.();
+      return;
+    }
+    if (props.focused !== false && isCtrlKey2(key, "f")) {
+      props.onFilterFindings();
       key.stopPropagation?.();
       return;
     }
@@ -38425,6 +39427,248 @@ function ModelDialog(props) {
     return _el$285;
   })();
 }
+function PublishOverlay(props) {
+  useKeyboard((key) => {
+    if (key.name === "escape") {
+      key.stopPropagation?.();
+      if (props.state === "preview" || props.state === "publishing")
+        props.onCancel();
+      else
+        props.onClose();
+      return;
+    }
+    if (!isEnterKey(key))
+      return;
+    key.stopPropagation?.();
+    if (props.state === "preview") {
+      if (!props.busy)
+        props.onConfirm();
+      return;
+    }
+    props.onClose();
+  });
+  return (() => {
+    var _el$296 = createElement("box");
+    setProp(_el$296, "position", "absolute");
+    setProp(_el$296, "left", 8);
+    setProp(_el$296, "top", 2);
+    setProp(_el$296, "width", 64);
+    setProp(_el$296, "height", 19);
+    setProp(_el$296, "zIndex", 170);
+    setProp(_el$296, "flexDirection", "column");
+    insert(_el$296, createComponent2(PublishConfirmDialog, {
+      open: true,
+      get state() {
+        return props.state;
+      },
+      get preview() {
+        return props.preview;
+      },
+      get message() {
+        return props.message;
+      },
+      get language() {
+        return props.language;
+      }
+    }));
+    return _el$296;
+  })();
+}
+function DemoOverlay(props) {
+  useKeyboard((key) => {
+    if (key.name === "escape" || isEnterKey(key)) {
+      key.stopPropagation?.();
+      props.onClose();
+    }
+  });
+  return (() => {
+    var _el$297 = createElement("box"), _el$298 = createElement("box"), _el$299 = createElement("text");
+    insertNode(_el$297, _el$298);
+    insertNode(_el$297, _el$299);
+    setProp(_el$297, "position", "absolute");
+    setProp(_el$297, "left", 8);
+    setProp(_el$297, "top", 2);
+    setProp(_el$297, "width", 64);
+    setProp(_el$297, "height", 20);
+    setProp(_el$297, "zIndex", 170);
+    setProp(_el$297, "flexDirection", "column");
+    setProp(_el$298, "flexGrow", 1);
+    setProp(_el$298, "minHeight", 0);
+    setProp(_el$298, "flexDirection", "column");
+    insert(_el$298, createComponent2(DemoResultPanel, {
+      get caseKey() {
+        return props.data?.caseKey;
+      },
+      get title() {
+        return props.data?.title;
+      },
+      get description() {
+        return props.data?.description;
+      },
+      get riskLevel() {
+        return props.data?.riskLevel;
+      },
+      get priorityFiles() {
+        return props.data?.priorityFiles;
+      },
+      get findings() {
+        return props.data?.findings ?? [];
+      },
+      get evidence() {
+        return props.data?.evidence;
+      },
+      get durationMs() {
+        return props.data?.durationMs;
+      },
+      get language() {
+        return props.language;
+      }
+    }));
+    insertNode(_el$299, createTextNode(`Esc / Enter \u5173\u95ED \xB7 \u79BB\u7EBF\u8FD0\u884C\uFF0C\u4E0D\u8C03\u7528\u6A21\u578B\u4E0E GitHub`));
+    setProp(_el$299, "height", 1);
+    setProp(_el$299, "fg", "#808080");
+    return _el$297;
+  })();
+}
+function ShowcaseOverlay(props) {
+  useKeyboard((key) => {
+    if (key.name === "escape" || isEnterKey(key)) {
+      key.stopPropagation?.();
+      props.onClose();
+    }
+  });
+  return (() => {
+    var _el$301 = createElement("box"), _el$302 = createElement("box"), _el$303 = createElement("text");
+    insertNode(_el$301, _el$302);
+    insertNode(_el$301, _el$303);
+    setProp(_el$301, "position", "absolute");
+    setProp(_el$301, "left", 8);
+    setProp(_el$301, "top", 3);
+    setProp(_el$301, "width", 64);
+    setProp(_el$301, "height", 16);
+    setProp(_el$301, "zIndex", 170);
+    setProp(_el$301, "flexDirection", "column");
+    setProp(_el$302, "flexGrow", 1);
+    setProp(_el$302, "minHeight", 0);
+    setProp(_el$302, "flexDirection", "column");
+    insert(_el$302, createComponent2(ShowcasePanel, {
+      get title() {
+        return props.data?.title;
+      },
+      get offlineReady() {
+        return props.data?.offlineReady;
+      },
+      get realReviewReady() {
+        return props.data?.realReviewReady;
+      },
+      get steps() {
+        return props.data?.steps ?? [];
+      },
+      get language() {
+        return props.language;
+      }
+    }));
+    insertNode(_el$303, createTextNode(`Esc / Enter \u5173\u95ED \xB7 \u6F14\u793A\u811A\u672C\u4E0D\u4F1A\u6539\u53D8\u9879\u76EE\u72B6\u6001`));
+    setProp(_el$303, "height", 1);
+    setProp(_el$303, "fg", "#808080");
+    return _el$301;
+  })();
+}
+function FindingsFilterOverlay(props) {
+  let filterInput;
+  useKeyboard((key) => {
+    if (key.name === "escape") {
+      key.stopPropagation?.();
+      props.onClear();
+      return;
+    }
+    if (isEnterKey(key)) {
+      key.stopPropagation?.();
+      props.onApply();
+      return;
+    }
+    if (key.name === "tab") {
+      key.stopPropagation?.();
+      props.onShortcut(key.shift === true ? "evidence" : "severity");
+      return;
+    }
+    if (isCtrlKey2(key, "s")) {
+      key.stopPropagation?.();
+      props.onShortcut("sort");
+    }
+  });
+  onMount(() => {
+    filterInput?.focus?.();
+  });
+  return (() => {
+    var _el$305 = createElement("box"), _el$306 = createElement("text"), _el$308 = createElement("text"), _el$310 = createElement("box"), _el$311 = createElement("input"), _el$312 = createElement("box"), _el$313 = createElement("text");
+    insertNode(_el$305, _el$306);
+    insertNode(_el$305, _el$308);
+    insertNode(_el$305, _el$310);
+    insertNode(_el$305, _el$312);
+    insertNode(_el$305, _el$313);
+    setProp(_el$305, "position", "absolute");
+    setProp(_el$305, "left", 9);
+    setProp(_el$305, "top", 3);
+    setProp(_el$305, "width", 62);
+    setProp(_el$305, "height", 14);
+    setProp(_el$305, "backgroundColor", "#171717");
+    setProp(_el$305, "borderStyle", "single");
+    setProp(_el$305, "borderColor", "#fb8147");
+    setProp(_el$305, "paddingLeft", 2);
+    setProp(_el$305, "paddingRight", 2);
+    setProp(_el$305, "zIndex", 170);
+    setProp(_el$305, "flexDirection", "column");
+    insertNode(_el$306, createTextNode(`FINDINGS FILTER // \u7B5B\u9009`));
+    setProp(_el$306, "fg", "#fb8147");
+    insertNode(_el$308, createTextNode(`\u8F93\u5165\u5173\u952E\u8BCD\u5B9E\u65F6\u8FC7\u6EE4\uFF1BTab \u4E25\u91CD\u7EA7\u522B \xB7 Shift+Tab \u8BC1\u636E \xB7 Ctrl+S \u6392\u5E8F`));
+    setProp(_el$308, "fg", "#808080");
+    insertNode(_el$310, _el$311);
+    setProp(_el$310, "marginTop", 1);
+    setProp(_el$310, "backgroundColor", "#202020");
+    setProp(_el$310, "paddingLeft", 1);
+    setProp(_el$310, "paddingRight", 1);
+    use((node) => {
+      filterInput = node;
+    }, _el$311);
+    setProp(_el$311, "placeholder", "\u5173\u952E\u8BCD / \u6587\u4EF6 / \u6807\u9898");
+    setProp(_el$311, "focused", true);
+    setProp(_el$311, "onContentChange", () => props.onQuery(filterInput?.value ?? ""));
+    setProp(_el$311, "flexGrow", 1);
+    setProp(_el$312, "marginTop", 1);
+    setProp(_el$312, "flexDirection", "column");
+    insert(_el$312, createComponent2(FindingsFilterBar, {
+      get active() {
+        return props.state.active;
+      },
+      get query() {
+        return props.state.query;
+      },
+      get severity() {
+        return props.state.severity;
+      },
+      get evidence() {
+        return props.state.evidence;
+      },
+      get sort() {
+        return props.state.sort;
+      },
+      get shown() {
+        return props.shown;
+      },
+      get total() {
+        return props.total;
+      },
+      get language() {
+        return props.language;
+      }
+    }));
+    insertNode(_el$313, createTextNode(`Enter \u5E94\u7528 \xB7 Esc \u6E05\u9664\u5E76\u5173\u95ED`));
+    setProp(_el$313, "fg", "#808080");
+    setProp(_el$313, "marginTop", 1);
+    return _el$305;
+  })();
+}
 function App() {
   const [mode, setMode] = createSignal("Build");
   const [composerDraft, setComposerDraft] = createSignal("");
@@ -38463,6 +39707,17 @@ function App() {
   const [historyStats, setHistoryStats] = createSignal({});
   const [historyStoreNote, setHistoryStoreNote] = createSignal("");
   const [modelOpen, setModelOpen] = createSignal(false);
+  const [findingsFilter, setFindingsFilter] = createSignal(emptyFindingsFilter());
+  const [filterOpen, setFilterOpen] = createSignal(false);
+  const [publishOpen, setPublishOpen] = createSignal(false);
+  const [publishState, setPublishState] = createSignal("preview");
+  const [publishPreview, setPublishPreview] = createSignal();
+  const [publishMessage, setPublishMessage] = createSignal("");
+  const [publishBusy, setPublishBusy] = createSignal(false);
+  const [demoOpen, setDemoOpen] = createSignal(false);
+  const [demoData, setDemoData] = createSignal();
+  const [showcaseOpen, setShowcaseOpen] = createSignal(false);
+  const [showcaseData, setShowcaseData] = createSignal();
   const [reviewReport, setReviewReport] = createSignal({});
   const [pendingReviewUrl, setPendingReviewUrl] = createSignal("");
   const [reviewing, setReviewing] = createSignal(false);
@@ -38662,6 +39917,143 @@ function App() {
     }
   };
   const currentRunId = () => reviewWorkspace().runId ?? reviewReport().run?.id ?? "";
+  const visibleFindings = () => applyFindingsFilter(reviewFindings(), findingsFilter());
+  const visibleFindingCounts = () => filterCounts(reviewFindings(), findingsFilter());
+  const updateFindingsFilter = (next) => setFindingsFilter({
+    ...next,
+    active: hasActiveCriteria(next)
+  });
+  const clearFindingsFilter = () => {
+    setFindingsFilter(emptyFindingsFilter());
+    setFilterOpen(false);
+    setReviewActionMessage("\u5DF2\u6E05\u9664 Findings \u7B5B\u9009\u3002");
+  };
+  const openFindingsFilter = () => {
+    if (reviewFindings().length === 0) {
+      appendMessage({
+        role: "assistant",
+        content: "\u5F53\u524D\u6CA1\u6709\u53EF\u7B5B\u9009\u7684 Findings\u3002\u5148\u6267\u884C /review <PR_URL> \u6216 /history <run_id>\u3002"
+      });
+      return;
+    }
+    setFindingsOpen(false);
+    setFilterOpen(true);
+  };
+  const applyFindingsFilterShortcut = (action) => {
+    const current = findingsFilter();
+    const next = action === "severity" ? cycleSeverity(current) : action === "evidence" ? cycleEvidence(current) : cycleSort(current);
+    updateFindingsFilter(next);
+  };
+  const closeFindingsFilter = () => {
+    setFilterOpen(false);
+    const state = findingsFilter();
+    if (hasActiveCriteria(state)) {
+      setReviewActionMessage(`Findings \u7B5B\u9009\u5DF2\u5E94\u7528\uFF1A${describeFilter(state)}\uFF08${visibleFindingCounts().shown}/${visibleFindingCounts().total}\uFF09`);
+    }
+  };
+  const runDemo = async (caseKey) => {
+    const key = caseKey.trim();
+    const response = await backend.request("command.execute", {
+      name: "demo",
+      args: key ? [key] : [],
+      session_id: sessionId()
+    });
+    if (!response.ok) {
+      setDemoOpen(true);
+      setDemoData(undefined);
+      setReviewActionMessage(String(response.error?.message ?? "\u79BB\u7EBF Demo \u8FD0\u884C\u5931\u8D25\u3002"));
+      return;
+    }
+    setDemoData(demoPanelFromPayload(response.result));
+    setDemoOpen(true);
+    if (response.result?.text) {
+      appendMessage({
+        role: "assistant",
+        content: String(response.result.text)
+      });
+    }
+  };
+  const openShowcase = async () => {
+    const response = await backend.request("command.execute", {
+      name: "showcase",
+      args: [],
+      session_id: sessionId()
+    });
+    if (!response.ok) {
+      setReviewActionMessage(String(response.error?.message ?? "\u6F14\u793A\u8DEF\u5F84\u8BFB\u53D6\u5931\u8D25\u3002"));
+      return;
+    }
+    setShowcaseData(showcasePanelFromPayload(response.result));
+    setShowcaseOpen(true);
+    if (response.result?.text) {
+      appendMessage({
+        role: "assistant",
+        content: String(response.result.text)
+      });
+    }
+  };
+  const startPublish = async (args) => {
+    const tokens = args.split(/\s+/).filter((token) => token.length > 0);
+    const confirm = tokens.some((token) => token === "--confirm" || token === "-c");
+    const runId = tokens.find((token) => !token.startsWith("-")) ?? "";
+    if (publishBusy())
+      return;
+    setPublishOpen(true);
+    setPublishState("publishing");
+    setPublishMessage(confirm ? "\u6B63\u5728\u53D1\u5E03\u5BA1\u67E5\u8BC4\u8BBA\u2026" : "\u6B63\u5728\u8BFB\u53D6\u53D1\u5E03\u9884\u89C8\u2026");
+    setPublishBusy(true);
+    try {
+      const response = await backend.request("command.execute", {
+        name: "publish",
+        args: [...runId ? [runId] : [], ...confirm ? ["--confirm"] : []],
+        session_id: sessionId()
+      });
+      if (!response.ok) {
+        setPublishState("failed");
+        setPublishMessage(String(response.error?.message ?? "\u53D1\u5E03\u5931\u8D25\u3002"));
+        setReviewActionMessage(String(response.error?.message ?? "\u53D1\u5E03\u5931\u8D25\u3002"));
+        return;
+      }
+      const payload = response.result ?? {};
+      setPublishPreview(publishPreviewFromPayload(payload));
+      setPublishMessage(String(payload.text ?? ""));
+      if (String(payload.status) === "published") {
+        setPublishState("published");
+        setReviewActionMessage(String(payload.text ?? "\u5BA1\u67E5\u8BC4\u8BBA\u5DF2\u53D1\u5E03\u3002"));
+        appendMessage({
+          role: "assistant",
+          content: String(payload.text ?? "\u5BA1\u67E5\u8BC4\u8BBA\u5DF2\u53D1\u5E03\u3002")
+        });
+      } else {
+        setPublishState("preview");
+      }
+    } catch (error) {
+      setPublishState("failed");
+      setPublishMessage(String(error));
+      setReviewActionMessage(String(error));
+    } finally {
+      setPublishBusy(false);
+    }
+  };
+  const confirmPublish = () => {
+    const runId = publishPreview()?.runId ?? "";
+    startPublish(runId ? `${runId} --confirm` : "--confirm");
+  };
+  const dismissPublish = () => {
+    setPublishOpen(false);
+    setPublishState("preview");
+    setPublishMessage("");
+  };
+  const cancelPublish = () => {
+    if (publishState() === "publishing") {
+      dismissPublish();
+      setReviewActionMessage("\u5DF2\u5173\u95ED\u53D1\u5E03\u5BF9\u8BDD\u6846\uFF1B\u82E5\u8BF7\u6C42\u4ECD\u5728\u8FDB\u884C\uFF0C\u7ED3\u679C\u4F1A\u5199\u5165\u5BF9\u8BDD\u8BB0\u5F55\u3002");
+      return;
+    }
+    setPublishState("cancelled");
+    setPublishMessage("\u5DF2\u53D6\u6D88\u53D1\u5E03\uFF1A\u6CA1\u6709\u5411 GitHub \u5199\u5165\u4EFB\u4F55\u5185\u5BB9\u3002");
+    setReviewActionMessage("\u5DF2\u53D6\u6D88\u53D1\u5E03\uFF1A\u6CA1\u6709\u5411 GitHub \u5199\u5165\u4EFB\u4F55\u5185\u5BB9\u3002");
+  };
   const explainCurrentRun = async () => {
     const runId = currentRunId();
     if (!runId) {
@@ -39042,34 +40434,34 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
   });
   onCleanup(() => void backend.stop());
   return (() => {
-    var _el$296 = createElement("box"), _el$297 = createElement("scrollbox"), _el$298 = createElement("box"), _el$325 = createElement("box"), _el$326 = createElement("text"), _el$327 = createElement("text"), _el$328 = createTextNode(` \xB7 `), _el$329 = createTextNode(` \xB7 `), _el$330 = createTextNode(` \xB7 `);
-    insertNode(_el$296, _el$297);
-    insertNode(_el$296, _el$325);
-    setProp(_el$296, "width", "100%");
-    setProp(_el$296, "height", "100%");
-    setProp(_el$296, "backgroundColor", "#0a0a0a");
-    setProp(_el$296, "alignItems", "center");
-    setProp(_el$296, "flexDirection", "column");
-    insert(_el$296, createComponent2(Show, {
+    var _el$315 = createElement("box"), _el$316 = createElement("scrollbox"), _el$317 = createElement("box"), _el$345 = createElement("box"), _el$346 = createElement("text"), _el$347 = createElement("text"), _el$348 = createTextNode(` \xB7 `), _el$349 = createTextNode(` \xB7 `), _el$350 = createTextNode(` \xB7 `);
+    insertNode(_el$315, _el$316);
+    insertNode(_el$315, _el$345);
+    setProp(_el$315, "width", "100%");
+    setProp(_el$315, "height", "100%");
+    setProp(_el$315, "backgroundColor", "#0a0a0a");
+    setProp(_el$315, "alignItems", "center");
+    setProp(_el$315, "flexDirection", "column");
+    insert(_el$315, createComponent2(Show, {
       get when() {
         return memo2(() => !!(messages().length === 0 && !reviewStage() && !errorMessage()))() && !compactHome();
       },
       get fallback() {
         return (() => {
-          var _el$331 = createElement("box"), _el$332 = createElement("text"), _el$334 = createElement("text"), _el$335 = createTextNode(` \xB7 `);
-          insertNode(_el$331, _el$332);
-          insertNode(_el$331, _el$334);
-          setProp(_el$331, "width", 76);
-          setProp(_el$331, "marginTop", 1);
-          setProp(_el$331, "flexDirection", "row");
-          setProp(_el$331, "justifyContent", "space-between");
-          insertNode(_el$332, createTextNode(`PR REVIEW / CHAT`));
-          setProp(_el$332, "fg", "#fb8147");
-          insertNode(_el$334, _el$335);
-          setProp(_el$334, "fg", "#808080");
-          insert(_el$334, () => runtime().provider_display ?? runtime().provider ?? "", _el$335);
-          insert(_el$334, () => runtime().model ?? "", null);
-          return _el$331;
+          var _el$351 = createElement("box"), _el$352 = createElement("text"), _el$354 = createElement("text"), _el$355 = createTextNode(` \xB7 `);
+          insertNode(_el$351, _el$352);
+          insertNode(_el$351, _el$354);
+          setProp(_el$351, "width", 76);
+          setProp(_el$351, "marginTop", 1);
+          setProp(_el$351, "flexDirection", "row");
+          setProp(_el$351, "justifyContent", "space-between");
+          insertNode(_el$352, createTextNode(`PR REVIEW / CHAT`));
+          setProp(_el$352, "fg", "#fb8147");
+          insertNode(_el$354, _el$355);
+          setProp(_el$354, "fg", "#808080");
+          insert(_el$354, () => runtime().provider_display ?? runtime().provider ?? "", _el$355);
+          insert(_el$354, () => runtime().model ?? "", null);
+          return _el$351;
         })();
       },
       get children() {
@@ -39079,20 +40471,20 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           }
         });
       }
-    }), _el$297);
-    insertNode(_el$297, _el$298);
-    setProp(_el$297, "width", "100%");
-    setProp(_el$297, "flexGrow", 1);
-    setProp(_el$297, "scrollY", true);
-    setProp(_el$297, "stickyScroll", true);
-    setProp(_el$297, "stickyStart", "bottom");
-    setProp(_el$297, "scrollbarOptions", {
+    }), _el$316);
+    insertNode(_el$316, _el$317);
+    setProp(_el$316, "width", "100%");
+    setProp(_el$316, "flexGrow", 1);
+    setProp(_el$316, "scrollY", true);
+    setProp(_el$316, "stickyScroll", true);
+    setProp(_el$316, "stickyStart", "bottom");
+    setProp(_el$316, "scrollbarOptions", {
       showArrows: false
     });
-    setProp(_el$298, "width", "100%");
-    setProp(_el$298, "alignItems", "center");
-    setProp(_el$298, "flexDirection", "column");
-    insert(_el$298, createComponent2(Show, {
+    setProp(_el$317, "width", "100%");
+    setProp(_el$317, "alignItems", "center");
+    setProp(_el$317, "flexDirection", "column");
+    insert(_el$317, createComponent2(Show, {
       get when() {
         return memo2(() => !!(messages().length === 0 && !composerDraft() && !streamingAssistant() && !errorMessage() && !reviewStage()))() && !compactHome();
       },
@@ -39104,44 +40496,82 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
         });
       }
     }), null);
-    insert(_el$298, createComponent2(Show, {
+    insert(_el$317, createComponent2(Show, {
       get when() {
         return errorMessage();
       },
       get children() {
-        var _el$299 = createElement("box"), _el$300 = createElement("text"), _el$302 = createElement("text"), _el$303 = createElement("text"), _el$305 = createElement("text");
-        insertNode(_el$299, _el$300);
-        insertNode(_el$299, _el$302);
-        insertNode(_el$299, _el$303);
-        insertNode(_el$299, _el$305);
-        setProp(_el$299, "width", 76);
-        setProp(_el$299, "backgroundColor", "#241616");
-        setProp(_el$299, "borderStyle", "single");
-        setProp(_el$299, "borderColor", "#ff6b6b");
-        setProp(_el$299, "paddingLeft", 2);
-        setProp(_el$299, "paddingRight", 2);
-        setProp(_el$299, "marginTop", 2);
-        setProp(_el$299, "flexDirection", "column");
-        insertNode(_el$300, createTextNode(`ERROR // RECOVERY`));
-        setProp(_el$300, "fg", "#ff6b6b");
-        setProp(_el$302, "fg", "#eeeeee");
-        insert(_el$302, errorMessage);
-        insertNode(_el$303, createTextNode(`\u5EFA\u8BAE\uFF1A\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u3001\u914D\u7F6E Endpoint\uFF0C\u6216\u4F7F\u7528 Ctrl+P \u5207\u6362\u8FD0\u884C\u65F6\u3002`));
-        setProp(_el$303, "fg", "#808080");
-        insertNode(_el$305, createTextNode(`\u53EF\u7528\u6062\u590D\uFF1ACtrl+R /retry \xB7 /model status \xB7 /model local \xB7 /model cloud \xB7 /new`));
-        setProp(_el$305, "fg", "#808080");
-        return _el$299;
+        var _el$318 = createElement("box"), _el$319 = createElement("text"), _el$321 = createElement("text"), _el$322 = createElement("text"), _el$324 = createElement("text");
+        insertNode(_el$318, _el$319);
+        insertNode(_el$318, _el$321);
+        insertNode(_el$318, _el$322);
+        insertNode(_el$318, _el$324);
+        setProp(_el$318, "width", 76);
+        setProp(_el$318, "backgroundColor", "#241616");
+        setProp(_el$318, "borderStyle", "single");
+        setProp(_el$318, "borderColor", "#ff6b6b");
+        setProp(_el$318, "paddingLeft", 2);
+        setProp(_el$318, "paddingRight", 2);
+        setProp(_el$318, "marginTop", 2);
+        setProp(_el$318, "flexDirection", "column");
+        insertNode(_el$319, createTextNode(`ERROR // RECOVERY`));
+        setProp(_el$319, "fg", "#ff6b6b");
+        setProp(_el$321, "fg", "#eeeeee");
+        insert(_el$321, errorMessage);
+        insertNode(_el$322, createTextNode(`\u5EFA\u8BAE\uFF1A\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u3001\u914D\u7F6E Endpoint\uFF0C\u6216\u4F7F\u7528 Ctrl+P \u5207\u6362\u8FD0\u884C\u65F6\u3002`));
+        setProp(_el$322, "fg", "#808080");
+        insertNode(_el$324, createTextNode(`\u53EF\u7528\u6062\u590D\uFF1ACtrl+R /retry \xB7 /model status \xB7 /model local \xB7 /model cloud \xB7 /new`));
+        setProp(_el$324, "fg", "#808080");
+        return _el$318;
       }
     }), null);
-    insert(_el$298, createComponent2(Show, {
+    insert(_el$317, createComponent2(Show, {
+      get when() {
+        return reviewFindings().length > 0;
+      },
+      get children() {
+        var _el$326 = createElement("box");
+        setProp(_el$326, "width", 76);
+        setProp(_el$326, "marginTop", 1);
+        setProp(_el$326, "flexDirection", "column");
+        insert(_el$326, createComponent2(FindingsFilterBar, {
+          get active() {
+            return hasActiveCriteria(findingsFilter()) || findingsFilter().sort !== "severity";
+          },
+          get query() {
+            return findingsFilter().query;
+          },
+          get severity() {
+            return memo2(() => findingsFilter().severity === "all")() ? undefined : findingsFilter().severity;
+          },
+          get evidence() {
+            return memo2(() => findingsFilter().evidence === "all")() ? undefined : findingsFilter().evidence;
+          },
+          get sort() {
+            return findingsFilter().sort;
+          },
+          get shown() {
+            return visibleFindingCounts().shown;
+          },
+          get total() {
+            return visibleFindingCounts().total;
+          },
+          get language() {
+            return runtime().ui_language;
+          }
+        }));
+        return _el$326;
+      }
+    }), null);
+    insert(_el$317, createComponent2(Show, {
       get when() {
         return memo2(() => !!isWideReview())() && (reviewing() || reviewReport().pr || reviewReport().counts);
       },
       get children() {
-        var _el$307 = createElement("box");
-        setProp(_el$307, "width", 76);
-        setProp(_el$307, "marginTop", 2);
-        insert(_el$307, createComponent2(ReviewWorkspace, {
+        var _el$327 = createElement("box");
+        setProp(_el$327, "width", 76);
+        setProp(_el$327, "marginTop", 2);
+        insert(_el$327, createComponent2(ReviewWorkspace, {
           layout: "wide",
           get progress() {
             return reviewProgressProps();
@@ -39150,29 +40580,31 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
             return reviewSummaryProps();
           },
           get findings() {
-            return reviewFindings();
+            return visibleFindings();
           },
           onOpenFindings: openFindings,
           onExplain: () => void explainCurrentRun(),
           onFeedback: () => openFeedback(),
           onExport: () => void exportCurrentReport(),
+          onPublish: () => void startPublish(""),
+          onFilter: openFindingsFilter,
           get language() {
             return runtime().ui_language;
           }
         }));
-        effect((_$p) => setProp(_el$307, "height", Math.max(20, dimensions().height - 8), _$p));
-        return _el$307;
+        effect((_$p) => setProp(_el$327, "height", Math.max(20, dimensions().height - 8), _$p));
+        return _el$327;
       }
     }), null);
-    insert(_el$298, createComponent2(Show, {
+    insert(_el$317, createComponent2(Show, {
       get when() {
         return memo2(() => !!(!isWideReview() && reviewing()))() && reviewStage();
       },
       get children() {
-        var _el$308 = createElement("box");
-        setProp(_el$308, "width", 76);
-        setProp(_el$308, "marginTop", 2);
-        insert(_el$308, createComponent2(ReviewProgressPanel, {
+        var _el$328 = createElement("box");
+        setProp(_el$328, "width", 76);
+        setProp(_el$328, "marginTop", 2);
+        insert(_el$328, createComponent2(ReviewProgressPanel, {
           get url() {
             return reviewUrl();
           },
@@ -39214,116 +40646,116 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           },
           onCancel: cancelCurrentTask
         }));
-        return _el$308;
+        return _el$328;
       }
     }), null);
-    insert(_el$298, createComponent2(Show, {
+    insert(_el$317, createComponent2(Show, {
       get when() {
         return memo2(() => !!!reviewing())() && (reviewStage() === "\u5BA1\u67E5\u5931\u8D25" || reviewStage() === "\u5BA1\u67E5\u5DF2\u53D6\u6D88");
       },
       get children() {
-        var _el$309 = createElement("box"), _el$310 = createElement("text"), _el$311 = createTextNode(`\u25CF `), _el$312 = createElement("text");
-        insertNode(_el$309, _el$310);
-        insertNode(_el$309, _el$312);
-        setProp(_el$309, "width", 76);
-        setProp(_el$309, "backgroundColor", "#161616");
-        setProp(_el$309, "borderStyle", "single");
-        setProp(_el$309, "paddingLeft", 2);
-        setProp(_el$309, "paddingRight", 2);
-        setProp(_el$309, "marginTop", 2);
-        setProp(_el$309, "flexDirection", "column");
-        insertNode(_el$310, _el$311);
-        insert(_el$310, reviewStage, null);
-        setProp(_el$312, "fg", "#b0b0b0");
-        insert(_el$312, reviewDetail);
-        insert(_el$309, createComponent2(Show, {
+        var _el$329 = createElement("box"), _el$330 = createElement("text"), _el$331 = createTextNode(`\u25CF `), _el$332 = createElement("text");
+        insertNode(_el$329, _el$330);
+        insertNode(_el$329, _el$332);
+        setProp(_el$329, "width", 76);
+        setProp(_el$329, "backgroundColor", "#161616");
+        setProp(_el$329, "borderStyle", "single");
+        setProp(_el$329, "paddingLeft", 2);
+        setProp(_el$329, "paddingRight", 2);
+        setProp(_el$329, "marginTop", 2);
+        setProp(_el$329, "flexDirection", "column");
+        insertNode(_el$330, _el$331);
+        insert(_el$330, reviewStage, null);
+        setProp(_el$332, "fg", "#b0b0b0");
+        insert(_el$332, reviewDetail);
+        insert(_el$329, createComponent2(Show, {
           get when() {
             return reviewUrl();
           },
           get children() {
-            var _el$313 = createElement("text");
-            setProp(_el$313, "fg", "#808080");
-            insert(_el$313, () => truncateMiddle(reviewUrl(), 68));
-            return _el$313;
+            var _el$333 = createElement("text");
+            setProp(_el$333, "fg", "#808080");
+            insert(_el$333, () => truncateMiddle(reviewUrl(), 68));
+            return _el$333;
           }
         }), null);
         effect((_p$) => {
           var _v$42 = reviewStage() === "\u5BA1\u67E5\u5931\u8D25" ? "#ff6b6b" : orange, _v$43 = reviewStage() === "\u5BA1\u67E5\u5931\u8D25" ? "#ff6b6b" : orange;
-          _v$42 !== _p$.e && (_p$.e = setProp(_el$309, "borderColor", _v$42, _p$.e));
-          _v$43 !== _p$.t && (_p$.t = setProp(_el$310, "fg", _v$43, _p$.t));
+          _v$42 !== _p$.e && (_p$.e = setProp(_el$329, "borderColor", _v$42, _p$.e));
+          _v$43 !== _p$.t && (_p$.t = setProp(_el$330, "fg", _v$43, _p$.t));
           return _p$;
         }, {
           e: undefined,
           t: undefined
         });
-        return _el$309;
+        return _el$329;
       }
     }), null);
-    insert(_el$298, createComponent2(Show, {
+    insert(_el$317, createComponent2(Show, {
       get when() {
         return messages().length > 0 || streamingAssistant();
       },
       get children() {
-        var _el$314 = createElement("box");
-        setProp(_el$314, "width", 76);
-        setProp(_el$314, "marginTop", 2);
-        setProp(_el$314, "flexDirection", "column");
-        insert(_el$314, createComponent2(For, {
+        var _el$334 = createElement("box");
+        setProp(_el$334, "width", 76);
+        setProp(_el$334, "marginTop", 2);
+        setProp(_el$334, "flexDirection", "column");
+        insert(_el$334, createComponent2(For, {
           get each() {
             return messages();
           },
           children: (message) => (() => {
-            var _el$336 = createElement("box"), _el$337 = createElement("text"), _el$338 = createElement("text");
-            insertNode(_el$336, _el$337);
-            insertNode(_el$336, _el$338);
-            setProp(_el$336, "flexDirection", "row");
-            setProp(_el$336, "gap", 1);
-            setProp(_el$336, "paddingBottom", 1);
-            insert(_el$337, () => message.role === "user" ? ">" : "\u25CF");
-            setProp(_el$338, "width", 70);
-            insert(_el$338, () => message.content);
+            var _el$356 = createElement("box"), _el$357 = createElement("text"), _el$358 = createElement("text");
+            insertNode(_el$356, _el$357);
+            insertNode(_el$356, _el$358);
+            setProp(_el$356, "flexDirection", "row");
+            setProp(_el$356, "gap", 1);
+            setProp(_el$356, "paddingBottom", 1);
+            insert(_el$357, () => message.role === "user" ? ">" : "\u25CF");
+            setProp(_el$358, "width", 70);
+            insert(_el$358, () => message.content);
             effect((_p$) => {
               var _v$44 = message.role === "user" ? orange : "#eeeeee", _v$45 = message.role === "user" ? "#eeeeee" : muted;
-              _v$44 !== _p$.e && (_p$.e = setProp(_el$337, "fg", _v$44, _p$.e));
-              _v$45 !== _p$.t && (_p$.t = setProp(_el$338, "fg", _v$45, _p$.t));
+              _v$44 !== _p$.e && (_p$.e = setProp(_el$357, "fg", _v$44, _p$.e));
+              _v$45 !== _p$.t && (_p$.t = setProp(_el$358, "fg", _v$45, _p$.t));
               return _p$;
             }, {
               e: undefined,
               t: undefined
             });
-            return _el$336;
+            return _el$356;
           })()
         }), null);
-        insert(_el$314, createComponent2(Show, {
+        insert(_el$334, createComponent2(Show, {
           get when() {
             return streamingAssistant();
           },
           get children() {
-            var _el$315 = createElement("box"), _el$316 = createElement("text"), _el$318 = createElement("text");
-            insertNode(_el$315, _el$316);
-            insertNode(_el$315, _el$318);
-            setProp(_el$315, "flexDirection", "row");
-            setProp(_el$315, "gap", 1);
-            insertNode(_el$316, createTextNode(`\u25CF`));
-            setProp(_el$316, "fg", "#fb8147");
-            setProp(_el$318, "width", 70);
-            setProp(_el$318, "fg", "#eeeeee");
-            insert(_el$318, streamingAssistant);
-            return _el$315;
+            var _el$335 = createElement("box"), _el$336 = createElement("text"), _el$338 = createElement("text");
+            insertNode(_el$335, _el$336);
+            insertNode(_el$335, _el$338);
+            setProp(_el$335, "flexDirection", "row");
+            setProp(_el$335, "gap", 1);
+            insertNode(_el$336, createTextNode(`\u25CF`));
+            setProp(_el$336, "fg", "#fb8147");
+            setProp(_el$338, "width", 70);
+            setProp(_el$338, "fg", "#eeeeee");
+            insert(_el$338, streamingAssistant);
+            return _el$335;
           }
         }), null);
-        return _el$314;
+        return _el$334;
       }
     }), null);
-    insert(_el$298, createComponent2(Show, {
+    insert(_el$317, createComponent2(Show, {
       get when() {
         return memo2(() => !!!isWideReview())() && (reviewReport().pr || reviewReport().counts);
       },
       get children() {
-        var _el$319 = createElement("box");
-        setProp(_el$319, "width", 76);
-        setProp(_el$319, "marginTop", 1);
-        insert(_el$319, createComponent2(ReviewSummaryPanel, {
+        var _el$339 = createElement("box");
+        setProp(_el$339, "width", 76);
+        setProp(_el$339, "marginTop", 1);
+        insert(_el$339, createComponent2(ReviewSummaryPanel, {
           get repository() {
             return reviewWorkspace().repository;
           },
@@ -39346,7 +40778,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
             return reviewWorkspace().filesSkipped;
           },
           get findings() {
-            return reviewFindings();
+            return visibleFindings();
           },
           get durationSeconds() {
             return reviewWorkspace().durationSeconds;
@@ -39365,53 +40797,55 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           },
           onOpenFindings: openFindings
         }));
-        return _el$319;
+        return _el$339;
       }
     }), null);
-    insert(_el$298, createComponent2(Show, {
+    insert(_el$317, createComponent2(Show, {
       get when() {
         return memo2(() => !!!isWideReview())() && (reviewReport().pr || reviewReport().counts);
       },
       get children() {
-        var _el$320 = createElement("box");
-        setProp(_el$320, "width", 76);
-        setProp(_el$320, "marginTop", 1);
-        insert(_el$320, createComponent2(ReviewActionBar, {
+        var _el$340 = createElement("box");
+        setProp(_el$340, "width", 76);
+        setProp(_el$340, "marginTop", 1);
+        insert(_el$340, createComponent2(ReviewActionBar, {
           onOpenFindings: openFindings,
           onExplain: () => void explainCurrentRun(),
           onFeedback: () => openFeedback(),
           onExport: () => void exportCurrentReport(),
+          onPublish: () => void startPublish(""),
+          onFilter: openFindingsFilter,
           get language() {
             return runtime().ui_language;
           }
         }));
-        return _el$320;
+        return _el$340;
       }
     }), null);
-    insert(_el$298, createComponent2(Show, {
+    insert(_el$317, createComponent2(Show, {
       get when() {
         return reviewActionMessage();
       },
       get children() {
-        var _el$321 = createElement("box"), _el$322 = createElement("text"), _el$324 = createElement("text");
-        insertNode(_el$321, _el$322);
-        insertNode(_el$321, _el$324);
-        setProp(_el$321, "width", 76);
-        setProp(_el$321, "backgroundColor", "#141414");
-        setProp(_el$321, "borderStyle", "single");
-        setProp(_el$321, "borderColor", "#7edc92");
-        setProp(_el$321, "paddingLeft", 2);
-        setProp(_el$321, "paddingRight", 2);
-        setProp(_el$321, "marginTop", 1);
-        setProp(_el$321, "flexDirection", "column");
-        insertNode(_el$322, createTextNode(`REVIEW ACTION // \u64CD\u4F5C\u7ED3\u679C`));
-        setProp(_el$322, "fg", "#7edc92");
-        setProp(_el$324, "fg", "#eeeeee");
-        insert(_el$324, reviewActionMessage);
-        return _el$321;
+        var _el$341 = createElement("box"), _el$342 = createElement("text"), _el$344 = createElement("text");
+        insertNode(_el$341, _el$342);
+        insertNode(_el$341, _el$344);
+        setProp(_el$341, "width", 76);
+        setProp(_el$341, "backgroundColor", "#141414");
+        setProp(_el$341, "borderStyle", "single");
+        setProp(_el$341, "borderColor", "#7edc92");
+        setProp(_el$341, "paddingLeft", 2);
+        setProp(_el$341, "paddingRight", 2);
+        setProp(_el$341, "marginTop", 1);
+        setProp(_el$341, "flexDirection", "column");
+        insertNode(_el$342, createTextNode(`REVIEW ACTION // \u64CD\u4F5C\u7ED3\u679C`));
+        setProp(_el$342, "fg", "#7edc92");
+        setProp(_el$344, "fg", "#eeeeee");
+        insert(_el$344, reviewActionMessage);
+        return _el$341;
       }
     }), null);
-    insert(_el$296, createComponent2(Composer, {
+    insert(_el$315, createComponent2(Composer, {
       get mode() {
         return mode();
       },
@@ -39438,6 +40872,10 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
       onExplain: () => void explainCurrentRun(),
       onFeedback: () => openFeedback(),
       onExport: () => void exportCurrentReport(),
+      onPublish: (args) => void startPublish(args),
+      onDemo: (caseKey) => void runDemo(caseKey),
+      onShowcase: () => void openShowcase(),
+      onFilterFindings: openFindingsFilter,
       onRetry: retryLastReview,
       get reviewing() {
         return reviewing();
@@ -39451,10 +40889,10 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
         return backendStatus() === "THINKING" || backendStatus() === "REVIEWING" || backendStatus() === "CANCELLING";
       },
       get focused() {
-        return memo2(() => !!(!findingsOpen() && !feedbackOpen() && !historyOpen() && !modelOpen() && !setupOpen() && pendingReviewUrl() === ""))() && reviewStage() !== "\u5BA1\u67E5\u5931\u8D25";
+        return memo2(() => !!(!findingsOpen() && !feedbackOpen() && !historyOpen() && !modelOpen() && !setupOpen() && !filterOpen() && !publishOpen() && !demoOpen() && !showcaseOpen() && pendingReviewUrl() === ""))() && reviewStage() !== "\u5BA1\u67E5\u5931\u8D25";
       }
-    }), _el$325);
-    insert(_el$296, createComponent2(Show, {
+    }), _el$345);
+    insert(_el$315, createComponent2(Show, {
       get when() {
         return modelOpen();
       },
@@ -39474,8 +40912,8 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           }
         });
       }
-    }), _el$325);
-    insert(_el$296, createComponent2(Show, {
+    }), _el$345);
+    insert(_el$315, createComponent2(Show, {
       get when() {
         return historyOpen();
       },
@@ -39494,8 +40932,8 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setHistoryOpen(false)
         });
       }
-    }), _el$325);
-    insert(_el$296, createComponent2(Show, {
+    }), _el$345);
+    insert(_el$315, createComponent2(Show, {
       get when() {
         return findingsOpen();
       },
@@ -39519,8 +40957,8 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setFindingsOpen(false)
         });
       }
-    }), _el$325);
-    insert(_el$296, createComponent2(Show, {
+    }), _el$345);
+    insert(_el$315, createComponent2(Show, {
       get when() {
         return memo2(() => !!feedbackOpen())() && reviewFindings()[activeFindingIndex()];
       },
@@ -39539,8 +40977,8 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setFeedbackOpen(false)
         });
       }
-    }), _el$325);
-    insert(_el$296, createComponent2(Show, {
+    }), _el$345);
+    insert(_el$315, createComponent2(Show, {
       get when() {
         return memo2(() => reviewStage() === "\u5BA1\u67E5\u5931\u8D25")() && reviewUrl();
       },
@@ -39559,8 +40997,95 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setReviewStage("")
         });
       }
-    }), _el$325);
-    insert(_el$296, createComponent2(Show, {
+    }), _el$345);
+    insert(_el$315, createComponent2(Show, {
+      get when() {
+        return filterOpen();
+      },
+      get children() {
+        return createComponent2(FindingsFilterOverlay, {
+          get state() {
+            return findingsFilter();
+          },
+          get shown() {
+            return visibleFindingCounts().shown;
+          },
+          get total() {
+            return visibleFindingCounts().total;
+          },
+          get language() {
+            return runtime().ui_language;
+          },
+          onQuery: (query) => updateFindingsFilter({
+            ...findingsFilter(),
+            query
+          }),
+          onShortcut: applyFindingsFilterShortcut,
+          onApply: closeFindingsFilter,
+          onClear: clearFindingsFilter
+        });
+      }
+    }), _el$345);
+    insert(_el$315, createComponent2(Show, {
+      get when() {
+        return publishOpen();
+      },
+      get children() {
+        return createComponent2(PublishOverlay, {
+          get state() {
+            return publishState();
+          },
+          get preview() {
+            return publishPreview();
+          },
+          get message() {
+            return publishMessage();
+          },
+          get language() {
+            return runtime().ui_language;
+          },
+          get busy() {
+            return publishBusy();
+          },
+          onConfirm: confirmPublish,
+          onCancel: cancelPublish,
+          onClose: dismissPublish
+        });
+      }
+    }), _el$345);
+    insert(_el$315, createComponent2(Show, {
+      get when() {
+        return demoOpen();
+      },
+      get children() {
+        return createComponent2(DemoOverlay, {
+          get data() {
+            return demoData();
+          },
+          get language() {
+            return runtime().ui_language;
+          },
+          onClose: () => setDemoOpen(false)
+        });
+      }
+    }), _el$345);
+    insert(_el$315, createComponent2(Show, {
+      get when() {
+        return showcaseOpen();
+      },
+      get children() {
+        return createComponent2(ShowcaseOverlay, {
+          get data() {
+            return showcaseData();
+          },
+          get language() {
+            return runtime().ui_language;
+          },
+          onClose: () => setShowcaseOpen(false)
+        });
+      }
+    }), _el$345);
+    insert(_el$315, createComponent2(Show, {
       get when() {
         return setupOpen();
       },
@@ -39590,8 +41115,8 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           }
         });
       }
-    }), _el$325);
-    insert(_el$296, createComponent2(Show, {
+    }), _el$345);
+    insert(_el$315, createComponent2(Show, {
       get when() {
         return pendingReviewUrl();
       },
@@ -39604,29 +41129,29 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setPendingReviewUrl("")
         });
       }
-    }), _el$325);
-    insertNode(_el$325, _el$326);
-    insertNode(_el$325, _el$327);
-    setProp(_el$325, "width", "100%");
-    setProp(_el$325, "flexShrink", 0);
-    setProp(_el$325, "justifyContent", "space-between");
-    setProp(_el$325, "paddingLeft", 2);
-    setProp(_el$325, "paddingRight", 2);
-    setProp(_el$325, "paddingBottom", 1);
-    setProp(_el$326, "fg", "#808080");
-    insert(_el$326, workspaceRootLabel);
-    insertNode(_el$327, _el$328);
-    insertNode(_el$327, _el$329);
-    insertNode(_el$327, _el$330);
-    insert(_el$327, () => runtime().runtime_profile ?? "RUNTIME", _el$328);
-    insert(_el$327, () => statusLabels[backendStatus()], _el$329);
-    insert(_el$327, () => runtime().model ?? "model", _el$330);
-    insert(_el$327, (() => {
+    }), _el$345);
+    insertNode(_el$345, _el$346);
+    insertNode(_el$345, _el$347);
+    setProp(_el$345, "width", "100%");
+    setProp(_el$345, "flexShrink", 0);
+    setProp(_el$345, "justifyContent", "space-between");
+    setProp(_el$345, "paddingLeft", 2);
+    setProp(_el$345, "paddingRight", 2);
+    setProp(_el$345, "paddingBottom", 1);
+    setProp(_el$346, "fg", "#808080");
+    insert(_el$346, workspaceRootLabel);
+    insertNode(_el$347, _el$348);
+    insertNode(_el$347, _el$349);
+    insertNode(_el$347, _el$350);
+    insert(_el$347, () => runtime().runtime_profile ?? "RUNTIME", _el$348);
+    insert(_el$347, () => statusLabels[backendStatus()], _el$349);
+    insert(_el$347, () => runtime().model ?? "model", _el$350);
+    insert(_el$347, (() => {
       var _c$0 = memo2(() => runtime().available === false);
       return () => _c$0() ? "OFFLINE" : runtime().available === true ? "ONLINE" : "0.1.0";
     })(), null);
-    effect((_$p) => setProp(_el$327, "fg", statusColors[backendStatus()], _$p));
-    return _el$296;
+    effect((_$p) => setProp(_el$347, "fg", statusColors[backendStatus()], _$p));
+    return _el$315;
   })();
 }
 

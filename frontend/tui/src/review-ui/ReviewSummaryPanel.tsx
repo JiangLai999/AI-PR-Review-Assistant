@@ -88,7 +88,11 @@ export function ReviewSummaryPanel(props: ReviewSummaryPanelProps) {
       paddingLeft={1}
       paddingRight={1}
       flexDirection="column"
+      overflow="hidden"
+      flexShrink={1}
+      minHeight={0}
     >
+      <box flexGrow={1} minHeight={0} overflow="hidden" flexDirection="column">
       <text height={1} fg="#fb8147">{title()}</text>
       <text height={1} fg="#eeeeee">{identityLine()}</text>
 
@@ -179,6 +183,7 @@ export function ReviewSummaryPanel(props: ReviewSummaryPanelProps) {
           {en() ? "Ctrl+O Open findings" : "Ctrl+O 打开 Findings"}
         </text>
       </Show>
+      </box>
     </box>
   )
 }

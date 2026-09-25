@@ -3829,36 +3829,17 @@ def chat_command(
 @click.pass_context
 def showcase_command(ctx: click.Context, json_output: bool, interactive: bool) -> None:
     """Print the recommended competition demo path without changing project state."""
+    from ai_pr_review.services.showcase_runner import showcase_payload
+
     config = None
     try:
         config = AppConfig.load(_config_path_from_context(ctx))
     except Exception:
         config = None
-    steps = [
-        {"step": 1, "command": "pr-review doctor", "purpose": "检查本地运行环境与凭据状态"},
-        {
-            "step": 2,
-            "command": "pr-review demo --case sql-injection",
-            "purpose": "离线展示规则、规划与证据校验",
-        },
-        {
-            "step": 3,
-            "command": "pr-review plan <PR_URL>",
-            "purpose": "生成真实 PR 审查计划，不调用模型",
-        },
-        {"step": 4, "command": "pr-review <PR_URL> --verbose", "purpose": "执行完整 AI 审查并落库"},
-        {"step": 5, "command": "pr-review history", "purpose": "复盘结果、成本与人工反馈"},
-    ]
-    payload = {
-        "title": "AI PR Review Assistant · Competition Showcase",
-        "offline_ready": True,
-        "real_review_ready": bool(
-            config
-            and _check_config_status(config)["api_key_configured"]
-            and config._resolve_github_token()
-        ),
-        "steps": steps,
-    }
+    # Shared with the chat backend's `/showcase` command (§12.3); the payload
+    # shape and the JSON bytes below are pinned by tests.
+    payload = showcase_payload(config)
+    steps = payload["steps"]
     if json_output:
         click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
         return
@@ -3913,50 +3894,27 @@ def showcase_command(ctx: click.Context, json_output: bool, interactive: bool) -
 @click.pass_context
 def demo_command(ctx: click.Context, case_key: str, list_cases: bool, json_output: bool) -> None:
     """Run an offline demonstration of planning and evidence validation."""
-    from ai_pr_review.demo_fixtures import get_demo_case, list_demo_cases
-    from ai_pr_review.services.agent.planner import ReviewPlanner
-    from ai_pr_review.services.analyzers.static_analyzer import StaticAnalyzer
-    from ai_pr_review.services.context_builder import ContextBuilder
-    from ai_pr_review.services.evidence.finding_validator import FindingValidator
-    from ai_pr_review.services.filter_pipeline import FilterPipeline
+    # The payload builder is shared with the chat backend's `/demo` command
+    # (§12.3). This command stays strictly offline: fixtures, the deterministic
+    # rule pipeline and the evidence validator, nothing else.
+    from ai_pr_review.services.demo_runner import demo_cases, run_demo
 
     if list_cases:
-        for case in list_demo_cases():
-            click.echo(f"{case.key}: {case.title} - {case.description}")
+        for case in demo_cases():
+            click.echo(f"{case['key']}: {case['title']} - {case['description']}")
         return
 
-    case = get_demo_case(case_key)
-    pr_data = case.pr_data
-    _, filter_result = FilterPipeline().filter_pr_data(pr_data)
-    plan = ReviewPlanner().build_plan(pr_data, filter_result)
-    context_builder = ContextBuilder()
-    analyzer = StaticAnalyzer()
-    validator = FindingValidator()
-    checked = []
-    for file_diff in pr_data.files:
-        context = context_builder.build_context(
-            file_diff.filename,
-            file_diff.patch or "",
-            case.file_contents.get(file_diff.filename, ""),
-        )
-        checked.extend(
-            validator.annotate(finding, validator.validate(finding, file_diff, context))
-            for finding in analyzer.analyze(file_diff, context)
-        )
+    demo = run_demo(case_key)
 
-    payload = {
-        "case": {"key": case.key, "title": case.title, "description": case.description},
-        "plan": plan.model_dump(mode="json"),
-        "findings": [finding.model_dump(mode="json") for finding in checked],
-    }
     if json_output:
-        click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        click.echo(json.dumps(demo.payload, ensure_ascii=False, indent=2))
         return
 
     console = Console(legacy_windows=False)
     console.print(
         Panel.fit(
-            f"[bold]AI PR Review Assistant - Offline Demo[/bold]\n{case.title}", border_style="blue"
+            f"[bold]AI PR Review Assistant - Offline Demo[/bold]\n{demo.title}",
+            border_style="blue",
         )
     )
     stages = Table(box=box.SIMPLE, show_header=False)
@@ -3972,15 +3930,18 @@ def demo_command(ctx: click.Context, case_key: str, list_cases: bool, json_outpu
     ]:
         stages.add_row(stage, "OK")
     console.print(stages)
-    valid_count = sum(1 for finding in checked if finding.evidence_status == "valid")
     console.print(
         Panel.fit(
-            f"Risk level: [bold red]{plan.risk_level.upper()}[/bold red]\nPriority files: {len(plan.priority_files)}\nFindings: {len(checked)}\nEvidence validated: {valid_count}/{len(checked)}\nEstimated cost: $0.00",
+            f"Risk level: [bold red]{demo.risk_level.upper()}[/bold red]\n"
+            f"Priority files: {demo.priority_files}\n"
+            f"Findings: {len(demo.findings)}\n"
+            f"Evidence validated: {demo.valid_count}/{len(demo.findings)}\n"
+            f"Estimated cost: $0.00",
             title="Demo result",
             border_style="green",
         )
     )
-    for finding in checked:
+    for finding in demo.findings:
         console.print(f"[{finding.severity.upper()}] {finding.title} ({finding.evidence_status})")
         console.print(f"  {finding.file}:{finding.line_start} · {finding.suggestion}")
 

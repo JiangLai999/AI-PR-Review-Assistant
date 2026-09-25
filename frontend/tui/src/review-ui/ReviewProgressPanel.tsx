@@ -82,7 +82,11 @@ export function ReviewProgressPanel(props: ReviewProgressPanelProps) {
       paddingLeft={1}
       paddingRight={1}
       flexDirection="column"
+      overflow="hidden"
+      flexShrink={1}
+      minHeight={0}
     >
+      <box flexGrow={1} minHeight={0} overflow="hidden" flexDirection="column">
       <text height={1} fg="#fb8147">{title()}</text>
       <text height={1} fg="#eeeeee">{props.url || "—"}</text>
       <text height={1} fg="#808080">{stageLine()}</text>
@@ -165,6 +169,7 @@ export function ReviewProgressPanel(props: ReviewProgressPanelProps) {
           {en() ? "Esc Cancel" : "Esc 取消审查"}
         </text>
       </Show>
+      </box>
     </box>
   )
 }

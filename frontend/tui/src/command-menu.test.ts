@@ -20,6 +20,19 @@ test("commands with arguments complete with a trailing space", () => {
   expect(commandCompletion(chatCommands.find((item) => item.name === "/help")!)).toBe("/help")
 })
 
+test("the P5 commands are advertised and complete with their arguments", () => {
+  const names = chatCommands.map((item) => item.name)
+  expect(names).toContain("/publish")
+  expect(names).toContain("/demo")
+  expect(names).toContain("/showcase")
+  expect(commandCompletion(chatCommands.find((item) => item.name === "/publish")!)).toBe("/publish ")
+  expect(commandCompletion(chatCommands.find((item) => item.name === "/demo")!)).toBe("/demo ")
+  // `/showcase` takes no argument, so Enter runs it immediately.
+  expect(commandCompletion(chatCommands.find((item) => item.name === "/showcase")!)).toBe("/showcase")
+  expect(commandMatches("/show").map((item) => item.name)).toEqual(["/showcase"])
+  expect(commandMatches("/pub").map((item) => item.name)).toEqual(["/publish"])
+})
+
 test("assistant deltas only update the active request and session", () => {
   const event = { event: "assistant.delta", session_id: "s1", request_id: "r1", text: "partial" }
   expect(isCurrentAssistantEvent(event, "s1", "r1")).toBe(true)

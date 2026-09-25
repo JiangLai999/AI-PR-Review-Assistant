@@ -348,6 +348,10 @@ class _ReviewEventStream:
 class Session:
     session_id: str
     messages: list[dict[str, str]] = field(default_factory=list)
+    # Runs already published from this session (§12.2). In-memory only: a
+    # repeat publish in a *new* session is a deliberate second comment, not a
+    # mistake, and nothing here may survive a restart.
+    published_run_ids: set[str] = field(default_factory=set)
 
 
 class JsonlBackend:
@@ -1044,6 +1048,21 @@ class JsonlBackend:
             "report": payload,
         }
 
+    def _publish_ledger(self, session_id: str) -> set[str]:
+        """The session's record of already-published runs (§12.2).
+
+        The ledger lives on the session object and never on disk. A publish
+        request that arrives without a prior `session.create` creates the
+        session on demand: dropping the ledger there would make repeat
+        detection vanish exactly when a caller skips the handshake.
+        """
+        session = self.sessions.get(session_id)
+        if session is None:
+            session = Session(session_id=session_id)
+            if session_id:
+                self.sessions[session_id] = session
+        return session.published_run_ids
+
     def _history_text(self, limit: int = 10) -> str:
         from ai_pr_review.services.result_store import ResultStore
 
@@ -1365,7 +1384,7 @@ class JsonlBackend:
                 elif command == "help":
                     result(
                         {
-                            "text": "/setup  配置助手\n/status 查看运行状态\n/model  查看当前模型\n/review 开始 PR 审查\n/cancel 取消当前审查\n/retry 重试上一次操作\n/report 查看当前报告\n/export json|markdown 导出当前报告\n/history 查看历史记录\n/explain <run_id> 解释 Finding 与证据\n/feedback <run_id> <finding_id> <status> [note] 记录 Finding 反馈\n/exit   退出 Chat"
+                            "text": "/setup  配置助手\n/status 查看运行状态\n/model  查看当前模型\n/review 开始 PR 审查\n/cancel 取消当前审查\n/retry 重试上一次操作\n/report 查看当前报告\n/export json|markdown 导出当前报告\n/history 查看历史记录\n/explain <run_id> 解释 Finding 与证据\n/feedback <run_id> <finding_id> <status> [note] 记录 Finding 反馈\n/publish [run_id] [--confirm] 预览并发布审查评论到 GitHub\n/demo [case_key|list] 运行离线 Demo\n/showcase 查看参赛演示路径\n/exit   退出 Chat"
                         }
                     )
                 elif command == "setup":
@@ -1498,6 +1517,64 @@ class JsonlBackend:
                             result(outcome)
                         else:
                             error(str(outcome["message"]), str(outcome["code"]))
+                elif command == "publish":
+                    from ai_pr_review.services.publish_service import (
+                        PublishError,
+                        PublishService,
+                        parse_publish_args,
+                    )
+
+                    raw_args = params.get("args", [])
+                    args = (
+                        [str(item).strip() for item in raw_args]
+                        if isinstance(raw_args, list)
+                        else []
+                    )
+                    service = PublishService(self.config)
+                    ledger = self._publish_ledger(str(params.get("session_id", "")))
+                    try:
+                        publish_run_id, confirm = parse_publish_args(args)
+                        if confirm:
+                            # The only branch that reaches GitHub.
+                            result(
+                                service.publish(
+                                    run_id=publish_run_id,
+                                    current_report=self.current_report,
+                                    published_run_ids=ledger,
+                                )
+                            )
+                        else:
+                            result(
+                                service.preview(
+                                    run_id=publish_run_id,
+                                    current_report=self.current_report,
+                                    published_run_ids=ledger,
+                                )
+                            )
+                    except PublishError as exc:
+                        error(exc.message, exc.code)
+                elif command == "demo":
+                    from ai_pr_review.services.demo_runner import (
+                        UnknownDemoCase,
+                        demo_payload,
+                    )
+
+                    raw_args = params.get("args", [])
+                    args = (
+                        [str(item).strip() for item in raw_args]
+                        if isinstance(raw_args, list)
+                        else []
+                    )
+                    # Offline by construction: fixtures plus deterministic rules.
+                    try:
+                        result(demo_payload(args))
+                    except UnknownDemoCase as exc:
+                        error(str(exc), "invalid_request")
+                elif command == "showcase":
+                    from ai_pr_review.services.showcase_runner import showcase_payload_with_text
+
+                    # Offline: the payload is derived from the loaded config only.
+                    result(showcase_payload_with_text(self.config))
                 elif command == "cancel":
                     cancel_session_id = str(params.get("session_id", ""))
                     chat_task = self.chat_cancellations.get(cancel_session_id)

@@ -1,60 +1,27 @@
 import { For, Show } from "solid-js"
-import { isEnLanguage } from "./helpers"
+import { actionBarView } from "./panel-model"
 
 export type ReviewActionBarProps = {
   onOpenFindings?: () => void
+  onFilter?: () => void
   onExplain?: () => void
   onFeedback?: () => void
+  onPublish?: () => void
   onExport?: () => void
   language?: string
 }
 
-type ActionSpec = {
-  id: "findings" | "explain" | "feedback" | "export"
-  keyHint: string
-  en: string
-  zh: string
-  handler?: () => void
-}
-
 export function ReviewActionBar(props: ReviewActionBarProps) {
-  const en = () => isEnLanguage(props.language)
-
-  const actions = (): ActionSpec[] =>
-    (
-      [
-        {
-          id: "findings",
-          keyHint: "Ctrl+O",
-          en: "Findings",
-          zh: "打开 Findings",
-          handler: props.onOpenFindings,
-        },
-        {
-          id: "explain",
-          keyHint: "Alt+E",
-          en: "Explain",
-          zh: "解释问题",
-          handler: props.onExplain,
-        },
-        {
-          id: "feedback",
-          keyHint: "Alt+F",
-          en: "Feedback",
-          zh: "反馈结果",
-          handler: props.onFeedback,
-        },
-        {
-          id: "export",
-          keyHint: "Alt+X",
-          en: "Export",
-          zh: "导出报告",
-          handler: props.onExport,
-        },
-      ] satisfies ActionSpec[]
-    ).filter((action) => typeof action.handler === "function")
-
-  const title = () => (en() ? "ACTIONS" : "操作")
+  const view = () =>
+    actionBarView({
+      onOpenFindings: props.onOpenFindings,
+      onFilter: props.onFilter,
+      onExplain: props.onExplain,
+      onFeedback: props.onFeedback,
+      onPublish: props.onPublish,
+      onExport: props.onExport,
+      language: props.language,
+    })
 
   return (
     <box
@@ -65,25 +32,30 @@ export function ReviewActionBar(props: ReviewActionBarProps) {
       paddingLeft={1}
       paddingRight={1}
       flexDirection="column"
+      overflow="hidden"
+      flexShrink={1}
+      minHeight={0}
     >
-      <text height={1} fg="#7edc92">{title()}</text>
+      <box flexGrow={1} minHeight={0} overflow="hidden" flexDirection="column">
+      <text height={1} fg="#7edc92">{view().title}</text>
       <Show
-        when={actions().length > 0}
+        when={view().actions.length > 0}
         fallback={
           <text height={1} fg="#808080">
-            {en() ? "No actions available." : "暂无可用操作。"}
+            {view().emptyText}
           </text>
         }
       >
-        <For each={actions()}>
+        <For each={view().actions}>
           {(action) => (
             <text height={1} fg="#eeeeee">
               <span style={{ fg: "#f3c742" }}>{action.keyHint}</span>
-              <span style={{ fg: "#eeeeee" }}>{` ${en() ? action.en : action.zh}`}</span>
+              <span style={{ fg: "#eeeeee" }}>{` ${action.label}`}</span>
             </text>
           )}
         </For>
       </Show>
+      </box>
     </box>
   )
 }

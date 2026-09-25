@@ -268,6 +268,10 @@ class HybridReviewOrchestrator:
             duration_seconds=duration,
             model=self.config.ai_client.model,
             metadata={
+                # Kept so `/publish` can render the real PR title later; runs
+                # saved before this field existed have no title at all and are
+                # published with an explicit placeholder instead (§12.2).
+                "pr_title": pr_data.title,
                 "strategy": stats["strategy"],
                 "hybrid": True,
                 "local_calls": stats["local_calls"],

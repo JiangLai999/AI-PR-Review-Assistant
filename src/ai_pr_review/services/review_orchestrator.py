@@ -319,6 +319,10 @@ class ReviewOrchestrator:
             duration_seconds=duration_seconds,
             model=app_config.ai_client.model,
             metadata={
+                # Kept so `/publish` can render the real PR title later; runs
+                # saved before this field existed have no title at all and are
+                # published with an explicit placeholder instead (§12.2).
+                "pr_title": pr_data.title,
                 "review_plan": review_plan.model_dump(mode="json"),
                 "language": {
                     "ui_language": getattr(app_config.preferences, "ui_language", "zh-CN"),

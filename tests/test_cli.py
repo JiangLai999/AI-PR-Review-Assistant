@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -1972,3 +1973,175 @@ def test_plain_chat_disables_reasoning_for_local_provider(monkeypatch):
 
     assert result == "本地模型正常"
     assert captured["reasoning_effort"] == "none"
+
+
+# ---------------------------------------------------------------------------
+# §12.3 demo / showcase payloads
+# ---------------------------------------------------------------------------
+
+# SHA-256 of `pr-review demo --json-output` taken from the pre-refactor CLI
+# (`git show HEAD:src/ai_pr_review/cli.py`) through CliRunner. The payload
+# builder moved into `services/demo_runner.py`; the printed bytes must not.
+# Newlines are LF here because CliRunner captures text, not OS-translated bytes.
+DEMO_JSON_SHA256 = {
+    "sql-injection": "91e9948d349c578c8ea30d3f3da01a252e0f6cd9f59493c271b6782008e08d95",
+    "tls-disabled": "d277f194f8d6dd79ea9ea406335e602462b8170e1e9dca94e70a54795e2d1e18",
+    "clean-change": "d1245baebe73bad2a0884f32d229105fccec4a2452cbf0e34bc8b1d644203015",
+}
+
+# Literal copy of the showcase payload the CLI printed before the refactor.
+SHOWCASE_PAYLOAD_GOLDEN = {
+    "title": "AI PR Review Assistant · Competition Showcase",
+    "offline_ready": True,
+    "real_review_ready": False,
+    "steps": [
+        {"step": 1, "command": "pr-review doctor", "purpose": "检查本地运行环境与凭据状态"},
+        {
+            "step": 2,
+            "command": "pr-review demo --case sql-injection",
+            "purpose": "离线展示规则、规划与证据校验",
+        },
+        {
+            "step": 3,
+            "command": "pr-review plan <PR_URL>",
+            "purpose": "生成真实 PR 审查计划，不调用模型",
+        },
+        {"step": 4, "command": "pr-review <PR_URL> --verbose", "purpose": "执行完整 AI 审查并落库"},
+        {"step": 5, "command": "pr-review history", "purpose": "复盘结果、成本与人工反馈"},
+    ],
+}
+
+
+@pytest.mark.parametrize("case_key", sorted(DEMO_JSON_SHA256))
+def test_demo_json_output_is_byte_identical_to_the_shared_builder(case_key):
+    """`--json-output` must keep printing exactly what it did before §12.3."""
+    from ai_pr_review.services.demo_runner import demo_case_payload
+
+    result = CliRunner().invoke(main, ["demo", "--case", case_key, "--json-output"])
+
+    assert result.exit_code == 0
+    expected = json.dumps(demo_case_payload(case_key), ensure_ascii=False, indent=2) + "\n"
+    assert result.output == expected
+    assert hashlib.sha256(result.output.encode("utf-8")).hexdigest() == DEMO_JSON_SHA256[case_key]
+
+
+def test_demo_json_output_is_deterministic_across_runs():
+    first = CliRunner().invoke(main, ["demo", "--case", "sql-injection", "--json-output"])
+    second = CliRunner().invoke(main, ["demo", "--case", "sql-injection", "--json-output"])
+    assert first.output == second.output
+
+
+def test_demo_json_output_carries_case_plan_and_findings():
+    result = CliRunner().invoke(main, ["demo", "--case", "sql-injection", "--json-output"])
+    payload = json.loads(result.output)
+
+    # The backend `/demo` payload is this object plus `text` (§12.3): the key
+    # set here is what the TUI's demo panel consumes.
+    assert sorted(payload) == ["case", "findings", "plan"]
+    assert payload["case"]["key"] == "sql-injection"
+    assert payload["findings"]
+    assert payload["plan"]["risk_level"]
+
+
+def test_demo_list_cases_still_prints_one_line_per_case():
+    result = CliRunner().invoke(main, ["demo", "--list-cases"])
+    lines = result.output.strip().splitlines()
+
+    assert result.exit_code == 0
+    assert len(lines) == 3
+    assert lines[0].startswith("sql-injection: ")
+
+
+def test_demo_console_path_reports_the_run_result():
+    result = CliRunner().invoke(main, ["demo", "--case", "sql-injection"])
+
+    assert result.exit_code == 0
+    assert "Demo result" in result.output
+    assert "Risk level:" in result.output
+    assert "Evidence validated:" in result.output
+
+
+def test_showcase_json_output_is_byte_identical_to_the_shared_builder(tmp_path):
+    """With an unconfigured workspace, `--json-output` must be unchanged (§12.3)."""
+    from ai_pr_review.config import AppConfig
+    from ai_pr_review.services.showcase_runner import showcase_payload
+
+    config_path = tmp_path / "config.json"
+    result = CliRunner().invoke(main, ["--config", str(config_path), "showcase", "--json-output"])
+
+    assert result.exit_code == 0
+    expected = (
+        json.dumps(showcase_payload(AppConfig.load(config_path)), ensure_ascii=False, indent=2)
+        + "\n"
+    )
+    assert result.output == expected
+
+
+def test_showcase_json_output_matches_the_frozen_payload(tmp_path):
+    """Byte-level pin against the payload the CLI emitted before the refactor."""
+    result = CliRunner().invoke(
+        main, ["--config", str(tmp_path / "config.json"), "showcase", "--json-output"]
+    )
+
+    assert result.exit_code == 0
+    assert result.output == json.dumps(SHOWCASE_PAYLOAD_GOLDEN, ensure_ascii=False, indent=2) + "\n"
+
+
+def test_showcase_real_review_ready_needs_both_api_key_and_github_token(tmp_path):
+    """`real_review_ready` follows the workspace config, not a constant."""
+    config_path = tmp_path / "config.json"
+    config = AppConfig.from_env()
+    config.ai_client.api_key = "test-key"
+    config.preferences.hybrid_strategy = "remote_only"
+    config._sync_runtime_sections()
+    config.save(config_path, save_key=True)
+
+    only_key = CliRunner().invoke(main, ["--config", str(config_path), "showcase", "--json-output"])
+    assert only_key.exit_code == 0
+    assert json.loads(only_key.output)["real_review_ready"] is False  # no GitHub token
+
+    with_token = AppConfig.load(config_path)
+    with_token.github_token = "test-token"
+    with_token.pr_fetcher.github_token = "test-token"
+    with_token.save(config_path, save_key=True)
+
+    both = CliRunner().invoke(main, ["--config", str(config_path), "showcase", "--json-output"])
+    assert both.exit_code == 0
+    assert json.loads(both.output)["real_review_ready"] is True
+
+
+def test_cli_review_records_pr_title_for_later_publishing(monkeypatch, tmp_path: Path):
+    """§12.2: `/publish` can only render a real PR title if the run stored one."""
+    install_success_stubs(monkeypatch)
+    config = configure_temp_app(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["https://github.com/owner/repo/pull/42"])
+
+    assert result.exit_code == 0
+    store = ResultStore(config.result_store)
+    run_id = store.list_runs(limit=1)[0]["id"]
+    assert store.get_run_metadata(run_id)["pr_title"] == "Add authentication"
+
+
+def test_demo_and_showcase_never_touch_the_network(monkeypatch):
+    """§12.3: both commands are strictly offline — no model call, no GitHub call."""
+    import ai_pr_review.services.pr_fetcher as pr_fetcher_module
+    import ai_pr_review.services.model_providers.factory as factory_module
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("offline command attempted a network client")
+
+    monkeypatch.setattr(pr_fetcher_module, "PRFetcher", _explode)
+    monkeypatch.setattr(factory_module, "create_model_provider", _explode)
+
+    runner = CliRunner()
+    for args in (
+        ["demo", "--case", "sql-injection", "--json-output"],
+        ["demo", "--case", "sql-injection"],
+        ["demo", "--list-cases"],
+        ["showcase", "--json-output"],
+        ["showcase"],
+    ):
+        result = runner.invoke(main, args)
+        assert result.exit_code == 0, (args, result.output, result.exception)

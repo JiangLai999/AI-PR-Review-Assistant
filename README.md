@@ -198,7 +198,12 @@ pr-review chat --model "gpt-4" --message "你好"
 | `/usage` | 显示消息统计 |
 | `/model <ID>` | 切换模型 |
 | `/review <URL>` | 执行 PR 审查 |
-| `/history` | 查看审查历史 |
+| `/history [数量或 Run ID]` | 查看审查历史；带 Run ID 时把它载入为当前报告 |
+| `/explain <run_id>` | 解释该 Run 的问题与证据，不调用模型 |
+| `/feedback <run_id> <finding_id> <status>` | 记录 Finding 反馈 |
+| `/publish [run_id] [--confirm]` | 先预览、确认后再发布审查评论到 GitHub |
+| `/demo [case_key]` | 运行离线演示用例（`/demo list` 列出全部） |
+| `/showcase` | 查看参赛演示路径，不改变项目状态 |
 | `/stats` | 查看统计数据 |
 | `/compact` | 压缩会话历史 |
 | `/restore` | 恢复历史会话 |
@@ -208,6 +213,8 @@ pr-review chat --model "gpt-4" --message "你好"
 Chat 快捷键：`Ctrl+C` 在存在选区时复制到剪贴板；无选区时第一次提示、1.5 秒内再按一次退出；运行中按 `Ctrl+C` 取消当前任务。输入框内可用 `Ctrl+A` 全选。
 
 Findings 详情：`Ctrl+O` 打开；没有 findings 时会提示先执行 `/review` 或 `/history <run_id>`。列表模式下 `↑↓` 选择、`←→` 翻页、`Ctrl/Alt+↑↓` 或 `PgUp/PgDn` 滚动详情；按 `Tab` 可把焦点切到详情，再用 `↑↓ / PgUp / PgDn / Home / End` 阅读完整问题、建议、证据和代码片段。
+
+审查工作区（P5）：`Ctrl+F` 打开 Findings 筛选浮层，输入关键词实时过滤，`Tab` 切换严重级别、`Shift+Tab` 切换证据状态、`Ctrl+S` 切换排序，`Enter` 应用、`Esc` 清除并关闭。`Alt+P` 进入发布流程：先显示目标仓库、PR 编号、问题数与截断后的评论正文，只有再按一次 `Enter` 才会真正调用 GitHub API 发帖，`Esc` 取消且不写入任何内容。`Alt+D` 或 `/demo` 打开离线演示面板（不调用模型、不联网），`/showcase` 打开参赛演示路径。
 
 Chat 内配置助手（`Ctrl+P` / `/setup`）为六段式：运行模式 → 模型服务与连接 → API Key / 本地模型 → 模型 → GitHub Token → 界面与输出偏好 → 确认保存。保存写入最高优先级私有配置，云端切换会保留远程槽与已保存 Key。
 

@@ -1908,3 +1908,443 @@ def test_feedback_statuses_match_cli_choice_and_result_store(tmp_path: Path) -> 
         store.save_feedback("run-x", "finding-x", status, "")
     with pytest.raises(ValueError):
         store.save_feedback("run-x", "finding-x", "definitely-not-a-status", "")
+
+
+# ---------------------------------------------------------------------------
+# §12.2 publish / §12.3 demo + showcase
+# ---------------------------------------------------------------------------
+
+PUBLISHED_PR_URL = "https://github.com/owner/repo/pull/31"
+
+
+class _FakeGitHub:
+    """Stands in for `PRFetcher`: records the comment instead of posting it."""
+
+    def __init__(self) -> None:
+        self.posted: list[str] = []
+        self.targets: list[tuple[str, str, int]] = []
+        self.fail_with: Exception | None = None
+
+    def _get_pull_request(self, owner: str, repo: str, number: int) -> "_FakeGitHub":
+        self.targets.append((owner, repo, number))
+        return self
+
+    def create_issue_comment(self, body: str) -> None:
+        if self.fail_with is not None:
+            raise self.fail_with
+        self.posted.append(body)
+
+
+@pytest.fixture
+def fake_github(monkeypatch: pytest.MonkeyPatch) -> _FakeGitHub:
+    """Replace the GitHub client so a "publish" stays offline and observable."""
+    import ai_pr_review.services.publish_service as publish_service
+
+    fake = _FakeGitHub()
+    monkeypatch.setattr(publish_service, "PRFetcher", lambda **kwargs: fake)
+    return fake
+
+
+def _reply(events: list[dict[str, Any]]) -> dict[str, Any]:
+    return next(event for event in events if "ok" in event)
+
+
+def _execute(
+    backend: JsonlBackend,
+    name: str,
+    args: list[Any],
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {"name": name, "args": args}
+    if session_id is not None:
+        params["session_id"] = session_id
+    return _reply(
+        asyncio.run(backend.handle({"id": "cmd", "method": "command.execute", "params": params}))
+    )
+
+
+def _new_session(backend: JsonlBackend) -> str:
+    events = asyncio.run(backend.handle({"id": "s", "method": "session.create", "params": {}}))
+    return str(_reply(events)["result"]["session_id"])
+
+
+def _save_publishable_run(
+    backend: JsonlBackend,
+    *,
+    pr_url: str = PUBLISHED_PR_URL,
+    findings: int = 2,
+    metadata: dict[str, Any] | None = None,
+    total_files: int = 4,
+) -> str:
+    from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
+    from ai_pr_review.services.result_store import ResultStore
+
+    return ResultStore(backend.config.result_store).save_result(
+        pr_url,
+        ReviewResult(
+            summary="stored summary",
+            findings=[
+                Finding(
+                    severity="high",
+                    category="security",
+                    file=f"src/module_{index}.py",
+                    line_start=index + 1,
+                    line_end=index + 1,
+                    title=f"stored finding {index}",
+                    problem="problem",
+                    suggestion="suggestion",
+                    confidence=0.9,
+                    code_snippet="x = 1",
+                    evidence_status="valid",
+                )
+                for index in range(findings)
+            ],
+        ),
+        head_sha="head-sha",
+        total_files=total_files,
+        included_files=2,
+        excluded_files=1,
+        metadata=metadata,
+    )
+
+
+def test_publish_preview_never_talks_to_github(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """§12.2: preview is a local read — no PR lookup, no comment."""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(backend)
+    session_id = _new_session(backend)
+
+    reply = _execute(backend, "publish", [run_id], session_id)
+
+    assert reply["ok"] is True
+    payload = reply["result"]
+    assert payload["status"] == "preview"
+    assert payload["requires_confirmation"] is True
+    assert payload["run_id"] == run_id
+    assert payload["repository"] == "owner/repo"
+    assert payload["pr_number"] == 31
+    assert payload["url"] == PUBLISHED_PR_URL
+    assert payload["findings"] == 2
+    assert payload["comment_chars"] == len(payload["comment_body"])
+    assert payload["already_published"] is False
+    assert "owner/repo#31" in payload["text"]
+    assert "/publish --confirm" in payload["text"]
+    assert fake_github.posted == []
+    assert fake_github.targets == []
+
+
+def test_publish_confirm_posts_exactly_one_comment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(backend)
+    session_id = _new_session(backend)
+
+    preview = _execute(backend, "publish", [run_id], session_id)["result"]
+    reply = _execute(backend, "publish", [run_id, "--confirm"], session_id)
+
+    assert reply["ok"] is True
+    payload = reply["result"]
+    assert payload["status"] == "published"
+    assert "requires_confirmation" not in payload
+    assert payload["comment_body"] == preview["comment_body"]
+    assert fake_github.targets == [("owner", "repo", 31)]
+    assert fake_github.posted == [payload["comment_body"]]
+    assert "owner/repo#31" in payload["text"]
+    assert payload["already_published"] is False
+
+
+def test_publish_without_run_id_uses_the_current_session_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(backend)
+    session_id = _new_session(backend)
+
+    _execute(backend, "history", [run_id], session_id)  # loads the report
+    assert backend.current_report is not None
+
+    reply = _execute(backend, "publish", [], session_id)
+
+    assert reply["ok"] is True
+    assert reply["result"]["run_id"] == run_id
+
+
+def test_publish_without_a_report_is_invalid_request(tmp_path: Path) -> None:
+    backend = JsonlBackend(tmp_path / "config.json")
+
+    reply = _execute(backend, "publish", ["--confirm"])
+
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "invalid_request"
+    assert "/review" in reply["error"]["message"]
+
+
+def test_publish_requires_a_github_token(tmp_path: Path, fake_github: _FakeGitHub) -> None:
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(backend)
+
+    for args in ([run_id, "--confirm"], [run_id]):
+        reply = _execute(backend, "publish", args)
+        assert reply["ok"] is False
+        assert reply["error"]["code"] == "missing_credentials"
+        assert "pr-review config" in reply["error"]["message"]
+    assert fake_github.posted == []
+    assert fake_github.targets == []
+
+
+def test_publish_unknown_run_is_not_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+
+    reply = _execute(backend, "publish", ["does-not-exist", "--confirm"])
+
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "not_found"
+    assert "does-not-exist" in reply["error"]["message"]
+    assert fake_github.posted == []
+
+
+def test_publish_rejects_a_run_whose_url_is_not_a_github_pr(tmp_path: Path) -> None:
+    """`not_publishable` wins over a missing token — a token would not help."""
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(
+        backend, pr_url="https://gitlab.com/owner/repo/-/merge_requests/31"
+    )
+
+    reply = _execute(backend, "publish", [run_id, "--confirm"])
+
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "not_publishable"
+    assert "gitlab.com" in reply["error"]["message"]
+
+
+def test_publish_api_failure_is_reported_and_never_marks_the_run_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(backend)
+    session_id = _new_session(backend)
+    fake_github.fail_with = RuntimeError("422 Validation Failed")
+
+    reply = _execute(backend, "publish", [run_id, "--confirm"], session_id)
+
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "publish_failed"
+    assert "422 Validation Failed" in reply["error"]["message"]
+    assert fake_github.posted == []
+
+    # A failed post must not enter the ledger: the retry is a first publish.
+    fake_github.fail_with = None
+    retry = _execute(backend, "publish", [run_id, "--confirm"], session_id)
+    assert retry["ok"] is True
+    assert retry["result"]["status"] == "published"
+    assert retry["result"]["already_published"] is False
+
+
+def test_repeat_publish_in_one_session_warns_and_posts_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """§12.2: never silently skip, never claim success without posting."""
+    from ai_pr_review.services.publish_service import REPEAT_PUBLISH_WARNING
+
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(backend)
+    session_id = _new_session(backend)
+
+    first = _execute(backend, "publish", [run_id, "--confirm"], session_id)["result"]
+    second = _execute(backend, "publish", [run_id, "--confirm"], session_id)["result"]
+
+    assert first["already_published"] is False
+    assert second["already_published"] is True
+    assert second["status"] == "published"
+    assert REPEAT_PUBLISH_WARNING in second["text"]
+    assert len(fake_github.posted) == 2
+
+    # The preview says the same thing as the confirm step.
+    preview = _execute(backend, "publish", [run_id], session_id)["result"]
+    assert preview["already_published"] is True
+    assert REPEAT_PUBLISH_WARNING in preview["text"]
+
+
+def test_publish_ledger_is_per_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(backend)
+    first_session = _new_session(backend)
+    second_session = _new_session(backend)
+
+    _execute(backend, "publish", [run_id, "--confirm"], first_session)
+    other = _execute(backend, "publish", [run_id, "--confirm"], second_session)
+
+    assert other["result"]["already_published"] is False
+    assert backend.sessions[first_session].published_run_ids == {run_id}
+    assert backend.sessions[second_session].published_run_ids == {run_id}
+
+
+def test_publish_rejects_an_unknown_flag(tmp_path: Path) -> None:
+    backend = JsonlBackend(tmp_path / "config.json")
+
+    reply = _execute(backend, "publish", ["--force"])
+
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "invalid_request"
+    assert "/publish" in reply["error"]["message"]
+
+
+def test_publish_comment_is_regenerated_from_the_stored_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """The body comes from `render_github_comment`, never from a stored string."""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(backend)
+    session_id = _new_session(backend)
+
+    body = _execute(backend, "publish", [run_id], session_id)["result"]["comment_body"]
+
+    assert body.startswith("## 🤖")
+    assert "stored summary" in body
+    assert "stored finding 0" in body and "stored finding 1" in body
+    # "Files Changed" uses the count the run recorded (total_files=4) — the
+    # per-file list is gone from the database and must not read as 0.
+    assert "| Files Changed | 4 |" in body
+
+
+def test_publish_reports_the_stored_pr_title_and_never_invents_an_author(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """§12.2: `pr_title` comes from metadata, the author is an honest placeholder."""
+    from ai_pr_review.services.publish_service import UNKNOWN_PR_AUTHOR
+
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    # The default template never prints the title/author, so use a template that
+    # does — otherwise the placeholder rule would be unobservable.
+    backend.config.report_renderer.github_comment_template = (
+        "title={pr_title}|author={author}|files={files_changed}"
+    )
+    with_title = _save_publishable_run(
+        backend, metadata={"pr_title": "Real stored title"}, total_files=7
+    )
+    without_title = _save_publishable_run(backend)  # run saved before pr_title existed
+
+    titled_body = _execute(backend, "publish", [with_title])["result"]["comment_body"]
+    historical_body = _execute(backend, "publish", [without_title])["result"]["comment_body"]
+
+    assert titled_body == f"title=Real stored title|author={UNKNOWN_PR_AUTHOR}|files=7"
+    assert historical_body == f"title=|author={UNKNOWN_PR_AUTHOR}|files=4"
+
+
+def test_new_runs_record_the_pr_title_in_metadata(tmp_path: Path) -> None:
+    """Newly saved runs must carry `pr_title` so a later publish is not blank."""
+    from ai_pr_review.services.result_store import ResultStore
+
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(backend, metadata={"pr_title": "Add authentication"})
+
+    metadata = ResultStore(backend.config.result_store).get_run_metadata(run_id)
+    assert metadata["pr_title"] == "Add authentication"
+
+
+def test_demo_list_returns_case_keys_and_text(tmp_path: Path) -> None:
+    backend = JsonlBackend(tmp_path / "config.json")
+
+    reply = _execute(backend, "demo", ["list"])
+
+    assert reply["ok"] is True
+    cases = reply["result"]["cases"]
+    assert [case["key"] for case in cases] == ["sql-injection", "tls-disabled", "clean-change"]
+    assert all(case["title"] and case["description"] for case in cases)
+    assert "sql-injection" in reply["result"]["text"]
+
+
+def test_demo_case_payload_matches_the_cli_json_object(tmp_path: Path) -> None:
+    """§12.3: the backend returns exactly what `--json-output` prints, plus text."""
+    from ai_pr_review.services.demo_runner import demo_case_payload
+
+    backend = JsonlBackend(tmp_path / "config.json")
+
+    reply = _execute(backend, "demo", ["sql-injection"])
+
+    assert reply["ok"] is True
+    payload = reply["result"]
+    assert "text" in payload and payload["text"]
+    assert {key: value for key, value in payload.items() if key != "text"} == (
+        demo_case_payload("sql-injection")
+    )
+
+
+def test_demo_defaults_to_the_sql_injection_case(tmp_path: Path) -> None:
+    backend = JsonlBackend(tmp_path / "config.json")
+
+    default = _execute(backend, "demo", [])["result"]
+    explicit = _execute(backend, "demo", ["sql-injection"])["result"]
+
+    assert default["case"]["key"] == "sql-injection"
+    assert default == explicit
+
+
+def test_demo_unknown_case_lists_the_available_keys(tmp_path: Path) -> None:
+    backend = JsonlBackend(tmp_path / "config.json")
+
+    reply = _execute(backend, "demo", ["nope"])
+
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "invalid_request"
+    for key in ("sql-injection", "tls-disabled", "clean-change"):
+        assert key in reply["error"]["message"]
+
+
+def test_showcase_payload_matches_the_cli_json_object(tmp_path: Path) -> None:
+    from ai_pr_review.services.showcase_runner import showcase_payload
+
+    backend = JsonlBackend(tmp_path / "config.json")
+
+    reply = _execute(backend, "showcase", [])
+
+    assert reply["ok"] is True
+    payload = reply["result"]
+    assert "text" in payload and payload["text"]
+    assert {key: value for key, value in payload.items() if key != "text"} == (
+        showcase_payload(backend.config)
+    )
+
+
+def test_demo_and_showcase_commands_are_strictly_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§12.3: no model call, no GitHub call, no writes."""
+    import ai_pr_review.services.model_providers.factory as factory_module
+    import ai_pr_review.services.pr_fetcher as pr_fetcher_module
+    import ai_pr_review.services.publish_service as publish_service
+
+    def _explode(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("offline command built a network client")
+
+    monkeypatch.setattr(pr_fetcher_module, "PRFetcher", _explode)
+    monkeypatch.setattr(publish_service, "PRFetcher", _explode)
+    monkeypatch.setattr(factory_module, "create_model_provider", _explode)
+
+    backend = JsonlBackend(tmp_path / "config.json")
+    store_path = Path(backend.config.result_store.db_path)
+    before = {path.name for path in tmp_path.iterdir()}
+
+    for args in (["list"], ["sql-injection"], []):
+        assert _execute(backend, "demo", args)["ok"] is True
+    assert _execute(backend, "showcase", [])["ok"] is True
+
+    # Nothing was written, and no history database appeared.
+    assert {path.name for path in tmp_path.iterdir()} == before
+    assert not store_path.exists()

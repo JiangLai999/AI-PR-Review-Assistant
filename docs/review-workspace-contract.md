@@ -521,3 +521,278 @@ Remaining notes:
    bar is not yet wired into the Chat shell.
 3. `findings_count` is per-file model output only; deterministic rule findings
    are merged at run level.
+
+## 12. Phase 5 Collaboration (2026-09-25)
+
+Phase 5 closes the last three competition gaps: publishing a review comment to
+GitHub from Chat, an offline showcase/demo path that never touches the network,
+and the interactive findings filter bar. It also finishes the narrow-mode
+visual defect recorded in §11.
+
+### 12.1 Ownership
+
+| Owner | Write scope | Deliverable |
+|---|---|---|
+| Claude Code | `src/ai_pr_review/services/demo_runner.py` (new), `src/ai_pr_review/services/showcase_runner.py` (new), `src/ai_pr_review/services/publish_service.py` (new), `src/ai_pr_review/cli.py`, `src/ai_pr_review/backend/jsonl_server.py`, `src/ai_pr_review/services/review_orchestrator.py`, `src/ai_pr_review/services/hybrid_orchestrator.py`, `tests/test_jsonl_backend.py`, `tests/test_cli.py`, `docs/claude-p5-publish.md` | publish / demo / showcase backend commands + shared payload builders |
+| MiMo Code | `frontend/tui/src/review-ui/**`, `frontend/tui/scripts/manual-review-workspace-check.tsx` | filter bar, publish confirm dialog, showcase + demo panels, narrow-mode border fix |
+| Codex | `frontend/tui/src/app.tsx`, `frontend/tui/src/protocol.ts`, `frontend/tui/src/review-report.ts`, `docs/review-workspace-contract.md`, final build/tests | integration, keybindings, PTY acceptance, `tui_static` rebuild |
+
+Write scopes stay disjoint. `cli.py` and the two orchestrators are Claude-only
+this round; Codex must not edit them, and Claude must not touch `app.tsx`.
+
+### 12.2 Publish command
+
+`command.execute` gains `name: "publish"` with `args: [...]`, where args are
+`[<run_id>] [--confirm]`.
+
+Target resolution:
+
+- no `run_id`: the run behind the current session report (`current_report.run.id`);
+  if the session has no report, fail with `invalid_request`;
+- `run_id`: that stored run from `ResultStore`.
+
+Two-phase behaviour is mandatory:
+
+1. **Preview** (no `--confirm`): no network write of any kind. Returns
+
+```json
+{
+  "status": "preview",
+  "requires_confirmation": true,
+  "run_id": "…",
+  "repository": "owner/repo",
+  "pr_number": 31,
+  "url": "https://github.com/owner/repo/pull/31",
+  "comment_body": "## 🤖 …",
+  "comment_chars": 1234,
+  "findings": 15,
+  "already_published": false,
+  "text": "预览：将向 owner/repo#31 发布审查评论（1234 字符）。再次执行 /publish --confirm 才会真正发布。"
+}
+```
+
+2. **Publish** (with `--confirm`): posts via
+   `PRFetcher._get_pull_request(owner, repo, number).create_issue_comment(body)`
+   and returns the same payload with `status: "published"`, a `text` that names
+   the target, and no `requires_confirmation` field.
+
+Rules:
+
+- A preview must never call GitHub. Tests must assert
+  `create_issue_comment` was not called.
+- Missing GitHub token → error code `missing_credentials`, message points at
+  `pr-review config`.
+- Run whose stored `pr_url` is not a GitHub PR URL → error `not_publishable`.
+- Unknown run id → error `not_found`.
+- Publishing the same run twice in one session is allowed but must set
+  `already_published: true` and warn that a second comment will be created. It
+  must never silently skip, and must never report success without posting.
+- GitHub API failure → error `publish_failed` carrying the upstream message.
+  Never return `status: "published"` when the post failed.
+- The comment body is regenerated deterministically through
+  `ReportRenderer.render_github_comment`. PR author/title are not stored for
+  historical runs: use an honest placeholder (`""` / `unknown`) and document
+  it in `docs/claude-p5-publish.md`. Add `pr_title` to newly saved run
+  metadata so future runs render the real title.
+- The repeat-publish ledger lives on the session object
+  (`published_run_ids`), never on disk.
+
+### 12.3 Demo and showcase commands
+
+Extract the payload builders so CLI and backend share one implementation; the
+existing CLI output must not change.
+
+| Command | Args | Result |
+|---|---|---|
+| `demo` | `["list"]` | `{"cases": [{"key","title","description"}], "text": …}` |
+| `demo` | `[<case_key>]` (default `sql-injection`) | the same object `pr-review demo --case <key> --json-output` prints, plus `text` |
+| `showcase` | `[]` | the same object `pr-review showcase --json-output` prints, plus `text` |
+
+Rules:
+
+- Both commands are strictly offline: no model call, no GitHub call, no writes.
+- `demo` with an unknown case key → error `invalid_request` listing available
+  keys.
+- `pr-review demo --case <key> --json-output` and
+  `pr-review showcase --json-output` must stay byte-identical after the
+  refactor; a test must pin this.
+
+### 12.4 Frontend components (MiMo Code)
+
+```ts
+type PublishPreview = {
+  runId?: string
+  repository?: string
+  prNumber?: number
+  url?: string
+  commentBody?: string
+  findings?: number
+  alreadyPublished?: boolean
+}
+
+type FindingsFilterBarProps = {
+  active: boolean
+  query?: string
+  severity?: string
+  evidence?: string
+  sort?: "severity" | "file" | "confidence"
+  shown: number
+  total: number
+  language?: string
+}
+
+type PublishConfirmDialogProps = {
+  open: boolean
+  state?: "preview" | "publishing" | "published" | "failed" | "cancelled"
+  preview?: PublishPreview
+  message?: string
+  maxBodyLines?: number
+  language?: string
+}
+
+type ShowcasePanelProps = {
+  title?: string
+  offlineReady?: boolean
+  realReviewReady?: boolean
+  steps: { step: number | string; command: string; purpose?: string }[]
+  language?: string
+}
+
+type DemoResultPanelProps = {
+  caseKey?: string
+  title?: string
+  description?: string
+  riskLevel?: string
+  priorityFiles?: number
+  findings: ReviewFinding[]
+  evidence?: { valid: number; needsReview: number; invalid: number; unverified: number }
+  durationMs?: number
+  language?: string
+}
+```
+
+Required semantics:
+
+- `FindingsFilterBar` is exactly one row high: active filters highlighted, plus
+  `shown/total`; `active === false` renders a hint-only row suggesting `/` to
+  filter. It must never wrap, exceed its width, or crash on undefined values.
+- `PublishConfirmDialog` renders nothing when `open === false`. In `preview` it
+  shows target, findings count, URL and a truncated comment body (default 8
+  lines, with an explicit truncation marker). `publishing`, `published`,
+  `failed`, `cancelled` each render distinct text; `failed` shows `message`
+  verbatim. It must never render success before `published`, and must never
+  render tokens or credential-looking strings from the preview.
+- `ShowcasePanel` numbers its steps and prints readiness as text plus color.
+- `DemoResultPanel` shows the risk badge, priority-file count, evidence health
+  and ranked findings, reusing `rankFindings` / `evidenceBadge` /
+  `severityColor`; empty or missing data renders a neutral line, not a crash.
+- Narrow-mode fix (§11 note 1): panels must keep their bottom border visible
+  when the parent gives less height than the content wants. The manual check
+  must include an 80x24 scene with deliberately over-long content and assert
+  the closing border glyph is present on the last drawn row.
+
+### 12.5 Acceptance
+
+Claude Code:
+
+- preview never posts; `--confirm` posts exactly once;
+- missing token, unknown run, non-GitHub run and API failure map to the codes
+  above;
+- repeat publish sets `already_published`;
+- demo list / demo case / showcase payloads match the CLI JSON output;
+- full Python suite passes.
+
+MiMo Code:
+
+- `bun run typecheck` passes;
+- filter bar, publish dialog (all five states), showcase panel and demo panel
+  tests pass, including undefined/malformed input;
+- manual check covers wide/narrow plus the overflow scene and reports exact
+  assertions.
+
+Codex:
+
+- `Alt+P` publish (preview → confirm → result), `/demo` and `/showcase`
+  commands wired to the real backend commands;
+- filter bar wired to `filterFindings` / `sortFindings` over the live findings
+  list, `/` to focus, `Esc` to clear;
+- publish success/failure surfaced in the action panel and transcript;
+- PTY acceptance of the preview→confirm flow against a fake target (no real
+  GitHub write unless the user explicitly asks);
+- full Python + TUI suites pass and `tui_static` is rebuilt.
+
+### 12.6 Task IDs
+
+| Task ID | Agent | Purpose |
+|---|---|---|
+| `claude-p5-publish` | Claude Code | publish / demo / showcase backend commands |
+| `mimo-p5-showcase-ui` | MiMo Code | filter bar, publish dialog, showcase/demo panels, narrow fix |
+| `codex-p5-integration` | Codex | integration, keybindings, PTY acceptance, build |
+
+### 12.7 Non-Goals
+
+- No Web UI changes in this phase;
+- no automatic publishing without an explicit confirmation step;
+- no GitHub App / OAuth flow — token-based publishing only;
+- no changes to review scoring, filtering policy or model routing.
+
+## 13. Phase 5 Execution Status (2026-09-25)
+
+| Stream | Status | Evidence |
+|---|---|---|
+| `claude-p5-publish` | completed | new `services/{publish_service,demo_runner,showcase_runner}.py`; `publish`/`demo`/`showcase` commands in `jsonl_server.py`; `pr_title` added to run metadata; 31 new tests; full Python suite 498 passed / 1 skipped; `docs/claude-p5-publish.md` |
+| `mimo-p5-showcase-ui` | completed | `FindingsFilterBar`, `PublishConfirmDialog`, `ShowcasePanel`, `DemoResultPanel`, `BorderedPanel`; narrow-mode closing border fixed; `bun run typecheck` exit 0; `bun test src` 102 passed / 0 failed; manual check 38 scenes at 80x24 / 120x30 |
+| `mimo-p5-publish-action` | completed | `ReviewActionBar` gained optional `onPublish` (`Alt+P`) and `onFilter` (`Ctrl+F`) via `actionBarView`; absent options stay hidden; manual check covers both layouts |
+| `codex-p5-integration` | completed | `app.tsx` wiring, `findings-filter.ts` (+11 tests), payload mappers in `review-report.ts` (+5 tests), `command-menu.ts` entries, `scripts/p5-app-integration-check.tsx`, `tui_static` rebuild |
+
+### 13.1 Codex independent verification
+
+Everything below was reproduced by Codex, not taken from an agent report:
+
+| Check | Command | Result |
+|---|---|---|
+| Backend publish/demo/showcase contract | `python _p5_verify/p5proto/verify_p5_backend.py` | 44/44 assertions passed (preview never builds a GitHub client; `--confirm` posts exactly once; repeat publish flagged per session; `not_found` / `not_publishable` / `missing_credentials` / `publish_failed` / `invalid_request` all reachable) |
+| CLI JSON stayed byte-identical | `python _p5_verify/p5proto/verify_cli_byte_identical.py` | `demo` (3 cases) + `showcase` hashes identical to the pre-refactor `cli.py` loaded from `HEAD` |
+| Python suite | `python -m pytest -q --no-cov` | 498 passed, 1 skipped |
+| TUI unit tests | `bun test src` | 102 passed, 0 failed |
+| TUI typecheck | `bun run typecheck` | exit 0 |
+| Component render matrix | `bun --preload @opentui/solid/preload scripts/manual-review-workspace-check.tsx` | 38 scenes passed (wide 120x30, narrow 80x24, publish 5 states, filter bar, showcase, demo, overflow closing border) |
+| Chat shell integration | `bun --preload @opentui/solid/preload scripts/p5-app-integration-check.tsx` | 3 parts, 41 checks passed: `/demo`, `/showcase`, `Ctrl+F`, `Alt+P` failure path, publish dialog in 5 states, and a real preview against a seeded stored run (`/history <run_id>` → 目标：example/repo#7, truncated body, `Enter 发布 · Esc 取消`) |
+| Standalone TUI in a real PTY | `src\ai_pr_review\tui_static\pr-review-tui.exe` with an isolated `AI_PR_REVIEW_CONFIG` | Chat shell rendered, backend reached `hybrid · 就绪` |
+
+### 13.2 Integration decisions worth recording
+
+1. **`Alt+P` / `Ctrl+F` instead of `/`** — the Chat composer owns `/` for slash
+   commands, so the filter bar hint (a MiMo Code file) was changed to
+   `Ctrl+F 过滤` / `Ctrl+F to filter` during integration. `panel-model.test.ts`
+   and the manual check were updated in the same edit.
+2. **`/demo` completes before it runs** — like `/review`, the first Enter
+   completes the command with a trailing space; the second Enter executes it.
+   `/showcase` takes no argument and runs on the first Enter.
+3. **Publish dialog height** — the preview needs the title, 8 body lines, the
+   truncation marker and the footer. At 17 rows the footer was clipped, so the
+   overlay is 19 rows.
+4. **Findings filter scope** — the filter applies to the workspace findings list
+   and the narrow-mode summary; `Ctrl+O` keeps showing the unfiltered dialog so a
+   filter can never hide a finding from the review surface entirely.
+5. **Preview is credential-checked** — a machine without a GitHub token gets
+   `missing_credentials` from the preview instead of a preview that could never
+   be published.
+6. **Historical runs have no PR title/author** — the comment renderer uses `""`
+   and `unknown`; new runs store `pr_title` so future comments carry the real
+   title.
+
+### 13.3 Remaining gaps
+
+1. No real GitHub comment has been posted from the Chat UI yet: the sandbox
+   blocks `api.github.com`, so the confirm phase is verified against a stub and
+   the preview phase against a seeded run. A live post still needs the user's
+   dedicated credential in a normal terminal.
+2. `findings_count` per file remains the model's per-file output; deterministic
+   rule findings are merged at run level (§11 note 3).
+3. The standalone wheel documented in
+   `docs/P5_CLI_ACCEPTANCE_2026-09-24.md` was built from the previous
+   `pr-review-tui.exe`; this round staged a fresh 1.5 MB binary that runs without
+   Bun installed, so that wheel's SHA-256 no longer describes the current tree.
+   Rebuild the wheel (`AI_PR_REVIEW_STANDALONE_TUI=1`) if a matching artifact is
+   needed.

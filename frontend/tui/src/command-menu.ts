@@ -17,6 +17,11 @@ export const chatCommands: readonly ChatCommand[] = [
   { name: "/report", description: "查看当前报告" },
   { name: "/export", description: "导出当前报告", argument: "<json|markdown> [路径]" },
   { name: "/history", description: "查看历史记录", argument: "[数量或 Run ID]" },
+  { name: "/explain", description: "解释当前 Run 的问题与证据", argument: "<run_id>" },
+  { name: "/feedback", description: "记录问题反馈", argument: "<run_id> <finding_id> <status>" },
+  { name: "/publish", description: "预览并发布审查评论到 GitHub", argument: "[run_id] [--confirm]" },
+  { name: "/demo", description: "运行离线演示用例", argument: "[case_key|list]" },
+  { name: "/showcase", description: "查看参赛演示路径" },
   { name: "/new", description: "开始新会话" },
 ]
 

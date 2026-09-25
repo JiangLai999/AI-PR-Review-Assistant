@@ -20,8 +20,10 @@ export type ReviewWorkspaceProps = {
   summary?: ReviewSummaryPanelProps
   findings?: ReviewFinding[]
   onOpenFindings?: () => void
+  onFilter?: () => void
   onExplain?: () => void
   onFeedback?: () => void
+  onPublish?: () => void
   onExport?: () => void
   language?: string
 }
@@ -41,7 +43,10 @@ function FindingsList(props: { findings: ReviewFinding[]; language?: string }) {
       flexDirection="column"
       flexGrow={1}
       overflow="hidden"
+      flexShrink={1}
+      minHeight={0}
     >
+      <box flexGrow={1} minHeight={0} overflow="hidden" flexDirection="column">
       <text height={1} fg="#f3c742">
         {en() ? `FINDINGS (${ranked().length})` : `问题列表 (${ranked().length})`}
       </text>
@@ -83,6 +88,7 @@ function FindingsList(props: { findings: ReviewFinding[]; language?: string }) {
           }}
         </For>
       </Show>
+      </box>
     </box>
   )
 }
@@ -112,8 +118,10 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
   const actionBar = () => (
     <ReviewActionBar
       onOpenFindings={props.onOpenFindings}
+      onFilter={props.onFilter}
       onExplain={props.onExplain}
       onFeedback={props.onFeedback}
+      onPublish={props.onPublish}
       onExport={props.onExport}
       language={props.language}
     />
@@ -145,6 +153,9 @@ export function ReviewWorkspace(props: ReviewWorkspaceProps) {
                 paddingLeft={1}
                 paddingRight={1}
                 flexDirection="column"
+                overflow="hidden"
+                flexShrink={1}
+                minHeight={0}
               >
                 <text height={1} fg="#808080">
                   {en() ? "No progress or summary yet." : "暂无进度或摘要。"}
