@@ -2465,6 +2465,155 @@ def test_publish_preview_keeps_blob_links_for_a_run_without_fork_metadata(
     assert "/pull/31/files" not in body
 
 
+# ---------------------------------------------------------------------------
+# 评论审计行：门槛 / 被过滤条数（claude-p6-comment-filter-line）
+# ---------------------------------------------------------------------------
+
+
+def test_publish_discloses_the_post_process_filter_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """run metadata 的 filtered_findings 落进评论 stats 块的最后一行。"""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(
+        backend,
+        metadata={
+            "filtered_findings": {
+                "before": 3,
+                "after": 2,
+                "below_threshold": 1,
+                "duplicates": 0,
+                "severity_sorted": True,
+            }
+        },
+    )
+    session_id = _new_session(backend)
+
+    body = _execute(backend, "publish", [run_id], session_id)["result"]["comment_body"]
+
+    # included_files=2 / total_files=4；门槛取本次配置值（默认 0.6）。
+    assert "> 已审查 2/4 个文件 · 置信度门槛 0.60 · 低于门槛过滤 1 条 · 去重 0 条" in body
+    assert fake_github.posted == []  # 预览不发帖
+
+
+def test_publish_explains_a_zero_finding_run_that_the_threshold_filtered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """用户实测场景：候选全部低于门槛 → 评论 0 条，但读者要看得出这是过滤造成的。"""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(
+        backend,
+        findings=0,
+        metadata={
+            "filtered_findings": {
+                "before": 3,
+                "after": 0,
+                "below_threshold": 3,
+                "duplicates": 0,
+                "severity_sorted": True,
+            }
+        },
+    )
+
+    body = _execute(backend, "publish", [run_id])["result"]["comment_body"]
+
+    assert "**0 个问题**" in body
+    assert "> 已审查 2/4 个文件 · 置信度门槛 0.60 · 低于门槛过滤 3 条 · 去重 0 条" in body
+
+
+def test_publish_uses_the_configured_threshold_for_a_recorded_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """门槛不是写死的 0.6：评论显示的是这台机器上生效的配置值。"""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    backend.config.post_processor.confidence_threshold = 0.75
+    run_id = _save_publishable_run(
+        backend,
+        metadata={"filtered_findings": {"below_threshold": 1, "duplicates": 0}},
+    )
+
+    body = _execute(backend, "publish", [run_id])["result"]["comment_body"]
+
+    assert "置信度门槛 0.75" in body
+
+
+def test_publish_prefers_the_threshold_recorded_by_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """Run 自己记了门槛时, 评论显示当时的门槛, 而不是今天配置里的值。"""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    backend.config.post_processor.confidence_threshold = 0.75
+    run_id = _save_publishable_run(
+        backend,
+        metadata={
+            "filtered_findings": {"below_threshold": 2, "duplicates": 0, "threshold": 0.6}
+        },
+    )
+
+    body = _execute(backend, "publish", [run_id])["result"]["comment_body"]
+
+    assert "置信度门槛 0.60" in body
+    assert "0.75" not in body
+
+
+def test_publish_of_a_run_without_filter_metadata_keeps_the_audit_line_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """字段加入之前保存的 Run 没有过滤数据：整行省略，不臆造 0 条被过滤。"""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(backend)  # metadata=None
+
+    body = _execute(backend, "publish", [run_id])["result"]["comment_body"]
+
+    assert "置信度门槛" not in body
+    assert "低于门槛过滤" not in body
+    assert "去重" not in body
+
+
+def test_publish_discloses_only_the_filter_counts_the_run_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """只记了部分计数：只显示已有片段，没记录的那段不显示也不填 0。"""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(
+        backend,
+        metadata={
+            "filtered_findings": {
+                "before": 3,
+                "after": 1,
+                "duplicates": 2,
+                "severity_sorted": True,
+            }
+        },
+    )
+
+    body = _execute(backend, "publish", [run_id])["result"]["comment_body"]
+
+    assert "> 已审查 2/4 个文件 · 置信度门槛 0.60 · 去重 2 条" in body
+    assert "低于门槛过滤" not in body
+
+
+def test_publish_tolerates_a_malformed_filter_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """坏数据不能让 /publish 崩，也不能被读成「0 条被过滤」这种假事实。"""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(backend, metadata={"filtered_findings": "not-a-dict"})
+
+    body = _execute(backend, "publish", [run_id])["result"]["comment_body"]
+
+    assert "置信度门槛" not in body
+    assert "低于门槛过滤" not in body
+    assert "去重" not in body
+
+
 def test_demo_list_returns_case_keys_and_text(tmp_path: Path) -> None:
     backend = JsonlBackend(tmp_path / "config.json")
 

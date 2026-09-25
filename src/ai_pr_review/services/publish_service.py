@@ -173,6 +173,35 @@ def format_reviewed_at(value: Any) -> str:
     return f"{parsed.strftime('%Y-%m-%d %H:%M:%S')} UTC"
 
 
+def comment_filter_disclosure(
+    stats: dict[str, Any] | None, *, fallback_threshold: Any = None
+) -> dict[str, float | int | None]:
+    """Normalize post-processor stats for the comment's audit line.
+
+    Both comment producers hold the same dict shape — the stored-run path reads
+    ``metadata["filtered_findings"]``, the CLI's inline path reads
+    ``ReviewArtifacts.filtered_findings`` — and sharing this keeps their two
+    comments from drifting (same reason `format_reviewed_at` is public).
+
+    Missing values stay ``None`` from end to end: the renderer then drops that
+    fragment instead of printing a 0 nobody measured. ``threshold`` is not part
+    of the stats today, so it falls back to the configured confidence threshold
+    — but only for a run that recorded counts, i.e. one that actually went
+    through the post-processor. A run that recorded nothing gets nothing.
+    """
+    raw = stats if isinstance(stats, dict) else {}
+    below_threshold = _as_count(raw.get("below_threshold"))
+    duplicates = _as_count(raw.get("duplicates"))
+    threshold = _as_float(raw.get("threshold"))
+    if threshold is None and (below_threshold is not None or duplicates is not None):
+        threshold = _as_float(fallback_threshold)
+    return {
+        "threshold": threshold,
+        "below_threshold": below_threshold,
+        "duplicates": duplicates,
+    }
+
+
 def _fork_info(metadata: dict[str, Any]) -> tuple[bool, str | None]:
     """Read the fork metadata the orchestrators store (P6 §4.3).
 
@@ -295,6 +324,10 @@ class PublishService:
 
         metadata = self.store.get_run_metadata(resolved)
         fork_flag, head_repo = _fork_info(metadata)
+        disclosure = comment_filter_disclosure(
+            metadata.get("filtered_findings"),
+            fallback_threshold=self.config.post_processor.confidence_threshold,
+        )
         pr_data = _stored_run_pr_data(run, metadata, parsed, pr_url, head_repo_full_name=head_repo)
         comment_body = ReportRenderer(self.config.report_renderer).render_github_comment(
             result,
@@ -315,6 +348,10 @@ class PublishService:
                 # repository being deleted); `pr_data.is_fork` covers runs that
                 # recorded the head repository without the flag.
                 from_fork=fork_flag or pr_data.is_fork,
+                # 后处理披露（评论审计行）：让「0 个问题」能区分模型判定与门槛过滤。
+                threshold=disclosure["threshold"],
+                below_threshold=disclosure["below_threshold"],
+                duplicates=disclosure["duplicates"],
             ),
         )
         return PublishTarget(

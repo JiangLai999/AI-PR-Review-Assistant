@@ -979,6 +979,7 @@ def test_hybrid_orchestrator_drops_findings_below_the_configured_threshold(
         "after": 1,
         "below_threshold": 1,
         "duplicates": 0,
+        "threshold": 0.6,
         "severity_sorted": True,
     }
     assert artifacts.filtered_findings == expected_stats
@@ -1016,6 +1017,7 @@ def test_hybrid_reports_nothing_when_the_only_finding_is_below_the_threshold(
         "after": 0,
         "below_threshold": 1,
         "duplicates": 0,
+        "threshold": 0.6,
         "severity_sorted": True,
     }
     assert artifacts.review_result.summary == "审查完成，发现 0 个问题"
@@ -1068,6 +1070,7 @@ def test_hybrid_and_standard_paths_post_process_identically(monkeypatch, tmp_pat
         "after": 3,
         "below_threshold": 1,
         "duplicates": 1,
+        "threshold": 0.6,
         "severity_sorted": True,
     }
 
@@ -1141,6 +1144,8 @@ def test_post_processor_process_still_applies_threshold_dedup_and_severity_sort(
         "after": 2,
         "below_threshold": 1,
         "duplicates": 1,
+        # 记录本次真正使用的门槛，历史 Run 复现时据此披露（而不是读今天的配置）
+        "threshold": 0.6,
         "severity_sorted": True,
     }
     # 入参不被就地修改：调用方仍能看到后处理前的完整 finding 列表。

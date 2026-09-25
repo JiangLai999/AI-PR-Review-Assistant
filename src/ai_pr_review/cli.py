@@ -107,6 +107,7 @@ from ai_pr_review.services.hybrid_orchestrator import HybridReviewOrchestrator
 from ai_pr_review.services.model_providers.factory import create_model_provider
 from ai_pr_review.services.pr_fetcher import PRFetcher
 from ai_pr_review.services.prompt_assembler import ReviewResult
+from ai_pr_review.services.publish_service import comment_filter_disclosure
 from ai_pr_review.services.report_renderer import GitHubCommentMeta, ReportRenderer
 from ai_pr_review.services.result_store import ResultStore
 from ai_pr_review.services.review_orchestrator import (
@@ -1636,6 +1637,15 @@ def render_github_comment_report(
 
         return format_reviewed_at(datetime.now(timezone.utc))
 
+    # 后处理披露：计数是这次 run 自己的事实（PostProcessor 写给两条编排路径的
+    # 同一份 stats），门槛是这次进程生效的配置值——同一份 app_config 跑出的
+    # 后处理，所以这里可以如实照写。归一化与 /publish 路径共用，避免两条评论
+    # 生产者漂移。
+    disclosure = comment_filter_disclosure(
+        artifacts.filtered_findings,
+        fallback_threshold=app_config.post_processor.confidence_threshold,
+    )
+
     return ReportRenderer(app_config.report_renderer).render_github_comment(
         artifacts.review_result or ReviewResult(summary="", findings=[]),
         artifacts.pr_data,
@@ -1654,6 +1664,10 @@ def render_github_comment_report(
             # A fork's head commit lives in another repository, so blob links
             # would 404; PRData knows the head repository (§4.2).
             from_fork=artifacts.pr_data.is_fork,
+            # 统计块最后一行：披露门槛与被过滤条数（缺数据时渲染器整段省略）。
+            threshold=disclosure["threshold"],
+            below_threshold=disclosure["below_threshold"],
+            duplicates=disclosure["duplicates"],
         ),
     )
 

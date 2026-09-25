@@ -744,3 +744,190 @@ def test_render_github_comment_compact_cut_marker_is_the_last_resort_and_last_se
     assert "⛔ Comment truncated" in output
     assert output.index("per-file prose omitted") < output.index("⛔ Comment truncated")
     assert output.endswith("for the full report.\n")
+
+
+# --- Filter disclosure: the audit line closing the stats block ---
+# (claude-p6-comment-filter-line) The v2 layout's one deliberate extension: a
+# reader who sees "0 findings" must be able to tell the model's verdict from a
+# confidence threshold that swallowed every candidate.
+
+
+def _pr_data_with_two_files() -> PRData:
+    pr_data = build_pr_data()
+    pr_data.files = pr_data.files + [
+        FileDiff(
+            filename="src/services/other.py",
+            status=FileStatus.MODIFIED,
+            additions=1,
+            deletions=1,
+            changes=2,
+            patch="@@ -1 +1 @@",
+        )
+    ]
+    return pr_data
+
+
+def _quote_lines(output: str) -> list[str]:
+    """The stats blockquote's lines, in document order."""
+    return [line for line in output.splitlines() if line.startswith("> ")]
+
+
+def test_render_github_comment_closes_the_stats_block_with_the_filter_audit():
+    """有 findings 时：覆盖率/门槛/过滤条数组成 stats 块的最后一行。"""
+    output = ReportRenderer().render_github_comment(
+        build_review_result(),
+        _pr_data_with_two_files(),
+        meta=GitHubCommentMeta(
+            language="zh-CN",
+            files_reviewed=2,
+            threshold=0.6,
+            below_threshold=1,
+            duplicates=0,
+        ),
+    )
+
+    assert "已审查 2/2 个文件 · 置信度门槛 0.60 · 低于门槛过滤 1 条 · 去重 0 条" in output
+    # 该行是引用块的最后一行：块内每条非末行都以硬换行结尾，末行没有。
+    assert (
+        _quote_lines(output)[-1]
+        == "> 已审查 2/2 个文件 · 置信度门槛 0.60 · 低于门槛过滤 1 条 · 去重 0 条"
+    )
+    assert output.split("已审查 2/2 个文件 · 置信度门槛 0.60 · 低于门槛过滤 1 条 · 去重 0 条")[
+        1
+    ].startswith("\n\n### 🎯")
+
+
+def test_render_github_comment_shows_the_filter_audit_without_findings_too():
+    """无 findings 分支同样要有这一行：这正是「0 个问题」需要被解释的场景。"""
+    result = build_review_result()
+    result.findings = []
+
+    output = ReportRenderer().render_github_comment(
+        result,
+        _pr_data_with_two_files(),
+        meta=GitHubCommentMeta(
+            language="zh-CN",
+            files_reviewed=2,
+            threshold=0.6,
+            below_threshold=3,
+            duplicates=0,
+        ),
+    )
+
+    assert "### ✅ 未发现问题" in output
+    assert "**0 个问题**" in output
+    assert (
+        _quote_lines(output)[-1]
+        == "> 已审查 2/2 个文件 · 置信度门槛 0.60 · 低于门槛过滤 3 条 · 去重 0 条"
+    )
+
+
+def test_render_github_comment_omits_the_audit_line_without_filter_data():
+    """没有过滤数据就整行省略：覆盖率已由目标行承担，其余不得臆造。"""
+    for meta in (
+        GitHubCommentMeta(language="zh-CN"),
+        GitHubCommentMeta(language="zh-CN", files_reviewed=1, files_skipped=0),
+        GitHubCommentMeta(files_reviewed=1, head_sha="head123"),
+    ):
+        output = ReportRenderer().render_github_comment(
+            build_review_result(), build_pr_data(), meta=meta
+        )
+
+        assert "置信度门槛" not in output
+        assert "低于门槛过滤" not in output
+        assert "去重" not in output
+        assert "confidence threshold" not in output
+        # 整行都不存在：引用块仍只有「严重级计数」与「证据校验」两行，覆盖率
+        # 只在目标行里说一次（否则没有过滤数据的 Run 也会多出一行重复的覆盖度）。
+        assert len(_quote_lines(output)) == 2
+        assert not any("已审查" in line or "reviewed " in line for line in _quote_lines(output))
+
+
+def test_render_github_comment_audit_line_keeps_only_the_fragments_it_has():
+    """部分字段：只显示已有片段，缺的那段不显示也不填 0。"""
+    only_below = ReportRenderer().render_github_comment(
+        build_review_result(),
+        build_pr_data(),
+        meta=GitHubCommentMeta(language="zh-CN", below_threshold=1),
+    )
+    assert _quote_lines(only_below)[-1] == "> 低于门槛过滤 1 条"
+    assert "置信度门槛" not in only_below
+    assert "去重" not in only_below
+    # 没有覆盖度数据时不伪造「已审查 x/y 个文件」（目标行也没有覆盖率后缀）
+    assert "已审查" not in only_below
+
+    without_below = ReportRenderer().render_github_comment(
+        build_review_result(),
+        _pr_data_with_two_files(),
+        meta=GitHubCommentMeta(language="zh-CN", files_reviewed=2, threshold=0.75, duplicates=2),
+    )
+    assert _quote_lines(without_below)[-1] == "> 已审查 2/2 个文件 · 置信度门槛 0.75 · 去重 2 条"
+    assert "低于门槛过滤" not in without_below
+
+    # 0 是真实测得的计数，必须显示；缺数据才是省略的理由。
+    zeroes = ReportRenderer().render_github_comment(
+        build_review_result(),
+        build_pr_data(),
+        meta=GitHubCommentMeta(language="zh-CN", below_threshold=0, duplicates=0),
+    )
+    assert _quote_lines(zeroes)[-1] == "> 低于门槛过滤 0 条 · 去重 0 条"
+
+
+def test_render_github_comment_audit_line_follows_the_interface_language():
+    """英文界面用同一组片段的英文措辞，数字口径一致。"""
+    english = ReportRenderer().render_github_comment(
+        build_review_result(),
+        _pr_data_with_two_files(),
+        meta=GitHubCommentMeta(
+            files_reviewed=2,
+            threshold=0.6,
+            below_threshold=1,
+            duplicates=0,
+        ),
+    )
+    assert (
+        _quote_lines(english)[-1]
+        == "> reviewed 2/2 files · confidence threshold 0.60 · filtered 1 below threshold"
+        " · 0 duplicates"
+    )
+
+
+def test_cli_comment_report_reads_the_filter_audit_from_the_run_artifacts():
+    """CLI 的 `--publish-comment` 路径：计数取自 artifacts.filtered_findings，
+    门槛取本次进程生效的配置值。"""
+    from ai_pr_review.cli import render_github_comment_report
+    from ai_pr_review.config import (
+        AIClientConfig,
+        AppConfig,
+        PostProcessorConfig,
+        PRFetcherConfig,
+    )
+    from ai_pr_review.services.filter_pipeline import FilterPipelineResult, FilterResult
+    from ai_pr_review.services.review_orchestrator import ReviewArtifacts
+
+    pr_data = _pr_data_with_two_files()
+    artifacts = ReviewArtifacts(
+        pr_data=pr_data,
+        filter_result=FilterPipelineResult(
+            results=[FilterResult(file=file, included=True) for file in pr_data.files]
+        ),
+        review_result=build_review_result(),
+        filtered_findings={
+            "before": 3,
+            "after": 2,
+            "below_threshold": 1,
+            "duplicates": 0,
+            "severity_sorted": True,
+        },
+    )
+    # 内存配置：不读磁盘上的用户配置，也不让两个 token 字段去读环境变量。
+    config = AppConfig(
+        ai_client=AIClientConfig(api_key=""),
+        github_token="",
+        pr_fetcher=PRFetcherConfig(github_token=""),
+    )
+    config.post_processor = PostProcessorConfig(confidence_threshold=0.6)
+
+    body = render_github_comment_report(artifacts, config)
+
+    assert "已审查 2/2 个文件 · 置信度门槛 0.60 · 低于门槛过滤 1 条 · 去重 0 条" in body

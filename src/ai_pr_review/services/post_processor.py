@@ -42,6 +42,7 @@ class PostProcessor:
         | `after` | 后处理之后剩下的条数 |
         | `below_threshold` | 因 `confidence_threshold` 被丢弃的条数 |
         | `duplicates` | 被去重规则合并掉的条数 |
+        | `threshold` | 本次实际使用的置信度门槛（历史 Run 复现时据此披露，而不是读当前配置） |
         | `severity_sorted` | 返回的 finding 确实按严重程度有序（对结果的自检） |
         """
         above_threshold = self.filter_by_confidence(
@@ -61,6 +62,9 @@ class PostProcessor:
             "after": len(findings),
             "below_threshold": len(result.findings) - len(above_threshold),
             "duplicates": len(above_threshold) - len(deduplicated),
+            # Store the threshold that was actually applied: republishing an old
+            # run must not claim today's setting was used back then.
+            "threshold": float(self._config.confidence_threshold),
             "severity_sorted": severity_ranks == sorted(severity_ranks),
         }
 

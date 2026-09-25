@@ -168,6 +168,13 @@ class GitHubCommentMeta:
     keeps its head commit outside the base repository, so a
     ``blob/<head_sha>`` link 404s. Callers that fetched the PR can say so, and
     the renderer then falls back to the PR files view.
+
+    ``threshold`` / ``below_threshold`` / ``duplicates`` describe what the
+    post-processor did to the model's candidates, so a comment that reports
+    "0 findings" can be told apart from a comment whose findings were all
+    dropped by the confidence threshold. Each of them is optional and each
+    fragment is dropped on its own when its datum is missing: a run that never
+    recorded filter statistics gets no audit line, not a fabricated 0.
     """
 
     language: str = "en"
@@ -180,6 +187,9 @@ class GitHubCommentMeta:
     files_reviewed: int | None = None
     files_skipped: int | None = None
     from_fork: bool = False
+    threshold: float | None = None
+    below_threshold: int | None = None
+    duplicates: int | None = None
 
 
 #: GitHub rejects comment bodies above 65,536 characters. Stay well below that
@@ -460,12 +470,16 @@ class ReportRenderer:
         lines = [f"## 🤖 {title}", ""]
         lines.extend([self._github_target_line(context, meta, zh), ""])
 
-        # One blockquote block: stats, evidence, provenance. Every line but the
-        # last gets an explicit hard break so no renderer can join them.
+        # One blockquote block: stats, evidence, provenance, and — closing it —
+        # what the post-processor filtered out. Every line but the last gets an
+        # explicit hard break so no renderer can join them.
         quote_lines = list(self._github_stats_line(context, evidence_counts, zh))
         meta_line = self._github_meta_line(meta, zh)
         if meta_line:
             quote_lines.append(meta_line)
+        audit_line = self._github_audit_line(context, meta, zh)
+        if audit_line:
+            quote_lines.append(audit_line)
         lines.extend(
             [
                 "> " + "  \n> ".join(quote_lines),
@@ -721,6 +735,49 @@ class ReportRenderer:
             for key in ("valid", "needs_review", "invalid", "unverified")
         )
         return [head, f"**{evidence_label}** {evidence_bits}"]
+
+    @staticmethod
+    def _github_audit_line(
+        context: RenderedReportContext, meta: GitHubCommentMeta, zh: bool
+    ) -> str:
+        """Closing line of the stats block: what the filter did to the findings.
+
+        The user story behind it: the same PR showed "2 findings" and then
+        "0 findings", and nothing told the reader whether the second one was the
+        model's verdict or a threshold swallowing every candidate. This line
+        separates the two cases out loud — e.g.
+        ``已审查 2/2 个文件 · 置信度门槛 0.60 · 低于门槛过滤 1 条 · 去重 0 条``.
+
+        Each fragment stands on its own datum and is dropped alone when that
+        datum is missing (an unknown threshold is never rendered as 0). A run
+        with no recorded filter statistics at all gets no line: its coverage is
+        already carried by the target line, and inventing the rest would be
+        worse than saying nothing.
+        """
+        if meta.threshold is None and meta.below_threshold is None and meta.duplicates is None:
+            return ""
+        bits: list[str] = []
+        if meta.files_reviewed is not None:
+            bits.append(
+                f"已审查 {meta.files_reviewed}/{context.files_changed} 个文件"
+                if zh
+                else f"reviewed {meta.files_reviewed}/{context.files_changed} files"
+            )
+        if meta.threshold is not None:
+            bits.append(
+                f"置信度门槛 {meta.threshold:.2f}"
+                if zh
+                else f"confidence threshold {meta.threshold:.2f}"
+            )
+        if meta.below_threshold is not None:
+            bits.append(
+                f"低于门槛过滤 {meta.below_threshold} 条"
+                if zh
+                else f"filtered {meta.below_threshold} below threshold"
+            )
+        if meta.duplicates is not None:
+            bits.append(f"去重 {meta.duplicates} 条" if zh else f"{meta.duplicates} duplicates")
+        return " · ".join(bits)
 
     @staticmethod
     def _github_meta_line(meta: GitHubCommentMeta, zh: bool) -> str:
