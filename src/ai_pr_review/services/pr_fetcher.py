@@ -121,6 +121,7 @@ class PRFetcher:
             merged=pr.merged,
             owner=parsed.owner,
             repo=parsed.repo,
+            head_repo_full_name=self._head_repo_full_name(pr),
         )
 
     def fetch_metadata(self, pr_url: str) -> PRData:
@@ -149,6 +150,7 @@ class PRFetcher:
             merged=pr.merged,
             owner=parsed.owner,
             repo=parsed.repo,
+            head_repo_full_name=self._head_repo_full_name(pr),
         )
 
     def fetch_diff_only(self, pr_url: str) -> str:
@@ -165,6 +167,23 @@ class PRFetcher:
             lambda: repo_obj.get_pull(pr_number),
             error_context=f"获取 PR {owner}/{repo}#{pr_number}",
         )
+
+    @staticmethod
+    def _head_repo_full_name(pr: PullRequest.PullRequest) -> str | None:
+        """PR head 仓库的 ``owner/repo``，未知时返回 ``None``。
+
+        GitHub 对已删除的 fork 仓库返回 ``None``，因此这里做三重容错：属性缺失、
+        值为 None、值不是字符串（测试替身）都当作「未知」。未知不是「同仓库」这个
+        结论，只是没有数据，调用方（``PRData.is_fork``）按非 fork 处理。
+        """
+        try:
+            head_repo = pr.head.repo
+        except AttributeError:
+            return None
+        full_name = getattr(head_repo, "full_name", None)
+        if not isinstance(full_name, str):
+            return None
+        return full_name.strip() or None
 
     def _get_repo(self, owner: str, repo: str) -> Repository:
         return self._execute_with_retry(

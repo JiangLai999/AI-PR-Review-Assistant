@@ -392,7 +392,7 @@ test("demoView ranks findings and surfaces risk, priority files and evidence", (
   expect(view.priorityFiles).toBe(3)
   expect(view.findings.map((item) => item.title)).toEqual(["auth bypass", "sql inject", "log gap"])
   expect(view.findings[0].severityColor).toBe("#ff6b6b")
-  expect(view.findings[0].evidenceText).toContain("Needs review")
+  expect(view.findings[0].evidenceText).toContain("needs review")
   expect(view.evidenceLine).toContain("2")
   expect(view.durationLine).toContain("1.5s")
   expect(view.empty).toBe(false)

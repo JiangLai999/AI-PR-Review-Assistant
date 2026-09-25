@@ -272,6 +272,12 @@ class HybridReviewOrchestrator:
                 # saved before this field existed have no title at all and are
                 # published with an explicit placeholder instead (§12.2).
                 "pr_title": pr_data.title,
+                # Fork 信息（P6 ③）：同 review_orchestrator，供 `/publish`
+                # 重建评论时决定用 PR files 链接还是 blob 链接。
+                "fork": {
+                    "is_fork": pr_data.is_fork,
+                    "head_repo": pr_data.head_repo_full_name,
+                },
                 "strategy": stats["strategy"],
                 "hybrid": True,
                 "local_calls": stats["local_calls"],

@@ -593,3 +593,82 @@ def test_hybrid_file_result_callback_reports_filtered_files_as_skipped(monkeypat
         "src/file_3.py",
     ]
     assert all(payload["findings_count"] is None for payload in skipped)
+
+
+# ---------------------------------------------------------------------------
+# fork 元数据（docs/P6_PLAN_2026-09-25.md §4.3）
+# ---------------------------------------------------------------------------
+
+
+class ForkStubPRFetcher(StubPRFetcher):
+    """head 仓库与 base 仓库不同的 PR：GitHub 上就是一次来自 fork 的 PR。"""
+
+    head_repo_full_name = "contributor/repo"
+
+    def fetch(self, pr_url: str) -> PRData:
+        return super().fetch(pr_url).model_copy(
+            update={"head_repo_full_name": self.head_repo_full_name}
+        )
+
+
+class RecordingResultStore(StubResultStore):
+    """StubResultStore 加一个类级指针，方便断言写进库里的 metadata。"""
+
+    last: RecordingResultStore | None = None
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        RecordingResultStore.last = self
+
+    @property
+    def saved_metadata(self) -> dict[str, Any]:
+        assert self.saved is not None, "save_result 没有被调用"
+        return self.saved[2].get("metadata") or {}
+
+
+def test_review_orchestrator_records_fork_metadata(monkeypatch, tmp_path):
+    """fork PR 的 run 必须留下 is_fork/head_repo，供 `/publish` 重建链接。"""
+    _patch_standard_orchestrator(monkeypatch)
+    monkeypatch.setattr("ai_pr_review.services.review_orchestrator.PRFetcher", ForkStubPRFetcher)
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.ResultStore", RecordingResultStore
+    )
+    orchestrator = ReviewOrchestrator(_standard_config(tmp_path))
+
+    asyncio.run(orchestrator.review("https://github.com/owner/repo/pull/42"))
+
+    assert RecordingResultStore.last.saved_metadata["fork"] == {
+        "is_fork": True,
+        "head_repo": "contributor/repo",
+    }
+
+
+def test_review_orchestrator_records_a_same_repository_run_as_not_a_fork(monkeypatch, tmp_path):
+    _patch_standard_orchestrator(monkeypatch)
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.ResultStore", RecordingResultStore
+    )
+    orchestrator = ReviewOrchestrator(_standard_config(tmp_path))
+
+    asyncio.run(orchestrator.review("https://github.com/owner/repo/pull/42"))
+
+    assert RecordingResultStore.last.saved_metadata["fork"] == {
+        "is_fork": False,
+        "head_repo": None,
+    }
+
+
+def test_hybrid_orchestrator_records_fork_metadata(monkeypatch, tmp_path):
+    _patch_hybrid_orchestrator(monkeypatch)
+    monkeypatch.setattr("ai_pr_review.services.review_orchestrator.PRFetcher", ForkStubPRFetcher)
+    monkeypatch.setattr(
+        "ai_pr_review.services.hybrid_orchestrator.ResultStore", RecordingResultStore
+    )
+    orchestrator = HybridReviewOrchestrator(_standard_config(tmp_path))
+
+    asyncio.run(orchestrator.review("https://github.com/owner/repo/pull/42"))
+
+    assert RecordingResultStore.last.saved_metadata["fork"] == {
+        "is_fork": True,
+        "head_repo": "contributor/repo",
+    }

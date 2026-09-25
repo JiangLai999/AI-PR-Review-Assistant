@@ -7,6 +7,7 @@ import re
 from collections.abc import Iterable
 
 from ai_pr_review.models.pr_data import FileDiff
+from ai_pr_review.services.analyzers.rule_catalog import get_rule
 from ai_pr_review.services.context_builder import FileContext
 from ai_pr_review.services.prompt_assembler import Finding
 
@@ -32,164 +33,63 @@ class StaticAnalyzer:
         findings: list[Finding] = []
         lowered = line.lower()
         if re.search(r"\b(eval|exec)\s*\(", line):
-            findings.append(
-                self._finding(
-                    filename,
-                    line_number,
-                    "Dynamic code execution",
-                    "The changed line executes dynamically constructed code, which can become arbitrary code execution when input is influenced by users.",
-                    "Remove dynamic execution or strictly constrain and validate the input before using a safe alternative.",
-                    "security",
-                    "high",
-                    line,
-                    0.98,
-                    "dynamic_execution",
-                )
-            )
+            findings.append(self._finding(filename, line_number, line, rule="dynamic_execution"))
         if "dangerouslysetinnerhtml" in lowered or "innerhtml" in lowered:
-            findings.append(
-                self._finding(
-                    filename,
-                    line_number,
-                    "Potential HTML injection",
-                    "The changed line writes HTML directly and may allow untrusted content to become executable markup.",
-                    "Prefer escaped text rendering or sanitize untrusted HTML with a well-maintained allowlist.",
-                    "security",
-                    "high",
-                    line,
-                    0.94,
-                    "html_injection",
-                )
-            )
+            findings.append(self._finding(filename, line_number, line, rule="html_injection"))
         if re.search(r"(?:password|api[_-]?key|secret|token)\s*=\s*['\"]", line, re.I):
-            findings.append(
-                self._finding(
-                    filename,
-                    line_number,
-                    "Possible hard-coded secret",
-                    "A credential-like value appears to be assigned directly in source code.",
-                    "Move the value to a secret manager or environment variable and rotate it if it was real.",
-                    "security",
-                    "critical",
-                    line,
-                    0.91,
-                    "hardcoded_secret",
-                )
-            )
+            findings.append(self._finding(filename, line_number, line, rule="hardcoded_secret"))
         if re.search(r"\b(?:SELECT|INSERT|UPDATE|DELETE)\b", line, re.I) and re.search(
             r"""\bf["']|\.format\(|%\s*\w|\+\s*\w""", line, re.I
         ):
-            findings.append(
-                self._finding(
-                    filename,
-                    line_number,
-                    "Possible SQL injection",
-                    "SQL text appears to be assembled with string interpolation or concatenation.",
-                    "Use parameterized queries or the database library's bound-parameter API.",
-                    "security",
-                    "high",
-                    line,
-                    0.88,
-                    "sql_interpolation",
-                )
-            )
+            findings.append(self._finding(filename, line_number, line, rule="sql_interpolation"))
         if re.search(r"\byaml\.load\s*\(", line) and not re.search(
             r"SafeLoader|safe_load|Loader\s*=", line
         ):
-            findings.append(
-                self._finding(
-                    filename,
-                    line_number,
-                    "Unsafe YAML deserialization",
-                    "`yaml.load` without a safe loader can construct arbitrary Python objects from untrusted input.",
-                    "Use `yaml.safe_load` or pass `Loader=yaml.SafeLoader` explicitly.",
-                    "security",
-                    "critical",
-                    line,
-                    0.9,
-                    "unsafe_yaml_load",
-                )
-            )
+            findings.append(self._finding(filename, line_number, line, rule="unsafe_yaml_load"))
         if re.search(r"\bverify\s*=\s*False\b", line):
             findings.append(
-                self._finding(
-                    filename,
-                    line_number,
-                    "TLS certificate verification disabled",
-                    "Certificate verification is turned off, so the connection is open to man-in-the-middle interception.",
-                    "Remove `verify=False` and trust a proper CA bundle instead.",
-                    "security",
-                    "high",
-                    line,
-                    0.9,
-                    "tls_verification_disabled",
-                )
+                self._finding(filename, line_number, line, rule="tls_verification_disabled")
             )
         if re.search(
             r"\b(?:SECRET|TOKEN|PASSWORD|API_?KEY)_?[A-Z0-9_]*\b\s*=\s*['\"][^'\"]{8,}['\"]", line
         ):
             findings.append(
                 self._finding(
-                    filename,
-                    line_number,
-                    "Possible hard-coded credential constant",
-                    "A credential-looking constant is assigned a literal secret value in source code.",
-                    "Load the secret from the environment or a secret manager, and rotate it if it was real.",
-                    "security",
-                    "critical",
-                    line,
-                    0.85,
-                    "hardcoded_credential_constant",
+                    filename, line_number, line, rule="hardcoded_credential_constant"
                 )
             )
         if (
             re.search(r"\bdebug\s*=\s*True\b", line, re.I)
             or re.search(r"""\[['"]DEBUG['"]\]\s*=\s*True""", line)
         ) and not re.search(r"#\s*noqa|test|dev", line, re.I):
-            findings.append(
-                self._finding(
-                    filename,
-                    line_number,
-                    "Debug mode may be enabled in production",
-                    "A debug flag is hard-coded to True, which can expose stack traces and an interactive debugger.",
-                    "Drive the flag from configuration or the environment instead of source.",
-                    "security",
-                    "medium",
-                    line,
-                    0.7,
-                    "debug_mode_enabled",
-                )
-            )
+            findings.append(self._finding(filename, line_number, line, rule="debug_mode_enabled"))
         return findings
 
     def _finding(
         self,
         filename: str,
         line_number: int,
-        title: str,
-        problem: str,
-        suggestion: str,
-        category: str,
-        severity: str,
         snippet: str,
-        confidence: float,
+        *,
         rule: str,
+        **params: str,
     ) -> Finding:
-        raw_id = f"{filename}:{line_number}:{rule}"
+        """按规则键从目录取文案构造 Finding。
+
+        规则键保持 `rule="..."` 关键字形式：`web_server.count_deterministic_rules()`
+        与 `tests/test_rule_catalog.py` 都靠它把规则数量与目录对齐。
+        """
+        definition = get_rule(rule)
+        raw_id = f"{filename}:{line_number}:{definition.rule_id}"
         finding_id = hashlib.sha1(raw_id.encode("utf-8")).hexdigest()[:12]
         return Finding(
             finding_id=finding_id,
-            severity=severity,
-            category=category,
             file=filename,
             line_start=line_number,
             line_end=line_number,
-            title=title,
-            problem=problem,
-            suggestion=suggestion,
-            confidence=confidence,
             code_snippet=snippet.strip(),
             sources=["static_rule"],
+            **definition.build_fields(),
         )
 
     def _changed_lines(self, patch: str) -> set[int]:

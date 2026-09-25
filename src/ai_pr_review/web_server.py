@@ -41,21 +41,14 @@ mimetypes.add_type("font/woff2", ".woff2")
 def count_deterministic_rules() -> int:
     """统计确定性规则的**去重**条数，避免界面里写死的数字随代码漂移。
 
-    - `python_ast_analyzer` 用关键字参数 `rule="..."`；
-      `static_analyzer` 用位置参数（`..., 0.98, "dynamic_execution",`）。
-    - 少数规则在两个分析器里各有实现（例如 `tls_verification_disabled`
-      在逐行与 AST 两侧都会命中），这里按规则名去重，因此结果小于实现数。
+    P6 之后规则文案与身份统一收敛在 `analyzers.rule_catalog`，所以这里直接读目录，
+    不再扫描分析器源码里的调用形态（那种正则会在重构后静默失准）。少数规则在两个
+    分析器里各有实现（例如 `tls_verification_disabled` 在逐行与 AST 两侧都会命中），
+    目录按 rule_id 去重，因此结果小于目录键数。
     """
-    import re
+    from ai_pr_review.services.analyzers.rule_catalog import all_rule_ids
 
-    from ai_pr_review.services.analyzers import python_ast_analyzer, static_analyzer
-
-    names: set[str] = set()
-    for module in (static_analyzer, python_ast_analyzer):
-        source = Path(module.__file__).read_text(encoding="utf-8")
-        names.update(re.findall(r'rule="([a-z][a-z0-9_]+)"', source))
-        names.update(re.findall(r'0\.\d+,\s*\n\s*"([a-z][a-z0-9_]+)",', source))
-    return len(names)
+    return len(all_rule_ids())
 
 
 def tree_sitter_available() -> bool:

@@ -394,6 +394,58 @@ def test_cli_publishes_comment(monkeypatch, tmp_path: Path):
     assert "# AI PR Review Report" not in body
 
 
+def test_cli_publishes_a_fork_comment_with_pr_files_links(monkeypatch, tmp_path: Path):
+    """P6 §4.5：fork PR 的评论不能用 blob 链接（head commit 在 fork 仓库里）。"""
+    created_fetchers: list[StubPRFetcher] = []
+
+    class ForkStubPRFetcher(StubPRFetcher):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.pr = self.pr.model_copy(update={"head_repo_full_name": "contributor/repo"})
+
+    def factory(*args, **kwargs):
+        fetcher = ForkStubPRFetcher(*args, **kwargs)
+        created_fetchers.append(fetcher)
+        return fetcher
+
+    monkeypatch.setattr("ai_pr_review.cli.PRFetcher", factory)
+    monkeypatch.setattr("ai_pr_review.services.review_orchestrator.PRFetcher", factory)
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.FilterPipeline", StubFilterPipeline
+    )
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.ContextBuilder", StubContextBuilder
+    )
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.PromptAssembler", StubPromptAssembler
+    )
+    monkeypatch.setattr("ai_pr_review.services.review_orchestrator.AIClient", StubAIClient)
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.PostProcessor", StubPostProcessor
+    )
+
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    config = configure_temp_app(monkeypatch, tmp_path)
+    result = runner.invoke(
+        main,
+        ["https://github.com/owner/repo/pull/42", "--publish-comment", "--format", "markdown"],
+    )
+
+    assert result.exit_code == 0
+    body = created_fetchers[-1].comment_body
+    assert body is not None
+    assert "https://github.com/owner/repo/pull/42/files" in body
+    assert "https://github.com/owner/repo/blob/head123" not in body
+
+    store = ResultStore(config.result_store)
+    run_id = store.list_runs(limit=1)[0]["id"]
+    assert store.get_run_metadata(run_id)["fork"] == {
+        "is_fork": True,
+        "head_repo": "contributor/repo",
+    }
+
+
 def test_cli_returns_exit_code_1_on_service_error(monkeypatch, tmp_path: Path):
     class FailingPRFetcher:
         def __init__(self, *args, **kwargs):
@@ -1989,9 +2041,14 @@ def test_plain_chat_disables_reasoning_for_local_provider(monkeypatch):
 # (`git show HEAD:src/ai_pr_review/cli.py`) through CliRunner. The payload
 # builder moved into `services/demo_runner.py`; the printed bytes must not.
 # Newlines are LF here because CliRunner captures text, not OS-translated bytes.
+#
+# P6 (§3.3) added the server-side `Finding.rule_id` field, so payloads that carry
+# findings gained exactly one key: stripping `rule_id` from the current payload
+# reproduces the original hashes (`sql-injection` 91e9948d…, `tls-disabled`
+# d277f194…, `clean-change` d1245bae… unchanged because it has no findings).
 DEMO_JSON_SHA256 = {
-    "sql-injection": "91e9948d349c578c8ea30d3f3da01a252e0f6cd9f59493c271b6782008e08d95",
-    "tls-disabled": "d277f194f8d6dd79ea9ea406335e602462b8170e1e9dca94e70a54795e2d1e18",
+    "sql-injection": "39860acad2a75d3a2861761c51b2497e37ffa0a1f8fa0ab33d6bbfa4aba7102f",
+    "tls-disabled": "f91ded556683394c342a503e667bec535b33b2fbb2d629002901f0f3a17ad005",
     "clean-change": "d1245baebe73bad2a0884f32d229105fccec4a2452cbf0e34bc8b1d644203015",
 }
 

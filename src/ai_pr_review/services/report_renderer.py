@@ -84,6 +84,34 @@ GITHUB_CATEGORY_LABELS_ZH = {
 _DEFAULT_GITHUB_TITLE = "AI PR Review Report"
 _DEFAULT_GITHUB_TITLE_ZH = "AI PR 审查报告"
 
+#: 证据状态术语的唯一真源（P6 计划 §1）。四个状态的含义固定为「位置与代码片段
+#: 自洽」——`FindingValidator` 只证明这一点，所以文案不得写成「证据有效」或
+#: 「问题成立」。终端明细行与 GitHub 评论徽章都从这里取词；TUI 侧见
+#: `frontend/tui/src/review-ui/helpers.ts`。英文是既有输出，保持不变。
+EVIDENCE_STATUS_LABELS: dict[str, tuple[str, str]] = {
+    "valid": ("validated", "校验通过"),
+    "needs_review": ("needs review", "待人工确认"),
+    "invalid": ("invalid", "校验不成立"),
+    "unverified": ("unverified", "未校验"),
+}
+#: 未知/缺失 status 按 `unverified` 处理，与 `FindingValidator` 的默认值一致。
+_EVIDENCE_FALLBACK_STATUS = "unverified"
+
+
+def _evidence_key(status: object) -> str:
+    """把任意 status 归一到 `EVIDENCE_STATUS_LABELS` 的四个键之一。"""
+    key = str(status or "").strip().lower()
+    return key if key in EVIDENCE_STATUS_LABELS else _EVIDENCE_FALLBACK_STATUS
+
+
+#: 评论徽章的图标；终端只用文字，因此图标单独一张表。
+_EVIDENCE_ICONS = {
+    "valid": "✅",
+    "needs_review": "🔍",
+    "invalid": "⛔",
+    "unverified": "❔",
+}
+
 #: Fence language for the optional code snippet, so GitHub highlights it.
 _FENCE_LANGUAGES = {
     "py": "python",
@@ -217,7 +245,9 @@ class ReportRenderer:
         }
         evidence_counts = {"valid": 0, "needs_review": 0, "invalid": 0, "unverified": 0}
         for finding in findings:
-            evidence_counts[finding.get("evidence_status") or "unverified"] += 1
+            # Same normalization as the comment renderer: a value outside the
+            # four states counts as `unverified` instead of raising KeyError.
+            evidence_counts[_evidence_key(finding.get("evidence_status"))] += 1
 
         summary_table = Table.grid(expand=True, padding=(0, 1))
         # Keep one compact row per metric; the English labels are stable for
@@ -237,10 +267,14 @@ class ReportRenderer:
             for severity in SEVERITY_ORDER
         )
         summary_table.add_row(labels["risk"], severity_distribution)
+        # The summary row spells the states out in full (§1): an abbreviated
+        # 「无效」 next to a full 「校验不成立」 reads as two different states.
         summary_table.add_row(
             labels["evidence"],
-            f"有效 {evidence_counts['valid']} · 待确认 {evidence_counts['needs_review']} · "
-            f"无效 {evidence_counts['invalid']} · 未校验 {evidence_counts['unverified']}",
+            " · ".join(
+                f"{EVIDENCE_STATUS_LABELS[key][1]} {evidence_counts[key]}"
+                for key in ("valid", "needs_review", "invalid", "unverified")
+            ),
         )
         console.print(Panel(summary_table, title=f"{self._config.title} · 审查结果", expand=False))
 
@@ -273,12 +307,9 @@ class ReportRenderer:
         for index, finding in enumerate(findings, start=1):
             severity = finding["severity"]
             status = finding.get("evidence_status") or "unverified"
-            status_label = {
-                "valid": "证据有效",
-                "needs_review": "待人工确认",
-                "invalid": "证据不成立",
-                "unverified": "未校验",
-            }.get(status, status)
+            # Same words as the GitHub comment badge and the TUI (§1): the
+            # status only says the location and snippet are self-consistent.
+            status_label = EVIDENCE_STATUS_LABELS[_evidence_key(status)][1]
             status_style = {
                 "valid": "green",
                 "needs_review": "yellow",
@@ -598,15 +629,9 @@ class ReportRenderer:
         self-consistent with the diff. Saying「证据有效」for that over-claims, so
         the badges spell out what was validated.
         """
-        table = {
-            "valid": ("✅ validated", "✅ 校验通过"),
-            "needs_review": ("🔍 needs review", "🔍 待人工确认"),
-            "invalid": ("⛔ invalid", "⛔ 校验不成立"),
-            "unverified": ("❔ unverified", "❔ 未校验"),
-        }
-        fallback = table["unverified"]
-        label = table.get(str(status or "").strip().lower(), fallback)
-        return label[1] if zh else label[0]
+        key = _evidence_key(status)
+        english, chinese = EVIDENCE_STATUS_LABELS[key]
+        return f"{_EVIDENCE_ICONS[key]} {chinese if zh else english}"
 
     def _github_stats_line(
         self,

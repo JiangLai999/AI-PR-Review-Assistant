@@ -1,10 +1,13 @@
-"""Localize deterministic Finding messages without touching code identifiers."""
+"""Localize deterministic Finding messages without touching code identifiers.
+
+中文文案的唯一真源是 `rule_catalog`：这里只负责按 `rule_id` 取用与回退，
+不再维护自己的规则表（`_RULE_ZH` 仅作为历史数据的兼容回退保留）。
+"""
 
 from __future__ import annotations
 
-import re
-
-from ai_pr_review.services.prompt_assembler import Finding
+from ai_pr_review.services.analyzers.rule_catalog import rule_for_id
+from ai_pr_review.services.prompt_assembler import Finding, finding_has_source
 
 _CATEGORY_ZH = {
     "correctness": "正确性",
@@ -76,15 +79,15 @@ _RULE_ZH = {
 
 
 def localize_deterministic_finding(finding: Finding, language: str) -> Finding:
-    if not language.lower().startswith("zh") or "static_rule" not in (finding.sources or []):
+    """把确定性规则的英文文案换成中文。
+
+    主路径按 `rule_id` 从 `rule_catalog` 取中文（目录覆盖全部规则，含规则自带的
+    动态片段）；`rule_id` 为空或目录未登记时回退到旧的按英文标题匹配表。
+    模型产出的 finding 不带 `static_rule` 来源，因此不会被本地化。
+    """
+    if not language.lower().startswith("zh") or not finding_has_source(finding, "static_rule"):
         return finding
-    title = finding.title
-    mapped = _RULE_ZH.get(title)
-    if mapped is None:
-        for english, value in _RULE_ZH.items():
-            if title.startswith(english):
-                mapped = (f"{value[0]}（{title[len(english):].strip(' ()')}）", value[1], value[2])
-                break
+    mapped = _localize_by_rule_id(finding) or _localize_by_title(finding.title)
     if mapped is None:
         return finding
     return finding.model_copy(
@@ -95,3 +98,22 @@ def localize_deterministic_finding(finding: Finding, language: str) -> Finding:
             "category": _CATEGORY_ZH.get(finding.category, finding.category),
         }
     )
+
+
+def _localize_by_rule_id(finding: Finding) -> tuple[str, str, str] | None:
+    definition = rule_for_id(finding.rule_id)
+    if definition is None:
+        return None
+    return definition.localize(finding.title)
+
+
+def _localize_by_title(title: str) -> tuple[str, str, str] | None:
+    """兼容回退：按英文标题查旧表（含 "标题变体（后缀）" 的拼接）。"""
+    mapped = _RULE_ZH.get(title)
+    if mapped is not None:
+        return mapped
+    for english, value in _RULE_ZH.items():
+        if title.startswith(english):
+            suffix = title[len(english) :].strip(" ()")
+            return (f"{value[0]}（{suffix}）", value[1], value[2])
+    return None

@@ -1,23 +1,23 @@
-"""统计确定性规则的实际数量，供 UI 显示与文档核对。"""
+"""统计确定性规则的实际数量，供 UI 显示与文档核对。
 
-import io
-import re
+P6 起规则由 `analyzers.rule_catalog` 统一登记，所以这里读目录而不是扫描调用形态：
+旧实现按位置参数正则匹配，目录重构后固定打印 0 条（静默失准）。
+"""
 
-FILES = [
-    ("src/ai_pr_review/services/analyzers/static_analyzer.py", "static"),
-    ("src/ai_pr_review/services/analyzers/python_ast_analyzer.py", "ast"),
-]
+import pathlib
+import sys
 
-total = 0
-for path, label in FILES:
-    source = io.open(path, encoding="utf-8").read()
-    # 规则名出现在 _finding(...) / _add(...) 的最后一个位置参数 "rule"
-    rules = set(re.findall(r'"([a-z][a-z0-9_]{3,})",\s*\n?\s*\)', source))
-    rules = {r for r in rules if r not in {"static_rule", "ai_analysis"}}
-    print(f"{label:8} {len(rules):>3} 条: {', '.join(sorted(rules))}")
-    total += len(rules)
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
-print(f"\n合计 {total} 条")
+from ai_pr_review.services.analyzers.rule_catalog import RULE_CATALOG, all_rule_ids  # noqa: E402
+
+ids = sorted(all_rule_ids())
+print(f"目录键 {len(RULE_CATALOG)} 个 / 去重规则 {len(ids)} 条")
+for rule_id in ids:
+    definition = next(item for item in RULE_CATALOG.values() if item.rule_id == rule_id)
+    print(f"  {rule_id:<32} {definition.severity:<8} {definition.title_zh}")
+
+print(f"\n合计 {len(ids)} 条")
 
 from ai_pr_review.config import MODEL_PROVIDER_PRESETS  # noqa: E402
 

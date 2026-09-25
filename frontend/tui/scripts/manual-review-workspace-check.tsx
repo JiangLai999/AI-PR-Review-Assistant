@@ -994,9 +994,47 @@ const showcaseDemoCases: PanelCase[] = [
       "[CRITICAL]",
       "[HIGH]",
       "[LOW]",
-      "Needs review",
+      "needs review",
     ],
     forbidLabels: ["undefined"],
+  },
+  {
+    // Vocabulary contract (docs/P6_PLAN_2026-09-25.md §1): the four evidence
+    // terms must be identical in the terminal, the TUI and the GitHub comment.
+    name: "evidence-vocabulary-zh",
+    width: 100,
+    height: 24,
+    node: () => (
+      <ReviewSummaryPanel
+        repository="owner/repo"
+        severity={{ critical: 1, high: 0, medium: 0, low: 0, info: 0 }}
+        evidence={{ valid: 1, needsReview: 1, invalid: 1, unverified: 1 }}
+        filesReviewed={1}
+        filesSkipped={0}
+        findings={[]}
+        language="zh-CN"
+      />
+    ),
+    expectLabels: ["证据校验", "校验通过", "待人工确认", "校验不成立", "未校验"],
+    forbidLabels: ["证据健康", "待复核", "未验证"],
+  },
+  {
+    name: "evidence-vocabulary-en",
+    width: 100,
+    height: 24,
+    node: () => (
+      <ReviewSummaryPanel
+        repository="owner/repo"
+        severity={{ critical: 1, high: 0, medium: 0, low: 0, info: 0 }}
+        evidence={{ valid: 1, needsReview: 1, invalid: 1, unverified: 1 }}
+        filesReviewed={1}
+        filesSkipped={0}
+        findings={[]}
+        language="en"
+      />
+    ),
+    expectLabels: ["validated", "needs review", "invalid", "unverified"],
+    forbidLabels: ["Valid", "Needs review", "Unverified"],
   },
   {
     name: "demo-empty",

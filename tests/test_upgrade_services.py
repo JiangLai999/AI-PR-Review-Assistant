@@ -75,3 +75,37 @@ def test_static_finding_is_verified_against_changed_line() -> None:
     assert checked.finding_id
     assert checked.evidence_status == "valid"
     assert checked.evidence[0].changed_line is True
+
+
+def test_evidence_source_follows_the_shared_source_helper() -> None:
+    """来源判定统一走 `finding_has_source`，大小写不再能左右分支（P6 §2.3）。"""
+    file_diff = FileDiff(
+        filename="src/app.py",
+        status=FileStatus.MODIFIED,
+        additions=1,
+        changes=1,
+        patch="@@ -1 +1,2 @@\n old\n+value = eval(user_input)",
+    )
+    content = "old\nvalue = eval(user_input)\n"
+    context = ContextBuilder().build_context(file_diff.filename, file_diff.patch or "", content)
+    validator = FindingValidator()
+
+    static_finding = StaticAnalyzer().analyze(file_diff, context)[0]
+    model_finding = static_finding.model_copy(
+        update={"sources": ["ai_analysis"], "finding_id": "", "rule_id": ""}
+    )
+
+    assert validator.validate(static_finding, file_diff, context).source == "static_rule"
+    assert validator.validate(model_finding, file_diff, context).source == "ai_analysis"
+    assert (
+        validator.validate(
+            model_finding.model_copy(update={"sources": ["AI_ANALYSIS"]}), file_diff, context
+        ).source
+        == "ai_analysis"
+    )
+    assert (
+        validator.validate(
+            static_finding.model_copy(update={"sources": [" Static_Rule "]}), file_diff, context
+        ).source
+        == "static_rule"
+    )

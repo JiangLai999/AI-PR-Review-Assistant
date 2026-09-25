@@ -2261,6 +2261,81 @@ def test_new_runs_record_the_pr_title_in_metadata(tmp_path: Path) -> None:
     assert metadata["pr_title"] == "Add authentication"
 
 
+def test_fork_metadata_survives_the_database_round_trip(tmp_path: Path) -> None:
+    """P6 §4.5：`fork` 写在 metadata JSON 里，不加数据库列，历史库照旧可读。"""
+    from ai_pr_review.services.result_store import ResultStore
+
+    backend = JsonlBackend(tmp_path / "config.json")
+    stored = {"is_fork": True, "head_repo": "contributor/repo"}
+    run_id = _save_publishable_run(backend, metadata={"fork": stored})
+
+    metadata = ResultStore(backend.config.result_store).get_run_metadata(run_id)
+
+    assert metadata["fork"] == stored
+
+
+def test_publish_preview_links_a_fork_run_to_the_pr_files_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """P6 §4.5：fork 的 head commit 不在 base 仓库，`blob/<sha>` 必然 404。"""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    fork_run = _save_publishable_run(
+        backend, metadata={"fork": {"is_fork": True, "head_repo": "contributor/repo"}}
+    )
+
+    fork_body = _execute(backend, "publish", [fork_run])["result"]["comment_body"]
+
+    assert "https://github.com/owner/repo/pull/31/files" in fork_body
+    assert "/blob/head-sha/" not in fork_body
+    assert fake_github.posted == []  # 预览不发帖
+
+
+def test_publish_preview_links_a_fork_with_a_deleted_repository_to_the_pr_files_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """fork 仓库被删除时只剩 is_fork=True，链接形式不能因此退回 blob。"""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    deleted_fork = _save_publishable_run(
+        backend, metadata={"fork": {"is_fork": True, "head_repo": None}}
+    )
+
+    body = _execute(backend, "publish", [deleted_fork])["result"]["comment_body"]
+
+    assert "https://github.com/owner/repo/pull/31/files" in body
+    assert "/blob/head-sha/" not in body
+
+
+def test_publish_preview_keeps_blob_links_for_a_same_repository_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    same_repo_run = _save_publishable_run(
+        backend, metadata={"fork": {"is_fork": False, "head_repo": "owner/repo"}}
+    )
+
+    body = _execute(backend, "publish", [same_repo_run])["result"]["comment_body"]
+
+    assert "https://github.com/owner/repo/blob/head-sha/src/module_0.py" in body
+    assert "/pull/31/files" not in body
+
+
+def test_publish_preview_keeps_blob_links_for_a_run_without_fork_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """字段加入之前保存的 Run 没有 `fork` 键：保持它当初的 blob 行为。"""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    historical_run = _save_publishable_run(backend)  # metadata=None
+
+    body = _execute(backend, "publish", [historical_run])["result"]["comment_body"]
+
+    assert "https://github.com/owner/repo/blob/head-sha/src/module_0.py" in body
+    assert "/pull/31/files" not in body
+
+
 def test_demo_list_returns_case_keys_and_text(tmp_path: Path) -> None:
     backend = JsonlBackend(tmp_path / "config.json")
 

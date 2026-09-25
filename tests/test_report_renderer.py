@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from ai_pr_review.config import ReportRendererConfig
 from ai_pr_review.models.pr_data import FileDiff, FileStatus, PRData
 from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
-from ai_pr_review.services.report_renderer import GitHubCommentMeta, ReportRenderer
+from ai_pr_review.services.report_renderer import (
+    EVIDENCE_STATUS_LABELS,
+    GitHubCommentMeta,
+    ReportRenderer,
+)
 
 
 def build_pr_data() -> PRData:
@@ -83,6 +89,68 @@ def test_render_terminal_outputs_summary_and_findings():
     assert "High: 1" in output
     assert "SQL Injection in user query" in output
     assert "Missing error handling" in output
+
+
+def test_render_terminal_uses_the_shared_evidence_vocabulary():
+    """P6 §1：终端中文证据文案与词汇表逐字一致，且不得写成「证据有效」。"""
+    result = build_review_result()
+    result.findings[0].evidence_status = "valid"
+    result.findings[1].evidence_status = "invalid"
+
+    output = ReportRenderer().render_terminal(result, build_pr_data(), language="zh-CN")
+
+    # 汇总行
+    assert "校验通过 1 · 待人工确认 0 · 校验不成立 1 · 未校验 0" in output
+    # 明细行
+    assert "校验通过 · 来源：ai_analysis" in output
+    assert "校验不成立 · 来源：ai_analysis" in output
+    # 「证据有效 / 证据不成立」把「位置与片段自洽」说成了「问题成立」。
+    assert "证据有效" not in output
+    assert "证据不成立" not in output
+    assert "有效 1" not in output
+
+
+@pytest.mark.parametrize(
+    ("status", "badge", "chinese"),
+    [
+        ("valid", "✅", "校验通过"),
+        ("needs_review", "🔍", "待人工确认"),
+        ("invalid", "⛔", "校验不成立"),
+        ("unverified", "❔", "未校验"),
+    ],
+)
+def test_terminal_and_comment_agree_on_the_chinese_evidence_word(status, badge, chinese):
+    """同一个 status 在终端与评论里必须是同一个中文词（P6 §6 的比对口径）。"""
+    assert EVIDENCE_STATUS_LABELS[status][1] == chinese
+
+    result = build_review_result()
+    for finding in result.findings:
+        finding.evidence_status = status
+
+    terminal = ReportRenderer().render_terminal(result, build_pr_data(), language="zh-CN")
+    comment = ReportRenderer().render_github_comment(
+        result, build_pr_data(), meta=GitHubCommentMeta(language="zh-CN", head_sha="head123")
+    )
+
+    assert f"{chinese} · 来源：ai_analysis" in terminal
+    assert f"{chinese} 2" in terminal  # 汇总行：两个 finding 同一个状态
+    assert f"{badge} {chinese}" in comment
+
+
+def test_render_terminal_falls_back_for_an_unknown_evidence_status():
+    """词汇表外的 status 与评论徽章一样回退到「未校验」，而不是抛 KeyError。"""
+    result = build_review_result()
+    result.findings[0].evidence_status = "not-a-status"
+
+    terminal = ReportRenderer().render_terminal(result, build_pr_data(), language="zh-CN")
+    comment = ReportRenderer().render_github_comment(
+        result, build_pr_data(), meta=GitHubCommentMeta(language="zh-CN")
+    )
+
+    assert "未校验 · 来源" in terminal
+    assert "未校验 2" in terminal
+    assert "not-a-status" not in terminal
+    assert "❔ 未校验 2" in comment
 
 
 def test_render_markdown_outputs_expected_sections():

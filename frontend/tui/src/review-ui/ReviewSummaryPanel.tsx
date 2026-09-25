@@ -45,10 +45,10 @@ const EVIDENCE_LABEL: Record<
   keyof EvidenceCounts & string,
   { en: string; zh: string; status: string }
 > = {
-  valid: { en: "Valid", zh: "有效", status: "valid" },
-  needsReview: { en: "Needs review", zh: "待复核", status: "needs_review" },
-  invalid: { en: "Invalid", zh: "无效", status: "invalid" },
-  unverified: { en: "Unverified", zh: "未验证", status: "unverified" },
+  valid: { en: "validated", zh: "校验通过", status: "valid" },
+  needsReview: { en: "needs review", zh: "待人工确认", status: "needs_review" },
+  invalid: { en: "invalid", zh: "校验不成立", status: "invalid" },
+  unverified: { en: "unverified", zh: "未校验", status: "unverified" },
 }
 
 export function ReviewSummaryPanel(props: ReviewSummaryPanelProps) {
@@ -114,7 +114,7 @@ export function ReviewSummaryPanel(props: ReviewSummaryPanelProps) {
       </text>
 
       <text height={1} marginTop={1}>
-        <span style={{ fg: "#f3c742" }}>{en() ? "Evidence " : "证据健康 "}</span>
+        <span style={{ fg: "#f3c742" }}>{en() ? "Evidence " : "证据校验 "}</span>
         <span style={{ fg: "#808080" }}>
           {en() ? "total" : "合计"} {evidenceTotals(evidence())}
         </span>

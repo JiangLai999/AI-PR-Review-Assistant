@@ -19,6 +19,7 @@ import re
 from typing import Any
 
 from ai_pr_review.models.pr_data import FileDiff
+from ai_pr_review.services.analyzers.rule_catalog import TLS_AST_RULE_KEY, get_rule
 from ai_pr_review.services.context_builder import FileContext
 from ai_pr_review.services.prompt_assembler import Finding
 
@@ -197,22 +198,7 @@ class _RuleVisitor(ast.NodeVisitor):
 
         for line, names in mutable_by_line.items():
             listed = ", ".join(f"`{name}`" for name in names)
-            self._add(
-                line=line,
-                title="Mutable default argument",
-                problem=(
-                    f"Parameter {listed} uses a mutable default value created once at "
-                    "function definition time, so mutations persist across calls."
-                ),
-                suggestion=(
-                    "Use `None` as the default and build the container inside the function "
-                    "body, for example `if value is None: value = []`."
-                ),
-                category="correctness",
-                severity="medium",
-                confidence=0.9,
-                rule="mutable_default_argument",
-            )
+            self._finding(line, rule="mutable_default_argument", listed=listed)
 
     def _is_mutable_default(self, node: ast.expr) -> bool:
         if isinstance(node, _MUTABLE_DEFAULT_TYPES):
@@ -231,23 +217,7 @@ class _RuleVisitor(ast.NodeVisitor):
                 continue
             if handler.lineno not in self._changed_lines:
                 continue
-            self._add(
-                line=handler.lineno,
-                title="Bare except swallows every exception",
-                problem=(
-                    "A bare `except:` also catches `KeyboardInterrupt`, `SystemExit` and "
-                    "genuine programming errors, which hides failures and can leave state "
-                    "inconsistent."
-                ),
-                suggestion=(
-                    "Catch the specific exception types you can handle, or re-raise after "
-                    "logging (`except Exception: ... raise`)."
-                ),
-                category="error_handling",
-                severity="medium",
-                confidence=0.92,
-                rule="bare_except",
-            )
+            self._finding(handler.lineno, rule="bare_except")
 
     def _check_lost_traceback(self, node: ast.ExceptHandler) -> None:
         """`raise X` 会丢失原始 traceback，`raise X from e` 则保留。"""
@@ -258,44 +228,14 @@ class _RuleVisitor(ast.NodeVisitor):
                 continue
             if child.lineno not in self._changed_lines:
                 continue
-            self._add(
-                line=child.lineno,
-                title="Exception re-raised without original traceback",
-                problem=(
-                    "Raising a new exception inside an `except` block without `from` "
-                    "discards the original cause, making the real failure hard to diagnose."
-                ),
-                suggestion=(
-                    "Chain the exceptions explicitly, for example `raise ConfigError(...) "
-                    "from exc`."
-                ),
-                category="error_handling",
-                severity="medium",
-                confidence=0.75,
-                rule="raise_without_from",
-            )
+            self._finding(child.lineno, rule="raise_without_from")
             return
 
     def _check_unsafe_int_parse(self, node: ast.Raise) -> None:
         """`raise ValueError(...)` 常出现在输入转换失败处，提示统一处理。"""
         if node.lineno not in self._changed_lines:
             return
-        self._add(
-            line=node.lineno,
-            title="Input conversion failure raised without context",
-            problem=(
-                "A raw `ValueError` is raised for a conversion failure, so callers cannot "
-                "tell which input was invalid."
-            ),
-            suggestion=(
-                "Raise a domain-specific error that includes the offending value and the "
-                "expected format."
-            ),
-            category="error_handling",
-            severity="low",
-            confidence=0.5,
-            rule="uncontextualised_value_error",
-        )
+        self._finding(node.lineno, rule="uncontextualised_value_error")
 
     def _check_weak_hash(self, node: ast.Call) -> None:
         if node.lineno not in self._changed_lines:
@@ -304,21 +244,8 @@ class _RuleVisitor(ast.NodeVisitor):
         weak = {"md5", "sha1"}
         if name.split(".")[-1] not in weak:
             return
-        self._add(
-            line=node.lineno,
-            title=f"Weak hash algorithm ({name.split('.')[-1]})",
-            problem=(
-                f"`{name}` is cryptographically broken and unsuitable for password "
-                "hashing or integrity checks against attackers."
-            ),
-            suggestion=(
-                "Use `hashlib.sha256` for integrity, or a dedicated password hash such as "
-                "`bcrypt`, `scrypt` or `argon2`."
-            ),
-            category="security",
-            severity="medium",
-            confidence=0.85,
-            rule="weak_hash_algorithm",
+        self._finding(
+            node.lineno, rule="weak_hash_algorithm", algorithm=name.split(".")[-1], name=name
         )
 
     def _check_is_literal(self, node: ast.Compare) -> None:
@@ -335,19 +262,7 @@ class _RuleVisitor(ast.NodeVisitor):
                 continue
             if neighbour.value is None:
                 continue
-            self._add(
-                line=node.lineno,
-                title="Identity comparison against a literal",
-                problem=(
-                    "`is` compares object identity, not value. Comparing against a literal "
-                    "relies on interpreter interning and can silently change behaviour."
-                ),
-                suggestion="Use `==`/`!=` for value comparison; keep `is` for `None`.",
-                category="correctness",
-                severity="medium",
-                confidence=0.9,
-                rule="is_literal_comparison",
-            )
+            self._finding(node.lineno, rule="is_literal_comparison")
             return
 
     def _check_risky_deserialization(self, node: ast.Call) -> None:
@@ -360,21 +275,12 @@ class _RuleVisitor(ast.NodeVisitor):
         library = RISKY_DESERIALIZERS.get((module, attribute))
         if library is None:
             return
-        self._add(
-            line=node.lineno,
-            title=f"Unsafe deserialization via {library}",
-            problem=(
-                f"`{module}.{attribute}` reconstructs arbitrary objects from untrusted "
-                "bytes and can lead to remote code execution."
-            ),
-            suggestion=(
-                "Use a data-only format such as JSON, or restrict loading to trusted, "
-                "integrity-checked payloads."
-            ),
-            category="security",
-            severity="critical",
-            confidence=0.9,
+        self._finding(
+            node.lineno,
             rule="unsafe_deserialization",
+            library=library,
+            module=module,
+            attribute=attribute,
         )
 
     def _check_subprocess_shell(self, node: ast.Call) -> None:
@@ -388,22 +294,7 @@ class _RuleVisitor(ast.NodeVisitor):
             for keyword in node.keywords
         ):
             return
-        self._add(
-            line=node.lineno,
-            title="Subprocess executed with shell=True",
-            problem=(
-                "`shell=True` passes the command through the system shell, so interpolated "
-                "input becomes a command-injection vector."
-            ),
-            suggestion=(
-                "Pass an argument list without `shell=True`, or use `shlex.quote` on every "
-                "untrusted fragment."
-            ),
-            category="security",
-            severity="high",
-            confidence=0.85,
-            rule="subprocess_shell_true",
-        )
+        self._finding(node.lineno, rule="subprocess_shell_true")
 
     def _check_tls_verification(self, node: ast.Call) -> None:
         if node.lineno not in self._changed_lines:
@@ -413,19 +304,7 @@ class _RuleVisitor(ast.NodeVisitor):
             for keyword in node.keywords
         ):
             return
-        self._add(
-            line=node.lineno,
-            title="TLS certificate verification disabled",
-            problem=(
-                "Disabling certificate verification makes the request vulnerable to "
-                "man-in-the-middle interception."
-            ),
-            suggestion="Remove `verify=False` and trust a proper CA bundle instead.",
-            category="security",
-            severity="high",
-            confidence=0.9,
-            rule="tls_verification_disabled",
-        )
+        self._finding(node.lineno, rule=TLS_AST_RULE_KEY)
 
     def _check_request_without_timeout(self, node: ast.Call) -> None:
         if node.lineno not in self._changed_lines:
@@ -437,19 +316,7 @@ class _RuleVisitor(ast.NodeVisitor):
             return
         if any(keyword.arg == "timeout" for keyword in node.keywords):
             return
-        self._add(
-            line=node.lineno,
-            title="HTTP request without timeout",
-            problem=(
-                "A request without an explicit timeout can block the worker indefinitely "
-                "when the peer stalls."
-            ),
-            suggestion="Pass an explicit `timeout=` value so the call fails fast.",
-            category="resource",
-            severity="medium",
-            confidence=0.7,
-            rule="http_request_without_timeout",
-        )
+        self._finding(node.lineno, rule="http_request_without_timeout")
 
     def _record_acquired_resource(self, value: ast.expr | None, targets: list[ast.expr]) -> None:
         if not isinstance(value, ast.Call):
@@ -473,52 +340,28 @@ class _RuleVisitor(ast.NodeVisitor):
         for name, call in self._acquired.items():
             if name in self._released:
                 continue
-            self._add(
-                line=call.lineno,
-                title="Resource opened without guaranteed cleanup",
-                problem=(
-                    f"`{name}` is assigned from a resource-acquiring call but the code path "
-                    "never closes it, so the handle leaks on exceptions and early returns."
-                ),
-                suggestion=(
-                    "Open the resource in a `with` block so it is released on every exit " "path."
-                ),
-                category="resource",
-                severity="medium",
-                confidence=0.75,
-                rule="unclosed_resource",
-            )
+            self._finding(call.lineno, rule="unclosed_resource", name=name)
 
     # ---- 输出 -----------------------------------------------------
 
-    def _add(
-        self,
-        *,
-        line: int,
-        title: str,
-        problem: str,
-        suggestion: str,
-        category: str,
-        severity: str,
-        confidence: float,
-        rule: str,
-    ) -> None:
+    def _finding(self, line: int, *, rule: str, **params: str) -> None:
+        """按规则键从目录取文案，构造一条确定性 Finding。
+
+        规则键保持 `rule="..."` 关键字形式：`web_server.count_deterministic_rules()`
+        与 `tests/test_rule_catalog.py` 都靠它把规则数量与目录对齐。
+        """
+        definition = get_rule(rule)
         snippet = self._line_text(line)
-        raw_id = f"{self._filename}:{line}:{rule}"
+        raw_id = f"{self._filename}:{line}:{definition.rule_id}"
         self.findings.append(
             Finding(
                 finding_id=hashlib.sha1(raw_id.encode("utf-8")).hexdigest()[:12],
-                severity=severity,
-                category=category,
                 file=self._filename,
                 line_start=line,
                 line_end=line,
-                title=title,
-                problem=problem,
-                suggestion=suggestion,
-                confidence=confidence,
                 code_snippet=snippet,
                 sources=["static_rule"],
+                **definition.build_fields(**params),
             )
         )
 

@@ -148,11 +148,30 @@ def _as_count(value: Any) -> int | None:
         return None
 
 
+def _fork_info(metadata: dict[str, Any]) -> tuple[bool, str | None]:
+    """Read the fork metadata the orchestrators store (P6 §4.3).
+
+    A run saved before that key existed has no fork data at all: it stays on
+    the blob-link path, which is exactly how it was published back then. A
+    deleted fork repository yields `head_repo=None` while `is_fork` is still
+    true, so the flag — not the repository name — decides the link style.
+    """
+    fork = metadata.get("fork")
+    if not isinstance(fork, dict):
+        return False, None
+    head_repo = fork.get("head_repo")
+    if not isinstance(head_repo, str) or not head_repo.strip():
+        head_repo = None
+    return bool(fork.get("is_fork")), head_repo
+
+
 def _stored_run_pr_data(
     run: dict[str, Any],
     metadata: dict[str, Any],
     parsed: ParsedPRUrl,
     pr_url: str,
+    *,
+    head_repo_full_name: str | None = None,
 ) -> PRData:
     """Rebuild the PR view the GitHub comment renderer needs.
 
@@ -178,6 +197,7 @@ def _stored_run_pr_data(
         diff="",
         files=[],
         url=pr_url,
+        head_repo_full_name=head_repo_full_name,
         merged=False,
         owner=parsed.owner,
         repo=parsed.repo,
@@ -245,7 +265,9 @@ class PublishService:
         if not _github_token(self.config):
             raise PublishError("missing_credentials", _MISSING_CREDENTIALS_MESSAGE)
 
-        pr_data = _stored_run_pr_data(run, self.store.get_run_metadata(resolved), parsed, pr_url)
+        metadata = self.store.get_run_metadata(resolved)
+        fork_flag, head_repo = _fork_info(metadata)
+        pr_data = _stored_run_pr_data(run, metadata, parsed, pr_url, head_repo_full_name=head_repo)
         comment_body = ReportRenderer(self.config.report_renderer).render_github_comment(
             result,
             pr_data,
@@ -260,9 +282,10 @@ class PublishService:
                 reviewed_at=str(run.get("created_at") or ""),
                 files_reviewed=_as_count(run.get("included_files")),
                 files_skipped=_as_count(run.get("excluded_files")),
-                # Fork detection needs the head repository, which PRData does
-                # not carry yet (see docs/claude-p5-comment-format.md F1).
-                from_fork=False,
+                # The stored `fork` flag is authoritative (it survives a fork
+                # repository being deleted); `pr_data.is_fork` covers runs that
+                # recorded the head repository without the flag.
+                from_fork=fork_flag or pr_data.is_fork,
             ),
         )
         return PublishTarget(

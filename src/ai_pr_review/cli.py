@@ -1642,6 +1642,9 @@ def render_github_comment_report(
             reviewed_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             files_reviewed=artifacts.filter_result.included_count,
             files_skipped=artifacts.filter_result.excluded_count,
+            # A fork's head commit lives in another repository, so blob links
+            # would 404; PRData knows the head repository (§4.2).
+            from_fork=artifacts.pr_data.is_fork,
         ),
     )
 

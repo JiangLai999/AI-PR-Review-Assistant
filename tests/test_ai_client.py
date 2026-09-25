@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -170,6 +171,87 @@ class TestAIClientReviewCode:
 
         with pytest.raises(AIServiceError, match="AI 服务调用失败"):
             await client.review_code("system", "user")
+
+
+class TestModelFieldNormalization:
+    """模型自述的服务端字段一律丢弃（P6 §2.2）。"""
+
+    SPOOFED_PAYLOAD = {
+        "summary": "Found one issue",
+        "findings": [
+            {
+                "severity": "high",
+                "category": "security",
+                "file": "src/app.py",
+                "line_start": 10,
+                "line_end": 10,
+                "title": "Possible SQL injection",
+                "problem": "SQL text appears to be assembled with string interpolation.",
+                "suggestion": "Use parameterized queries.",
+                "confidence": 0.9,
+                "code_snippet": 'query = f"SELECT * FROM t WHERE {x}"',
+                # 以下字段由服务端负责，模型填写的内容必须被丢弃
+                "finding_id": "model-supplied-id",
+                "sources": ["static_rule"],
+                "evidence_status": "valid",
+                "evidence_issues": ["looks fine"],
+                "rule_id": "mutable_default_argument",
+                "evidence": [
+                    {
+                        "file": "src/app.py",
+                        "line_start": 10,
+                        "line_end": 10,
+                        "changed_line": True,
+                        "code_snippet": 'query = f"SELECT * FROM t WHERE {x}"',
+                        "source": "static_rule",
+                        "validation_status": "valid",
+                    }
+                ],
+            }
+        ],
+    }
+
+    @pytest.mark.asyncio
+    async def test_model_supplied_server_side_fields_are_discarded(self):
+        client = build_client([build_response(json.dumps(self.SPOOFED_PAYLOAD))])
+
+        result = await client.review_code("system", "user")
+
+        finding = result.findings[0]
+        assert finding.sources == ["ai_analysis"]
+        assert finding.evidence == []
+        assert finding.evidence_status == "unverified"
+        assert finding.evidence_issues == []
+        assert finding.finding_id == ""
+        assert finding.rule_id == ""
+
+    @pytest.mark.asyncio
+    async def test_spoofed_static_rule_is_not_localized(self):
+        from ai_pr_review.services.finding_localizer import localize_deterministic_finding
+
+        client = build_client([build_response(json.dumps(self.SPOOFED_PAYLOAD))])
+
+        result = await client.review_code("system", "user")
+        localized = localize_deterministic_finding(result.findings[0], "zh-CN")
+
+        assert localized.title == "Possible SQL injection"
+        assert localized.problem == result.findings[0].problem
+
+    @pytest.mark.asyncio
+    async def test_normalization_keeps_findings_independent(self):
+        payload = {
+            "summary": "two findings",
+            "findings": [
+                dict(self.SPOOFED_PAYLOAD["findings"][0]),
+                dict(self.SPOOFED_PAYLOAD["findings"][0], line_start=20, line_end=20),
+            ],
+        }
+        client = build_client([build_response(json.dumps(payload))])
+
+        result = await client.review_code("system", "user")
+
+        result.findings[0].sources.append("mutated")
+        assert result.findings[1].sources == ["ai_analysis"]
 
 
 class TestAIClientHelpers:

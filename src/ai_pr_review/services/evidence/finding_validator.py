@@ -8,7 +8,7 @@ import re
 from ai_pr_review.models.pr_data import FileDiff
 from ai_pr_review.models.review_plan import Evidence
 from ai_pr_review.services.context_builder import FileContext
-from ai_pr_review.services.prompt_assembler import Finding
+from ai_pr_review.services.prompt_assembler import Finding, finding_has_source
 
 
 class FindingValidator:
@@ -58,7 +58,7 @@ class FindingValidator:
             line_end=finding.line_end,
             changed_line=changed_line,
             code_snippet=finding.code_snippet,
-            source="static_rule" if "static_rule" in finding.sources else "ai_analysis",
+            source="static_rule" if finding_has_source(finding, "static_rule") else "ai_analysis",
             validation_status=status,
             validation_messages=messages,
         )

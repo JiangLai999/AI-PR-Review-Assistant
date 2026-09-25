@@ -28,16 +28,19 @@ test("severityColor maps known severities and never throws on junk", () => {
 })
 
 test("evidenceBadge is text-first and accepts alternate spellings", () => {
-  expect(evidenceBadge("valid", "en")).toBe("✓ Valid")
-  expect(evidenceBadge("needs_review", "en")).toBe("⚠ Needs review")
-  expect(evidenceBadge("needs-review", "en")).toBe("⚠ Needs review")
-  expect(evidenceBadge("needsReview", "en")).toBe("⚠ Needs review")
-  expect(evidenceBadge("invalid", "en")).toBe("✗ Invalid")
-  expect(evidenceBadge("unverified", "en")).toBe("? Unverified")
-  expect(evidenceBadge("valid")).toBe("✓ 有效")
-  expect(evidenceBadge("needs_review")).toBe("⚠ 待复核")
-  expect(evidenceBadge("")).toBe("? 未验证")
-  expect(evidenceBadge(undefined as unknown as string)).toBe("? 未验证")
+  // Vocabulary contract: docs/P6_PLAN_2026-09-25.md §1.
+  expect(evidenceBadge("valid", "en")).toBe("✓ validated")
+  expect(evidenceBadge("needs_review", "en")).toBe("⚠ needs review")
+  expect(evidenceBadge("needs-review", "en")).toBe("⚠ needs review")
+  expect(evidenceBadge("needsReview", "en")).toBe("⚠ needs review")
+  expect(evidenceBadge("invalid", "en")).toBe("✗ invalid")
+  expect(evidenceBadge("unverified", "en")).toBe("? unverified")
+  expect(evidenceBadge("valid")).toBe("✓ 校验通过")
+  expect(evidenceBadge("needs_review")).toBe("⚠ 待人工确认")
+  expect(evidenceBadge("invalid")).toBe("✗ 校验不成立")
+  expect(evidenceBadge("unverified")).toBe("? 未校验")
+  expect(evidenceBadge("")).toBe("? 未校验")
+  expect(evidenceBadge(undefined as unknown as string)).toBe("? 未校验")
 })
 
 test("evidenceColor covers the four health states", () => {

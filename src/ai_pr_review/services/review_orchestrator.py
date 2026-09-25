@@ -323,6 +323,13 @@ class ReviewOrchestrator:
                 # saved before this field existed have no title at all and are
                 # published with an explicit placeholder instead (§12.2).
                 "pr_title": pr_data.title,
+                # Fork 信息（P6 ③）：`/publish` 之后只能从库里重建 PRData，而 fork
+                # 的 head commit 不在 base 仓库里，blob 链接必然 404。存下这个判断，
+                # 历史 Run 没有该键即保持原有的 blob 行为。
+                "fork": {
+                    "is_fork": pr_data.is_fork,
+                    "head_repo": pr_data.head_repo_full_name,
+                },
                 "review_plan": review_plan.model_dump(mode="json"),
                 "language": {
                     "ui_language": getattr(app_config.preferences, "ui_language", "zh-CN"),

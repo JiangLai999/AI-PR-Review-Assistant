@@ -493,7 +493,7 @@ function evidenceLineOf(evidence: EvidenceCounts, language?: string): string {
     `${evidenceBadge("invalid", language)} ${evidence?.invalid ?? 0}`,
     `${evidenceBadge("unverified", language)} ${evidence?.unverified ?? 0}`,
   ]
-  return en ? `Evidence ${parts.join("  ")}` : `证据健康 ${parts.join("  ")}`
+  return en ? `Evidence ${parts.join("  ")}` : `证据校验 ${parts.join("  ")}`
 }
 
 function toFindingLine(finding: ReviewFinding, language?: string): DemoFindingLine {

@@ -193,9 +193,37 @@ class AIClient:
             ) from exc
 
         try:
-            return ReviewResult.model_validate(payload)
+            result = ReviewResult.model_validate(payload)
         except ValidationError as exc:
             raise AIResponseFormatError("AI 返回的 JSON 结构无效。", original_error=exc) from exc
+        return self._normalize_model_findings(result)
+
+    @staticmethod
+    def _normalize_model_findings(result: ReviewResult) -> ReviewResult:
+        """丢弃模型自述的服务端字段。
+
+        来源、证据状态、finding_id 与规则身份都由确定性分析器 / 校验器填写，
+        模型自述不得影响下游控制流（来源判定、中文本地化分支）。
+        """
+        if not result.findings:
+            return result
+        return result.model_copy(
+            update={
+                "findings": [
+                    finding.model_copy(
+                        update={
+                            "sources": ["ai_analysis"],
+                            "evidence": [],
+                            "evidence_status": "unverified",
+                            "evidence_issues": [],
+                            "finding_id": "",
+                            "rule_id": "",
+                        }
+                    )
+                    for finding in result.findings
+                ]
+            }
+        )
 
     def _extract_text_content(self, response: Any) -> str:
         if hasattr(response, "text"):

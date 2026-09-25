@@ -51,14 +51,18 @@ export function evidenceBadge(status: string, language?: string): string {
   const en = isEnLanguage(language)
   switch (normalizeToken(status)) {
     case "valid":
-      return en ? "✓ Valid" : "✓ 有效"
+      // Vocabulary contract (docs/P6_PLAN_2026-09-25.md §1): the badge names
+      // what the validator checked (location + snippet self-consistency),
+      // never "the finding is true". The four terms must match the terminal
+      // renderer and the GitHub comment.
+      return en ? "✓ validated" : "✓ 校验通过"
     case "needs_review":
     case "review":
-      return en ? "⚠ Needs review" : "⚠ 待复核"
+      return en ? "⚠ needs review" : "⚠ 待人工确认"
     case "invalid":
-      return en ? "✗ Invalid" : "✗ 无效"
+      return en ? "✗ invalid" : "✗ 校验不成立"
     default:
-      return en ? "? Unverified" : "? 未验证"
+      return en ? "? unverified" : "? 未校验"
   }
 }
 

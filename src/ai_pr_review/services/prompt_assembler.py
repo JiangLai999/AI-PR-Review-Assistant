@@ -7,6 +7,7 @@ Schema。该模块尽量保持输出稳定，方便后续接入 LLM 或做快照
 from __future__ import annotations
 
 import json
+import re
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -14,6 +15,9 @@ from ai_pr_review.config import PromptAssemblerConfig
 from ai_pr_review.models.pr_data import FileDiff
 from ai_pr_review.models.review_plan import Evidence, ReviewPlan
 from ai_pr_review.services.context_builder import FileContext
+
+# 用于统计 schema 中 `$defs` 的引用，便于剔除已无人引用的定义。
+_SCHEMA_REFERENCE = re.compile(r"#/\$defs/(\w+)")
 
 BASE_SYSTEM_PROMPT = """You are a code reviewer. Output findings in the specified JSON format ONLY.
 No preamble, no markdown fences, no commentary outside the JSON.
@@ -53,6 +57,19 @@ LANGUAGE_SPECIFIC_PROMPTS = {
 }
 
 
+# 由服务端确定性组件（分析器 / 校验器）填写、不交给模型的 Finding 字段。
+# 交给模型的 JSON Schema 必须剔除它们，否则模型可以自述来源与证据状态、
+# 甚至伪造 rule_id 影响本地化分支（P6 计划 §2.1）。
+SERVER_SIDE_FINDING_FIELDS = (
+    "finding_id",
+    "sources",
+    "evidence",
+    "evidence_status",
+    "evidence_issues",
+    "rule_id",
+)
+
+
 class Finding(BaseModel):
     """单条审查发现。"""
 
@@ -76,6 +93,21 @@ class Finding(BaseModel):
     evidence: list[Evidence] = Field(default_factory=list)
     evidence_status: str = "unverified"
     evidence_issues: list[str] = Field(default_factory=list)
+    # 确定性规则身份，由 rule_catalog 写入；模型产出一律被置空。
+    rule_id: str = ""
+
+    @field_validator("sources", mode="before")
+    @classmethod
+    def normalize_sources(cls, value: object) -> object:
+        """Trim/lower source tags so ``static_rule`` cannot be spoofed by casing.
+
+        Unknown values are kept as-is; only their spelling is normalized.
+        """
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, (list, tuple)):
+            return value
+        return [item.strip().lower() if isinstance(item, str) else item for item in value]
 
     @field_validator("category", mode="before")
     @classmethod
@@ -108,6 +140,19 @@ class ReviewResult(BaseModel):
 
     summary: str
     findings: list[Finding]
+
+
+def finding_has_source(finding: Finding, source: str) -> bool:
+    """判断 finding 是否来自某个来源，交给模型的字段不参与判定。
+
+    判定统一走这里，避免 `finding_validator` / `finding_localizer` 各处
+    自行写一遍 `"static_rule" in finding.sources`。
+    """
+    normalized = source.strip().lower()
+    return any(
+        isinstance(item, str) and item.strip().lower() == normalized
+        for item in (finding.sources or [])
+    )
 
 
 class PromptAssembler:
@@ -247,8 +292,36 @@ class PromptAssembler:
         return "\n".join(sections)
 
     def get_json_schema(self) -> dict:
-        """获取输出的 JSON Schema。"""
-        return ReviewResult.model_json_schema()
+        """获取输出的 JSON Schema（不含服务端字段）。
+
+        字段本身保留在 `Finding` 上供服务端写入，但不暴露给模型。
+        """
+        schema = ReviewResult.model_json_schema()
+        definitions = schema.get("$defs")
+        finding_schema = definitions.get("Finding") if isinstance(definitions, dict) else None
+        if isinstance(finding_schema, dict):
+            properties = finding_schema.get("properties")
+            if isinstance(properties, dict):
+                for name in SERVER_SIDE_FINDING_FIELDS:
+                    properties.pop(name, None)
+            required = finding_schema.get("required")
+            if isinstance(required, list):
+                finding_schema["required"] = [
+                    name for name in required if name not in SERVER_SIDE_FINDING_FIELDS
+                ]
+        self._drop_unreferenced_definitions(schema)
+        return schema
+
+    @staticmethod
+    def _drop_unreferenced_definitions(schema: dict) -> None:
+        """移除已无人引用的 `$defs`（例如只被 `evidence` 引用的 Evidence）。"""
+        definitions = schema.get("$defs")
+        if not isinstance(definitions, dict):
+            return
+        referenced = set(_SCHEMA_REFERENCE.findall(json.dumps(schema)))
+        for name in list(definitions):
+            if name not in referenced:
+                definitions.pop(name)
 
     def _render_plan(self, plan: ReviewPlan) -> list[str]:
         return [

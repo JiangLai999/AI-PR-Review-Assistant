@@ -880,3 +880,16 @@ Follow-ups opened by this audit (not started):
    same-repo links;
 4. localise the deterministic rule messages (the visible English prose on
    `static_rule` findings is content, not chrome).
+
+**All four were closed by P6 (2026-09-25)** — see `docs/P6_PLAN_2026-09-25.md`
+§7 for the execution record and the independent verification:
+
+1. the model-facing JSON schema no longer exposes server-owned Finding fields and
+   `AIClient` normalises whatever the model claims, so `static_rule` can only come
+   from a deterministic analyzer (`rule_catalog` + `finding_has_source`);
+2. `EVIDENCE_STATUS_LABELS` is now the single vocabulary source shared by the
+   terminal renderer and the GitHub comment, and the TUI uses the same four terms;
+3. `PRData.head_repo_full_name` / `is_fork` are fetched by `PRFetcher`, persisted
+   in run metadata and consumed by `publish_service` (`from_fork`);
+4. rules now live in `analyzers/rule_catalog.py` with `title_zh` / `problem_zh` /
+   `suggestion_zh` (covering all 18 rule ids, including interpolated templates).
