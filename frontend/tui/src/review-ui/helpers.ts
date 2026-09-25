@@ -174,3 +174,93 @@ export function severityTotals(counts: SeverityCounts): number {
 export function evidenceTotals(counts: EvidenceCounts): number {
   return clampCount(counts?.valid) + clampCount(counts?.needsReview) + clampCount(counts?.invalid) + clampCount(counts?.unverified)
 }
+
+export type FindingsFilter = {
+  severity?: string
+  evidence?: string
+  query?: string
+}
+
+export type FindingsSortKey = "severity" | "file" | "confidence"
+
+const isFindingObject = (value: unknown): value is ReviewFinding =>
+  typeof value === "object" && value !== null
+
+const searchableText = (finding: ReviewFinding): string =>
+  [finding.title, finding.message, finding.problem, finding.file, finding.category, finding.suggestion]
+    .map((part) => String(part ?? ""))
+    .join(" ")
+    .toLowerCase()
+
+/**
+ * Filter findings by severity, evidence health, and free-text query.
+ * Criteria are AND-ed; blank criteria are ignored. Never throws.
+ */
+export function filterFindings(
+  findings: ReviewFinding[] | null | undefined,
+  filter?: FindingsFilter | null,
+): ReviewFinding[] {
+  const list = Array.isArray(findings) ? findings : []
+  const severity = normalizeToken((filter?.severity ?? "") as string)
+  const evidence = normalizeToken((filter?.evidence ?? "") as string)
+  const query = String(filter?.query ?? "")
+    .trim()
+    .toLowerCase()
+
+  return list.filter((finding) => {
+    if (!isFindingObject(finding)) return false
+    if (severity && normalizeToken(finding.severity) !== severity) return false
+    if (evidence && normalizeToken(finding.evidence_status) !== evidence) return false
+    if (query && !searchableText(finding).includes(query)) return false
+    return true
+  })
+}
+
+const compareIndex = (
+  a: { index: number },
+  b: { index: number },
+): number => a.index - b.index
+
+const confidenceValue = (finding: ReviewFinding): number | undefined => {
+  const value = finding?.confidence
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
+}
+
+/**
+ * Stable sort of findings by severity (critical first), file path, or
+ * confidence (highest first). Missing values sink to the end. Never throws
+ * and never mutates the input array.
+ */
+export function sortFindings(
+  findings: ReviewFinding[] | null | undefined,
+  key: FindingsSortKey = "severity",
+): ReviewFinding[] {
+  const list = Array.isArray(findings) ? findings : []
+  const entries = list.map((finding, index) => ({ finding, index }))
+
+  entries.sort((a, b) => {
+    if (key === "file") {
+      const fileA = String(a.finding?.file ?? "")
+      const fileB = String(b.finding?.file ?? "")
+      if (!fileA && !fileB) return compareIndex(a, b)
+      if (!fileA) return 1
+      if (!fileB) return -1
+      return fileA.localeCompare(fileB) || compareIndex(a, b)
+    }
+
+    if (key === "confidence") {
+      const confA = confidenceValue(a.finding)
+      const confB = confidenceValue(b.finding)
+      if (confA === undefined && confB === undefined) return compareIndex(a, b)
+      if (confA === undefined) return 1
+      if (confB === undefined) return -1
+      return confB - confA || compareIndex(a, b)
+    }
+
+    const rankA = SEVERITY_RANK[normalizeToken(a.finding?.severity)] ?? UNKNOWN_RANK
+    const rankB = SEVERITY_RANK[normalizeToken(b.finding?.severity)] ?? UNKNOWN_RANK
+    return rankA - rankB || compareIndex(a, b)
+  })
+
+  return entries.map((entry) => entry.finding)
+}

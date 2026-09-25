@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
+from typing import Any
 
 from ai_pr_review.config import AIClientConfig, AppConfig
 from ai_pr_review.models.pr_data import FileDiff
@@ -43,6 +44,7 @@ class HybridReviewOrchestrator:
         file_done_callback: Callable[[str], None] | None = None,
         stage_callback: Callable[[str, str], None] | None = None,
         cancel_check: Callable[[], bool] | None = None,
+        file_result_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> ReviewArtifacts:
         """执行混合模型审查
 
@@ -50,6 +52,11 @@ class HybridReviewOrchestrator:
         - 低风险文件：本地模型 + 确定性规则
         - 中风险文件：根据策略决定
         - 高风险文件：远程模型深度分析
+
+        `file_result_callback(payload)` 与标准编排器同构（契约 §10.2）：被过滤的
+        文件报 `skipped`，逐文件模型调用抛异常时报 `failed`（本编排器按原语义
+        吞掉异常继续跑），其余报 `reviewed`。`findings_count` 只统计该文件模型
+        调用返回的 finding，确定性规则结论在运行级合并。
         """
         start_time = time.perf_counter()
 
@@ -66,6 +73,8 @@ class HybridReviewOrchestrator:
         # 阶段 2: 过滤文件
         stage("filtering", f"共 {pr_data.changed_files_count} 个变更文件，正在过滤")
         filtered_pr_data, filter_result = self.filter_pipeline.filter_pr_data(pr_data)
+        # 被过滤掉的文件永远不会进入审查循环，只能在这里如实上报。
+        standard_review.emit_skipped_file_results(file_result_callback, filter_result)
 
         # 阶段 3: 构建上下文
         stage("context", f"为 {len(filtered_pr_data.files)} 个文件构建代码上下文")
@@ -143,6 +152,7 @@ class HybridReviewOrchestrator:
             system_prompt = self.prompt_assembler.build_system_prompt(context.language)
             user_prompt = self.prompt_assembler.build_user_prompt(context)
 
+            call_started_at = time.perf_counter()
             try:
                 selected_config = self.config.ai_client.model_provider
                 if is_local:
@@ -168,9 +178,29 @@ class HybridReviewOrchestrator:
                 total_cost += call_cost
                 self.model_selector.record_cost(call_cost)
             except Exception as e:
+                # 该文件的模型调用失败：如实上报 failed（findings_count 未知，
+                # 不是 0），再按本编排器原有语义吞掉异常继续处理下一个文件。
+                standard_review.emit_file_result(
+                    file_result_callback,
+                    file_diff.filename,
+                    "failed",
+                    findings_count=None,
+                    duration_ms=standard_review.elapsed_ms(call_started_at),
+                    error=str(e) or e.__class__.__name__,
+                )
                 result = ReviewResult(
                     summary=f"审查失败: {e}",
                     findings=[],
+                )
+            else:
+                findings = getattr(result, "findings", None)
+                standard_review.emit_file_result(
+                    file_result_callback,
+                    file_diff.filename,
+                    "reviewed",
+                    findings_count=len(findings) if isinstance(findings, list) else None,
+                    duration_ms=standard_review.elapsed_ms(call_started_at),
+                    error=None,
                 )
 
             all_findings.extend(result.findings)

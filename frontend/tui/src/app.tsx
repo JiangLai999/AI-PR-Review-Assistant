@@ -15,6 +15,8 @@ import {
 } from "./review-report"
 import { ReviewProgressPanel } from "./review-ui/ReviewProgressPanel"
 import { ReviewSummaryPanel } from "./review-ui/ReviewSummaryPanel"
+import { ReviewActionBar } from "./review-ui/ReviewActionBar"
+import { ReviewWorkspace } from "./review-ui/ReviewWorkspace"
 import type { InputRenderable, TextareaRenderable, KeyBinding, ScrollBoxRenderable } from "@opentui/core"
 
 const orange = "#fb8147"
@@ -244,6 +246,9 @@ function Composer(props: {
   onOpenFindings: () => void
   onOpenHistory: () => void
   onOpenModel: () => void
+  onExplain: () => void
+  onFeedback: () => void
+  onExport: () => void
   onRetry: () => void
   reviewing: boolean
   busy: boolean
@@ -514,6 +519,21 @@ function Composer(props: {
     // silently does nothing until the user finds and closes that dialog.
     if (isCtrlKey(key, "o")) {
       props.onOpenFindings()
+      key.stopPropagation?.()
+      return
+    }
+    if (key.meta === true && key.name === "e") {
+      props.onExplain()
+      key.stopPropagation?.()
+      return
+    }
+    if (key.meta === true && key.name === "f") {
+      props.onFeedback()
+      key.stopPropagation?.()
+      return
+    }
+    if (key.meta === true && key.name === "x") {
+      props.onExport()
       key.stopPropagation?.()
       return
     }
@@ -1640,7 +1660,14 @@ function ReviewConfirmDialog(props: { url: string; onConfirm: () => void; onClos
   )
 }
 
-export function FindingsDialog(props: { findings: ReviewFinding[]; onClose: () => void }) {
+export function FindingsDialog(props: {
+  findings: ReviewFinding[]
+  onSelect?: (index: number) => void
+  onExplain?: (index: number) => void
+  onFeedback?: (index: number) => void
+  onExport?: () => void
+  onClose: () => void
+}) {
   const pageSize = 8
   const [selectedIndex, setSelectedIndex] = createSignal(0)
   const [page, setPage] = createSignal(0)
@@ -1649,6 +1676,7 @@ export function FindingsDialog(props: { findings: ReviewFinding[]; onClose: () =
   const pageCount = () => Math.max(1, Math.ceil(props.findings.length / pageSize))
   const pageFindings = () => props.findings.slice(page() * pageSize, (page() + 1) * pageSize)
   const selected = () => props.findings[selectedIndex()] ?? {}
+  onMount(() => props.onSelect?.(0))
   useKeyboard((key) => {
     if (key.name === "escape") {
       props.onClose()
@@ -1656,6 +1684,24 @@ export function FindingsDialog(props: { findings: ReviewFinding[]; onClose: () =
     }
     if (key.name === "tab") {
       setDetailFocused((current) => !current)
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
+    if (key.name === "e" && key.ctrl !== true && key.meta !== true) {
+      props.onExplain?.(selectedIndex())
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
+    if (key.name === "f" && key.ctrl !== true && key.meta !== true) {
+      props.onFeedback?.(selectedIndex())
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
+    if (key.name === "x" && key.ctrl !== true && key.meta !== true) {
+      props.onExport?.()
       key.preventDefault()
       key.stopPropagation()
       return
@@ -1721,12 +1767,16 @@ export function FindingsDialog(props: { findings: ReviewFinding[]; onClose: () =
     }
     if (key.name === "left") {
       setPage((current) => Math.max(0, current - 1))
-      setSelectedIndex((current) => Math.max(0, current - pageSize))
+      const next = Math.max(0, selectedIndex() - pageSize)
+      setSelectedIndex(next)
+      props.onSelect?.(next)
       detailScroll?.scrollTo(0)
     }
     if (key.name === "right") {
       setPage((current) => Math.min(pageCount() - 1, current + 1))
-      setSelectedIndex((current) => Math.min(props.findings.length - 1, current + pageSize))
+      const next = Math.min(props.findings.length - 1, selectedIndex() + pageSize)
+      setSelectedIndex(next)
+      props.onSelect?.(next)
       detailScroll?.scrollTo(0)
     }
   })
@@ -1750,7 +1800,9 @@ export function FindingsDialog(props: { findings: ReviewFinding[]; onClose: () =
           descriptionColor={muted}
           selectedDescriptionColor="#ffd0bb"
           onChange={(index) => {
-            setSelectedIndex(page() * pageSize + index)
+            const next = page() * pageSize + index
+            setSelectedIndex(next)
+            props.onSelect?.(next)
             detailScroll?.scrollTo(0)
           }}
         />
@@ -1785,9 +1837,59 @@ export function FindingsDialog(props: { findings: ReviewFinding[]; onClose: () =
       </scrollbox>
       <text fg={muted}>
         {detailFocused()
-          ? "↑↓/Pg 滚动 · Home/End 首尾 · Tab 列表 · Esc 返回"
-          : `↑↓ 选择 · Tab 详情 · Ctrl/Alt+↑↓ 滚动 · ←→ 翻页 (${page() + 1}/${pageCount()}) · Esc`}
+          ? "↑↓/Pg滚动 · Home/End · Tab列表 · E解释 · F反馈 · X导出 · Esc"
+          : `↑↓选择 · Tab详情 · Ctrl/Alt+↑↓滚动 · ←→翻页 (${page() + 1}/${pageCount()}) · E解释 · F反馈 · X导出 · Esc`}
       </text>
+    </box>
+  )
+}
+
+function FeedbackDialog(props: {
+  finding: ReviewFinding
+  language?: string
+  onSelect: (status: string, note: string) => void
+  onClose: () => void
+}) {
+  const [selectedIndex, setSelectedIndex] = createSignal(0)
+  const options = [
+    { name: "接受 / Accepted", description: "确认这是一个需要修复的问题", value: "accepted" },
+    { name: "误报 / Rejected", description: "标记为误报或不需要处理", value: "rejected" },
+    { name: "已修复 / Fixed", description: "问题已经修复", value: "fixed" },
+    { name: "待复核 / Needs review", description: "保留为人工复核状态", value: "needs_review" },
+  ]
+  useKeyboard((key) => {
+    if (key.name === "escape") {
+      props.onClose()
+      return
+    }
+    if (isEnterKey(key)) {
+      const option = options[selectedIndex()]
+      if (option) props.onSelect(option.value, "")
+    }
+  })
+  return (
+    <box position="absolute" left={9} top={4} width={62} height={16} backgroundColor="#171717" borderStyle="single" borderColor={orange} padding={2} zIndex={150} flexDirection="column">
+      <text fg={orange}>FINDING FEEDBACK // 反馈</text>
+      <text fg="#eeeeee">{props.finding.title ?? props.finding.message ?? "未命名问题"}</text>
+      <text fg={muted}>
+        {props.finding.file ?? "unknown"}:{props.finding.line_start ?? "?"}
+      </text>
+      <box marginTop={1} flexGrow={1}>
+        <select
+          options={options}
+          selectedIndex={selectedIndex()}
+          focused
+          showDescription={false}
+          width="100%"
+          height={4}
+          selectedBackgroundColor="#5a2e1c"
+          selectedTextColor="#ffffff"
+          descriptionColor={muted}
+          selectedDescriptionColor="#ffd0bb"
+          onChange={(index) => setSelectedIndex(index)}
+        />
+      </box>
+      <text fg={muted}>↑↓ 选择 · Enter 提交 · Esc 取消</text>
     </box>
   )
 }
@@ -1957,6 +2059,9 @@ export function App() {
   const [reviewStartedAt, setReviewStartedAt] = createSignal<number>()
   const [reviewElapsedMs, setReviewElapsedMs] = createSignal(0)
   const [findingsOpen, setFindingsOpen] = createSignal(false)
+  const [activeFindingIndex, setActiveFindingIndex] = createSignal(0)
+  const [feedbackOpen, setFeedbackOpen] = createSignal(false)
+  const [reviewActionMessage, setReviewActionMessage] = createSignal("")
   const [historyOpen, setHistoryOpen] = createSignal(false)
   const [historyRuns, setHistoryRuns] = createSignal<HistoryRun[]>([])
   const [historyStats, setHistoryStats] = createSignal<HistoryStats>({})
@@ -1994,6 +2099,9 @@ export function App() {
     setReviewRouting({})
     setReviewStartedAt(undefined)
     setReviewElapsedMs(0)
+    setActiveFindingIndex(0)
+    setFeedbackOpen(false)
+    setReviewActionMessage("")
   }
 
   onMount(() => {
@@ -2145,6 +2253,121 @@ export function App() {
         role: "assistant",
         content: "当前没有 Findings。请先执行 /review <PR_URL>，或使用 /history <run_id> 加载包含 findings 的历史报告。",
       })
+    }
+  }
+
+  const currentRunId = () => reviewWorkspace().runId ?? reviewReport().run?.id ?? ""
+
+  const explainCurrentRun = async () => {
+    const runId = currentRunId()
+    if (!runId) {
+      setReviewActionMessage(
+        "当前没有可解释的 Run。请先完成一次审查，或用 /history <run_id> 打开历史记录。",
+      )
+      return
+    }
+    const response = await backend.request("command.execute", {
+      name: "explain",
+      args: [runId],
+      session_id: sessionId(),
+    })
+    setReviewActionMessage(
+      response.ok
+        ? String(response.result?.text ?? "解释已生成。")
+        : String(response.error?.message ?? "解释失败。"),
+    )
+  }
+
+  const openFeedback = (index = activeFindingIndex()) => {
+    if (!reviewFindings()[index]) {
+      appendMessage({
+        role: "assistant",
+        content: "当前没有可反馈的 Finding。请先用 Ctrl+O 打开 Findings 并选择一条问题。",
+      })
+      return
+    }
+    setActiveFindingIndex(index)
+    setFindingsOpen(false)
+    setFeedbackOpen(true)
+  }
+
+  const submitFindingFeedback = async (
+    findingId: string,
+    status: string,
+    note = "",
+  ) => {
+    const runId = currentRunId()
+    if (!runId) {
+      setReviewActionMessage(
+        "当前没有可反馈的 Run。请先完成一次审查，或用 /history <run_id> 打开历史记录。",
+      )
+      return
+    }
+    const response = await backend.request("command.execute", {
+      name: "feedback",
+      args: [runId, findingId, status, note],
+      session_id: sessionId(),
+    })
+    setReviewActionMessage(
+      response.ok
+        ? String(response.result?.text ?? `已记录反馈：${findingId} → ${status}`)
+        : String(response.error?.message ?? "反馈保存失败。"),
+    )
+  }
+
+  const exportCurrentReport = async (format = "markdown") => {
+    const response = await backend.request("command.execute", {
+      name: "export",
+      args: [format],
+      session_id: sessionId(),
+    })
+    appendMessage({
+      role: "assistant",
+      content: response.ok
+        ? String(response.result?.text ?? "报告已导出。")
+        : String(response.error?.message ?? "报告导出失败。"),
+    })
+  }
+
+  const isWideReview = () => dimensions().width >= 120
+
+  const reviewProgressProps = () => {
+    if (!reviewing() || !reviewStage()) return undefined
+    return {
+      url: reviewUrl(),
+      stageId: reviewStages().find((stage) => stage.status === "active")?.id ?? "",
+      stageLabel: reviewStage(),
+      progress: reviewProgress(),
+      stages: reviewStages(),
+      filesDone: reviewFilesDone(),
+      filesTotal: reviewFilesTotal() || undefined,
+      currentFile: reviewFile() || undefined,
+      fileStates: reviewFileStates(),
+      routing: reviewRouting(),
+      elapsedMs: reviewElapsedMs(),
+      cost: reviewWorkspace().cost,
+      language: runtime().ui_language,
+      onCancel: cancelCurrentTask,
+    }
+  }
+
+  const reviewSummaryProps = () => {
+    if (!reviewReport().pr && !reviewReport().counts) return undefined
+    return {
+      repository: reviewWorkspace().repository,
+      prNumber: reviewWorkspace().prNumber,
+      title: reviewWorkspace().title,
+      severity: reviewWorkspace().severity,
+      evidence: reviewWorkspace().evidence,
+      filesReviewed: reviewWorkspace().filesReviewed,
+      filesSkipped: reviewWorkspace().filesSkipped,
+      findings: reviewFindings(),
+      durationSeconds: reviewWorkspace().durationSeconds,
+      cost: reviewWorkspace().cost,
+      runId: reviewWorkspace().runId,
+      model: runtime().model,
+      language: runtime().ui_language,
+      onOpenFindings: openFindings,
     }
   }
 
@@ -2462,7 +2685,22 @@ export function App() {
           <text fg={muted}>可用恢复：Ctrl+R /retry · /model status · /model local · /model cloud · /new</text>
         </box>
       </Show>
-      <Show when={reviewing() && reviewStage()}>
+      <Show when={isWideReview() && (reviewing() || reviewReport().pr || reviewReport().counts)}>
+        <box width={76} height={Math.max(20, dimensions().height - 8)} marginTop={2}>
+          <ReviewWorkspace
+            layout="wide"
+            progress={reviewProgressProps()}
+            summary={reviewSummaryProps()}
+            findings={reviewFindings()}
+            onOpenFindings={openFindings}
+            onExplain={() => void explainCurrentRun()}
+            onFeedback={() => openFeedback()}
+            onExport={() => void exportCurrentReport()}
+            language={runtime().ui_language}
+          />
+        </box>
+      </Show>
+      <Show when={!isWideReview() && reviewing() && reviewStage()}>
         <box width={76} marginTop={2}>
           <ReviewProgressPanel
             url={reviewUrl()}
@@ -2507,7 +2745,7 @@ export function App() {
           </Show>
         </box>
       </Show>
-      <Show when={reviewReport().pr || reviewReport().counts}>
+      <Show when={!isWideReview() && (reviewReport().pr || reviewReport().counts)}>
         <box width={76} marginTop={1}>
           <ReviewSummaryPanel
             repository={reviewWorkspace().repository}
@@ -2525,6 +2763,23 @@ export function App() {
             language={runtime().ui_language}
             onOpenFindings={openFindings}
           />
+        </box>
+      </Show>
+      <Show when={!isWideReview() && (reviewReport().pr || reviewReport().counts)}>
+        <box width={76} marginTop={1}>
+          <ReviewActionBar
+            onOpenFindings={openFindings}
+            onExplain={() => void explainCurrentRun()}
+            onFeedback={() => openFeedback()}
+            onExport={() => void exportCurrentReport()}
+            language={runtime().ui_language}
+          />
+        </box>
+      </Show>
+      <Show when={reviewActionMessage()}>
+        <box width={76} backgroundColor="#141414" borderStyle="single" borderColor="#7edc92" paddingLeft={2} paddingRight={2} marginTop={1} flexDirection="column">
+          <text fg="#7edc92">REVIEW ACTION // 操作结果</text>
+          <text fg="#eeeeee">{reviewActionMessage()}</text>
         </box>
       </Show>
         </box>
@@ -2547,6 +2802,9 @@ export function App() {
         onOpenFindings={openFindings}
         onOpenHistory={() => void openHistory()}
         onOpenModel={() => setModelOpen(true)}
+        onExplain={() => void explainCurrentRun()}
+        onFeedback={() => openFeedback()}
+        onExport={() => void exportCurrentReport()}
         onRetry={retryLastReview}
         reviewing={reviewing()}
         onCancel={cancelCurrentTask}
@@ -2555,7 +2813,7 @@ export function App() {
         onChatRequestEnd={() => setActiveChatRequestId(undefined)}
         hasRenderedAssistantReply={hasRenderedAssistantReply}
         busy={backendStatus() === "THINKING" || backendStatus() === "REVIEWING" || backendStatus() === "CANCELLING"}
-        focused={!findingsOpen() && !historyOpen() && !modelOpen() && !setupOpen() && pendingReviewUrl() === "" && reviewStage() !== "审查失败"}
+        focused={!findingsOpen() && !feedbackOpen() && !historyOpen() && !modelOpen() && !setupOpen() && pendingReviewUrl() === "" && reviewStage() !== "审查失败"}
       />
       <Show when={modelOpen()}>
         <ModelDialog
@@ -2572,7 +2830,33 @@ export function App() {
         <HistoryDialog runs={historyRuns()} statistics={historyStats()} fallbackNote={historyStoreNote()} onOpen={openHistoryRun} onClose={() => setHistoryOpen(false)} />
       </Show>
       <Show when={findingsOpen()}>
-        <FindingsDialog findings={reviewFindings()} onClose={() => setFindingsOpen(false)} />
+        <FindingsDialog
+          findings={reviewFindings()}
+          onSelect={setActiveFindingIndex}
+          onExplain={(index) => {
+            setActiveFindingIndex(index)
+            setFindingsOpen(false)
+            void explainCurrentRun()
+          }}
+          onFeedback={(index) => {
+            setActiveFindingIndex(index)
+            setFindingsOpen(false)
+            setFeedbackOpen(true)
+          }}
+          onExport={() => void exportCurrentReport()}
+          onClose={() => setFindingsOpen(false)}
+        />
+      </Show>
+      <Show when={feedbackOpen() && reviewFindings()[activeFindingIndex()]}>
+        <FeedbackDialog
+          finding={reviewFindings()[activeFindingIndex()]}
+          language={runtime().ui_language}
+          onSelect={(status, note) => {
+            setFeedbackOpen(false)
+            void submitFindingFeedback(String(activeFindingIndex()), status, note)
+          }}
+          onClose={() => setFeedbackOpen(false)}
+        />
       </Show>
       <Show when={reviewStage() === "审查失败" && reviewUrl()}>
         <ReviewFailureDialog

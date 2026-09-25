@@ -100,11 +100,29 @@ def _parse_review_file_total(detail: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+# Must match `ResultStore.save_feedback` and the CLI's `feedback --status`
+# choice; a drifted list here would silently accept a value the store rejects.
+FEEDBACK_STATUSES = frozenset({"accepted", "rejected", "fixed", "needs_review"})
+
+
 def _as_float(value: Any) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _optional_int(value: Any) -> int | None:
+    """An int, or None when the value is missing/not a number.
+
+    Never invents a number: an unknown per-file count or duration stays null.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _review_completed_fields(report: dict[str, Any]) -> dict[str, Any]:
@@ -145,9 +163,10 @@ class _ReviewEventStream:
 
     The orchestrator only reports stage *starts* (`stage_callback`), so stage
     durations are measured here: a stage ends when the next one starts, or when
-    the run finishes. Per-file `findings_count` and skipped/failed file events
-    are not exposed by the orchestrator at all — they are reported as null (or
-    omitted) rather than invented. See `docs/claude-review-events.md`.
+    the run finishes. Per-file outcomes arrive through `file_result_callback`
+    (`file_result`, contract §10.2) and are used verbatim; when an orchestrator
+    does not report them, the previous null/measured fallback still applies —
+    values are never invented. See `docs/claude-review-actions.md`.
     """
 
     def __init__(
@@ -162,6 +181,7 @@ class _ReviewEventStream:
         self.last_stage_id: str | None = None
         self.finished = False
         self._file_starts: dict[str, list[tuple[float, int]]] = {}
+        self._file_results: dict[str, list[dict[str, Any]]] = {}
         self._stage: tuple[str, str, float] | None = None
         self._progress = 0
 
@@ -246,25 +266,64 @@ class _ReviewEventStream:
             started_at=_utc_now(),
         )
 
+    def file_result(self, payload: dict[str, Any]) -> None:
+        """Record the orchestrator's real per-file outcome (contract §10.2).
+
+        `skipped` files never reach `file_started`/`file_done`, so their event is
+        published here; `reviewed`/`failed` outcomes are held until the matching
+        `file_done` arrives, which keeps exactly one `review.file_done` per file.
+        """
+        if not isinstance(payload, dict):
+            return
+        filename = str(payload.get("filename", "") or "")
+        if not filename:
+            return
+        status = str(payload.get("status", "") or "reviewed")
+        if status == "skipped":
+            self._emit(
+                "review.file_done",
+                filename=filename,
+                index=None,
+                total=self.files_total,
+                status="skipped",
+                findings_count=_optional_int(payload.get("findings_count")),
+                duration_ms=_optional_int(payload.get("duration_ms")),
+                reason="filtered_by_policy",
+            )
+            return
+        self._file_results.setdefault(filename, []).append(dict(payload))
+
     def file_done(self, filename: str) -> None:
         starts = self._file_starts.get(filename) or []
         started_at, index = starts.pop(0) if starts else (None, None)
         if not starts:
             self._file_starts.pop(filename, None)
-        self._emit(
-            "review.file_done",
-            filename=filename,
-            index=index,
-            total=self.files_total,
-            status="reviewed",
-            # The orchestrator keeps per-file finding counts internal.
-            findings_count=None,
-            duration_ms=(
-                None
-                if started_at is None
-                else max(0, round((time.perf_counter() - started_at) * 1000))
-            ),
+        results = self._file_results.get(filename) or []
+        payload = results.pop(0) if results else None
+        if not results:
+            self._file_results.pop(filename, None)
+        measured_ms = (
+            None
+            if started_at is None
+            else max(0, round((time.perf_counter() - started_at) * 1000))
         )
+        duration_ms = _optional_int(payload.get("duration_ms")) if payload else None
+        if duration_ms is None:
+            # Fall back to the backend's own measurement only when the
+            # orchestrator reported nothing for this file.
+            duration_ms = measured_ms
+        event: dict[str, Any] = {
+            "filename": filename,
+            "index": index,
+            "total": self.files_total,
+            "status": str(payload.get("status", "") or "reviewed") if payload else "reviewed",
+            "findings_count": _optional_int(payload.get("findings_count")) if payload else None,
+            "duration_ms": duration_ms,
+        }
+        error = payload.get("error") if payload else None
+        if isinstance(error, str) and error:
+            event["error"] = error
+        self._emit("review.file_done", **event)
 
     def complete(self) -> None:
         """Close the last stage after a successful run."""
@@ -932,6 +991,10 @@ class JsonlBackend:
             check_cancelled()
             stream.file_done(filename)
 
+        def file_result(payload: dict[str, Any]) -> None:
+            check_cancelled()
+            stream.file_result(payload)
+
         try:
             stream.started(pr_url)
             stream.routing(self._review_routing())
@@ -945,6 +1008,7 @@ class JsonlBackend:
                 cancel_check=(
                     (lambda: cancel_event.is_set()) if cancel_event is not None else None
                 ),
+                file_result_callback=file_result,
             )
             # The orchestrators re-check before persisting, but a cancel racing
             # the very last stage must not be reported as a successful review.
@@ -1045,6 +1109,92 @@ class JsonlBackend:
             "run": run,
             "metadata": metadata,
             "report": report,
+        }
+
+    def _explain_run(self, run_id: str) -> dict[str, Any]:
+        """Structured findings/evidence explanation for a stored run (§10.3).
+
+        Deterministic rendering of what the run recorded — no model call, so
+        `/explain` answers the same thing on every machine and costs nothing.
+        """
+        from ai_pr_review.services.result_store import ResultStore
+
+        store = ResultStore(self.config.result_store)
+        result = store.get_result(run_id)
+        if result is None:
+            raise LookupError(run_id)
+        metadata = store.get_run_metadata(run_id)
+        findings = [finding.model_dump(mode="json") for finding in result.findings]
+        language_info = metadata.get("language", {}) if isinstance(metadata, dict) else {}
+        lines = [f"Finding 解释 · Run {run_id}", f"摘要：{result.summary}"]
+        if language_info:
+            lines.append(
+                f"语言：界面 {language_info.get('ui_language', '-')} · "
+                f"审查响应 {language_info.get('response_language', '-')}"
+            )
+        if not findings:
+            lines.append("该 Run 没有记录任何 Finding。")
+        for finding in findings:
+            lines.append("")
+            lines.append(
+                f"[{str(finding.get('severity', 'info')).upper()}] {finding.get('title', '')}"
+            )
+            lines.append(
+                f"  位置：{finding.get('file', '')}:"
+                f"{finding.get('line_start', '?')}-{finding.get('line_end', '?')}"
+            )
+            sources = finding.get("sources") or ["unknown"]
+            lines.append(f"  来源：{', '.join(str(source) for source in sources)}")
+            lines.append(f"  证据：{finding.get('evidence_status') or 'unverified'}")
+            issues = finding.get("evidence_issues") or []
+            if issues:
+                lines.append(f"  疑点：{'; '.join(str(issue) for issue in issues)}")
+            lines.append(f"  原因：{finding.get('problem', '')}")
+            lines.append(f"  建议：{finding.get('suggestion', '')}")
+        return {
+            "text": "\n".join(lines),
+            "run_id": run_id,
+            "summary": result.summary,
+            "findings": findings,
+            "metadata": metadata,
+        }
+
+    def _record_feedback(
+        self,
+        run_id: str,
+        finding_id: str,
+        status: str,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """Persist feedback for a stored finding (§10.3).
+
+        Returns an outcome dict instead of raising so the protocol layer can map
+        each failure to an actionable error code.
+        """
+        from ai_pr_review.services.result_store import ResultStore
+
+        store = ResultStore(self.config.result_store)
+        result = store.get_result(run_id)
+        if result is None:
+            return {"ok": False, "code": "not_found", "message": f"未找到审查记录：{run_id}"}
+        known_ids = {finding.finding_id for finding in result.findings if finding.finding_id}
+        if finding_id not in known_ids:
+            return {
+                "ok": False,
+                "code": "not_found",
+                "message": f"Run {run_id} 中未找到 Finding：{finding_id}",
+            }
+        try:
+            store.save_feedback(run_id, finding_id, status, note)
+        except ValueError as exc:
+            return {"ok": False, "code": "invalid_request", "message": str(exc)}
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "finding_id": finding_id,
+            "status": status,
+            "note": note,
+            "text": f"已记录反馈：{finding_id} → {status}" + (f"（{note}）" if note else ""),
         }
 
     def _export_text(self, fmt: str) -> str:
@@ -1215,7 +1365,7 @@ class JsonlBackend:
                 elif command == "help":
                     result(
                         {
-                            "text": "/setup  配置助手\n/status 查看运行状态\n/model  查看当前模型\n/review 开始 PR 审查\n/cancel 取消当前审查\n/retry 重试上一次操作\n/report 查看当前报告\n/export json|markdown 导出当前报告\n/history 查看历史记录\n/exit   退出 Chat"
+                            "text": "/setup  配置助手\n/status 查看运行状态\n/model  查看当前模型\n/review 开始 PR 审查\n/cancel 取消当前审查\n/retry 重试上一次操作\n/report 查看当前报告\n/export json|markdown 导出当前报告\n/history 查看历史记录\n/explain <run_id> 解释 Finding 与证据\n/feedback <run_id> <finding_id> <status> [note] 记录 Finding 反馈\n/exit   退出 Chat"
                         }
                     )
                 elif command == "setup":
@@ -1305,6 +1455,49 @@ class JsonlBackend:
                                 ),
                             }
                         )
+                elif command == "explain":
+                    raw_args = params.get("args", [])
+                    args = (
+                        [str(item).strip() for item in raw_args]
+                        if isinstance(raw_args, list)
+                        else []
+                    )
+                    run_id = args[0] if args else ""
+                    if not run_id:
+                        error("请提供 Run ID：/explain <run_id>", "invalid_request")
+                    else:
+                        try:
+                            result(self._explain_run(run_id))
+                        except LookupError:
+                            error(f"未找到审查记录：{run_id}", "not_found")
+                elif command == "feedback":
+                    raw_args = params.get("args", [])
+                    args = (
+                        [str(item).strip() for item in raw_args]
+                        if isinstance(raw_args, list)
+                        else []
+                    )
+                    run_id = args[0] if len(args) > 0 else ""
+                    finding_id = args[1] if len(args) > 1 else ""
+                    status = args[2].lower() if len(args) > 2 else ""
+                    note = args[3] if len(args) > 3 else ""
+                    if not run_id or not finding_id or not status:
+                        error(
+                            "用法：/feedback <run_id> <finding_id> <status> [note]",
+                            "invalid_request",
+                        )
+                    elif status not in FEEDBACK_STATUSES:
+                        error(
+                            f"无效的反馈状态：{status}；可选："
+                            + ", ".join(sorted(FEEDBACK_STATUSES)),
+                            "invalid_request",
+                        )
+                    else:
+                        outcome = self._record_feedback(run_id, finding_id, status, note)
+                        if outcome["ok"]:
+                            result(outcome)
+                        else:
+                            error(str(outcome["message"]), str(outcome["code"]))
                 elif command == "cancel":
                     cancel_session_id = str(params.get("session_id", ""))
                     chat_task = self.chat_cancellations.get(cancel_session_id)

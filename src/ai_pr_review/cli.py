@@ -1362,8 +1362,14 @@ async def run_review(
     progress_callback: Callable[[str, str], None] | None = None,
     file_done_callback: Callable[[str], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
+    file_result_callback: Callable[[dict], None] | None = None,
 ) -> ReviewArtifacts:
-    """Run a review with terminal guidance and animated progress when interactive."""
+    """Run a review with terminal guidance and animated progress when interactive.
+
+    `file_result_callback(payload)` is optional and forwarded verbatim to the
+    orchestrator (contract §10.2): filename / status / findings_count /
+    duration_ms / error. Existing callers keep working unchanged.
+    """
     app_config = config or AppConfig.load()
 
     # 根据配置决定使用混合编排器还是标准编排器
@@ -1481,6 +1487,7 @@ async def run_review(
             file_done_callback=file_done,
             stage_callback=update,
             cancel_check=cancel_check,
+            file_result_callback=file_result_callback,
         )
         if progress is not None and task_id is not None:
             progress.update(

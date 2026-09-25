@@ -6,6 +6,7 @@ import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from ai_pr_review.config import AIClientConfig, AppConfig
 from ai_pr_review.models.pr_data import FileDiff, FileStatus, PRData
@@ -44,6 +45,69 @@ FILTER_REASON_SUMMARY_LABELS = {
     "excluded_too_large": "变更量过大",
     "custom_rule": "自定义规则过滤",
 }
+
+
+def elapsed_ms(started_at: float) -> int:
+    """Milliseconds since `time.perf_counter()` reading `started_at`."""
+    return max(0, round((time.perf_counter() - started_at) * 1000))
+
+
+def file_result_payload(
+    filename: str,
+    status: str,
+    *,
+    findings_count: int | None = None,
+    duration_ms: int | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Build one `file_result_callback` payload (contract §10.2).
+
+    Every field is always present so callers can rely on the shape; unknown
+    values stay `None` instead of being estimated.
+    """
+    return {
+        "filename": filename,
+        "status": status,
+        "findings_count": findings_count,
+        "duration_ms": duration_ms,
+        "error": error,
+    }
+
+
+def emit_file_result(
+    callback: Callable[[dict[str, Any]], None] | None,
+    filename: str,
+    status: str,
+    **fields: Any,
+) -> None:
+    if callback is not None:
+        callback(file_result_payload(filename, status, **fields))
+
+
+def emit_skipped_file_results(
+    callback: Callable[[dict[str, Any]], None] | None,
+    filter_result: FilterPipelineResult,
+) -> None:
+    """Report every file the filter pipeline removed as `skipped`.
+
+    `file_done_callback` is deliberately not called for these files: it only
+    ever fired for files that entered review, and callers pair it with
+    `progress_callback`. A filtered file spends no review time, so
+    `duration_ms` is a real 0 rather than an estimate.
+    """
+    if callback is None:
+        return
+    for entry in getattr(filter_result, "results", None) or []:
+        if getattr(entry, "included", True):
+            continue
+        emit_file_result(
+            callback,
+            entry.file.filename,
+            "skipped",
+            findings_count=None,
+            duration_ms=0,
+            error=None,
+        )
 
 
 @dataclass(slots=True)
@@ -119,6 +183,7 @@ class ReviewOrchestrator:
         file_done_callback: Callable[[str], None] | None = None,
         stage_callback: Callable[[str, str], None] | None = None,
         cancel_check: Callable[[], bool] | None = None,
+        file_result_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> ReviewArtifacts:
         """执行完整审查。
 
@@ -127,6 +192,12 @@ class ReviewOrchestrator:
         两者配对才能驱动一个诚实的进度条：只报"开始"而不报"完成"会让人以为卡死。
 
         `stage_callback(stage, detail)` 报告非文件级的阶段变化（抓取、规划、落库等）。
+
+        `file_result_callback(payload)` 是可选的真实结果回调（契约 §10.2）：
+        `payload` 含 filename/status(`reviewed`|`skipped`|`failed`)/findings_count/
+        duration_ms/error。被过滤掉的文件报 `skipped`（不触发 `file_done_callback`），
+        模型调用抛异常时先报 `failed` 再照旧抛出；`findings_count` 无法取得时为 None，
+        且只统计该文件模型调用返回的 finding（确定性规则结论在运行级合并，不按文件归属）。
 
         `cancel_check()` 在每个文件边界被调用；返回 True 时抛出 `ReviewCancelled`。
         注意：无法中断已经在飞的模型调用，停止发生在文件之间。
@@ -149,6 +220,8 @@ class ReviewOrchestrator:
         stage("filtering", f"共 {pr_data.changed_files_count} 个变更文件，正在过滤")
         filtered_pr_data, filter_result = self._filter_pipeline.filter_pr_data(pr_data)
         review_plan = self._planner.build_plan(pr_data, filter_result)
+        # 被过滤掉的文件永远不会进入审查循环，只能在这里如实上报。
+        emit_skipped_file_results(file_result_callback, filter_result)
         ai_client = AIClient(config=app_config.ai_client)
 
         stage("context", f"正在为 {filter_result.included_count} 个文件构建上下文")
@@ -161,6 +234,7 @@ class ReviewOrchestrator:
             progress_callback,
             review_plan,
             file_done_callback=file_done_callback,
+            file_result_callback=file_result_callback,
         )
         stage("cross_file", "正在分析跨文件接口影响")
         cross_file_contexts = file_contexts[: max(1, app_config.ai_client.cross_file_max_files)]
@@ -379,6 +453,7 @@ class ReviewOrchestrator:
         progress_callback: Callable[[str, str], None] | None,
         review_plan: ReviewPlan | None = None,
         file_done_callback: Callable[[str], None] | None = None,
+        file_result_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[ReviewResult]:
         semaphore = asyncio.Semaphore(max(1, concurrency))
 
@@ -390,8 +465,31 @@ class ReviewOrchestrator:
                 # "已开始"，之后长时间无动静，进度条反而更不可信。
                 if progress_callback is not None:
                     progress_callback(file_diff.filename, self._config.ai_client.model)
+                started_at = time.perf_counter()
                 try:
-                    return await ai_client.review_code(system_prompt, user_prompt)
+                    result = await ai_client.review_code(system_prompt, user_prompt)
+                except Exception as exc:
+                    # 先如实上报失败，再保持原有的"异常向上抛、整轮审查终止"语义。
+                    emit_file_result(
+                        file_result_callback,
+                        file_diff.filename,
+                        "failed",
+                        findings_count=None,
+                        duration_ms=elapsed_ms(started_at),
+                        error=str(exc) or exc.__class__.__name__,
+                    )
+                    raise
+                else:
+                    findings = getattr(result, "findings", None)
+                    emit_file_result(
+                        file_result_callback,
+                        file_diff.filename,
+                        "reviewed",
+                        findings_count=len(findings) if isinstance(findings, list) else None,
+                        duration_ms=elapsed_ms(started_at),
+                        error=None,
+                    )
+                    return result
                 finally:
                     if file_done_callback is not None:
                         file_done_callback(file_diff.filename)
@@ -442,4 +540,11 @@ class ReviewOrchestrator:
         return "No valid findings were identified."
 
 
-__all__ = ["ReviewArtifacts", "ReviewOrchestrator"]
+__all__ = [
+    "ReviewArtifacts",
+    "ReviewOrchestrator",
+    "elapsed_ms",
+    "emit_file_result",
+    "emit_skipped_file_results",
+    "file_result_payload",
+]

@@ -334,6 +334,7 @@ def test_review_cancelled_after_pipeline_returns_is_not_reported_completed(
         progress_callback,
         file_done_callback,
         cancel_check=None,
+        file_result_callback=None,
     ):
         assert cancel_check is not None, "取消检查必须透传到编排器"
         assert cancel_check() is False
@@ -1305,6 +1306,123 @@ def test_review_file_total_is_null_when_the_orchestrator_never_reports_it(
     assert file_done["total"] is None
 
 
+def test_review_file_done_uses_real_status_findings_count_and_duration(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """契约 §3.5/§10.2：file_result_callback 的真实结果必须进入 review.file_done。
+
+    旧回调缺席时保留 null 兜底（见上一个测试）；这里覆盖 reviewed / failed /
+    skipped 三种真实结果，以及被过滤文件不触发 file_started 的事实。
+    """
+
+    async def run() -> list[dict]:
+        published: list[dict] = []
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=published.append)
+
+        async def fake_run_review(pr_url, **kwargs):
+            file_result_callback = kwargs["file_result_callback"]
+            file_done_callback = kwargs["file_done_callback"]
+            progress_callback = kwargs["progress_callback"]
+            kwargs["stage_callback"]("context", "正在为 2 个文件构建上下文")
+            # 被过滤的文件：只有结果回调，没有 started / done
+            file_result_callback(
+                {
+                    "filename": "docs/readme.md",
+                    "status": "skipped",
+                    "findings_count": None,
+                    "duration_ms": 0,
+                    "error": None,
+                }
+            )
+            progress_callback("src/a.py", "本地/qwen3.5:4b")
+            await asyncio.sleep(0.02)
+            file_result_callback(
+                {
+                    "filename": "src/a.py",
+                    "status": "reviewed",
+                    "findings_count": 2,
+                    "duration_ms": 4200,
+                    "error": None,
+                }
+            )
+            file_done_callback("src/a.py")
+            progress_callback("src/b.py", "本地/qwen3.5:4b")
+            file_result_callback(
+                {
+                    "filename": "src/b.py",
+                    "status": "failed",
+                    "findings_count": None,
+                    "duration_ms": 17,
+                    "error": "model call failed for src/b.py",
+                }
+            )
+            file_done_callback("src/b.py")
+            return _review_artifacts(included=2, excluded=1)
+
+        monkeypatch.setattr("ai_pr_review.cli.run_review", fake_run_review)
+        await backend.handle(_review_request())
+        return published
+
+    published = asyncio.run(run())
+    file_done = [event for event in published if event["event"] == "review.file_done"]
+    assert [event["filename"] for event in file_done] == [
+        "docs/readme.md",
+        "src/a.py",
+        "src/b.py",
+    ]
+
+    skipped, reviewed, failed = file_done
+    assert skipped["status"] == "skipped"
+    assert skipped["findings_count"] is None
+    assert skipped["reason"] == "filtered_by_policy"
+    assert skipped["index"] is None
+
+    assert reviewed["status"] == "reviewed"
+    assert reviewed["findings_count"] == 2
+    # 实测值来自编排器，而不是后端自己掐的表
+    assert reviewed["duration_ms"] == 4200
+    assert "error" not in reviewed
+    assert reviewed["index"] == 1
+
+    assert failed["status"] == "failed"
+    assert failed["findings_count"] is None
+    assert failed["duration_ms"] == 17
+    assert failed["error"] == "model call failed for src/b.py"
+    assert failed["index"] == 2
+
+    # 被过滤的文件不产生 file_started
+    started = [event for event in published if event["event"] == "review.file_started"]
+    assert [event["filename"] for event in started] == ["src/a.py", "src/b.py"]
+
+
+def test_review_file_done_falls_back_to_measured_duration_when_payload_omits_it(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """编排器只报部分字段时，缺的字段各自兜底，不能整体丢弃。"""
+
+    async def run() -> list[dict]:
+        published: list[dict] = []
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=published.append)
+
+        async def fake_run_review(pr_url, **kwargs):
+            kwargs["stage_callback"]("context", "正在为 1 个文件构建上下文")
+            kwargs["progress_callback"]("src/a.py", "")
+            await asyncio.sleep(0.02)
+            kwargs["file_result_callback"]({"filename": "src/a.py", "status": "reviewed"})
+            kwargs["file_done_callback"]("src/a.py")
+            return _review_artifacts(included=1, excluded=0)
+
+        monkeypatch.setattr("ai_pr_review.cli.run_review", fake_run_review)
+        await backend.handle(_review_request())
+        return published
+
+    published = asyncio.run(run())
+    done = next(event for event in published if event["event"] == "review.file_done")
+    assert done["status"] == "reviewed"
+    assert done["findings_count"] is None
+    assert done["duration_ms"] is not None and done["duration_ms"] >= 15
+
+
 def test_review_stage_progress_table_stays_monotonic_for_both_orchestrators() -> None:
     from ai_pr_review.backend.jsonl_server import (
         REVIEW_STAGE_LABELS,
@@ -1598,3 +1716,195 @@ def test_local_chat_disables_reasoning_channel(monkeypatch, tmp_path: Path) -> N
         assert captured["reasoning_effort"] == "none"
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# explain / feedback 审查动作（docs/review-workspace-contract.md §10.3）
+# ---------------------------------------------------------------------------
+
+
+def _store_run(backend: JsonlBackend, **finding_kwargs: Any) -> str:
+    """Persist a real run so explain/feedback read from the real ResultStore."""
+    from ai_pr_review.services.prompt_assembler import ReviewResult
+    from ai_pr_review.services.result_store import ResultStore
+
+    finding = _finding(**finding_kwargs)
+    finding.finding_id = "finding-abc123"
+    finding.evidence_issues = ["行号与 diff 不一致"]
+    finding.sources = ["static_rule", "ai_analysis"]
+    run_id = ResultStore(backend.config.result_store).save_result(
+        "https://github.com/example/repo/pull/31",
+        ReviewResult(
+            summary="审查完成，发现 1 个问题",
+            findings=[finding],
+        ),
+        metadata={
+            "language": {"ui_language": "zh-CN", "response_language": "zh-CN"},
+        },
+    )
+    return run_id
+
+
+def test_command_explain_returns_structured_findings_and_evidence(tmp_path: Path) -> None:
+    """契约 §10.3：explain <run_id> 返回结构化 findings/证据说明。"""
+    from ai_pr_review.services.result_store import ResultStore
+
+    async def run() -> None:
+        backend = JsonlBackend(tmp_path / "config.json")
+        run_id = _store_run(backend, severity="critical", evidence_status="needs_review")
+
+        response = await backend.handle(
+            {
+                "id": "1",
+                "method": "command.execute",
+                "params": {"name": "explain", "args": [run_id]},
+            }
+        )
+        assert response[0]["ok"] is True
+        payload = response[0]["result"]
+        assert payload["run_id"] == run_id
+        assert payload["findings"][0]["finding_id"] == "finding-abc123"
+        assert payload["findings"][0]["evidence_status"] == "needs_review"
+        assert payload["metadata"]["language"]["response_language"] == "zh-CN"
+        text = payload["text"]
+        assert "[CRITICAL] critical finding" in text
+        assert "src/module_0.py:1-1" in text
+        assert "static_rule, ai_analysis" in text
+        assert "needs_review" in text
+        assert "行号与 diff 不一致" in text
+        assert "suggestion" in text
+        # 不查库失败时不能返回半成品
+        assert ResultStore(backend.config.result_store).get_result(run_id) is not None
+
+    asyncio.run(run())
+
+
+def test_command_explain_rejects_missing_and_unknown_run(tmp_path: Path) -> None:
+    async def run() -> None:
+        backend = JsonlBackend(tmp_path / "config.json")
+
+        missing_args = await backend.handle(
+            {"id": "1", "method": "command.execute", "params": {"name": "explain", "args": []}}
+        )
+        assert missing_args[0]["ok"] is False
+        assert missing_args[0]["error"]["code"] == "invalid_request"
+        assert "run_id" in missing_args[0]["error"]["message"]
+
+        unknown = await backend.handle(
+            {
+                "id": "2",
+                "method": "command.execute",
+                "params": {"name": "explain", "args": ["no-such-run"]},
+            }
+        )
+        assert unknown[0]["ok"] is False
+        assert unknown[0]["error"]["code"] == "not_found"
+        assert "no-such-run" in unknown[0]["error"]["message"]
+
+    asyncio.run(run())
+
+
+def test_command_feedback_persists_and_rejects_invalid_arguments(tmp_path: Path) -> None:
+    """契约 §10.3：feedback 复用 ResultStore，非法 run/finding/status 给出明确错误。"""
+    from ai_pr_review.services.result_store import ResultStore
+
+    async def run() -> None:
+        backend = JsonlBackend(tmp_path / "config.json")
+        run_id = _store_run(backend)
+
+        recorded = await backend.handle(
+            {
+                "id": "1",
+                "method": "command.execute",
+                "params": {
+                    "name": "feedback",
+                    "args": [run_id, "finding-abc123", "accepted", "确认是真实问题"],
+                },
+            }
+        )
+        assert recorded[0]["ok"] is True
+        assert recorded[0]["result"]["status"] == "accepted"
+        assert recorded[0]["result"]["note"] == "确认是真实问题"
+        stored = ResultStore(backend.config.result_store).list_feedback(run_id)
+        assert [(item["finding_id"], item["status"], item["note"]) for item in stored] == [
+            ("finding-abc123", "accepted", "确认是真实问题")
+        ]
+
+        # 状态大小写无关，但非法值必须报错并列出可选值
+        upper = await backend.handle(
+            {
+                "id": "2",
+                "method": "command.execute",
+                "params": {"name": "feedback", "args": [run_id, "finding-abc123", "FIXED"]},
+            }
+        )
+        assert upper[0]["ok"] is True
+        assert upper[0]["result"]["status"] == "fixed"
+
+        bad_status = await backend.handle(
+            {
+                "id": "3",
+                "method": "command.execute",
+                "params": {"name": "feedback", "args": [run_id, "finding-abc123", "maybe"]},
+            }
+        )
+        assert bad_status[0]["ok"] is False
+        assert bad_status[0]["error"]["code"] == "invalid_request"
+        assert "maybe" in bad_status[0]["error"]["message"]
+        assert "needs_review" in bad_status[0]["error"]["message"]
+
+        bad_run = await backend.handle(
+            {
+                "id": "4",
+                "method": "command.execute",
+                "params": {"name": "feedback", "args": ["no-such-run", "finding-abc123", "fixed"]},
+            }
+        )
+        assert bad_run[0]["ok"] is False
+        assert bad_run[0]["error"]["code"] == "not_found"
+        assert "no-such-run" in bad_run[0]["error"]["message"]
+
+        bad_finding = await backend.handle(
+            {
+                "id": "5",
+                "method": "command.execute",
+                "params": {"name": "feedback", "args": [run_id, "missing-finding", "fixed"]},
+            }
+        )
+        assert bad_finding[0]["ok"] is False
+        assert bad_finding[0]["error"]["code"] == "not_found"
+        assert "missing-finding" in bad_finding[0]["error"]["message"]
+
+        usage = await backend.handle(
+            {
+                "id": "6",
+                "method": "command.execute",
+                "params": {"name": "feedback", "args": [run_id, "finding-abc123"]},
+            }
+        )
+        assert usage[0]["ok"] is False
+        assert usage[0]["error"]["code"] == "invalid_request"
+        assert "/feedback" in usage[0]["error"]["message"]
+
+        # 非法参数不能留下任何反馈记录
+        assert len(ResultStore(backend.config.result_store).list_feedback(run_id)) == 2
+
+    asyncio.run(run())
+
+
+def test_feedback_statuses_match_cli_choice_and_result_store(tmp_path: Path) -> None:
+    """契约 §10.3：反馈状态必须与 CLI --status 选项、ResultStore 允许值一致。"""
+    from ai_pr_review.backend.jsonl_server import FEEDBACK_STATUSES
+    from ai_pr_review.cli import feedback_command
+    from ai_pr_review.config import ResultStoreConfig
+    from ai_pr_review.services.result_store import ResultStore
+
+    status_option = next(param for param in feedback_command.params if param.name == "status")
+    assert set(status_option.type.choices) == set(FEEDBACK_STATUSES)
+
+    store = ResultStore(ResultStoreConfig(db_path=str(tmp_path / "results.db")))
+    for status in sorted(FEEDBACK_STATUSES):
+        # 每个允许值都必须被 store 接受
+        store.save_feedback("run-x", "finding-x", status, "")
+    with pytest.raises(ValueError):
+        store.save_feedback("run-x", "finding-x", "definitely-not-a-status", "")

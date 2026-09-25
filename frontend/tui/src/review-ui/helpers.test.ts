@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import {
   evidenceBadge,
   evidenceColor,
+  filterFindings,
   formatConfidence,
   formatCost,
   formatDuration,
@@ -11,6 +12,7 @@ import {
   severityColor,
   severityPercent,
   severityTotals,
+  sortFindings,
 } from "./helpers"
 import type { ReviewFinding, SeverityCounts } from "./types"
 
@@ -150,4 +152,179 @@ test("progressBar is driven by the numeric percent, not label length", () => {
   expect(progressBar(250, 4)).toBe("████")
   expect(progressBar(Number.NaN, 4)).toBe("░░░░")
   expect(progressBar(50)).toHaveLength(20)
+})
+
+const mixedFindings: ReviewFinding[] = [
+  {
+    severity: "high",
+    title: "SQL 拼接导致注入风险",
+    file: "src/auth_service.py",
+    line_start: 88,
+    confidence: 0.95,
+    evidence_status: "valid",
+  },
+  {
+    severity: "critical",
+    title: "Auth bypass in middleware",
+    file: "src/auth_service.py",
+    line_start: 12,
+    confidence: 0.8,
+    evidence_status: "needs_review",
+  },
+  {
+    severity: "low",
+    title: "日志缺少 request id",
+    file: "src/db/session.py",
+    line_start: 3,
+    evidence_status: "unverified",
+    confidence: 0.4,
+  },
+  {
+    severity: "medium",
+    title: "Missing type hints",
+    file: "src/util.py",
+    confidence: 0.2,
+    evidence_status: "needs-review",
+  },
+]
+
+test("filterFindings matches severity, evidence, and free-text query", () => {
+  expect(filterFindings(mixedFindings, { severity: "high" }).map((f) => f.title)).toEqual([
+    "SQL 拼接导致注入风险",
+  ])
+  expect(filterFindings(mixedFindings, { severity: "CRITICAL" }).map((f) => f.title)).toEqual([
+    "Auth bypass in middleware",
+  ])
+  expect(filterFindings(mixedFindings, { evidence: "needs_review" }).map((f) => f.title)).toEqual([
+    "Auth bypass in middleware",
+    "Missing type hints",
+  ])
+  expect(filterFindings(mixedFindings, { evidence: "needsReview" }).map((f) => f.title)).toEqual([
+    "Auth bypass in middleware",
+    "Missing type hints",
+  ])
+  expect(filterFindings(mixedFindings, { query: "auth" }).map((f) => f.title)).toEqual([
+    "SQL 拼接导致注入风险",
+    "Auth bypass in middleware",
+  ])
+  expect(filterFindings(mixedFindings, { query: "SESSION" }).map((f) => f.title)).toEqual([
+    "日志缺少 request id",
+  ])
+})
+
+test("filterFindings AND-combines criteria and ignores blank ones", () => {
+  expect(
+    filterFindings(mixedFindings, { severity: "high", evidence: "valid" }).map((f) => f.title),
+  ).toEqual(["SQL 拼接导致注入风险"])
+  expect(
+    filterFindings(mixedFindings, { severity: "high", evidence: "invalid" }),
+  ).toEqual([])
+  expect(filterFindings(mixedFindings, { severity: "", evidence: "", query: "  " })).toHaveLength(4)
+  expect(filterFindings(mixedFindings, {})).toHaveLength(4)
+  expect(filterFindings(mixedFindings, null)).toHaveLength(4)
+  expect(filterFindings(mixedFindings, undefined)).toHaveLength(4)
+})
+
+test("filterFindings tolerates empty and malformed input", () => {
+  expect(filterFindings([], { severity: "high" })).toEqual([])
+  expect(filterFindings(undefined as unknown as ReviewFinding[], { severity: "high" })).toEqual([])
+  expect(filterFindings(null as unknown as ReviewFinding[], {})).toEqual([])
+
+  const malformed = [
+    null,
+    undefined,
+    42,
+    "nope",
+    { title: "kept" },
+    { severity: "high", title: "also kept" },
+  ] as unknown as ReviewFinding[]
+  expect(filterFindings(malformed, {}).map((f) => (f as ReviewFinding).title)).toEqual([
+    "kept",
+    "also kept",
+  ])
+  expect(filterFindings(malformed, { severity: "high" }).map((f) => (f as ReviewFinding).title)).toEqual([
+    "also kept",
+  ])
+  expect(() => filterFindings(malformed, { severity: "high", query: "kept" })).not.toThrow()
+})
+
+test("sortFindings orders by severity with stable ties", () => {
+  const ranked = sortFindings(mixedFindings, "severity")
+  expect(ranked.map((f) => f.severity)).toEqual(["critical", "high", "medium", "low"])
+  expect(ranked.map((f) => f.title)).toEqual([
+    "Auth bypass in middleware",
+    "SQL 拼接导致注入风险",
+    "Missing type hints",
+    "日志缺少 request id",
+  ])
+  expect(sortFindings(mixedFindings).map((f) => f.severity)).toEqual([
+    "critical",
+    "high",
+    "medium",
+    "low",
+  ])
+  expect(mixedFindings[0].severity).toBe("high")
+})
+
+test("sortFindings orders by file and confidence, sinking missing values", () => {
+  const byFile = sortFindings(mixedFindings, "file")
+  expect(byFile.map((f) => f.file)).toEqual([
+    "src/auth_service.py",
+    "src/auth_service.py",
+    "src/db/session.py",
+    "src/util.py",
+  ])
+
+  const byConfidence = sortFindings(mixedFindings, "confidence")
+  expect(byConfidence.map((f) => f.confidence)).toEqual([0.95, 0.8, 0.4, 0.2])
+
+  const sparse: ReviewFinding[] = [
+    { title: "no-file", severity: "high" },
+    { title: "no-conf", file: "a.ts" },
+    { title: "has-both", file: "b.ts", confidence: 0.5 },
+  ]
+  expect(sortFindings(sparse, "file").map((f) => f.title)).toEqual([
+    "no-conf",
+    "has-both",
+    "no-file",
+  ])
+  expect(sortFindings(sparse, "confidence").map((f) => f.title)).toEqual([
+    "has-both",
+    "no-file",
+    "no-conf",
+  ])
+})
+
+test("sortFindings tolerates empty, malformed, and mixed input", () => {
+  expect(sortFindings([])).toEqual([])
+  expect(sortFindings(undefined as unknown as ReviewFinding[])).toEqual([])
+  expect(sortFindings(null as unknown as ReviewFinding[], "file")).toEqual([])
+
+  const junk = [
+    { title: "mid", severity: "medium" },
+    null,
+    { title: "top", severity: "critical" },
+    undefined,
+    { title: "bare" },
+    { title: "bad-conf", severity: "low", confidence: Number.NaN },
+  ] as unknown as ReviewFinding[]
+
+  expect(() => sortFindings(junk, "severity")).not.toThrow()
+  expect(() => sortFindings(junk, "file")).not.toThrow()
+  expect(() => sortFindings(junk, "confidence")).not.toThrow()
+
+  const severitySorted = sortFindings(junk, "severity")
+  expect(severitySorted).toHaveLength(6)
+  expect(severitySorted[0]).toEqual({ title: "top", severity: "critical" })
+
+  const confidenceSorted = sortFindings(junk, "confidence")
+  expect(confidenceSorted).toHaveLength(6)
+  expect(
+    confidenceSorted
+      .filter((item): item is ReviewFinding => Boolean(item))
+      .every((item) => typeof item === "object"),
+  ).toBe(true)
+
+  const weirdKey = sortFindings(mixedFindings, "nope" as unknown as "severity")
+  expect(weirdKey).toHaveLength(4)
 })

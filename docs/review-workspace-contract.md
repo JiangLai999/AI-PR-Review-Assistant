@@ -357,3 +357,167 @@ Known follow-ups:
    round; the current integration uses the existing single-column Chat layout.
 3. Finding feedback, false-positive marking, export and publish actions remain
    Phase 3 work.
+
+## 10. Phase 3/4 Collaboration (2026-09-25)
+
+### 10.1 Ownership
+
+| Owner | Write scope | Deliverable |
+|---|---|---|
+| Claude Code | `src/ai_pr_review/services/review_orchestrator.py`, `src/ai_pr_review/services/hybrid_orchestrator.py`, `src/ai_pr_review/cli.py`, `src/ai_pr_review/backend/jsonl_server.py`, `tests/test_review_orchestrator.py`, `tests/test_jsonl_backend.py`, `docs/claude-review-actions.md` | Real per-file callbacks + explain/feedback backend commands |
+| MiMo Code | `frontend/tui/src/review-ui/**`, `frontend/tui/scripts/manual-review-workspace-check.tsx` | Responsive workspace, findings filter/search, action bar |
+| Codex | `frontend/tui/src/app.tsx`, `frontend/tui/src/review-report.ts`, `frontend/tui/src/protocol.ts`, final build/tests | Integration, action wiring, responsive layout selection, acceptance |
+
+### 10.2 Backend callback contract
+
+Keep the existing callbacks unchanged:
+
+```python
+progress_callback(filename: str, model: str) -> None
+file_done_callback(filename: str) -> None
+```
+
+Add one optional callback so the backend can report real file outcomes:
+
+```python
+file_result_callback(payload: dict) -> None
+```
+
+Payload:
+
+```json
+{
+  "filename": "src/auth_service.py",
+  "status": "reviewed | skipped | failed",
+  "findings_count": 2,
+  "duration_ms": 4200,
+  "error": null
+}
+```
+
+Rules:
+
+- `file_done_callback` must still fire exactly as before for backward
+  compatibility.
+- `file_result_callback` is optional; old callers must not break.
+- `findings_count` is the number of findings returned for that file. If the
+  value is unavailable it must be `null`.
+- `status` must be `skipped` for files filtered out before review, `failed` when
+  the per-file model call raises, and `reviewed` otherwise.
+- No fabricated values: if the orchestrator cannot know a value, emit `null`.
+
+### 10.3 Backend actions
+
+Add to `command.execute`:
+
+| Command | Arguments | Result |
+|---|---|---|
+| `explain` | `run_id` | structured findings/evidence explanation text |
+| `feedback` | `run_id`, `finding_id`, `status`, optional `note` | persisted feedback result |
+
+Allowed feedback statuses must match `ResultStore.save_feedback` and existing
+CLI semantics. Invalid run/finding/status must return an actionable error.
+
+### 10.4 Frontend filters and actions
+
+MiMo Code must add presentational helpers:
+
+```ts
+filterFindings(findings, {
+  severity?: string
+  evidence?: string
+  query?: string
+}): ReviewFinding[]
+
+sortFindings(findings, key: "severity" | "file" | "confidence"): ReviewFinding[]
+```
+
+And a presentational action bar:
+
+```ts
+type ReviewActionBarProps = {
+  onOpenFindings?: () => void
+  onExplain?: () => void
+  onFeedback?: () => void
+  onExport?: () => void
+  language?: string
+}
+```
+
+Actions render only when the callback is provided. No backend calls.
+
+### 10.5 Responsive layout
+
+Add `ReviewWorkspace` with:
+
+```ts
+type ReviewWorkspaceLayout = "wide" | "narrow"
+
+type ReviewWorkspaceProps = {
+  layout: ReviewWorkspaceLayout
+  progress?: ReviewProgressPanelProps
+  summary?: ReviewSummaryPanelProps
+  findings?: ReviewFinding[]
+  onOpenFindings?: () => void
+  onExplain?: () => void
+  onFeedback?: () => void
+  onExport?: () => void
+  language?: string
+}
+```
+
+Semantics:
+
+- `wide`: summary and findings/action area render side by side;
+- `narrow`: progress/summary stack vertically, findings remain behind
+  `Ctrl+O`;
+- both layouts must tolerate missing props;
+- the manual check must render `wide` at 120x30 and `narrow` at 80x24.
+
+### 10.6 Acceptance
+
+Claude Code:
+
+- old orchestrator tests still pass;
+- new callback tests cover reviewed / skipped / failed / null counts;
+- `explain` and `feedback` backend tests pass;
+- full Python suite passes.
+
+MiMo Code:
+
+- typecheck and Bun tests pass;
+- filter/sort tests cover empty, malformed and mixed inputs;
+- manual check renders wide/narrow and action availability.
+
+Codex:
+
+- action bar wired to real `explain`/`feedback`/`export` commands;
+- responsive layout selected from `useTerminalDimensions()`;
+- full Python + TUI suites pass;
+- `tui_static` rebuilt.
+
+### 10.7 Task IDs
+
+| Task ID | Agent | Purpose |
+|---|---|---|
+| `claude-review-actions` | Claude Code | Callback extension + explain/feedback backend |
+| `mimo-review-workspace-v2` | MiMo Code | Responsive workspace, filters/search, action bar |
+| `codex-review-actions-integration` | Codex | Integration and final acceptance |
+
+## 11. Phase 3/4 Execution Status (2026-09-25)
+
+| Stream | Status | Evidence |
+|---|---|---|
+| `claude-review-actions` | completed | 63 targeted tests passed; full Python suite 466 passed / 1 skipped; `docs/claude-review-actions.md` |
+| `mimo-review-workspace-v2` | completed | `bun test src` 57 passed / 0 failed; 18 manual render scenes passed at 80x24 / 120x30 |
+| `codex-review-actions-integration` | completed | wide `ReviewWorkspace` + narrow `ReviewActionBar` wired; `Alt+E/F/X` and Findings `E/F/X` actions wired to real backend commands; explain verified against a real stored run |
+
+Remaining notes:
+
+1. Narrow-mode panels can still clip their bottom border when content exceeds
+   the allocated viewport; the main Chat scrollbox remains the navigation
+   surface.
+2. Filter/search helpers are present and tested, but the interactive filter
+   bar is not yet wired into the Chat shell.
+3. `findings_count` is per-file model output only; deterministic rule findings
+   are merged at run level.
