@@ -64,6 +64,31 @@ function dumpFrame(frame: string, label: string) {
   for (const line of interesting) console.log(`  | ${line.trim()}`)
 }
 
+/**
+ * Poll the rendered frame until `pattern` matches or the deadline passes.
+ *
+ * A real publish round-trip (PyGithub client + HTTPS POST) can take far longer
+ * than a fixed settle window, and the first live run proved it: the dialog was
+ * still on 正在发布 when the fixed 3s window closed, even though the comment
+ * had already been created. Returns the last frame plus the elapsed time so the
+ * caller can assert on the terminal state instead of on wall-clock luck.
+ */
+async function waitForFrame(
+  view: { renderOnce: () => Promise<void>; captureCharFrame: () => string },
+  pattern: RegExp,
+  timeoutMs = 120_000,
+): Promise<{ frame: string; elapsedMs: number }> {
+  const started = Date.now()
+  let frame = view.captureCharFrame()
+  while (Date.now() - started < timeoutMs) {
+    if (pattern.test(frame)) return { frame, elapsedMs: Date.now() - started }
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    await view.renderOnce()
+    frame = view.captureCharFrame()
+  }
+  return { frame, elapsedMs: Date.now() - started }
+}
+
 async function settle(view: { renderOnce: () => Promise<void> }, times = 12) {
   // The backend is a child process: give the protocol round-trip room to land.
   for (let i = 0; i < times; i += 1) {
@@ -139,12 +164,16 @@ async function appFlows() {
 
     // Alt+P without a report must fail with actionable text, never a bogus post.
     view.mockInput.pressKey("p", { meta: true })
-    await settle(view)
-    const publishFrame = view.captureCharFrame()
+    // Exercises `waitForFrame` on a terminal state we can reach offline.
+    const { frame: publishFrame, elapsedMs } = await waitForFrame(
+      view,
+      /发布失败|发布预览|已发布/,
+      60_000,
+    )
     check(/PUBLISH/i.test(publishFrame), "Alt+P opens the publish dialog")
     check(
       /FAILED|失败/i.test(publishFrame),
-      "publishing without a run reports a failure instead of success",
+      `publishing without a run reports a failure instead of success (${elapsedMs}ms)`,
       publishFrame.slice(0, 200),
     )
     check(
@@ -377,10 +406,85 @@ async function publishPreviewFlow() {
 
 // `P5_CHECK_ONLY=publish` runs part C alone; the other modes exist so a failing
 // section can be reproduced without the earlier App instances in the way.
+/**
+ * Part D: live publish against GitHub.
+ *
+ * Guarded twice so it can never fire by accident: `P5_CHECK_ONLY=live` plus
+ * `P5_LIVE_RUN_ID=<uuid>` produces the preview, and `P5_LIVE_PUBLISH=1` is
+ * required before the harness presses Enter on the confirmation dialog. This
+ * mode uses the ambient config (real token, real history), so
+ * `AI_PR_REVIEW_CONFIG` must stay unset.
+ */
+async function livePublishFlow() {
+  console.log("\n[D] live publish against GitHub")
+  const runId = (process.env.P5_LIVE_RUN_ID ?? "").trim()
+  const mayPost = (process.env.P5_LIVE_PUBLISH ?? "") === "1"
+  if (!runId) {
+    console.log("  SKIP  set P5_LIVE_RUN_ID=<uuid> to preview the live run")
+    return
+  }
+  if (configuredPath) {
+    console.log("  SKIP  unset AI_PR_REVIEW_CONFIG: live mode needs the real config")
+    return
+  }
+  console.log(`  run=${runId}  will_post=${mayPost}`)
+
+  const view = await testRender(() => <App />, { width: 100, height: 34, kittyKeyboard: true })
+  try {
+    await settle(view)
+    await runCommand(view, `/history ${runId}`, 2)
+    const historyFrame = view.captureCharFrame()
+    // The workspace renders the stored findings and the publish action once the
+    // run is loaded; the transcript line has usually scrolled out of view.
+    const loaded =
+      /\[(CRITICAL|HIGH|MEDIUM|LOW|INFO)\]/.test(historyFrame) &&
+      /Alt\+P 发布评论/.test(historyFrame)
+    check(loaded, "`/history <run_id>` loads the live run into the workspace")
+    if (!loaded) dumpFrame(historyFrame, "live-history")
+
+    view.mockInput.pressKey("p", { meta: true })
+    await settle(view)
+    const previewFrame = view.captureCharFrame()
+    const previewed =
+      /发布预览/.test(previewFrame) &&
+      /JiangLai999\/AI-PR-Review-Assistant#31/.test(previewFrame) &&
+      /Enter 发布 · Esc 取消/.test(previewFrame)
+    check(previewed, "Alt+P previews the real PR with its confirm footer")
+    check(!/已发布/.test(previewFrame), "the preview does not claim a published comment")
+    if (!previewed) dumpFrame(previewFrame, "live-preview")
+
+    if (!mayPost) {
+      console.log("  NOTE  preview only; set P5_LIVE_PUBLISH=1 to actually post")
+      return
+    }
+
+    view.mockInput.pressEnter()
+    // A live GitHub POST can take tens of seconds; wait for the terminal state
+    // instead of guessing how long the round-trip needs.
+    const { frame: postedFrame, elapsedMs: publishMs } = await waitForFrame(
+      view,
+      /已发布|发布失败|发布已取消/,
+      180_000,
+    )
+    const posted =
+      /已发布/.test(postedFrame) &&
+      /JiangLai999\/AI-PR-Review-Assistant/.test(postedFrame) &&
+      /github\.com\/JiangLai999\/AI-PR-Review-Assistant\/pull\/31/.test(postedFrame)
+    check(posted, `Enter posts the comment and the dialog reports 已发布 (${publishMs}ms)`)
+    if (!posted) dumpFrame(postedFrame, "live-posted")
+
+    view.mockInput.pressEscape()
+    await settle(view, 4)
+  } finally {
+    view.renderer.destroy()
+  }
+}
+
 const only = (process.env.P5_CHECK_ONLY ?? "").trim().toLowerCase()
 if (!only || only === "app") await appFlows()
 if (!only || only === "publish") await publishPreviewFlow()
 if (!only || only === "overlays") await overlayStates()
+if (only === "live") await livePublishFlow()
 
 console.log("\n== summary ==")
 console.log(JSON.stringify({ failures }, null, 2))

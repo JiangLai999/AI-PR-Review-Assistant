@@ -758,6 +758,7 @@ Everything below was reproduced by Codex, not taken from an agent report:
 | TUI typecheck | `bun run typecheck` | exit 0 |
 | Component render matrix | `bun --preload @opentui/solid/preload scripts/manual-review-workspace-check.tsx` | 38 scenes passed (wide 120x30, narrow 80x24, publish 5 states, filter bar, showcase, demo, overflow closing border) |
 | Chat shell integration | `bun --preload @opentui/solid/preload scripts/p5-app-integration-check.tsx` | 3 parts, 41 checks passed: `/demo`, `/showcase`, `Ctrl+F`, `Alt+P` failure path, publish dialog in 5 states, and a real preview against a seeded stored run (`/history <run_id>` → 目标：example/repo#7, truncated body, `Enter 发布 · Esc 取消`) |
+| **Live publish** (`P5_CHECK_ONLY=live`, `P5_LIVE_PUBLISH=1`) | `bun --preload @opentui/solid/preload scripts/p5-app-integration-check.tsx` | Real comment written through the Chat UI: [issuecomment-5826836965](https://github.com/JiangLai999/AI-PR-Review-Assistant/pull/31#issuecomment-5826836965), 9,461 chars, posted body SHA-256 identical to the previewed body, comment count 0 → 1 |
 | Standalone TUI in a real PTY | `src\ai_pr_review\tui_static\pr-review-tui.exe` with an isolated `AI_PR_REVIEW_CONFIG` | Chat shell rendered, backend reached `hybrid · 就绪` |
 
 ### 13.2 Integration decisions worth recording
@@ -784,10 +785,15 @@ Everything below was reproduced by Codex, not taken from an agent report:
 
 ### 13.3 Remaining gaps
 
-1. No real GitHub comment has been posted from the Chat UI yet: the sandbox
-   blocks `api.github.com`, so the confirm phase is verified against a stub and
-   the preview phase against a seeded run. A live post still needs the user's
-   dedicated credential in a normal terminal.
+1. **Closed 2026-09-25**: a real comment was posted from the Chat UI on
+   `JiangLai999/AI-PR-Review-Assistant#31` (issuecomment-5826836965, 9,461
+   chars) and the published body hashed identical to the previewed body. The
+   first live attempt also exposed an acceptance-script defect: the harness used
+   a fixed 3-second settle window and asserted before the render, so it reported
+   a failure on a post that had in fact succeeded. `waitForFrame()` now polls
+   for a terminal state (validated at 201 ms on the offline failure path, and by
+   the GitHub-side re-check for the live case). Details:
+   `_p5_verify/reports/p5-live-publish-evidence.md`.
 2. `findings_count` per file remains the model's per-file output; deterministic
    rule findings are merged at run level (§11 note 3).
 3. The standalone wheel documented in
