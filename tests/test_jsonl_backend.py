@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import re
+import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
@@ -2292,6 +2293,101 @@ def test_new_runs_record_the_pr_title_in_metadata(tmp_path: Path) -> None:
 
     metadata = ResultStore(backend.config.result_store).get_run_metadata(run_id)
     assert metadata["pr_title"] == "Add authentication"
+
+
+def test_pr_author_metadata_survives_the_database_round_trip(tmp_path: Path) -> None:
+    """P6：`pr_author` 与 `pr_title` 一样走 metadata JSON，历史库照旧可读。"""
+    from ai_pr_review.services.result_store import ResultStore
+
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(backend, metadata={"pr_author": "alice"})
+
+    metadata = ResultStore(backend.config.result_store).get_run_metadata(run_id)
+
+    assert metadata["pr_author"] == "alice"
+
+
+def test_publish_mentions_the_stored_pr_author(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """新 Run 记下 pr_author 后，历史重新渲染的评论头部能看到 @作者。"""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(backend, metadata={"pr_author": "alice"})
+    session_id = _new_session(backend)
+
+    body = _execute(backend, "publish", [run_id], session_id)["result"]["comment_body"]
+
+    assert "@alice" in body
+
+
+def test_publish_of_a_run_without_pr_author_never_mentions_an_unknown_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """缺 metadata 的旧 Run 用占位符，但不能渲染成 @unknown——那是个不存在的用户名。"""
+    from ai_pr_review.services.publish_service import UNKNOWN_PR_AUTHOR
+
+    # 字面冻结：占位符被改写时本用例必须变红，而不是跟着常量一起绿。
+    assert UNKNOWN_PR_AUTHOR == "unknown"
+
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(backend)
+    session_id = _new_session(backend)
+
+    body = _execute(backend, "publish", [run_id], session_id)["result"]["comment_body"]
+
+    assert "@unknown" not in body
+    assert "@alice" not in body
+
+
+def test_publish_marks_the_stored_review_time_as_utc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """`created_at` 是 SQLite 的 UTC 时间却没有时区标记；发布必须显式标出 UTC。
+
+    UTC+8 的读者看到 06:39:28 会读成本地时间（实际发生在 14:39:28）。
+    """
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(backend)
+    session_id = _new_session(backend)
+
+    body = _execute(backend, "publish", [run_id], session_id)["result"]["comment_body"]
+
+    assert re.search(r"审查于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC", body)
+
+
+def test_reviewed_at_formatter_marks_utc_and_never_raises() -> None:
+    """格式化规则本身：无时区的按 UTC 标注，带时区的换算，坏值原样返回。"""
+    from ai_pr_review.services.publish_service import format_reviewed_at
+
+    assert format_reviewed_at("2026-09-25 06:39:28") == "2026-09-25 06:39:28 UTC"
+    assert format_reviewed_at("2026-09-25T06:39:28Z") == "2026-09-25 06:39:28 UTC"
+    # 已带时区的时间换算到 UTC，不会被重复贴标记
+    assert format_reviewed_at("2026-09-25T06:39:28+08:00") == "2026-09-24 22:39:28 UTC"
+    # 解析失败/缺失一律原样返回：坏数据不能让 /publish 崩，也不能被静默改写
+    assert format_reviewed_at("not a timestamp") == "not a timestamp"
+    assert format_reviewed_at(None) == ""
+    assert format_reviewed_at("") == ""
+
+
+def test_publish_keeps_an_unparseable_stored_time_verbatim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """坏时间戳不能让发布失败：原样出现在评论里，读者看得见异常。"""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(backend)
+    with contextlib.closing(sqlite3.connect(backend.config.result_store.db_path)) as connection:
+        connection.execute(
+            "UPDATE runs SET created_at = ? WHERE id = ?", ("not a timestamp", run_id)
+        )
+        connection.commit()
+
+    body = _execute(backend, "publish", [run_id])["result"]["comment_body"]
+
+    assert "审查于 not a timestamp" in body
 
 
 def test_fork_metadata_survives_the_database_round_trip(tmp_path: Path) -> None:

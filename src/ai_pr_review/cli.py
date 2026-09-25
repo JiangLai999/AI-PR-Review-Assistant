@@ -1629,6 +1629,13 @@ def render_github_comment_report(
     artifacts: ReviewArtifacts, config: AppConfig | None = None
 ) -> str:
     app_config = config or AppConfig.load()
+
+    def _reviewed_at_now() -> str:
+        """Reuse the publish-path formatter so both producers agree exactly."""
+        from ai_pr_review.services.publish_service import format_reviewed_at
+
+        return format_reviewed_at(datetime.now(timezone.utc))
+
     return ReportRenderer(app_config.report_renderer).render_github_comment(
         artifacts.review_result or ReviewResult(summary="", findings=[]),
         artifacts.pr_data,
@@ -1639,7 +1646,9 @@ def render_github_comment_report(
             duration_seconds=artifacts.duration_seconds,
             cost=artifacts.total_cost,
             head_sha=getattr(artifacts.pr_data, "head_sha", "") or "",
-            reviewed_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            # Same formatter as the publish path so the two GitHub comment
+            # producers cannot drift on the timestamp format (P6 follow-up).
+            reviewed_at=_reviewed_at_now(),
             files_reviewed=artifacts.filter_result.included_count,
             files_skipped=artifacts.filter_result.excluded_count,
             # A fork's head commit lives in another repository, so blob links

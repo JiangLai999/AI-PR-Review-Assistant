@@ -672,3 +672,235 @@ def test_hybrid_orchestrator_records_fork_metadata(monkeypatch, tmp_path):
         "is_fork": True,
         "head_repo": "contributor/repo",
     }
+
+
+# ---------------------------------------------------------------------------
+# hybrid 证据校验 + pr_author 元数据（docs/P6_PLAN_2026-09-25.md §1）
+# ---------------------------------------------------------------------------
+
+#: 校验器要判定「位置 + 片段」，所以桩上下文必须给出非空的 full_content：
+#: 第 1 行是 diff 的变更行，第 2 行不是，第 9 行不存在。
+CONTEXT_FILE_CONTENT = "new\nkeep\n"
+
+
+class ContentStubContextBuilder(StubContextBuilder):
+    """带 `full_content` 的上下文桩，让真实 FindingValidator 有事实可判。"""
+
+    def build_context(self, file_path: str, diff: str, full_content: str) -> FileContext:
+        return FileContext(
+            file_path=file_path,
+            language="python",
+            diff=diff,
+            diff_with_context=diff,
+            imports=[],
+            functions=[],
+            classes=[],
+            parse_mode="regex",
+            full_content=CONTEXT_FILE_CONTENT,
+        )
+
+
+class StaticFindingAnalyzer(StubStaticAnalyzer):
+    """每个文件产出一条真实的 `static_rule` finding：证明规则产出也走校验。"""
+
+    def analyze(self, file_diff: FileDiff, file_context: FileContext) -> list[Finding]:
+        return [
+            evidence_finding(
+                file_diff.filename,
+                title=f"Static rule issue in {file_diff.filename}",
+                sources=["static_rule"],
+            )
+        ]
+
+
+def evidence_finding(
+    file: str,
+    *,
+    title: str = "Model issue",
+    line: int = 1,
+    snippet: str = "new",
+    sources: list[str] | None = None,
+) -> Finding:
+    return Finding(
+        severity="medium",
+        category="correctness",
+        file=file,
+        line_start=line,
+        line_end=line,
+        title=title,
+        problem="problem",
+        suggestion="suggestion",
+        confidence=0.9,
+        code_snippet=snippet,
+        sources=list(sources) if sources is not None else ["ai_analysis"],
+    )
+
+
+def scenario_ai_client_factory(findings_by_file: dict[str, list[Finding]]) -> type:
+    """构造按文件名返回预置 finding 的 AIClient 替身类型。"""
+
+    class ScenarioAIClient(StubAIClient):
+        async def review_code(self, system_prompt: str, user_prompt: str) -> ReviewResult:
+            return ReviewResult(
+                summary=f"reviewed {user_prompt}",
+                findings=list(findings_by_file.get(user_prompt, [])),
+            )
+
+    return ScenarioAIClient
+
+
+def test_hybrid_run_validates_model_and_static_findings(monkeypatch, tmp_path):
+    """混合编排器（cli 默认路径）的每条 finding 都要有证据状态与计数。
+
+    Codex 定位的缺陷：hybrid 从不调用 FindingValidator，真实评论因此恒为
+    「校验通过 0 / 未校验 N」。本用例用真实校验器覆盖三种结论。
+    """
+    model_findings = {
+        # 行号落在变更行、片段在文件里 → valid
+        "src/file_0.py": [
+            evidence_finding("src/file_0.py", title="Model issue in src/file_0.py")
+        ],
+        # 片段在文件里，但第 2 行不是 diff 的变更行 → needs_review
+        "src/file_1.py": [
+            evidence_finding(
+                "src/file_1.py", title="Model issue in src/file_1.py", line=2, snippet="keep"
+            )
+        ],
+        # 第 9 行超出该文件内容（只有 2 行）→ invalid，且只有拿到这个文件自己的
+        # 上下文才可能得出这个结论。
+        "src/file_2.py": [
+            evidence_finding(
+                "src/file_2.py", title="Model issue in src/file_2.py", line=9, snippet="keep"
+            )
+        ],
+    }
+
+    _patch_hybrid_orchestrator(
+        monkeypatch, ai_client=scenario_ai_client_factory(model_findings)
+    )
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.ContextBuilder", ContentStubContextBuilder
+    )
+    monkeypatch.setattr(
+        "ai_pr_review.services.hybrid_orchestrator.StaticAnalyzer", StaticFindingAnalyzer
+    )
+    monkeypatch.setattr(
+        "ai_pr_review.services.hybrid_orchestrator.ResultStore", RecordingResultStore
+    )
+    orchestrator = HybridReviewOrchestrator(_standard_config(tmp_path))
+
+    artifacts = asyncio.run(orchestrator.review("https://github.com/owner/repo/pull/42"))
+
+    findings = {finding.title: finding for finding in artifacts.review_result.findings}
+    expected_counts = {"valid": 5, "needs_review": 1, "invalid": 1}
+    # 4 个文件的静态规则产出 + file_0 的模型产出 = valid；模型另两条各占一档。
+    assert artifacts.validation_summary == expected_counts
+    assert RecordingResultStore.last.saved_metadata["validation_summary"] == expected_counts
+    assert findings["Static rule issue in src/file_0.py"].evidence_status == "valid"
+    assert findings["Static rule issue in src/file_0.py"].evidence[0].source == "static_rule"
+    assert findings["Model issue in src/file_0.py"].evidence_status == "valid"
+    assert findings["Model issue in src/file_1.py"].evidence_status == "needs_review"
+    assert findings["Model issue in src/file_2.py"].evidence_status == "invalid"
+    # 校验只标注、不丢弃：7 条 finding 全在，且都带 id 与证据。
+    assert len(artifacts.review_result.findings) == 7
+    assert all(
+        finding.evidence_status != "unverified"
+        for finding in artifacts.review_result.findings
+    )
+    assert all(
+        finding.finding_id and finding.evidence
+        for finding in artifacts.review_result.findings
+    )
+    assert (
+        "Finding line range is outside the available file content."
+        in findings["Model issue in src/file_2.py"].evidence_issues
+    )
+
+
+def test_hybrid_validates_a_finding_against_the_file_it_points_at(monkeypatch, tmp_path):
+    """模型审查 A 却点名 B：用 B 自己的上下文校验；B 不在本次范围则如实记 invalid。"""
+    model_findings = {
+        "src/file_0.py": [
+            evidence_finding("src/file_2.py", title="Model issue in src/file_2.py"),
+            evidence_finding("src/missing.py", title="Model issue in src/missing.py"),
+        ]
+    }
+
+    _patch_hybrid_orchestrator(
+        monkeypatch, ai_client=scenario_ai_client_factory(model_findings)
+    )
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.ContextBuilder", ContentStubContextBuilder
+    )
+    orchestrator = HybridReviewOrchestrator(_standard_config(tmp_path))
+
+    artifacts = asyncio.run(orchestrator.review("https://github.com/owner/repo/pull/42"))
+
+    findings = {finding.title: finding for finding in artifacts.review_result.findings}
+    in_scope = findings["Model issue in src/file_2.py"]
+    out_of_scope = findings["Model issue in src/missing.py"]
+    assert in_scope.evidence_status == "valid"
+    assert [evidence.file for evidence in in_scope.evidence] == ["src/file_2.py"]
+    assert out_of_scope.evidence_status == "invalid"
+    assert out_of_scope.evidence_issues == [
+        "Finding file is not present in the cross-file review context."
+    ]
+    assert artifacts.validation_summary == {"valid": 1, "needs_review": 0, "invalid": 1}
+
+
+def test_standard_orchestrator_records_the_pr_author(monkeypatch, tmp_path):
+    """发布路径只能从 run metadata 重建 PRData，作者必须落库。"""
+    _patch_standard_orchestrator(monkeypatch)
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.ResultStore", RecordingResultStore
+    )
+    orchestrator = ReviewOrchestrator(_standard_config(tmp_path))
+
+    asyncio.run(orchestrator.review("https://github.com/owner/repo/pull/42"))
+
+    assert RecordingResultStore.last.saved_metadata["pr_author"] == "alice"
+
+
+def test_hybrid_orchestrator_records_the_pr_author(monkeypatch, tmp_path):
+    """cli.run_review 默认走 hybrid：这条路径同样要留下 pr_author。"""
+    _patch_hybrid_orchestrator(monkeypatch)
+    monkeypatch.setattr(
+        "ai_pr_review.services.hybrid_orchestrator.ResultStore", RecordingResultStore
+    )
+    orchestrator = HybridReviewOrchestrator(_standard_config(tmp_path))
+
+    asyncio.run(orchestrator.review("https://github.com/owner/repo/pull/42"))
+
+    assert RecordingResultStore.last.saved_metadata["pr_author"] == "alice"
+
+
+def test_orchestrators_record_a_missing_author_as_an_empty_string(monkeypatch, tmp_path):
+    """抓不到作者时写空串，不编造：发布路径据此回退到占位符。"""
+
+    class AnonymousPRFetcher(StubPRFetcher):
+        def fetch(self, pr_url: str) -> PRData:
+            return super().fetch(pr_url).model_copy(update={"author": ""})
+
+    _patch_standard_orchestrator(monkeypatch)
+    monkeypatch.setattr("ai_pr_review.services.review_orchestrator.PRFetcher", AnonymousPRFetcher)
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.ResultStore", RecordingResultStore
+    )
+    asyncio.run(
+        ReviewOrchestrator(_standard_config(tmp_path)).review(
+            "https://github.com/owner/repo/pull/42"
+        )
+    )
+    assert RecordingResultStore.last.saved_metadata["pr_author"] == ""
+
+    _patch_hybrid_orchestrator(monkeypatch)
+    monkeypatch.setattr("ai_pr_review.services.review_orchestrator.PRFetcher", AnonymousPRFetcher)
+    monkeypatch.setattr(
+        "ai_pr_review.services.hybrid_orchestrator.ResultStore", RecordingResultStore
+    )
+    asyncio.run(
+        HybridReviewOrchestrator(_standard_config(tmp_path)).review(
+            "https://github.com/owner/repo/pull/42"
+        )
+    )
+    assert RecordingResultStore.last.saved_metadata["pr_author"] == ""

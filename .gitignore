@@ -1,6 +1,10 @@
 # Local project secrets
 .ai_pr_review/config.json
 .ai_pr_review/config.local.json
+# Local fallback result store (SQLite + WAL) when the per-user path is unwritable
+.ai_pr_review/results.db
+.ai_pr_review/results.db-shm
+.ai_pr_review/results.db-wal
 
 # Python cache and test artifacts
 __pycache__/

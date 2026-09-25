@@ -13,6 +13,7 @@ from ai_pr_review.services import review_orchestrator as standard_review
 from ai_pr_review.services.analyzers.python_ast_analyzer import PythonAstAnalyzer
 from ai_pr_review.services.analyzers.static_analyzer import StaticAnalyzer
 from ai_pr_review.services.context_builder import FileContext
+from ai_pr_review.services.evidence.finding_validator import FindingValidator
 from ai_pr_review.services.filter_pipeline import FilterPipeline
 from ai_pr_review.services.finding_localizer import localize_deterministic_finding
 from ai_pr_review.services.model_selector import ModelSelector, TaskComplexity
@@ -33,6 +34,7 @@ class HybridReviewOrchestrator:
         self.static_analyzer = StaticAnalyzer()
         self.ast_analyzer = PythonAstAnalyzer()
         self.prompt_assembler = standard_review.PromptAssembler()
+        self.finding_validator = FindingValidator()
         self.result_store = ResultStore(config.result_store)
 
     async def review(
@@ -57,6 +59,9 @@ class HybridReviewOrchestrator:
         文件报 `skipped`，逐文件模型调用抛异常时报 `failed`（本编排器按原语义
         吞掉异常继续跑），其余报 `reviewed`。`findings_count` 只统计该文件模型
         调用返回的 finding，确定性规则结论在运行级合并。
+
+        每条 finding（模型与确定性规则）都会经 `FindingValidator` 标注证据状态，
+        计数写进 `metadata["validation_summary"]` 与 `ReviewArtifacts.validation_summary`。
         """
         start_time = time.perf_counter()
 
@@ -96,25 +101,42 @@ class HybridReviewOrchestrator:
 
         # 阶段 4: 运行确定性规则（所有文件）
         stage("static_rules", "运行静态安全规则和 AST 分析")
-        all_findings = []
+        all_findings: list[Finding] = []
+        validation_counts = {"valid": 0, "needs_review": 0, "invalid": 0}
+
+        def record(finding: Finding, file_diff: FileDiff, context: FileContext) -> None:
+            """本地化 + 证据校验后收录一条 finding。
+
+            与标准编排器同一条路径（`review_orchestrator.py:265-271`）：先按 `rule_id`
+            本地化确定性文案，再用 `FindingValidator` 校验「位置 + 片段」是否与
+            `(file_diff, context)` 自洽，结论写回 `evidence_status`，**绝不因此丢弃
+            finding**。模型产出与确定性规则产出都走这里，所以真实评论不再出现
+            「校验通过 0 / 未校验 N」。
+
+            模型在审查 A 文件时点名 B 文件（跨文件 finding）时，用 B 自己的
+            `(file_diff, context)` 校验；B 不在本次审查范围内则如实记为 invalid。
+            """
+            localized = localize_deterministic_finding(
+                finding, getattr(self.config.preferences, "language", "zh-CN")
+            )
+            if localized.file == file_diff.filename:
+                evidence = self.finding_validator.validate(localized, file_diff, context)
+            else:
+                evidence = self.finding_validator.validate_against_contexts(
+                    localized, file_contexts
+                )
+            all_findings.append(self.finding_validator.annotate(localized, evidence))
+            validation_counts[evidence.validation_status] += 1
 
         for file_diff, context in file_contexts:
             # 静态规则
-            static_findings = self.static_analyzer.analyze(file_diff, context)
-            for finding in static_findings:
-                localized = localize_deterministic_finding(
-                    finding, getattr(self.config.preferences, "language", "zh-CN")
-                )
-                all_findings.append(localized)
+            for finding in self.static_analyzer.analyze(file_diff, context):
+                record(finding, file_diff, context)
 
             # AST 分析
             if file_diff.filename.endswith(".py"):
-                ast_findings = self.ast_analyzer.analyze(file_diff, context)
-                for finding in ast_findings:
-                    localized = localize_deterministic_finding(
-                        finding, getattr(self.config.preferences, "language", "zh-CN")
-                    )
-                    all_findings.append(localized)
+                for finding in self.ast_analyzer.analyze(file_diff, context):
+                    record(finding, file_diff, context)
 
         # 阶段 5: 智能分级审查
         stage("reviewing", f"开始智能分级审查，共 {len(file_contexts)} 个文件")
@@ -203,7 +225,11 @@ class HybridReviewOrchestrator:
                     error=None,
                 )
 
-            all_findings.extend(result.findings)
+            # 模型产出与确定性规则产出走同一条校验路径：调用点就在该文件的
+            # (file_diff, context) 旁边，校验必然拿到正确的文件内容。
+            for finding in result.findings:
+                record(finding, file_diff, context)
+
             reviewed_count += 1
 
             # 文件完成回调
@@ -249,6 +275,7 @@ class HybridReviewOrchestrator:
             total_cost=total_cost,
             duration_seconds=duration,
             run_id="",  # 将由 ResultStore 生成
+            validation_summary=validation_counts,
         )
 
         # Re-check right before persisting: cancelling after the last stage
@@ -272,12 +299,17 @@ class HybridReviewOrchestrator:
                 # saved before this field existed have no title at all and are
                 # published with an explicit placeholder instead (§12.2).
                 "pr_title": pr_data.title,
+                # `/publish` 之后只能从库里重建 PRData，作者同样只能靠这里；
+                # 没记录作者的旧 Run 才回退到占位符（§12.2）。
+                "pr_author": pr_data.author or "",
                 # Fork 信息（P6 ③）：同 review_orchestrator，供 `/publish`
                 # 重建评论时决定用 PR files 链接还是 blob 链接。
                 "fork": {
                     "is_fork": pr_data.is_fork,
                     "head_repo": pr_data.head_repo_full_name,
                 },
+                # 与标准编排器同名字段：hybrid 也把证据校验计数落在 run metadata 里。
+                "validation_summary": validation_counts,
                 "strategy": stats["strategy"],
                 "hybrid": True,
                 "local_calls": stats["local_calls"],

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, MutableSet, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import PrivateAttr
@@ -39,10 +40,10 @@ PUBLISH_ERROR_CODES = (
 
 USAGE = "用法：/publish [run_id] [--confirm]"
 
-#: Historical runs stored no PR title, and a run never stored its author
-#: (contract §12.2). Both are reported as explicit placeholders: inventing a
-#: title or naming a contributor who never touched the PR would be a lie that
-#: ends up in a published GitHub comment.
+#: Historical runs stored no PR title, and runs saved before `pr_author` existed
+#: stored no author either (contract §12.2). Both are reported as explicit
+#: placeholders: inventing a title or naming a contributor who never touched the
+#: PR would be a lie that ends up in a published GitHub comment.
 UNKNOWN_PR_TITLE = ""
 UNKNOWN_PR_AUTHOR = "unknown"
 UNKNOWN_PR_STATE = "unknown"
@@ -148,6 +149,30 @@ def _as_count(value: Any) -> int | None:
         return None
 
 
+def format_reviewed_at(value: Any) -> str:
+    """Render the stored review time with an explicit UTC marker.
+
+    SQLite hands back `created_at` from `CURRENT_TIMESTAMP`: UTC, but with no
+    zone marker, so printing it verbatim reads as local time (a UTC+8 reader
+    sees 06:39:28 for a review that ran at 14:39:28). Anything that does not
+    parse is passed through untouched — a timestamp we cannot read is not
+    silently rewritten, and a malformed row must not break `/publish`.
+
+    Public because the CLI's inline `--publish-comment` path renders the same
+    field, and the two must not drift (P6 review follow-up).
+    """
+    raw = str(value if value is not None else "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc)
+    return f"{parsed.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+
+
 def _fork_info(metadata: dict[str, Any]) -> tuple[bool, str | None]:
     """Read the fork metadata the orchestrators store (P6 §4.3).
 
@@ -177,9 +202,12 @@ def _stored_run_pr_data(
 
     Only fields the run actually recorded are filled in; the rest are the
     documented placeholders. The comment body itself is derived from the stored
-    findings and summary, so nothing here is invented.
+    findings and summary, so nothing here is invented. The author follows the
+    same rule as the title: it comes from `metadata["pr_author"]`, and only runs
+    that recorded no author fall back to the placeholder.
     """
     title = str(metadata.get("pr_title") or UNKNOWN_PR_TITLE)
+    author = str(metadata.get("pr_author") or UNKNOWN_PR_AUTHOR)
     try:
         total_files = int(run.get("total_files") or 0)
     except (TypeError, ValueError):
@@ -188,7 +216,7 @@ def _stored_run_pr_data(
         pr_number=int(run.get("pr_number") or parsed.pr_number),
         title=title,
         description=None,
-        author=UNKNOWN_PR_AUTHOR,
+        author=author,
         state=UNKNOWN_PR_STATE,
         head_sha=str(run.get("head_sha") or ""),
         base_sha="",
@@ -279,7 +307,8 @@ class PublishService:
                 cost=_as_float(run.get("total_cost")),
                 head_sha=str(run.get("head_sha") or ""),
                 # A republished historical run must not look freshly reviewed.
-                reviewed_at=str(run.get("created_at") or ""),
+                # `created_at` is UTC without a zone marker; say so out loud.
+                reviewed_at=format_reviewed_at(run.get("created_at")),
                 files_reviewed=_as_count(run.get("included_files")),
                 files_skipped=_as_count(run.get("excluded_files")),
                 # The stored `fork` flag is authoritative (it survives a fork
