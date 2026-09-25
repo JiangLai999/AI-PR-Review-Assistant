@@ -3034,3 +3034,975 @@ def test_demo_and_showcase_commands_are_strictly_offline(
     # Nothing was written, and no history database appeared.
     assert {path.name for path in tmp_path.iterdir()} == before
     assert not store_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# CHAT/REVIEW 双槽路由（docs/dual-model-roles-plan.md §5.1 / §5.4）
+# ---------------------------------------------------------------------------
+
+
+def _chat_send(session_id: str, text: str = "你好") -> dict[str, Any]:
+    return {
+        "id": "turn",
+        "method": "chat.send",
+        "params": {"session_id": session_id, "text": text},
+    }
+
+
+def _stub_provider(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]) -> None:
+    """把 create_model_provider 换成 stub，并记下它收到的 provider 配置。"""
+    from ai_pr_review.services.model_providers.base import ProviderResponse
+
+    class FakeProvider:
+        async def stream_chat(self, messages, on_delta, **kwargs):
+            captured["options"] = kwargs
+            await on_delta("stub")
+            return ProviderResponse(text="stub")
+
+    def factory(config):
+        captured["config"] = config
+        return FakeProvider()
+
+    monkeypatch.setattr("ai_pr_review.backend.jsonl_server.create_model_provider", factory)
+
+
+def test_chat_uses_the_local_slot_provider_when_chat_slot_is_local(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """方案 §5.1 #4：聊天按 `resolve_chat_slot` 选槽，不再固定跟"活跃槽"。
+
+    这里刻意让活跃槽（`ai_client`，跟随 hybrid_strategy=remote_only）停在远端：
+    聊天仍必须走 `local_provider`，否则"聊本地、审云端"这个组合根本无法配置。
+    """
+
+    async def run() -> None:
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=lambda event: None)
+        backend._apply_setup(
+            {"runtime_profile": "custom", "chat_slot": "local", "review_slot": "remote"}
+        )
+        # 活跃槽（ai_client）此刻停在远端——这正是本用例要制造的分歧：
+        # 聊天若还跟着 ai_client 走就会选中下面那个远端模型。
+        assert backend.config.ai_client.model_provider.name == backend.config.provider.name
+        assert backend.config.ai_client.model_provider.name != "ollama"
+        backend.config.provider.default_model = "remote-slot-model"
+        backend.config.local_provider.default_model = "local-slot-model"
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(_chat_send(session["session_id"]))
+
+        assert response[0]["ok"] is True
+        selected = captured["config"]
+        assert selected.name == "ollama"
+        assert selected.model_name == "local-slot-model"
+        assert selected.base_url == backend.config.local_provider.base_url
+        assert selected.api_format == backend.config.local_provider.api_format
+        # 本地槽沿用既有的"关掉思考通道"处理。
+        assert captured["options"]["reasoning_effort"] == "none"
+
+    asyncio.run(run())
+
+
+def test_chat_uses_the_remote_slot_provider_when_chat_slot_is_remote(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """反向：活跃槽是本地（review_slot=local -> local_only）时，聊天仍要打远端。"""
+
+    async def run() -> None:
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=lambda event: None)
+        backend._apply_setup(
+            {"runtime_profile": "custom", "chat_slot": "remote", "review_slot": "local"}
+        )
+        # 活跃槽此刻是本地（local_only）：聊天若跟着 ai_client 走就会选中本地模型。
+        assert backend.config.ai_client.model_provider.name == "ollama"
+        backend.config.provider.default_model = "remote-slot-model"
+        backend.config.local_provider.default_model = "local-slot-model"
+        backend.config.provider.api_key = "test-key"
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(_chat_send(session["session_id"]))
+
+        assert response[0]["ok"] is True
+        selected = captured["config"]
+        assert selected.name == backend.config.provider.name
+        assert selected.name != "ollama"
+        assert selected.model_name == "remote-slot-model"
+        assert selected.api_key == "test-key"
+        assert "reasoning_effort" not in captured["options"]
+
+    asyncio.run(run())
+
+
+def test_chat_without_a_key_on_the_remote_slot_is_a_missing_api_key(tmp_path: Path) -> None:
+    """远端槽缺 Key 时报 `missing_api_key`，绝不静默回退到已配置好的本地槽。"""
+
+    async def run() -> None:
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=lambda event: None)
+        backend._apply_setup(
+            {"runtime_profile": "custom", "chat_slot": "remote", "review_slot": "local"}
+        )
+        backend.config.provider.api_key = ""
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+
+        response = await backend.handle(_chat_send(session["session_id"]))
+
+        # 协议边界不抛异常：`_chat` 里的 RuntimeError 经 _classify_error 变成事件。
+        assert response[0]["ok"] is False
+        assert response[0]["error"]["code"] == "missing_api_key"
+        assert (
+            f"Missing API key for provider: {backend.config.provider.name}"
+            in response[0]["error"]["message"]
+        )
+        # 失败的聊天不能把会话留在"繁忙"状态（否则后续每次聊天都被拒）。
+        assert backend.chat_cancellations == {}
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("review_slot", "strategy"),
+    [("remote", "remote_only"), ("local", "local_only"), ("hybrid", "balanced")],
+)
+def test_custom_setup_writes_slots_and_folds_hybrid_strategy(
+    review_slot: str, strategy: str, tmp_path: Path
+) -> None:
+    """方案 §3.2/§4.2：custom 写两个槽位，并把 review_slot 折算回 hybrid_strategy。"""
+    from ai_pr_review.config import AppConfig
+
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+
+    snapshot = backend._apply_setup(
+        {"runtime_profile": "custom", "chat_slot": "local", "review_slot": review_slot}
+    )
+
+    assert snapshot["routing"]["profile"] == "custom"
+    assert snapshot["routing"]["review"]["slot"] == review_slot
+    assert backend.config.preferences.hybrid_strategy == strategy
+
+    reloaded = AppConfig.load(config_path)
+    assert reloaded.preferences.chat_slot == "local"
+    assert reloaded.preferences.review_slot == review_slot
+    assert reloaded.preferences.hybrid_strategy == strategy
+
+
+def test_custom_setup_keeps_the_slot_it_was_not_given(tmp_path: Path) -> None:
+    """部分更新：载荷里的槽位覆盖旧值，没提到的槽位保持已落盘的选择。"""
+    backend = JsonlBackend(tmp_path / "config.json")
+    backend._apply_setup({"runtime_profile": "local", "local_model": "qwen3.5:4b"})
+    assert backend.config.preferences.hybrid_strategy == "local_only"
+
+    # 只传 review_slot：chat_slot 保持空（= 跟随预设）。
+    backend._apply_setup({"runtime_profile": "custom", "review_slot": "remote"})
+    assert backend.config.preferences.review_slot == "remote"
+    assert backend.config.preferences.chat_slot == ""
+    assert backend.config.preferences.hybrid_strategy == "remote_only"
+
+    # 反过来只传 chat_slot：review_slot 必须留在上一次的值。
+    backend._apply_setup({"runtime_profile": "custom", "chat_slot": "local"})
+    assert backend.config.preferences.chat_slot == "local"
+    assert backend.config.preferences.review_slot == "remote"
+    assert backend.config.preferences.hybrid_strategy == "remote_only"
+
+    # 显式空串 = 清除该槽覆盖，重新跟随预设（与 config 层的 "" 语义一致）。
+    backend._apply_setup({"runtime_profile": "custom", "chat_slot": ""})
+    assert backend.config.preferences.chat_slot == ""
+    assert backend.config.preferences.review_slot == "remote"
+
+
+def test_custom_setup_rejects_invalid_slots_and_writes_nothing(tmp_path: Path) -> None:
+    from ai_pr_review.config import ConfigValidationError
+
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+
+    with pytest.raises(ConfigValidationError, match="对话模型槽位仅支持 remote 或 local"):
+        backend._apply_setup({"runtime_profile": "custom", "chat_slot": "cloud"})
+    with pytest.raises(ConfigValidationError, match="审查模型槽位仅支持 remote、local 或 hybrid"):
+        backend._apply_setup({"runtime_profile": "custom", "review_slot": "balanced"})
+    # hybrid 只属于审查槽：聊天没有"按复杂度分流"这一档。
+    with pytest.raises(ConfigValidationError, match="对话模型槽位"):
+        backend._apply_setup({"runtime_profile": "custom", "chat_slot": "hybrid"})
+
+    # 校验失败必须整单失败：磁盘和内存里都不能留下半套配置。
+    assert config_path.exists() is False
+    assert backend.config.preferences.chat_slot == ""
+    assert backend.config.preferences.review_slot == ""
+
+
+def test_switching_to_a_preset_clears_both_slot_overrides(tmp_path: Path) -> None:
+    """方案 §4.1：预设是唯一事实来源，选预设必须清掉上一次的槽位覆盖。"""
+    from ai_pr_review.config import AppConfig
+
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+    backend._apply_setup(
+        {"runtime_profile": "custom", "chat_slot": "local", "review_slot": "hybrid"}
+    )
+    assert AppConfig.load(config_path).preferences.chat_slot == "local"
+
+    snapshot = backend._apply_setup(
+        {
+            "runtime_profile": "cloud",
+            "provider_name": "deepseek",
+            "api_key": "sk-test-not-real",
+            "model_name": "deepseek-flash",
+            # 预设载荷即使带了槽位也必须被清空（旧载荷根本不带这两个字段）。
+            "chat_slot": "local",
+            "review_slot": "local",
+        }
+    )
+
+    assert backend.config.preferences.chat_slot == ""
+    assert backend.config.preferences.review_slot == ""
+    reloaded = AppConfig.load(config_path)
+    assert (reloaded.preferences.chat_slot, reloaded.preferences.review_slot) == ("", "")
+    assert snapshot["routing"] == {
+        "profile": "cloud",
+        "chat": {"slot": "remote", "label": "云端", "model": "deepseek-flash"},
+        "review": {"slot": "remote", "label": "云端", "model": "deepseek-flash"},
+    }
+
+
+def test_config_options_expose_routing_and_the_custom_preset(tmp_path: Path) -> None:
+    """方案 §4.1/§5.4：选项里必须能拿到"用哪一档预设"和两个槽各自的模型。"""
+    backend = JsonlBackend(tmp_path / "config.json")
+    backend.config.provider.default_model = "remote-model"
+    backend.config.local_provider.default_model = "local-model"
+
+    options = backend._setup_options()
+    profiles = {item["value"]: item["label"] for item in options["runtime_profiles"]}
+    assert profiles["custom"] == "自定义"
+    assert {"cloud", "local", "hybrid"} <= set(profiles)
+    # 默认预设是 balanced（= hybrid），两个槽都还没有显式覆盖。
+    assert options["routing"] == {
+        "profile": "hybrid",
+        "chat": {"slot": "remote", "label": "云端", "model": "remote-model"},
+        "review": {"slot": "hybrid", "label": "混合", "model": "remote-model"},
+    }
+
+    backend._apply_setup(
+        {"runtime_profile": "custom", "chat_slot": "local", "review_slot": "local"}
+    )
+    custom = backend._setup_options()["routing"]
+    assert custom == {
+        "profile": "custom",
+        "chat": {"slot": "local", "label": "本地", "model": "local-model"},
+        "review": {"slot": "local", "label": "本地", "model": "local-model"},
+    }
+
+
+def test_config_and_model_snapshots_carry_routing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """方案 §5.4：三个协议出口都带 routing，且既有字段一个都不改名、不删除。"""
+
+    async def run() -> None:
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=lambda event: None)
+        backend.config.provider.default_model = "remote-model"
+        backend.config.local_provider.default_model = "local-model"
+        backend.config.provider.api_key = "test-key"
+        backend._apply_setup(
+            {"runtime_profile": "custom", "chat_slot": "local", "review_slot": "remote"}
+        )
+
+        class OfflineProvider:
+            """No health_check / list_models: model.status must not touch the network."""
+
+        monkeypatch.setattr(
+            "ai_pr_review.backend.jsonl_server.create_model_provider",
+            lambda config: OfflineProvider(),
+        )
+
+        snapshot = (await backend.handle(
+            {"id": "1", "method": "config.snapshot", "params": {}}
+        ))[0]["result"]
+        expected = {
+            "profile": "custom",
+            "chat": {"slot": "local", "label": "本地", "model": "local-model"},
+            "review": {"slot": "remote", "label": "云端", "model": "remote-model"},
+        }
+        assert snapshot["routing"] == expected
+        # 既有字段仍然描述"活跃槽"（review_slot=remote -> remote_only -> 远端），
+        # 而 routing 才是两个槽各自的真相。
+        assert snapshot["provider"] == backend.config.provider.name
+        assert snapshot["provider"] != "ollama"
+        assert snapshot["model"] == "remote-model"
+        assert snapshot["runtime_profile"] == "cloud"
+
+        options = (await backend.handle(
+            {"id": "2", "method": "config.options", "params": {}}
+        ))[0]["result"]
+        assert options["routing"] == expected
+
+        status = (await backend.handle(
+            {"id": "3", "method": "model.status", "params": {}}
+        ))[0]["result"]
+        assert status["routing"] == expected
+        # 顶层字段与 model.apply 写入的对象保持一致（仍是活跃槽）。
+        assert status["model"] == "remote-model"
+
+    asyncio.run(run())
+
+
+def test_env_provider_override_keeps_chat_on_the_overridden_primary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`AI_PR_REVIEW_PROVIDER` 要求"本进程用云端"：聊天也必须跟随，不能被本地槽吃掉。
+
+    这条路径改造前是由 `ai_client` 兜住的（既有用例
+    `test_provider_env_override_rebuilds_endpoint_and_model` 只断言到配置层）。
+    """
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+    backend._apply_runtime_profile("local")  # 落盘 hybrid_strategy=local_only
+    monkeypatch.setenv("AI_PR_REVIEW_PROVIDER", "deepseek")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    async def run() -> None:
+        restarted = JsonlBackend(config_path, event_sink=lambda event: None)
+        assert restarted.config.provider.name == "deepseek"
+        restarted.config.provider.api_key = "test-key"
+        session = (await restarted.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await restarted.handle(_chat_send(session["session_id"]))
+
+        assert response[0]["ok"] is True
+        assert captured["config"].name == "deepseek"
+        assert captured["config"].name != "ollama"
+        # 云端 provider 不能因为"选的是本地槽"而被塞 reasoning_effort。
+        assert "reasoning_effort" not in captured["options"]
+
+    asyncio.run(run())
+
+
+def test_local_chat_slot_keeps_a_primary_ollama_endpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """主 Provider 自己就是 Ollama 时，"本地槽"就是主槽：自定义端点/模型不能丢。"""
+
+    async def run() -> None:
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=lambda event: None)
+        backend.config.provider.name = "ollama"
+        backend.config.provider.base_url = "http://127.0.0.1:9999/v1"
+        backend.config.provider.default_model = "primary-ollama-model"
+        backend.config.preferences.hybrid_strategy = "local_only"
+        backend.config._sync_runtime_sections()
+        # 两个槽的端点确实不同，否则这条用例分辨不出选错槽。
+        assert backend.config.local_provider.base_url != backend.config.provider.base_url
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(_chat_send(session["session_id"]))
+
+        assert response[0]["ok"] is True
+        assert captured["config"].base_url == "http://127.0.0.1:9999/v1"
+        assert captured["config"].model_name == "primary-ollama-model"
+
+    asyncio.run(run())
+
+
+def test_runtime_switch_clears_the_slot_overrides(tmp_path: Path) -> None:
+    """`/model cloud|local|hybrid|offline` 与配置助手的预设一样，必须清掉槽位覆盖。"""
+    backend = JsonlBackend(tmp_path / "config.json")
+    backend._apply_setup(
+        {"runtime_profile": "custom", "chat_slot": "local", "review_slot": "local"}
+    )
+    assert backend.config.preferences.review_slot == "local"
+    backend.config.provider.api_key = "test-key"
+
+    snapshot = backend._apply_runtime_profile("cloud")
+
+    assert backend.config.preferences.chat_slot == ""
+    assert backend.config.preferences.review_slot == ""
+    # 否则 routing.review 会宣称"本地"，而实际生效的审查策略是 remote_only。
+    assert snapshot["routing"]["profile"] == "cloud"
+    assert snapshot["routing"]["review"]["slot"] == "remote"
+
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+
+async def _execute_async(
+    backend: JsonlBackend,
+    name: str,
+    args: list[Any],
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """`_execute` 的协程版：用例本身已经跑在事件循环里时不能再嵌套 `asyncio.run`。"""
+    params: dict[str, Any] = {"name": name, "args": args}
+    if session_id is not None:
+        params["session_id"] = session_id
+    events = await backend.handle({"id": "cmd", "method": "command.execute", "params": params})
+    return _reply(events)
+
+
+async def _new_session_async(backend: JsonlBackend) -> str:
+    events = await backend.handle({"id": "s", "method": "session.create", "params": {}})
+    return str(_reply(events)["result"]["session_id"])
+# ---------------------------------------------------------------------------
+
+
+def _context_finding(
+    *,
+    severity: str,
+    confidence: float,
+    filename: str,
+    line_start: int,
+    line_end: int,
+) -> Any:
+    """写一条字段齐全的 finding，供 §9 的渲染断言引用具体文本。"""
+    from ai_pr_review.services.prompt_assembler import Finding
+
+    return Finding(
+        severity=severity,
+        category="correctness",
+        file=filename,
+        line_start=line_start,
+        line_end=line_end,
+        title=f"{severity} 问题",
+        problem="问题描述",
+        suggestion="修复建议",
+        confidence=confidence,
+        code_snippet="if x == 1:\n    pass",
+        evidence_status="needs_review",
+        evidence_issues=["行号与 diff 不一致"],
+        sources=["ai_analysis"],
+        finding_id=f"finding-{severity}",
+    )
+
+
+def _store_context_run(
+    backend: JsonlBackend,
+    *,
+    findings: list[Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+    summary: str = "审查完成，发现 3 个问题",
+) -> str:
+    """落库一个信息完整的 run（PR 标题/作者/证据校验/过滤计数），返回 run_id。
+
+    `metadata` 显式传入时**整体替换**默认值：需要"什么都没记录"的 run 时传 `{}`。
+    """
+    from ai_pr_review.services.prompt_assembler import ReviewResult
+    from ai_pr_review.services.result_store import ResultStore
+
+    if findings is None:
+        findings = [
+            _context_finding(
+                severity="medium",
+                confidence=0.75,
+                filename="src/medium.py",
+                line_start=5,
+                line_end=5,
+            ),
+            _context_finding(
+                severity="critical",
+                confidence=0.9,
+                filename="src/critical.py",
+                line_start=12,
+                line_end=20,
+            ),
+            _context_finding(
+                severity="high",
+                confidence=0.8,
+                filename="src/high.py",
+                line_start=1,
+                line_end=3,
+            ),
+        ]
+    if metadata is None:
+        metadata = {
+            "pr_title": "Review workspace contract",
+            "pr_author": "octocat",
+            "validation_summary": {"valid": 1, "needs_review": 1, "invalid": 1},
+            "filtered_findings": {"threshold": 0.7, "below_threshold": 2, "duplicates": 1},
+        }
+    return ResultStore(backend.config.result_store).save_result(
+        "https://github.com/example/repo/pull/31",
+        ReviewResult(summary=summary, findings=findings),
+        head_sha="a" * 40,
+        total_files=3,
+        included_files=2,
+        excluded_files=1,
+        total_cost=0.0124,
+        duration_seconds=42.31,
+        model="deepseek-flash",
+        metadata=metadata,
+    )
+
+
+def _context_store(backend: JsonlBackend) -> Any:
+    from ai_pr_review.services.result_store import ResultStore
+
+    return ResultStore(backend.config.result_store)
+
+
+def _review_request_for(session_id: str, request_id: str = "review") -> dict[str, Any]:
+    return {
+        "id": request_id,
+        "method": "command.execute",
+        "params": {
+            "name": "review",
+            "args": ["https://github.com/example/repo/pull/31"],
+            "session_id": session_id,
+        },
+    }
+
+
+def test_review_context_renders_l1_to_l4_with_stable_format(tmp_path: Path) -> None:
+    """§9.2 B：L1 摘要 / L2 清单 / L3 全文 / L4 过滤计数，层标记与字段逐字可冻结。"""
+    from ai_pr_review.services.review_context import build_review_context, estimate_tokens
+
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _store_context_run(backend)
+
+    context = build_review_context(_context_store(backend), run_id)
+
+    assert context is not None
+    assert estimate_tokens(context) > 0
+    # L1：运行摘要从不缺席，PR/作者/模型/成本/证据校验都在
+    assert "[L1 运行摘要]" in context
+    assert f"Run: {run_id}" in context
+    assert "PR: example/repo #31 · Review workspace contract" in context
+    assert "作者: octocat" in context
+    assert "URL: https://github.com/example/repo/pull/31" in context
+    assert "模型: deepseek-flash" in context
+    assert "耗时 42.3s · 成本 $0.0124" in context
+    assert "统计: 共 3 条 · critical 1 · high 1 · medium 1 · low 0 · info 0" in context
+    assert "文件: 审查 2 · 跳过 1（共 3）" in context
+    assert "证据校验: valid 1 · needs_review 1 · invalid 1" in context
+    assert "摘要: 审查完成，发现 3 个问题" in context
+    # L2：严重度 / 文件:行 / 置信度 / 证据状态 / 标题，按严重度排序
+    assert "[L2 FINDINGS 清单] 共 3 条（按严重度排序）" in context
+    listed = [line for line in context.splitlines() if re.match(r"^\d+\. \[", line)]
+    assert listed[0] == (
+        "1. [critical] src/critical.py:12-20 · 置信度 90% · 证据 needs_review · critical 问题"
+    )
+    assert listed[1].startswith("2. [high] src/high.py:1-3 · 置信度 80%")
+    # 单行 finding 不写成 5-5，与评论里的 `文件:行` 口径一致
+    assert listed[2].startswith("3. [medium] src/medium.py:5 · 置信度 75%")
+    # L3：与 L2 同一编号，含原因/建议/代码片段/证据疑点
+    assert "[L3 重点 FINDING 全文] 前 3 条（按严重度排序）" in context
+    assert "#1 [critical] critical 问题" in context
+    assert "   位置: src/critical.py:12-20" in context
+    assert "   置信度 90% · 证据: needs_review" in context
+    assert "   原因: 问题描述" in context
+    assert "   建议: 修复建议" in context
+    assert "   代码:\n     if x == 1:\n         pass" in context
+    assert "   疑点: 行号与 diff 不一致" in context
+    # L4：门槛与计数照抄 run 记录，不重算
+    assert "[L4 被过滤 FINDING] 门槛 0.70 · 低于门槛 2 条 · 去重 1 条" in context
+
+
+def test_review_context_never_invents_unrecorded_layers(tmp_path: Path) -> None:
+    """缺什么就少哪一段：没有 filtered_findings 就没有 L4，也不写"被过滤 0 条"。"""
+    from ai_pr_review.services.review_context import build_review_context
+
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _store_context_run(backend, findings=[], metadata={}, summary="没有问题的 PR")
+
+    context = build_review_context(_context_store(backend), run_id)
+
+    assert context is not None
+    assert "[L4" not in context
+    assert "被过滤" not in context
+    assert "[L3 " not in context
+    assert "[L2 FINDINGS 清单]\n（该 Run 没有记录任何 Finding）" in context
+    # 没记录过的字段不编造：没有标题/作者/证据校验，就没有对应行
+    assert "作者:" not in context
+    assert "证据校验" not in context
+    assert "PR: example/repo #31\n" in context
+    # 统计里的 0 是实测的 0（result.findings 为空），可以出现
+    assert "统计: 共 0 条" in context
+
+
+def test_review_context_budget_drops_l4_then_l3_then_l2_but_keeps_l1(tmp_path: Path) -> None:
+    """§9.D：裁剪顺序 L4 → L3（减条目）→ L2（只留 high/critical）；L1 永不裁剪。"""
+    from ai_pr_review.services.review_context import (
+        build_review_context,
+        build_review_context_meta,
+        estimate_tokens,
+    )
+
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _store_context_run(backend)
+    store = _context_store(backend)
+    full = build_review_context(store, run_id, token_budget=10**9)
+    assert full is not None
+    full_tokens = estimate_tokens(full)
+    l1 = full.split("\n\n[L2")[0]
+    for marker in (
+        "[L1 运行摘要]",
+        "[L2 FINDINGS 清单]",
+        "[L3 重点 FINDING 全文]",
+        "[L4 被过滤 FINDING]",
+    ):
+        assert marker in full
+
+    # 差一点预算：L4 先消失，L2/L3 原样保留
+    tight = build_review_context_meta(store, run_id, token_budget=full_tokens - 1)
+    assert tight is not None
+    assert tight.trimmed == ("L4",)
+    assert tight.text.startswith(l1)
+    assert "[L4 被过滤 FINDING]" not in tight.text
+    assert "[L3 重点 FINDING 全文] 前 3 条" in tight.text
+    assert "[L2 FINDINGS 清单] 共 3 条（按严重度排序）" in tight.text
+
+    # 再收紧：L3 开始减条目，但 L2 仍是全量
+    trimmed_l3 = build_review_context_meta(store, run_id, token_budget=full_tokens - 40)
+    assert trimmed_l3.trimmed == ("L4", "L3")
+    assert trimmed_l3.text.startswith(l1)
+    blocks = re.findall(r"^#\d+ \[", trimmed_l3.text, flags=re.MULTILINE)
+    assert 1 <= len(blocks) < 3
+    assert "[L2 FINDINGS 清单] 共 3 条（按严重度排序）" in trimmed_l3.text
+
+    # 极端预算：只剩 L1 + 仅 critical/high 的 L2，L1 逐字不变
+    minimal = build_review_context_meta(store, run_id, token_budget=1)
+    assert minimal is not None
+    assert minimal.trimmed == ("L4", "L3", "L2")
+    assert minimal.text.startswith(l1)
+    assert "[L3 " not in minimal.text
+    assert "[L4 " not in minimal.text
+    assert "（预算受限，仅保留 critical/high）" in minimal.text
+    assert "1. [critical] src/critical.py:12-20" in minimal.text
+    assert "3. [medium]" not in minimal.text
+    # 裁剪提示点名被裁的层，并给出查看完整内容的命令
+    assert "已按 L4 → L3 → L2 顺序裁剪 L4、L3、L2" in minimal.text
+    assert f"/explain {run_id}" in minimal.text
+
+
+def test_review_context_returns_none_when_the_run_or_store_is_unreadable(tmp_path: Path) -> None:
+    """读不到就返回 None（由调用方降级），不抛异常、不返回半成品。"""
+    from ai_pr_review.services.review_context import (
+        build_review_context,
+        build_review_context_meta,
+    )
+
+    class ExplodingStore:
+        def get_run_summary(self, run_id: str) -> dict:
+            raise sqlite3.OperationalError("database is locked")
+
+    class MissingResultStore:
+        def get_run_summary(self, run_id: str) -> dict:
+            return {"id": run_id}
+
+        def get_result(self, run_id: str) -> None:
+            return None
+
+        def get_run_metadata(self, run_id: str) -> dict:
+            return {}
+
+    assert build_review_context(ExplodingStore(), "run-x") is None
+    assert build_review_context_meta(MissingResultStore(), "run-x") is None
+
+    backend = JsonlBackend(tmp_path / "config.json")
+    store = _context_store(backend)
+    assert build_review_context(store, "no-such-run") is None
+    assert build_review_context_meta(store, "") is None
+
+
+def test_review_completion_binds_the_session_but_failure_and_cancel_do_not(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """§9.2 A：只有成功落库的审查才绑定当前 Run。"""
+
+    async def run() -> None:
+        from ai_pr_review.services.review_orchestrator import (
+            ReviewCancelled as OrchestratorCancelled,
+        )
+
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=lambda event: None)
+        session_id = await _new_session_async(backend)
+
+        async def ok_review(pr_url, **kwargs):
+            return _review_artifacts(findings=[_finding()])
+
+        monkeypatch.setattr("ai_pr_review.cli.run_review", ok_review)
+        response = await backend.handle(_review_request_for(session_id))
+        assert response[0]["ok"] is True
+        assert backend.sessions[session_id].current_run_id == "run-31"
+
+        # 失败：不绑定（否则 chat 会去解读一个不存在的 run）
+        failed_session = await _new_session_async(backend)
+
+        async def failing_review(pr_url, **kwargs):
+            raise RuntimeError("模型服务不可用")
+
+        monkeypatch.setattr("ai_pr_review.cli.run_review", failing_review)
+        response = await backend.handle(_review_request_for(failed_session))
+        assert response[0]["ok"] is False
+        assert backend.sessions[failed_session].current_run_id is None
+
+        # 取消：同样不绑定
+        cancelled_session = await _new_session_async(backend)
+
+        async def cancelled_review(pr_url, **kwargs):
+            raise OrchestratorCancelled()
+
+        monkeypatch.setattr("ai_pr_review.cli.run_review", cancelled_review)
+        response = await backend.handle(_review_request_for(cancelled_session))
+        assert response[0]["result"]["cancelled"] is True
+        assert backend.sessions[cancelled_session].current_run_id is None
+
+    asyncio.run(run())
+
+
+def test_context_command_reports_switches_and_clears_the_binding(tmp_path: Path) -> None:
+    """§9.2 A/E：/context 的查看、切换、off 三态，以及未知 run / 无会话的错误面。"""
+
+    async def run() -> None:
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=lambda event: None)
+        session_id = await _new_session_async(backend)
+        run_id = _store_context_run(backend)
+
+        # 未绑定：文案必须明确说清楚，并给出绑定方法
+        unbound = (await _execute_async(backend, "context", [], session_id))["result"]
+        assert unbound["bound"] is False
+        assert unbound["run_id"] is None
+        assert unbound["token_estimate"] is None
+        assert unbound["token_budget"] == 8000
+        assert "审查上下文：未绑定" in unbound["text"]
+        assert "/context <run_id>" in unbound["text"]
+
+        # 切换绑定：报 run_id、PR 与 token 估算
+        bound = (await _execute_async(backend, "context", [run_id], session_id))["result"]
+        assert bound["bound"] is True
+        assert bound["run_id"] == run_id
+        assert bound["token_estimate"] > 0
+        assert bound["token_budget"] == 8000
+        assert bound["trimmed"] == []
+        assert "已切换审查上下文" in bound["text"]
+        assert f"Run: {run_id}" in bound["text"]
+        assert "PR: example/repo #31 · Review workspace contract" in bound["text"]
+        assert "token 估算: 约" in bound["text"]
+
+        # 无参查看与切换结果一致
+        status = (await _execute_async(backend, "context", [], session_id))["result"]
+        assert status["run_id"] == run_id
+        assert status["token_estimate"] == bound["token_estimate"]
+
+        # 会话快照也带上绑定，TUI 无需再问一次
+        snapshot = await backend.handle(
+            {"id": "get", "method": "session.get", "params": {"session_id": session_id}}
+        )
+        assert snapshot[0]["result"]["current_run_id"] == run_id
+
+        # 未知 run：报 not_found，且不改动已有绑定
+        missing = await _execute_async(backend, "context", ["no-such-run"], session_id)
+        assert missing["ok"] is False
+        assert missing["error"]["code"] == "not_found"
+        assert backend.sessions[session_id].current_run_id == run_id
+
+        # off：解绑并回到未绑定文案
+        off = (await _execute_async(backend, "context", ["off"], session_id))["result"]
+        assert off["bound"] is False
+        assert off["run_id"] is None
+        assert backend.sessions[session_id].current_run_id is None
+        assert "已解除审查上下文绑定" in off["text"]
+        assert (await _execute_async(backend, "context", [], session_id))["result"]["bound"] is False
+
+        # 没有会话：查看仍可回答"未绑定"，但切换/解绑没有绑定可操作
+        assert (await _execute_async(backend, "context", []))["result"]["bound"] is False
+        assert (await _execute_async(backend, "context", ["off"]))["ok"] is False
+        assert (await _execute_async(backend, "context", [run_id]))["error"]["code"] == "not_found"
+
+    asyncio.run(run())
+
+
+def test_history_and_explain_bind_the_run_only_on_success(tmp_path: Path) -> None:
+    """§9.2 A：`/history <run_id>` 与 `/explain <run_id>` 成功后绑定；列表与未找到不绑定。"""
+
+    async def run() -> None:
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=lambda event: None)
+        run_id = _store_context_run(backend)
+
+        history_session = await _new_session_async(backend)
+        assert (await _execute_async(backend, "history", [run_id], history_session))["ok"] is True
+        assert backend.sessions[history_session].current_run_id == run_id
+
+        explain_session = await _new_session_async(backend)
+        assert (await _execute_async(backend, "explain", [run_id], explain_session))["ok"] is True
+        assert backend.sessions[explain_session].current_run_id == run_id
+
+        listing_session = await _new_session_async(backend)
+        assert (await _execute_async(backend, "history", [], listing_session))["ok"] is True
+        assert backend.sessions[listing_session].current_run_id is None
+        # 未找到的历史：返回 ok=True 的详情（run 为 None），但绝不能绑定
+        assert (await _execute_async(backend, "history", ["no-such-run"], listing_session))["ok"] is True
+        assert backend.sessions[listing_session].current_run_id is None
+        assert (await _execute_async(backend, "explain", ["no-such-run"], listing_session))["ok"] is False
+        assert backend.sessions[listing_session].current_run_id is None
+        # 已有绑定的会话跑一次列表，不会顺手解绑
+        assert (await _execute_async(backend, "history", [], history_session))["ok"] is True
+        assert backend.sessions[history_session].current_run_id == run_id
+
+    asyncio.run(run())
+
+
+def test_chat_injects_the_bound_review_context_into_the_system_prompt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """§9.2 C：绑定后 system_prompt = 语言指令 + 上下文 + 诚实约束，且不写进对话历史。"""
+
+    async def run() -> None:
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=lambda event: None)
+        backend.config.provider.api_key = "test-key"
+        backend.config._sync_runtime_sections()
+        run_id = _store_context_run(backend)
+        session_id = await _new_session_async(backend)
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        # 未绑定：只有语言指令
+        response = await backend.handle(_chat_send(session_id))
+        assert response[0]["ok"] is True
+        plain_prompt = captured["options"]["system_prompt"]
+        assert "请默认使用中文回答" in plain_prompt
+        assert "<review_context" not in plain_prompt
+
+        await _execute_async(backend, "context", [run_id], session_id)
+        response = await backend.handle(_chat_send(session_id, "第 2 条 finding 的文件与行号？"))
+
+        assert response[0]["ok"] is True
+        prompt = captured["options"]["system_prompt"]
+        # 注入必须排在语言指令之后
+        assert prompt.index("请默认使用中文回答") < prompt.index("<review_context")
+        assert f'<review_context run_id="{run_id}">' in prompt
+        assert "[L1 运行摘要]" in prompt
+        assert "PR: example/repo #31 · Review workspace contract" in prompt
+        assert "src/critical.py:12-20" in prompt
+        assert "证据校验: valid 1 · needs_review 1 · invalid 1" in prompt
+        assert "[L4 被过滤 FINDING] 门槛 0.70" in prompt
+        # 诚实约束三条
+        assert "只依据上面的审查上下文回答" in prompt
+        assert "必须给出「文件:行」与严重度" in prompt
+        assert "需要查看源码" in prompt
+        assert "不得臆测" in prompt
+        # 上下文只进 system prompt：对话历史里只有正常的 user/assistant 轮次
+        messages = backend.sessions[session_id].messages
+        assert [message["role"] for message in messages] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]
+        assert all("<review_context" not in message["content"] for message in messages)
+
+        # 预算收紧到 1 token：仍然可用，但注入内容被裁剪且明说裁剪了哪些层
+        backend.config.preferences.chat_context_budget = 1
+        await backend.handle(_chat_send(session_id, "再说一次"))
+        trimmed_prompt = captured["options"]["system_prompt"]
+        assert "[L1 运行摘要]" in trimmed_prompt
+        assert "[L4 被过滤 FINDING]" not in trimmed_prompt
+        assert "已按 L4 → L3 → L2 顺序裁剪" in trimmed_prompt
+
+    asyncio.run(run())
+
+
+def test_chat_degrades_to_plain_chat_when_context_cannot_be_built(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """§9.2 C：构建失败/无记录时降级为普通聊天，记 warning，对话不得中断。"""
+
+    async def run() -> None:
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=lambda event: None)
+        backend.config.provider.api_key = "test-key"
+        backend.config._sync_runtime_sections()
+        run_id = _store_context_run(backend)
+        session_id = await _new_session_async(backend)
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+        await _execute_async(backend, "context", [run_id], session_id)
+
+        # (1) 绑定后 run 被清理：读不到，但要如实说明，而不是悄悄变回未绑定
+        backend.sessions[session_id].current_run_id = "no-such-run"
+        response = await backend.handle(_chat_send(session_id))
+        assert response[0]["ok"] is True
+        assert "<review_context" not in captured["options"]["system_prompt"]
+        status = (await _execute_async(backend, "context", [], session_id))["result"]
+        assert status["bound"] is True
+        assert status["run_id"] == "no-such-run"
+        assert status["token_estimate"] is None
+        assert "无法读取" in status["text"]
+
+        # (2) 构建器抛异常
+        def exploding_builder(store, run_id, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(
+            "ai_pr_review.backend.jsonl_server.build_review_context", exploding_builder
+        )
+        backend.sessions[session_id].current_run_id = run_id
+        response = await backend.handle(_chat_send(session_id))
+        assert response[0]["ok"] is True
+        assert response[0]["result"]["text"] == "stub"
+        assert "<review_context" not in captured["options"]["system_prompt"]
+
+        # (3) 构建器返回 None
+        monkeypatch.setattr(
+            "ai_pr_review.backend.jsonl_server.build_review_context",
+            lambda store, run_id, **kwargs: None,
+        )
+        response = await backend.handle(_chat_send(session_id))
+        assert response[0]["ok"] is True
+        assert "<review_context" not in captured["options"]["system_prompt"]
+        # 降级不影响正常对话历史：三轮问答各留下 user/assistant
+        assert len(backend.sessions[session_id].messages) == 6
+
+    asyncio.run(run())
+
+    warnings = capsys.readouterr().err
+    assert warnings.count("falling back to plain chat") == 3
+    assert "no-such-run" in warnings
+    assert "database is locked" in warnings
+
+
+def test_chat_context_budget_preference_is_read_defensively(tmp_path: Path) -> None:
+    """预算来自 `preferences.chat_context_budget`（§9.D），非法值退回 8000。"""
+    backend = JsonlBackend(tmp_path / "config.json")
+    assert backend._chat_context_budget() == 8000
+    backend.config.preferences.chat_context_budget = 1200
+    assert backend._chat_context_budget() == 1200
+    backend.config.preferences.chat_context_budget = 0
+    assert backend._chat_context_budget() == 8000
+    backend.config.preferences.chat_context_budget = "abc"
+    assert backend._chat_context_budget() == 8000
+
+
+def test_review_context_budget_trim_never_claims_an_empty_run(tmp_path: Path) -> None:
+    """预算把 L2 收窄到 critical/high 后，不能把"有 finding 但被裁"说成"什么都没发现"。"""
+    from ai_pr_review.services.review_context import build_review_context_meta
+
+    backend = JsonlBackend(tmp_path / "config.json")
+    findings = [
+        _context_finding(
+            severity="medium",
+            confidence=0.8,
+            filename="src/medium.py",
+            line_start=3,
+            line_end=4,
+        )
+    ]
+    run_id = _store_context_run(backend, findings=findings, summary="只有一个中危问题")
+
+    minimal = build_review_context_meta(_context_store(backend), run_id, token_budget=1)
+
+    assert minimal is not None
+    assert minimal.trimmed == ("L4", "L3", "L2")
+    assert "没有记录任何 Finding" not in minimal.text
+    assert "预算受限：该 Run 没有 critical/high 的 Finding" in minimal.text
+    # 统计行仍是实测的 1 条
+    assert "统计: 共 1 条" in minimal.text
+
+
+def test_help_lists_the_context_command(tmp_path: Path) -> None:
+    backend = JsonlBackend(tmp_path / "config.json")
+    help_text = _execute(backend, "help", [])["result"]["text"]
+    assert "/context [run_id|off] 查看/切换/解除审查上下文绑定" in help_text

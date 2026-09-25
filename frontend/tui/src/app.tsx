@@ -1,4 +1,4 @@
-import { createSignal, For, Show, onMount, onCleanup } from "solid-js"
+import { createMemo, createSignal, For, Show, onMount, onCleanup } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { BackendClient } from "./backend"
 import { isCurrentAssistantEvent, isForeignSessionEvent } from "./protocol"
@@ -41,6 +41,23 @@ import {
   type FindingsFilterState,
 } from "./findings-filter"
 import { emptyFindingsMessage } from "./empty-findings"
+import {
+  CHAT_SLOT_VALUES,
+  REVIEW_SLOT_VALUES,
+  presetDescription,
+  presetIndexOf,
+  presetLabel,
+  routeBoxes,
+  routeSummary,
+  routingStatusText,
+  setupSlotFields,
+  slotIndexOf,
+  type RouteBox,
+  type RouteSlotValue,
+  type RoutingSnapshot,
+  type SetupPreset,
+  type SlotModelNames,
+} from "./setup-routing"
 import type { InputRenderable, TextareaRenderable, KeyBinding, ScrollBoxRenderable } from "@opentui/core"
 
 const orange = "#fb8147"
@@ -105,6 +122,8 @@ type RuntimeSnapshot = {
   message?: string
   ui_language?: string
   configuration_warnings?: string[]
+  /** CHAT/REVIEW 双槽路由快照（config.snapshot / model.status 共用）。 */
+  routing?: RoutingSnapshot
 }
 
 const BRAND_PIXEL = [
@@ -116,6 +135,31 @@ const BRAND_PIXEL = [
 ]
 
 const isEn = (language?: string) => String(language ?? "zh-CN").toLowerCase().startsWith("en")
+
+/**
+ * 状态栏右侧那一行（方案 §4.4）。
+ *
+ * 模型段只读后端 `routing` 快照 —— `CHAT x · REVIEW y`，混合审查额外标
+ * `(local↔remote)`；旧后端没有 `routing` 时回落到改造前的单模型文案，状态栏不会
+ * 因为一个新字段缺失就整段空白。导出是为了让 `scripts/*.tsx` 能用 fixture 渲染出
+ * 文本证据（App 本身要连真实后端才能跑到这一步）。
+ */
+export function RuntimeStatusLine(props: {
+  runtime: RuntimeSnapshot
+  status: AppStatus
+  width: number
+  height: number
+}) {
+  const routingLabel = () =>
+    routingStatusText(props.runtime.routing, props.runtime.ui_language) || (props.runtime.model ?? "model")
+  return (
+    <text fg={statusColors[props.status]}>
+      {props.runtime.runtime_profile ?? "RUNTIME"} · {statusLabels[props.status]} · {routingLabel()} ·{" "}
+      {props.runtime.available === false ? "OFFLINE" : props.runtime.available === true ? "ONLINE" : "0.1.0"} ·{" "}
+      {props.width}×{props.height}
+    </text>
+  )
+}
 
 function PixelLogo(props: { language?: string }) {
   return (
@@ -756,6 +800,8 @@ type ChoiceOption = {
 
 type SetupOptions = {
   providers: ProviderSetupOption[]
+  /** 后端给出的运行模式预设（含 custom「自定义」）；缺失时回落到本地兜底表。 */
+  runtime_profiles?: SetupPreset[]
   api_formats?: ChoiceOption[]
   ui_languages?: ChoiceOption[]
   output_formats?: ChoiceOption[]
@@ -781,7 +827,10 @@ type SetupOptions = {
     chat_layout?: string
     workbench_mode?: string
     local_model?: string
+    local_models?: string[]
   }
+  /** 与 `config.snapshot` 同形的槽位快照（方案 §5.4）。 */
+  routing?: RoutingSnapshot
 }
 
 type SetupStep = "runtime" | "provider" | "model" | "key" | "local" | "summary"
@@ -791,6 +840,19 @@ const runtimeOptions = [
   { name: "Local", description: "Ollama 本地模型：离线可用，数据留在本机", value: "local" },
   { name: "Hybrid", description: "混合策略：按任务在本地与云端之间协作", value: "hybrid" },
   { name: "Offline", description: "离线优先：只使用本地运行时", value: "offline" },
+]
+
+/**
+ * `config.options.runtime_profiles` 不可用时的兜底（旧后端/读取失败）。
+ *
+ * 预设清单的 owner 是后端 `RUNTIME_PROFILES`；这里只保证「自定义」这一档不会因为
+ * 一次 options 读取失败而消失，顺序与后端一致。
+ */
+const fallbackRuntimeProfiles: SetupPreset[] = [
+  { value: "cloud", label: "云端" },
+  { value: "local", label: "本地" },
+  { value: "hybrid", label: "混合" },
+  { value: "custom", label: "自定义" },
 ]
 
 const stepTitles: Record<SetupStep, string> = {
@@ -1097,6 +1159,8 @@ function LegacySetupDialog(props: SetupDialogProps) {
 
 type SetupScreen =
   | "runtime"
+  | "route_chat"
+  | "route_review"
   | "provider"
   | "base_url"
   | "api_format"
@@ -1115,6 +1179,9 @@ type SetupScreen =
 
 const screenStages: Record<SetupScreen, number> = {
   runtime: 1,
+  // 路由细化页仍属第 1 阶段"运行模式"：它是 custom 预设的展开，不是新阶段。
+  route_chat: 1,
+  route_review: 1,
   provider: 2,
   base_url: 2,
   api_format: 2,
@@ -1143,6 +1210,8 @@ const stageNames: Record<number, string> = {
 
 const screenTitles: Record<SetupScreen, string> = {
   runtime: "选择运行模式",
+  route_chat: "路由细化 · 对话模型",
+  route_review: "路由细化 · 审查模型",
   provider: "选择模型供应商",
   base_url: "配置 API Base URL",
   api_format: "选择 API 协议格式",
@@ -1160,7 +1229,33 @@ const screenTitles: Record<SetupScreen, string> = {
   summary: "确认并保存",
 }
 
-function SetupWizardDialog(props: SetupDialogProps) {
+/**
+ * 路由细化页的标题与方框文案（方案 §5.2 #15）。
+ *
+ * 助手其余屏幕目前是中文单语（改造前的现状），新增的两屏按 `ui_language` 出中英两版；
+ * 其余屏幕保持原文案不动，避免"顺手翻译"改变既有交互的可见文本。
+ */
+const routeScreenTitle = (value: SetupScreen, en: boolean, fallback: string): string => {
+  if (value === "route_chat") return en ? "Route detail · chat model" : "路由细化 · 对话模型"
+  if (value === "route_review") return en ? "Route detail · review model" : "路由细化 · 审查模型"
+  return fallback
+}
+
+// 方框标题与槽别名在 setup-routing.ts（`routeBoxes`）里出，这里只放本屏独有的提示语。
+const routeCopy = (en: boolean) => ({
+  hybridHint: en
+    ? "Hybrid review splits files by complexity between local and cloud."
+    : "混合审查按文件复杂度在本地与云端之间自动分流。",
+  keys: en
+    ? "↑↓ select · Tab/←→ switch box · Enter next · Esc back"
+    : "↑↓ 选择 · Tab/←→ 切换方框 · Enter 下一步 · Esc 返回",
+})
+
+/**
+ * 配置助手（Ctrl+P）。导出仅供 `scripts/*.tsx` 的文本证据脚本以 fixture 渲染，
+ * 与 FindingsDialog 等既有导出同理。
+ */
+export function SetupWizardDialog(props: SetupDialogProps) {
   const dimensions = useTerminalDimensions()
   const [screen, setScreen] = createSignal<SetupScreen>("runtime")
   const [options, setOptions] = createSignal<SetupOptions>()
@@ -1172,6 +1267,10 @@ function SetupWizardDialog(props: SetupDialogProps) {
   let inputRef: InputRenderable | undefined
 
   const [runtimeIndex, setRuntimeIndex] = createSignal(0)
+  const [routeChatIndex, setRouteChatIndex] = createSignal(0)
+  const [routeReviewIndex, setRouteReviewIndex] = createSignal(0)
+  // 细化页两个方框都在两屏上可见；焦点决定 ↑↓ 改的是哪一个（Tab/←→ 切换）。
+  const [routeFocus, setRouteFocus] = createSignal<"chat" | "review">("chat")
   const [providerIndex, setProviderIndex] = createSignal(0)
   const [modelIndex, setModelIndex] = createSignal(0)
   const [localModelIndex, setLocalModelIndex] = createSignal(0)
@@ -1213,7 +1312,9 @@ function SetupWizardDialog(props: SetupDialogProps) {
       { value: "off", label: "关闭 / Off（只用一行状态条显示进度）" },
     ]
   const local = () => options()?.local
-  const selectedRuntime = () => runtimeOptions[runtimeIndex()]?.value ?? "cloud"
+  const selectedRuntime = () =>
+    runtimeProfiles()[Math.min(runtimeIndex(), Math.max(0, runtimeProfiles().length - 1))]?.value ??
+    "cloud"
   const needsCloud = () => selectedRuntime() === "cloud" || selectedRuntime() === "hybrid"
   const selectedProvider = () => providers()[Math.min(providerIndex(), Math.max(0, providers().length - 1))]
   const cloudModels = () => selectedProvider()?.models ?? []
@@ -1232,6 +1333,57 @@ function SetupWizardDialog(props: SetupDialogProps) {
   const remoteKeyConfigured = () =>
     options()?.current.remote_api_key_configured ?? options()?.current.api_key_configured ?? false
   const githubConfigured = () => options()?.current.github_token_configured ?? false
+
+  /** 助手当前选中的界面语言：新增文案跟着它实时切换（保存前就能看到效果）。 */
+  const uiLanguage = () => selectedUiLanguage()
+  const runtimeProfiles = () => {
+    const fromBackend = options()?.runtime_profiles ?? []
+    return fromBackend.length > 0 ? fromBackend : fallbackRuntimeProfiles
+  }
+  const selectedPreset = (): SetupPreset =>
+    runtimeProfiles()[Math.min(runtimeIndex(), Math.max(0, runtimeProfiles().length - 1))] ?? {
+      value: "cloud",
+      label: "云端",
+    }
+  const isCustom = () => selectedRuntime() === "custom"
+  const isRouteScreen = (value: SetupScreen) => value === "route_chat" || value === "route_review"
+
+  /**
+   * 细化页两个方框里显示的模型名，全部来自 `config.options`（方案 §4.2）。
+   *
+   * 预设分支用助手当前选中的 Provider 模型（云端分支保存的就是它）；custom 分支改用
+   * **已落盘**的 `current.remote_model` / `local_model`——custom 只写槽位，不保存
+   * Provider / 本地端点，显示助手里的临时选择会让用户以为那张网卡已经换了。
+   * 都没有就是"未配置"，绝不硬编码模型名。
+   */
+  const slotModels = (): SlotModelNames => {
+    if (isCustom()) {
+      return {
+        remote: options()?.current.remote_model || "",
+        local: options()?.current.local_model || "",
+      }
+    }
+    return {
+      remote: selectedModel() || options()?.current.remote_model || "",
+      local: selectedLocalModel() || options()?.current.local_model || "",
+    }
+  }
+  /**
+   * 方框模型必须 memo：`routeBoxes()` 每次返回全新对象/数组，若直接喂给 `<For>`，
+   * 每次按键（焦点/选中项变化）都会把两个方框连同所有行拆掉重建——像素渲染器只
+   * 重画变化的单元格，重建后的行会留下上一次的字符残影。
+   */
+  const routeBoxViews = createMemo(() => routeBoxes(slotModels(), uiLanguage()))
+  const chatChoices = () => routeBoxViews()[0].choices
+  const reviewChoices = () => routeBoxViews()[1].choices
+  const routeChatSlot = (): RouteSlotValue =>
+    chatChoices()[Math.min(routeChatIndex(), chatChoices().length - 1)]?.value ?? "remote"
+  const routeReviewSlot = (): RouteSlotValue =>
+    reviewChoices()[Math.min(routeReviewIndex(), reviewChoices().length - 1)]?.value ?? "remote"
+  const routeSelection = () => ({ chat: routeChatSlot(), review: routeReviewSlot() })
+  /** 确认页的三行摘要：custom 用实时选择，预设显示该预设的槽位定义。 */
+  const routePreview = () => routeSummary(selectedRuntime(), routeSelection(), slotModels(), uiLanguage())
+  const routeStageCopy = () => routeCopy(isEn(uiLanguage()))
 
   const indexOfValue = (items: ChoiceOption[], value?: string) => {
     const index = items.findIndex((item) => item.value === value)
@@ -1270,7 +1422,27 @@ function SetupWizardDialog(props: SetupDialogProps) {
     "workbench",
     "summary",
   ]
-  const order = () => (needsCloud() ? cloudOrder : localOrder)
+  /**
+   * custom 顺序（方案 §4.2）：选完两个槽位就离开"运行模式"阶段。
+   *
+   * 细化页只决定"用哪个槽"，不决定槽里配了什么（后端 `_apply_setup` 的 custom 分支
+   * 也只写槽位、读都不读 provider/local 字段）。所以这里不显示 Provider / API Key /
+   * 本地端点这些屏幕——它们填了也会被后端忽略，显示出来反而是"填了没保存"的误导。
+   */
+  const customOrder: SetupScreen[] = [
+    "runtime",
+    "route_chat",
+    "route_review",
+    "github",
+    "ui_language",
+    "response_language",
+    "output_format",
+    "auto_publish",
+    "chat_layout",
+    "workbench",
+    "summary",
+  ]
+  const order = () => (isCustom() ? customOrder : needsCloud() ? cloudOrder : localOrder)
 
   const inputDefault = (target: SetupScreen): string => {
     if (target === "base_url") return baseUrl() || selectedProvider()?.base_url || ""
@@ -1286,6 +1458,9 @@ function SetupWizardDialog(props: SetupDialogProps) {
   const goTo = (target: SetupScreen) => {
     setError("")
     setInputFocused(false)
+    // 进入细化页时焦点落在本屏主方框上（route_chat 选对话、route_review 选审查）。
+    if (target === "route_chat") setRouteFocus("chat")
+    else if (target === "route_review") setRouteFocus("review")
     if (isInputScreen(target)) {
       setInputValue(inputDefault(target))
       setScreen(target)
@@ -1319,7 +1494,11 @@ function SetupWizardDialog(props: SetupDialogProps) {
         chat_layout: selectedChatLayout(),
         workbench_mode: selectedWorkbenchMode(),
       }
-      if (needsCloud()) {
+      if (isCustom()) {
+        // 只有 custom 才附带两个槽位（`setupSlotFields` 保证其它预设返回空对象，
+        // 旧载荷逐字节不变）。后端 custom 分支只写这两个键。
+        Object.assign(payload, setupSlotFields(selectedRuntime(), routeSelection()))
+      } else if (needsCloud()) {
         const provider = selectedProvider()
         if (!provider) throw new Error("没有可用的云端 Provider 配置。")
         payload.provider_name = provider.name
@@ -1342,9 +1521,13 @@ function SetupWizardDialog(props: SetupDialogProps) {
     } catch (cause) {
       const message = String(cause)
       setError(message)
-      if (needsCloud() && message.includes("API Key")) goTo("api_key")
+      // 路由细化页的校验错误要回到出错的那一屏：custom 顺序里没有 provider/model
+      // 屏幕，落到那里会让用户卡在一个不在流程里的页面。
+      if (isCustom() && message.includes("槽位")) {
+        goTo(message.includes("对话模型") ? "route_chat" : "route_review")
+      } else if (needsCloud() && message.includes("API Key")) goTo("api_key")
       else if (message.includes("GitHub Token")) goTo("github")
-      else if (message.includes("模型")) goTo("model")
+      else if (!isCustom() && message.includes("模型")) goTo("model")
     } finally {
       setBusy(false)
     }
@@ -1378,8 +1561,20 @@ function SetupWizardDialog(props: SetupDialogProps) {
       if (!response.ok) throw new Error(response.error?.message ?? "无法读取配置选项")
       const payload = response.result as SetupOptions
       setOptions(payload)
-      const initialRuntime = runtimeOptions.findIndex((option) => option.value === props.runtime.runtime_profile)
-      setRuntimeIndex(initialRuntime >= 0 ? initialRuntime : 0)
+      // 预设选中项优先读 routing.profile：runtime_profile 是"实际生效的槽"折算出来的
+      // （custom 会被折算成 cloud/local/hybrid），只有 routing.profile 记得住"自定义"。
+      const presetValues = (payload.runtime_profiles ?? fallbackRuntimeProfiles).map(
+        (preset) => preset.value,
+      )
+      const routing = payload.routing ?? props.runtime.routing
+      setRuntimeIndex(
+        presetIndexOf(presetValues, routing?.profile, payload.current.runtime_profile ?? props.runtime.runtime_profile),
+      )
+      // 细化页两个方框的初值 = 当前生效的槽位（后端 resolve_* 的结果，前端不推导）。
+      setRouteChatIndex(slotIndexOf(CHAT_SLOT_VALUES.map((value) => ({ value })), routing?.chat?.slot))
+      setRouteReviewIndex(
+        slotIndexOf(REVIEW_SLOT_VALUES.map((value) => ({ value })), routing?.review?.slot),
+      )
       const currentProvider = payload.providers.findIndex(
         (item) => item.name === (payload.current.remote_provider ?? payload.current.provider),
       )
@@ -1416,10 +1611,63 @@ function SetupWizardDialog(props: SetupDialogProps) {
     }
   })
 
+  /**
+   * 细化页的键盘模型（方案 §4.2）：↑↓ 改当前方框的选择、Tab/←→ 在两个方框之间移动、
+   * Enter 前进、Esc 返回。两个方框都在两屏上，焦点决定谁吃 ↑↓。
+   */
+  const moveRouteSelection = (delta: number) => {
+    const focus = routeFocus()
+    const choices = focus === "chat" ? chatChoices() : reviewChoices()
+    if (choices.length === 0) return
+    const current = focus === "chat" ? routeChatIndex() : routeReviewIndex()
+    const nextIndex = (current + delta + choices.length) % choices.length
+    if (focus === "chat") setRouteChatIndex(nextIndex)
+    else setRouteReviewIndex(nextIndex)
+  }
+
+  const moveRouteFocus = (delta: number) => {
+    const order: Array<"chat" | "review"> = ["chat", "review"]
+    const current = order.indexOf(routeFocus())
+    setRouteFocus(order[(current + delta + order.length) % order.length])
+  }
+
   useKeyboard((key) => {
     if (key.name === "escape" && !busy()) {
+      // 细化页的 Esc 是"返回上一屏"（方案 §4.2 的键盘矩阵）：先退回运行模式页，
+      // 再按一次才是改造前的"Esc 取消助手"。其余屏幕语义不变。
+      if (isRouteScreen(screen())) {
+        previous()
+        return
+      }
       props.onClose()
       return
+    }
+    if (isRouteScreen(screen()) && !busy()) {
+      if (key.name === "tab") {
+        moveRouteFocus(key.shift === true ? -1 : 1)
+        key.preventDefault?.()
+        key.stopPropagation?.()
+        return
+      }
+      if (
+        (key.name === "right" || key.name === "left") &&
+        key.ctrl !== true &&
+        key.meta !== true &&
+        key.shift !== true
+      ) {
+        // ←→ 在细化页是"换方框"，不是"上一屏"：先拦下来，别让下面的通用规则拿走。
+        // Ctrl/Alt+← 仍然落到下面的"返回"，保持与其它屏幕一致的快捷键。
+        moveRouteFocus(key.name === "right" ? 1 : -1)
+        key.preventDefault?.()
+        key.stopPropagation?.()
+        return
+      }
+      if (key.name === "up" || key.name === "down") {
+        moveRouteSelection(key.name === "down" ? 1 : -1)
+        key.preventDefault?.()
+        key.stopPropagation?.()
+        return
+      }
     }
     if (key.name === "left" && (key.ctrl === true || key.meta === true) && !busy()) {
       previous()
@@ -1437,9 +1685,58 @@ function SetupWizardDialog(props: SetupDialogProps) {
   })
 
   const dialogWidth = 74
-  const dialogHeight = screen() === "provider" || screen() === "summary" ? 24 : 22
-  const left = Math.max(2, Math.floor((dimensions().width - dialogWidth) / 2))
-  const top = Math.max(0, Math.floor((dimensions().height - dialogHeight) / 2))
+  /**
+   * 对话框高度必须每次求值（accessor，不是常量）。
+   *
+   * 改造前这里是 `const dialogHeight = screen() === "provider" ? 24 : 22`，在组件
+   * 初始化时求值一次——`screen()` 那时永远是 "runtime"，于是**所有屏幕都只有 22 行**。
+   * 22 行的内容区 = 22 - padding 4 - 边框 2 = 16 行，超出时 opentui 会静默丢掉溢出块的
+   * 首行并留下上一次的字符残影（确认页云端分支：三行摘要 + 5 行 Provider 明细 + 6 行
+   * 通用项 + 提示 + 页脚 = 19 行，实测被截成 12 行）。
+   *
+   * 现在按屏幕返回高度：确认页 26（内容 19 ≤ 20），供应商 / 路由细化页 24（≤ 18），
+   * 其余 22（≤ 16）。左/上位置同样做成 accessor，窗口尺寸变化时才会跟着重新居中。
+   */
+  const dialogHeight = (): number =>
+    screen() === "summary"
+      ? 26
+      : screen() === "provider" || isRouteScreen(screen())
+        ? 24
+        : 22
+  const left = () => Math.max(2, Math.floor((dimensions().width - dialogWidth) / 2))
+  const top = () => Math.max(0, Math.floor((dimensions().height - dialogHeight()) / 2))
+
+  /**
+   * 一个路由方框（方案 §4.2 的像素风选择框）：槽别名 + 实际模型名，
+   * 选中行用 accent 底色 + `▸`，非焦点的方框淡出但保持可读。
+   */
+  const renderRouteBox = (boxModel: RouteBox) => {
+    const focused = () => routeFocus() === boxModel.key
+    const selected = () => (boxModel.key === "chat" ? routeChatIndex() : routeReviewIndex())
+    return (
+      <box flexDirection="column" marginBottom={boxModel.key === "chat" ? 1 : 0}>
+        <text fg={focused() ? "#eeeeee" : muted}>{boxModel.title}</text>
+        <box
+          borderStyle="single"
+          borderColor={focused() ? orange : muted}
+          paddingLeft={1}
+          paddingRight={1}
+          flexDirection="column"
+        >
+          <For each={boxModel.choices}>{(choice, choiceIndex) => {
+            const active = () => choiceIndex() === selected()
+            return (
+              <text bg={active() ? "#5a2e1c" : "#171717"}>
+                <span style={{ fg: active() ? orange : muted }}>{active() ? "▸ " : "  "}</span>
+                <span style={{ fg: active() ? "#ffffff" : "#eeeeee" }}>{choice.label}</span>
+                <span style={{ fg: active() ? "#ffd0bb" : muted }}>{`  ${choice.detail}`}</span>
+              </text>
+            )
+          }}</For>
+        </box>
+      </box>
+    )
+  }
 
   const renderInput = (title: string, placeholder: string) => (
     <box marginTop={1} flexDirection="column">
@@ -1462,27 +1759,43 @@ function SetupWizardDialog(props: SetupDialogProps) {
   )
 
   return (
-    <box position="absolute" left={left} top={top} width={dialogWidth} height={dialogHeight} backgroundColor="#171717" borderStyle="single" borderColor={orange} padding={2} zIndex={100} flexDirection="column">
+    <box position="absolute" left={left()} top={top()} width={dialogWidth} height={dialogHeight()} backgroundColor="#171717" borderStyle="single" borderColor={orange} padding={2} zIndex={100} flexDirection="column">
       <text fg={orange}>配置助手 // SETUP WIZARD</text>
       <text fg={muted}>
-        {screenStages[screen()]}/6 · {stageNames[screenStages[screen()]]} · {screenTitles[screen()]}
+        {screenStages[screen()]}/6 · {stageNames[screenStages[screen()]]} ·{" "}
+        {routeScreenTitle(screen(), isEn(uiLanguage()), screenTitles[screen()])}
       </text>
       <Show when={loading()}><text fg={muted}>读取配置选项中...</text></Show>
       <Show when={!loading() && screen() === "runtime"}>
         <box marginTop={1} flexGrow={1}>
           <select
-            options={runtimeOptions}
+            options={runtimeProfiles().map((preset) => ({
+              name: presetLabel(preset, uiLanguage()),
+              description: presetDescription(preset.value, uiLanguage()),
+              value: preset.value,
+            }))}
             selectedIndex={runtimeIndex()}
             focused
             showDescription
             width="100%"
-            height={8}
+            height={10}
             selectedBackgroundColor="#5a2e1c"
             selectedTextColor="#ffffff"
             descriptionColor={muted}
             selectedDescriptionColor="#ffd0bb"
             onChange={(index) => setRuntimeIndex(index)}
           />
+        </box>
+      </Show>
+      <Show when={!loading() && isRouteScreen(screen())}>
+        {/*
+          高度预算（实测，见 docs/claude-tui-route.md）：对话框内容区 =
+          height - padding 4 - 边框 2；超出时渲染器**静默**丢掉溢出块的首行并留下
+          上一次的字符残影。细化页内容固定 16 行 + 最多 1 行错误 = 17 ≤ 18（24 行）。
+        */}
+        <box flexDirection="column">
+          <For each={routeBoxViews()}>{(boxModel) => renderRouteBox(boxModel)}</For>
+          <text fg={muted}>{routeStageCopy().hybridHint}</text>
         </box>
       </Show>
       <Show when={!loading() && screen() === "provider"}>
@@ -1704,7 +2017,10 @@ function SetupWizardDialog(props: SetupDialogProps) {
       </Show>
       <Show when={!loading() && screen() === "summary"}>
         <box marginTop={1} flexDirection="column">
-          <text><span style={{ fg: orange }}>运行模式  </span><span style={{ fg: "#eeeeee" }}>{runtimeOptions[runtimeIndex()]?.name}</span></text>
+          {/* 三行摘要（方案 §4.3 第 6 阶段）：运行模式 + 对话模型 + 审查模型。 */}
+          <text><span style={{ fg: orange }}>{isEn(uiLanguage()) ? "Runtime   " : "运行模式  "}</span><span style={{ fg: "#eeeeee" }}>{presetLabel(selectedPreset(), uiLanguage())}</span></text>
+          <text><span style={{ fg: orange }}>{isEn(uiLanguage()) ? "Chat      " : "对话模型  "}</span><span style={{ fg: "#eeeeee" }}>{routePreview().chat}</span></text>
+          <text><span style={{ fg: orange }}>{isEn(uiLanguage()) ? "Review    " : "审查模型  "}</span><span style={{ fg: "#eeeeee" }}>{routePreview().review}</span></text>
           <Show when={needsCloud()}>
             <text><span style={{ fg: orange }}>Provider  </span><span style={{ fg: "#eeeeee" }}>{selectedProvider()?.display_name}</span></text>
             <text><span style={{ fg: orange }}>Endpoint  </span><span style={{ fg: "#eeeeee" }}>{baseUrl() || selectedProvider()?.base_url}</span></text>
@@ -1712,10 +2028,13 @@ function SetupWizardDialog(props: SetupDialogProps) {
             <text><span style={{ fg: orange }}>模型       </span><span style={{ fg: "#eeeeee" }}>{selectedModel()}</span></text>
             <text><span style={{ fg: orange }}>API Key    </span><span style={{ fg: "#eeeeee" }}>{apiKey().trim() ? "将更新" : remoteKeyConfigured() ? "保留现有" : "未配置"}</span></text>
           </Show>
-          <Show when={!needsCloud()}>
+          <Show when={!needsCloud() && !isCustom()}>
             <text><span style={{ fg: orange }}>本地引擎  </span><span style={{ fg: "#eeeeee" }}>{local()?.display_name}</span></text>
             <text><span style={{ fg: orange }}>Endpoint  </span><span style={{ fg: "#eeeeee" }}>{localBaseUrl() || local()?.base_url}</span></text>
             <text><span style={{ fg: orange }}>本地模型  </span><span style={{ fg: "#eeeeee" }}>{selectedLocalModel()}</span></text>
+          </Show>
+          <Show when={isCustom()}>
+            <text fg={muted}>自定义路由只写入两个槽位；各槽的 Provider / Key / 端点沿用已有配置。</text>
           </Show>
           <text><span style={{ fg: orange }}>GitHub    </span><span style={{ fg: "#eeeeee" }}>{githubToken().trim() ? "将更新" : githubConfigured() ? "保留现有" : "未配置"}</span></text>
           <text><span style={{ fg: orange }}>界面语言  </span><span style={{ fg: "#eeeeee" }}>{selectedUiLanguage()}</span></text>
@@ -1723,7 +2042,8 @@ function SetupWizardDialog(props: SetupDialogProps) {
           <text><span style={{ fg: orange }}>输出格式  </span><span style={{ fg: "#eeeeee" }}>{selectedOutputFormat()}</span></text>
           <text><span style={{ fg: orange }}>自动发布  </span><span style={{ fg: "#eeeeee" }}>{autoPublish() ? "是" : "否"}</span></text>
           <text><span style={{ fg: orange }}>Chat 布局 </span><span style={{ fg: "#eeeeee" }}>{selectedChatLayout()}</span></text>
-          <text fg={muted}>Enter 保存到私有配置；高级 headers / extra params 可稍后用 pr-review config --advanced 配置。</text>
+          {/* 一行写完：这行原本会长到换行，多出的一行会把确认页挤出高度预算。 */}
+          <text fg={muted}>Enter 保存到私有配置；高级项用 pr-review config --advanced。</text>
         </box>
       </Show>
       <box flexGrow={1} />
@@ -1733,9 +2053,11 @@ function SetupWizardDialog(props: SetupDialogProps) {
           ? "保存中..."
           : screen() === "summary"
             ? "Enter 保存 · ← 返回修改 · Esc 取消"
-            : isInputScreen(screen())
-              ? "Enter 确认 · Ctrl/Alt+← 返回 · Esc 取消"
-              : "↑↓ 选择 · Enter 下一步 · ← 返回 · Esc 取消"}
+            : isRouteScreen(screen())
+              ? routeStageCopy().keys
+              : isInputScreen(screen())
+                ? "Enter 确认 · Ctrl/Alt+← 返回 · Esc 取消"
+                : "↑↓ 选择 · Enter 下一步 · ← 返回 · Esc 取消"}
       </text>
     </box>
   )
@@ -3658,7 +3980,12 @@ export function App() {
       </Show>
       <box width="100%" flexShrink={0} justifyContent="space-between" paddingLeft={2} paddingRight={2} paddingBottom={1}>
         <text fg={muted}>{workspaceRootLabel()}</text>
-        <text fg={statusColors[backendStatus()]}>{runtime().runtime_profile ?? "RUNTIME"} · {statusLabels[backendStatus()]} · {runtime().model ?? "model"} · {runtime().available === false ? "OFFLINE" : runtime().available === true ? "ONLINE" : "0.1.0"} · {dimensions().width}×{dimensions().height}</text>
+        <RuntimeStatusLine
+          runtime={runtime()}
+          status={backendStatus()}
+          width={dimensions().width}
+          height={dimensions().height}
+        />
       </box>
     </box>
   )

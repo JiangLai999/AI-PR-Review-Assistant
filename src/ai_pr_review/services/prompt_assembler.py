@@ -8,13 +8,17 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import PurePosixPath
 
 from pydantic import BaseModel, Field, field_validator
 
 from ai_pr_review.config import PromptAssemblerConfig
 from ai_pr_review.models.pr_data import FileDiff
 from ai_pr_review.models.review_plan import Evidence, ReviewPlan
-from ai_pr_review.services.context_builder import FileContext
+from ai_pr_review.services.context_builder import (
+    SUPPORTED_LANGUAGE_EXTENSIONS,
+    FileContext,
+)
 
 # 用于统计 schema 中 `$defs` 的引用，便于剔除已无人引用的定义。
 _SCHEMA_REFERENCE = re.compile(r"#/\$defs/(\w+)")
@@ -55,6 +59,73 @@ LANGUAGE_SPECIFIC_PROMPTS = {
 - prototype pollution (Object.assign on user input) -> security
 - XSS via innerHTML/dangerouslySetInnerHTML -> security""",
 }
+
+# ---------------------------------------------------------------------------
+# 仓库感知（L1-b）：相关文件注入段 + 诚实约束。段格式冻结，改动即测试失败。
+# 见 docs/repo-aware-review-plan.md §4.5。
+# ---------------------------------------------------------------------------
+
+RELATED_FILES_HEADING_ZH = "## 相关仓库文件（未被本次修改）"
+RELATED_FILES_HEADING_EN = "## Related repository files (not modified in this PR)"
+
+RELATED_FILE_RULES_ZH = (
+    "RELATED FILE RULES:\n"
+    "- 相关文件仅用于核实影响面。引用它们时必须给出 `文件:行`；\n"
+    "- 未在上下文中出现的文件内容不得臆测。"
+)
+RELATED_FILE_RULES_EN = (
+    "RELATED FILE RULES:\n"
+    "- Related files are for impact verification only. When citing them, always give `file:line`.\n"
+    "- Never invent file content that does not appear in the context."
+)
+
+
+def related_file_system_rules(response_language: str) -> str:
+    """相关文件诚实约束段（system prompt）。"""
+    return (
+        RELATED_FILE_RULES_ZH
+        if response_language.strip().lower().startswith("zh")
+        else RELATED_FILE_RULES_EN
+    )
+
+
+def _language_for_path(path: str) -> str:
+    suffix = PurePosixPath(path).suffix.lower()
+    return SUPPORTED_LANGUAGE_EXTENSIONS.get(suffix, "text")
+
+
+def render_related_files_section(
+    related_files: list[dict], response_language: str
+) -> str:
+    """把相关文件渲染成 user prompt 末尾的固定格式段（格式冻结见测试）。"""
+    zh = response_language.strip().lower().startswith("zh")
+    heading = RELATED_FILES_HEADING_ZH if zh else RELATED_FILES_HEADING_EN
+    lines: list[str] = [heading, ""]
+    for index, item in enumerate(related_files):
+        path = str(item.get("path", ""))
+        reason = str(item.get("reason", ""))
+        truncated = bool(item.get("truncated"))
+        content = str(item.get("content", ""))
+        if zh:
+            title = (
+                f"### {path}（原因：{reason}，已截断）"
+                if truncated
+                else f"### {path}（原因：{reason}）"
+            )
+        else:
+            title = (
+                f"### {path} (reason: {reason}, truncated)"
+                if truncated
+                else f"### {path} (reason: {reason})"
+            )
+        lines.append(title)
+        lines.append(f"```{_language_for_path(path)}")
+        # 内容自带的末尾换行不额外空行：围栏紧跟最后一行。
+        lines.append(content.rstrip("\n"))
+        lines.append("```")
+        if index < len(related_files) - 1:
+            lines.append("")
+    return "\n".join(lines)
 
 
 # 由服务端确定性组件（分析器 / 校验器）填写、不交给模型的 Finding 字段。
@@ -164,8 +235,14 @@ class PromptAssembler:
         self._config = config or PromptAssemblerConfig()
         self._response_language = response_language
 
-    def build_system_prompt(self, language: str) -> str:
-        """组装完整的 system prompt。"""
+    def build_system_prompt(
+        self, language: str, *, include_related_file_rules: bool = False
+    ) -> str:
+        """组装完整的 system prompt。
+
+        ``include_related_file_rules=True`` 时追加「相关文件」诚实约束；
+        默认 False，与注入前逐字一致。
+        """
         normalized_language = self._normalize_language(language)
         sections = [BASE_SYSTEM_PROMPT.strip()]
 
@@ -176,6 +253,9 @@ class PromptAssembler:
         if self._config.include_custom_rules_in_system_prompt and self._config.custom_rules:
             rendered_rules = "\n".join(f"- {rule}" for rule in self._config.custom_rules)
             sections.append(f"CUSTOM REVIEW RULES:\n{rendered_rules}")
+
+        if include_related_file_rules:
+            sections.append(self.related_file_rules())
 
         language_instruction = (
             "Write summary, finding titles, problems, suggestions, and human-readable categories in Simplified Chinese."
@@ -227,7 +307,18 @@ class PromptAssembler:
             "Context:",
             diff_with_context or "<empty>",
         ]
+        related_files = getattr(file_context, "related_files", None) or []
+        if related_files:
+            sections.append(self.render_related_files(related_files))
         return "\n".join(sections)
+
+    def related_file_rules(self) -> str:
+        """相关文件诚实约束（system prompt 追加段）。"""
+        return related_file_system_rules(self._response_language)
+
+    def render_related_files(self, related_files: list[dict]) -> str:
+        """user prompt 末尾的相关文件固定格式段。"""
+        return render_related_files_section(related_files, self._response_language)
 
     def build_cross_file_system_prompt(self) -> str:
         """Build instructions for a cross-file impact review."""

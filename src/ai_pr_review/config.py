@@ -605,6 +605,151 @@ def normalize_workbench_mode(value: object) -> str:
     return DEFAULT_WORKBENCH_MODE
 
 
+# CHAT/REVIEW 双槽路由（docs/dual-model-roles-plan.md §3）。
+# 两个槽都是**可选覆盖**：`""` 表示"跟随运行模式预设"（即按 hybrid_strategy 推导），
+# 因此旧配置文件不需要任何改动就能加载。
+CHAT_SLOT_VALUES: tuple[str, ...] = ("remote", "local")
+REVIEW_SLOT_VALUES: tuple[str, ...] = ("remote", "local", "hybrid")
+DEFAULT_CHAT_SLOT = ""
+DEFAULT_REVIEW_SLOT = ""
+# 显式 review_slot -> 派生的 hybrid_strategy（方案 §3.2）。
+REVIEW_SLOT_TO_STRATEGY: dict[str, str] = {
+    "remote": "remote_only",
+    "local": "local_only",
+    "hybrid": "balanced",
+}
+# 旧配置方向：hybrid_strategy -> 推导出的 review_slot（方案 §3.4）。
+REVIEW_STRATEGY_TO_SLOT: dict[str, str] = {
+    "remote_only": "remote",
+    "local_only": "local",
+    "balanced": "hybrid",
+}
+
+# 仓库感知审查的偏好项（docs/repo-aware-review-plan.md §4.6）。
+REPO_CONTEXT_MODES: tuple[str, ...] = ("off", "tests", "tests+imports")
+DEFAULT_REPO_CONTEXT = "tests+imports"
+DEFAULT_REPO_CONTEXT_MAX_FILES = 3
+DEFAULT_REPO_CONTEXT_BUDGET_TOKENS = 4000
+DEFAULT_REPO_CACHE_MAX_MB = 200
+# 合法闭区间（含端点）；越界一律回退默认值。
+REPO_CONTEXT_MAX_FILES_RANGE: tuple[int, int] = (1, 10)
+REPO_CONTEXT_BUDGET_TOKENS_RANGE: tuple[int, int] = (500, 32000)
+REPO_CACHE_MAX_MB_RANGE: tuple[int, int] = (10, 10000)
+
+
+def _warn_invalid_preference(field: str, detail: str) -> None:
+    """非法偏好值的统一告警。
+
+    与 ``normalize_workbench_mode`` 同风格：只回退 + 告警，绝不抛异常
+    （配置坏了也要能进 ``pr-review config`` 去修）。提示里不回显原值：
+    配置内容可能含终端控制字符或误粘贴的密钥。
+    """
+    warnings.warn(
+        f"配置项 preferences.{field} 的值不受支持，{detail}。",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+
+
+def normalize_chat_slot(value: object) -> str:
+    """把任意输入归一化为合法的 ``chat_slot``。
+
+    空串（含缺失、``None``）**不是**非法值：它的语义就是"跟随运行模式预设"，
+    与非法值回退后的结果一致，因此不告警。
+    """
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return DEFAULT_CHAT_SLOT
+    if normalized in CHAT_SLOT_VALUES:
+        return normalized
+    _warn_invalid_preference(
+        "chat_slot", "已回退为跟随运行模式预设（可选值：remote、local，或留空）"
+    )
+    return DEFAULT_CHAT_SLOT
+
+
+def normalize_review_slot(value: object) -> str:
+    """把任意输入归一化为合法的 ``review_slot``（"hybrid" 仅审查侧可填）。"""
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return DEFAULT_REVIEW_SLOT
+    if normalized in REVIEW_SLOT_VALUES:
+        return normalized
+    _warn_invalid_preference(
+        "review_slot", "已回退为跟随运行模式预设（可选值：remote、local、hybrid，或留空）"
+    )
+    return DEFAULT_REVIEW_SLOT
+
+
+def normalize_repo_context(value: object) -> str:
+    """把任意输入归一化为合法的 ``repo_context``（仓库上下文预取范围）。"""
+    normalized = str(value or "").strip().lower()
+    if normalized in REPO_CONTEXT_MODES:
+        return normalized
+    _warn_invalid_preference(
+        "repo_context", "已回退为 tests+imports（可选值：off、tests、tests+imports）"
+    )
+    return DEFAULT_REPO_CONTEXT
+
+
+def _normalize_bounded_int(
+    value: object, *, field: str, default: int, bounds: tuple[int, int]
+) -> int:
+    """把任意输入归一化为 ``bounds`` 闭区间内的整数，否则回退 ``default``。"""
+    minimum, maximum = bounds
+    candidate: int | None
+    if isinstance(value, bool):
+        # bool 是 int 的子类：True 会被当成 1 通过范围检查，但"最大文件数 = True"
+        # 不是用户能表达的意思，按非法值处理比静默当 1 更安全。
+        candidate = None
+    elif isinstance(value, int):
+        candidate = value
+    elif isinstance(value, float) and value.is_integer():
+        # JSON 里的 3.0 与 3 等价，不该因此触发一次回退告警。
+        candidate = int(value)
+    elif isinstance(value, str) and value.strip():
+        try:
+            candidate = int(value.strip())
+        except ValueError:
+            candidate = None
+    else:
+        candidate = None
+    if candidate is None or not minimum <= candidate <= maximum:
+        _warn_invalid_preference(field, f"已回退为 {default}（允许范围：{minimum}..{maximum}）")
+        return default
+    return candidate
+
+
+def normalize_repo_context_max_files(value: object) -> int:
+    """每个变更文件最多预取几个相关仓库文件（1..10）。"""
+    return _normalize_bounded_int(
+        value,
+        field="repo_context_max_files",
+        default=DEFAULT_REPO_CONTEXT_MAX_FILES,
+        bounds=REPO_CONTEXT_MAX_FILES_RANGE,
+    )
+
+
+def normalize_repo_context_budget_tokens(value: object) -> int:
+    """每个变更文件的相关文件总 token 预算（500..32000）。"""
+    return _normalize_bounded_int(
+        value,
+        field="repo_context_budget_tokens",
+        default=DEFAULT_REPO_CONTEXT_BUDGET_TOKENS,
+        bounds=REPO_CONTEXT_BUDGET_TOKENS_RANGE,
+    )
+
+
+def normalize_repo_cache_max_mb(value: object) -> int:
+    """仓库文件缓存目录的容量上限，单位 MB（10..10000）。"""
+    return _normalize_bounded_int(
+        value,
+        field="repo_cache_max_mb",
+        default=DEFAULT_REPO_CACHE_MAX_MB,
+        bounds=REPO_CACHE_MAX_MB_RANGE,
+    )
+
+
 @dataclass
 class PreferencesConfig:
     """User-facing CLI preferences."""
@@ -617,10 +762,90 @@ class PreferencesConfig:
     hybrid_strategy: str = "balanced"  # 新增：双模型协作策略
     max_cost_per_review: float = 0.50  # 新增：单次审查最大成本
     workbench_mode: str = DEFAULT_WORKBENCH_MODE  # 审查工作台显示模式
+    # CHAT/REVIEW 双槽路由：空 = 跟随运行模式预设（由 resolve_* 推导）。
+    chat_slot: str = DEFAULT_CHAT_SLOT
+    review_slot: str = DEFAULT_REVIEW_SLOT
+    # 仓库感知审查：预取范围 + 上限（见 docs/repo-aware-review-plan.md §4.6）。
+    repo_context: str = DEFAULT_REPO_CONTEXT
+    repo_context_max_files: int = DEFAULT_REPO_CONTEXT_MAX_FILES
+    repo_context_budget_tokens: int = DEFAULT_REPO_CONTEXT_BUDGET_TOKENS
+    repo_cache_max_mb: int = DEFAULT_REPO_CACHE_MAX_MB
 
     def __post_init__(self) -> None:
         # 属性一旦构造出来就保证合法，加载/导入/向导三条路径因此共用同一套回退规则。
+        # （resolve_* 仍会对"构造之后直接赋值"的坏值兜底，见 resolve_chat_slot。）
         self.workbench_mode = normalize_workbench_mode(self.workbench_mode)
+        self.chat_slot = normalize_chat_slot(self.chat_slot)
+        self.review_slot = normalize_review_slot(self.review_slot)
+        self.repo_context = normalize_repo_context(self.repo_context)
+        self.repo_context_max_files = normalize_repo_context_max_files(
+            self.repo_context_max_files
+        )
+        self.repo_context_budget_tokens = normalize_repo_context_budget_tokens(
+            self.repo_context_budget_tokens
+        )
+        self.repo_cache_max_mb = normalize_repo_cache_max_mb(self.repo_cache_max_mb)
+
+
+def _preferences_of(config: object) -> object:
+    """取出偏好对象：同时接受 ``AppConfig`` 与裸 ``PreferencesConfig``。
+
+    ``PreferencesConfig`` 自己没有 ``preferences`` 属性，因此直接传它也能工作；
+    传其它东西（``None``/字典/任意对象）时返回原对象，后续 ``getattr`` 全部走默认值，
+    保证 resolve_* 永不抛异常。
+    """
+    preferences = getattr(config, "preferences", None)
+    return config if preferences is None else preferences
+
+
+def _hybrid_strategy_of(config: object) -> str:
+    """当前运行模式预设，归一化为小写（与既有 `hybrid_strategy` 读法一致）。"""
+    return str(getattr(_preferences_of(config), "hybrid_strategy", "") or "").strip().lower()
+
+
+def resolve_chat_slot(config: object) -> str:
+    """返回聊天槽位：``"remote"`` 或 ``"local"``。
+
+    显式 ``chat_slot`` 优先；为空（或非法）时按运行模式预设推导：
+    ``local_only`` -> 本地，其余（``remote_only`` / ``balanced`` / 未知）一律远端。
+
+    非法显式值只告警回退，不抛异常。构造之后再直接赋值
+    （``preferences.chat_slot = "cloud"``）会绕过 ``__post_init__``，所以这里重新
+    归一化一次——告警只由这一处发出，同一次读取不会重复告警。
+    """
+    explicit = normalize_chat_slot(getattr(_preferences_of(config), "chat_slot", ""))
+    if explicit:
+        return explicit
+    return "local" if _hybrid_strategy_of(config) == "local_only" else "remote"
+
+
+def resolve_review_slot(config: object) -> str:
+    """返回审查槽位：``"remote"``、``"local"`` 或 ``"hybrid"``。
+
+    显式 ``review_slot`` 优先；为空（或非法）时按运行模式预设推导：
+    ``local_only`` -> 本地、``balanced`` -> 混合、其余（含未知）-> 远端。
+    """
+    explicit = normalize_review_slot(getattr(_preferences_of(config), "review_slot", ""))
+    if explicit:
+        return explicit
+    return REVIEW_STRATEGY_TO_SLOT.get(_hybrid_strategy_of(config), "remote")
+
+
+def sync_review_slot_to_strategy(config: object) -> None:
+    """把显式 ``review_slot`` 折算写回 ``preferences.hybrid_strategy``。
+
+    仅在 ``review_slot`` 是三个合法值之一时执行
+    （``remote`` -> ``remote_only``、``local`` -> ``local_only``、``hybrid`` -> ``balanced``）；
+    空值或非法值一律不改动 ``hybrid_strategy``——"用户没细化路由时，预设就是唯一事实来源"。
+
+    非法值不在这里告警：``resolve_review_slot`` 已经是告警点，两处都发会让同一次
+    读取重复告警。聊天槽不参与折算（聊天只从预设**推导**，从不反向写回预设）。
+    """
+    preferences = _preferences_of(config)
+    explicit = str(getattr(preferences, "review_slot", "") or "").strip().lower()
+    strategy = REVIEW_SLOT_TO_STRATEGY.get(explicit)
+    if strategy is not None:
+        preferences.hybrid_strategy = strategy
 
 
 @dataclass

@@ -25,7 +25,15 @@ from ai_pr_review.services.filter_pipeline import (
 )
 from ai_pr_review.services.hybrid_orchestrator import HybridReviewOrchestrator
 from ai_pr_review.services.post_processor import PostProcessor
-from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
+from ai_pr_review.services.prompt_assembler import (
+    RELATED_FILE_RULES_EN,
+    RELATED_FILE_RULES_ZH,
+    Finding,
+    PromptAssembler as RealPromptAssembler,
+    ReviewResult,
+    related_file_system_rules,
+)
+from ai_pr_review.services.repo_context import FileSystemRepoCache, RelatedFile
 from ai_pr_review.services.review_orchestrator import (
     ReviewCancelled,
     ReviewOrchestrator,
@@ -1463,3 +1471,309 @@ def test_cancelled_review_releases_its_cost_reservation(monkeypatch) -> None:
 
     asyncio.run(scenario())
     assert client.reserved_cost == 0
+
+
+# ---------------------------------------------------------------------------
+# 仓库感知 L1-b：FileContext.related_files + PromptAssembler 注入段 + hybrid 预取
+# ---------------------------------------------------------------------------
+
+
+def _related(
+    path: str,
+    reason: str = "test",
+    content: str = "def t():\n    pass\n",
+    *,
+    truncated: bool = False,
+    from_cache: bool = False,
+) -> dict[str, Any]:
+    return {
+        "path": path,
+        "reason": reason,
+        "content": content,
+        "truncated": truncated,
+        "from_cache": from_cache,
+    }
+
+
+class TestFileContextRelatedFilesDefault:
+    def test_related_files_defaults_to_empty_list(self):
+        context = FileContext(
+            file_path="src/a.py",
+            language="python",
+            diff="d",
+            diff_with_context="c",
+            parse_mode="regex",
+        )
+        assert context.related_files == []
+
+    def test_default_empty_leaves_prompt_unchanged(self):
+        context = FileContext(
+            file_path="src/a.py",
+            language="python",
+            diff="d",
+            diff_with_context="c",
+            parse_mode="regex",
+        )
+        assembler = RealPromptAssembler()
+        prompt = assembler.build_user_prompt(context)
+        assert "相关仓库文件" not in prompt
+        assert "Related repository files" not in prompt
+        system = assembler.build_system_prompt("python")
+        assert "RELATED FILE RULES" not in system
+
+
+class TestRelatedFilesPromptFreeze:
+    """§4.5 段格式冻结：逐字断言，改动即失败。"""
+
+    def test_user_prompt_section_format_zh(self):
+        assembler = RealPromptAssembler(response_language="zh-CN")
+        context = FileContext(
+            file_path="src/service.py",
+            language="python",
+            diff="@@ -1 +1 @@\n-a\n+b",
+            diff_with_context="ctx",
+            parse_mode="regex",
+            related_files=[
+                _related(
+                    "tests/test_auth_service.py",
+                    "test",
+                    "def test_ok():\n    assert True\n",
+                    truncated=True,
+                ),
+                _related("path/to/config.py", "import", "X = 1\n", from_cache=True),
+            ],
+        )
+
+        prompt = assembler.build_user_prompt(context)
+
+        expected = (
+            "\n## 相关仓库文件（未被本次修改）\n"
+            "\n"
+            "### tests/test_auth_service.py（原因：test，已截断）\n"
+            "```python\n"
+            "def test_ok():\n"
+            "    assert True\n"
+            "```\n"
+            "\n"
+            "### path/to/config.py（原因：import）\n"
+            "```python\n"
+            "X = 1\n"
+            "```"
+        )
+        assert prompt.endswith(expected)
+
+    def test_user_prompt_section_format_en(self):
+        assembler = RealPromptAssembler(response_language="en-US")
+        context = FileContext(
+            file_path="src/service.py",
+            language="python",
+            diff="@@ -1 +1 @@\n-a\n+b",
+            diff_with_context="ctx",
+            parse_mode="regex",
+            related_files=[
+                _related(
+                    "tests/test_auth_service.py",
+                    "test",
+                    "def test_ok():\n    assert True\n",
+                    truncated=True,
+                ),
+            ],
+        )
+
+        prompt = assembler.build_user_prompt(context)
+
+        expected = (
+            "\n## Related repository files (not modified in this PR)\n"
+            "\n"
+            "### tests/test_auth_service.py (reason: test, truncated)\n"
+            "```python\n"
+            "def test_ok():\n"
+            "    assert True\n"
+            "```"
+        )
+        assert prompt.endswith(expected)
+
+    def test_system_prompt_honesty_rules_zh_and_en(self):
+        zh = RealPromptAssembler(response_language="zh-CN").build_system_prompt(
+            "python", include_related_file_rules=True
+        )
+        en = RealPromptAssembler(response_language="en-US").build_system_prompt(
+            "python", include_related_file_rules=True
+        )
+        assert RELATED_FILE_RULES_ZH in zh
+        assert "引用它们时必须给出 `文件:行`" in zh
+        assert "未在上下文中出现的文件内容不得臆测" in zh
+        assert RELATED_FILE_RULES_EN in en
+        assert "always give `file:line`" in en
+        assert "Never invent file content that does not appear in the context" in en
+        assert related_file_system_rules("zh-CN") == RELATED_FILE_RULES_ZH
+        assert related_file_system_rules("en-US") == RELATED_FILE_RULES_EN
+
+
+class CountingRepoProvider:
+    """stub 预取器：记录构造与 collect_for_file 调用。"""
+
+    constructions = 0
+    collect_calls: list[str] = []
+    items: list[RelatedFile] = []
+    error: Exception | None = None
+
+    @classmethod
+    def reset(cls, items: list[RelatedFile] | None = None, error: Exception | None = None):
+        cls.constructions = 0
+        cls.collect_calls = []
+        cls.items = items or []
+        cls.error = error
+
+    def __init__(self, *args, **kwargs):
+        CountingRepoProvider.constructions += 1
+        self.kwargs = kwargs
+
+    def collect_for_file(self, file_path: str):
+        CountingRepoProvider.collect_calls.append(file_path)
+        if CountingRepoProvider.error is not None:
+            raise CountingRepoProvider.error
+        return list(CountingRepoProvider.items)
+
+
+class TestHybridRepoContextInjection:
+    def _run(self, monkeypatch, tmp_path, *, mode: str, items=None, error=None):
+        CountingRepoProvider.reset(items=items, error=error)
+        _patch_hybrid_orchestrator(monkeypatch)
+        monkeypatch.setattr(
+            "ai_pr_review.services.hybrid_orchestrator.RepoContextProvider",
+            CountingRepoProvider,
+        )
+        monkeypatch.setattr(
+            "ai_pr_review.services.hybrid_orchestrator.ResultStore",
+            RecordingResultStore,
+        )
+        config = _standard_config(tmp_path)
+        config.preferences.repo_context = mode
+        orchestrator = HybridReviewOrchestrator(config)
+        artifacts = asyncio.run(orchestrator.review("https://github.com/owner/repo/pull/42"))
+        return artifacts
+
+    def test_off_does_not_call_provider(self, monkeypatch, tmp_path):
+        self._run(monkeypatch, tmp_path, mode="off")
+
+        assert CountingRepoProvider.constructions == 0
+        assert CountingRepoProvider.collect_calls == []
+        meta = RecordingResultStore.last.saved_metadata["repo_context"]
+        assert meta["files"] == []
+        assert meta["skipped_reason"] == "off"
+
+    def test_non_off_calls_provider_and_records_metadata(self, monkeypatch, tmp_path):
+        items = [
+            RelatedFile(
+                path="tests/test_src.py",
+                reason="test",
+                content="def t():\n    pass\n",
+                truncated=False,
+                from_cache=True,
+            ),
+            RelatedFile(
+                path="pkg/dep.py",
+                reason="import",
+                content="X = 1\n",
+                truncated=True,
+                from_cache=False,
+            ),
+        ]
+        self._run(monkeypatch, tmp_path, mode="tests+imports", items=items)
+
+        # StubPRFetcher 造了 4 个文件，每个都会 collect 一次
+        assert CountingRepoProvider.constructions == 1
+        assert len(CountingRepoProvider.collect_calls) == 4
+        meta = RecordingResultStore.last.saved_metadata["repo_context"]
+        assert meta["files"] == [
+            "tests/test_src.py",
+            "pkg/dep.py",
+            "tests/test_src.py",
+            "pkg/dep.py",
+            "tests/test_src.py",
+            "pkg/dep.py",
+            "tests/test_src.py",
+            "pkg/dep.py",
+        ]
+        assert meta["from_cache"] == 4
+        assert meta["truncated"] == ["pkg/dep.py"] * 4
+        assert meta["skipped_reason"] is None
+
+    def test_provider_exception_degrades_and_sets_skipped_reason(self, monkeypatch, tmp_path):
+        artifacts = self._run(
+            monkeypatch,
+            tmp_path,
+            mode="tests+imports",
+            error=RuntimeError("prefetch exploded"),
+        )
+
+        # 审查必须正常完成，不能被预取失败打断
+        assert artifacts.review_result is not None
+        meta = RecordingResultStore.last.saved_metadata["repo_context"]
+        assert meta["files"] == []
+        assert meta["skipped_reason"] == "prefetch exploded"
+
+    def test_tests_mode_passes_test_only_reasons(self, monkeypatch, tmp_path):
+        captured: dict[str, Any] = {}
+
+        class CaptureProvider(CountingRepoProvider):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                captured.update(kwargs)
+
+        CountingRepoProvider.reset()
+        _patch_hybrid_orchestrator(monkeypatch)
+        monkeypatch.setattr(
+            "ai_pr_review.services.hybrid_orchestrator.RepoContextProvider",
+            CaptureProvider,
+        )
+        monkeypatch.setattr(
+            "ai_pr_review.services.hybrid_orchestrator.ResultStore",
+            RecordingResultStore,
+        )
+        config = _standard_config(tmp_path)
+        config.preferences.repo_context = "tests"
+        asyncio.run(
+            HybridReviewOrchestrator(config).review(
+                "https://github.com/owner/repo/pull/42"
+            )
+        )
+
+        assert captured.get("reasons") == frozenset({"test"})
+        assert captured.get("max_files") == 3
+        assert captured.get("budget_tokens") == 4000
+
+
+class TestFileSystemRepoCache:
+    def test_put_then_get_roundtrip(self, tmp_path):
+        cache = FileSystemRepoCache("owner", "repo", "sha123", root=tmp_path)
+        cache.put("pkg/mod.py", "hello\n")
+
+        assert cache.get("pkg/mod.py") == "hello\n"
+        # 落盘路径符合 <root>/<owner>__<repo>/<sha>/<safe-path>.txt
+        stored = list(cache.directory.glob("*.txt"))
+        assert len(stored) == 1
+        assert stored[0].name == "pkg__mod.py.txt"
+
+    def test_miss_returns_none_and_put_is_atomic(self, tmp_path):
+        cache = FileSystemRepoCache("o", "r", "s", root=tmp_path)
+        assert cache.get("missing.py") is None
+
+        cache.put("a/b.py", "content")
+        leftovers = [p for p in cache.directory.iterdir() if p.name.startswith(".tmp-")]
+        assert leftovers == []
+        assert cache.get("a/b.py") == "content"
+
+    def test_path_traversal_is_sanitized(self, tmp_path):
+        cache = FileSystemRepoCache("o", "r", "s", root=tmp_path)
+        cache.put("../../evil.py", "x")
+
+        assert cache.get("../../evil.py") == "x"
+        # 真正要保证的是：落盘点必须在缓存目录内，不能写出 root 之外。
+        target = next(cache.directory.glob("*.txt"))
+        assert target.resolve().is_relative_to(cache.directory.resolve())
+        assert target.resolve().is_relative_to(tmp_path.resolve())
+        # 干净的路径键不得依赖真实目录结构
+        assert not (tmp_path.parent / "evil.py").exists()
+        assert not (tmp_path / "evil.py").exists()

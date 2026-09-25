@@ -14,6 +14,9 @@ __pycache__/
 # Sandbox-friendly TEMP dirs used when the default temp path is not writable
 .pytest_x/
 .pytest_codex/
+# Per-agent TEMP dirs used by scripts/agent_dispatch_runner.py
+.pytest_claude/
+.pytest_mimo/
 .coverage
 htmlcov/
 

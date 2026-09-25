@@ -103,6 +103,9 @@ class FileContext(BaseModel):
     classes: list[ClassInfo] = Field(default_factory=list)
     parse_mode: str
     full_content: str = ""
+    # 仓库感知（L1-b）：相关但未被本次修改的仓库文件。默认空 = 与注入前完全一致。
+    # 每个 dict 形如 {"path", "reason", "content", "truncated", "from_cache"}。
+    related_files: list[dict] = Field(default_factory=list)
 
 
 class ContextBuilder:

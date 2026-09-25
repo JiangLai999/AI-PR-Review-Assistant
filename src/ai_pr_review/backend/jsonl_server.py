@@ -21,15 +21,27 @@ from pathlib import Path
 from typing import Any, Callable, cast
 
 from ai_pr_review.config import (
+    CHAT_SLOT_VALUES,
     MODEL_PROVIDER_PRESETS,
     PROVIDER_MODEL_PRESETS,
+    REVIEW_SLOT_VALUES,
     AppConfig,
     ConfigValidationError,
     ModelProviderConfig,
     ProviderConfig,
+    resolve_chat_slot,
     resolve_config_path,
+    resolve_review_slot,
+    sync_review_slot_to_strategy,
 )
 from ai_pr_review.services.model_providers.factory import create_model_provider
+from ai_pr_review.services.review_context import (
+    DEFAULT_TOKEN_BUDGET,
+    build_review_context,
+    build_review_context_meta,
+    describe_run,
+    wrap_review_context,
+)
 
 # Use the orchestrator's exception class itself. A *subclass* here would NOT
 # catch a plain `ReviewCancelled` raised inside `run_review` — `except SubClass`
@@ -89,6 +101,26 @@ REVIEW_ROUTING_REASONS: dict[str, dict[str, str]] = {
         ),
     },
 }
+
+
+# CHAT/REVIEW 双槽路由（docs/dual-model-roles-plan.md §3、§5.4）。
+# 槽位是**角色名**，不是"provider 一定在远端"的断言：`remote` 槽永远是持久化的
+# 主 Provider（可能是 Ollama），`local` 槽永远是 `local_provider`。
+ROUTE_SLOT_LABELS: dict[str, str] = {"remote": "云端", "local": "本地", "hybrid": "混合"}
+# 路由快照里的 `profile`：显式槽位 -> custom，否则由运行模式预设折算（方案 §3.2/§3.4）。
+ROUTE_PROFILE_BY_STRATEGY: dict[str, str] = {
+    "remote_only": "cloud",
+    "local_only": "local",
+    "balanced": "hybrid",
+}
+# 配置助手第 1 步的预设清单（方案 §4.1）。`offline` 是旧值：读取时等价于"本地"，
+# 因此不再作为可选项提供，由 `_apply_setup` 继续接受以保持旧载荷兼容。
+RUNTIME_PROFILES: tuple[tuple[str, str], ...] = (
+    ("cloud", "云端"),
+    ("local", "本地"),
+    ("hybrid", "混合"),
+    ("custom", "自定义"),
+)
 
 
 def _utc_now() -> str:
@@ -364,6 +396,10 @@ class Session:
     # repeat publish in a *new* session is a deliberate second comment, not a
     # mistake, and nothing here may survive a restart.
     published_run_ids: set[str] = field(default_factory=set)
+    # The run this session is currently discussing (§9.2 A). Chat injects the
+    # matching review context into its system prompt; in-memory only, so a
+    # restart (or `/context off`) cleanly returns to plain chat.
+    current_run_id: str | None = None
 
 
 class JsonlBackend:
@@ -394,9 +430,7 @@ class JsonlBackend:
             # process without rewriting persisted local_only preferences.
             return "cloud"
         strategy = getattr(self.config.preferences, "hybrid_strategy", "remote_only")
-        return {"remote_only": "cloud", "balanced": "hybrid", "local_only": "local"}.get(
-            strategy, "cloud"
-        )
+        return ROUTE_PROFILE_BY_STRATEGY.get(strategy, "cloud")
 
     def _apply_runtime_profile(self, profile: str) -> dict[str, Any]:
         profile = profile.strip().lower()
@@ -421,10 +455,84 @@ class JsonlBackend:
             self.config.preferences.hybrid_strategy = (
                 "remote_only" if profile == "cloud" else "balanced"
             )
+        # 切运行模式和走配置助手的预设一样，要把显式槽位覆盖清掉（方案 §4.1）。
+        self._clear_route_slots()
         self.config._sync_runtime_sections()
         self.runtime_profile = profile
         self.config.save(self.config_path, save_key=True)
         return self._config_snapshot()
+
+    @staticmethod
+    def _has_explicit_value(preferences: object, field: str, allowed: tuple[str, ...]) -> bool:
+        """字段是否是**合法**的显式取值（docs/dual-model-roles-plan.md §3.3）。
+
+        只有合法值算显式：非法值在 config 层会被回退成"跟随运行模式预设"，
+        这里若按"字段非空就算"会让确认页显示 custom、实际却按预设路由。
+        """
+        value = str(getattr(preferences, field, "") or "").strip().lower()
+        return value in allowed
+
+    def _has_explicit_slot(self) -> bool:
+        """是否显式指定了任一槽位（方案 §3.3）。"""
+        preferences = self.config.preferences
+        return self._has_explicit_value(
+            preferences, "chat_slot", CHAT_SLOT_VALUES
+        ) or self._has_explicit_value(preferences, "review_slot", REVIEW_SLOT_VALUES)
+
+    def _clear_route_slots(self) -> None:
+        """清空两个槽位覆盖：运行模式预设是唯一事实来源（方案 §4.1）。
+
+        不清空的话：选了预设却仍被 `resolve_review_slot` 里的"显式优先"规则压住，
+        协议上的 `routing.review` 会与实际生效的审查策略互相矛盾。
+        """
+        self.config.preferences.chat_slot = ""
+        self.config.preferences.review_slot = ""
+
+    def _slot_model(self, slot: str) -> str:
+        """槽位在路由快照里代表的模型名。
+
+        `hybrid` 没有单一模型，报远端（升级）模型：它是能覆盖全部文件的那个；
+        本地模型由 `slot="local"` 表达（与 `ModelSelector` 的 local/remote 槽一致）。
+        """
+        if slot == "local":
+            return str(self.config.local_provider.default_model or "")
+        return str(self.config.provider.default_model or "")
+
+    def _routing_snapshot(self) -> dict[str, Any]:
+        """`routing` 块：config.snapshot / config.options / model.status 共用（方案 §5.4）。
+
+        只在这里做推导（`resolve_*`），前端只读结果，不得自行由 `hybrid_strategy` 反推。
+
+        `profile` 回答"当前路由来自哪一档预设"，`runtime_profile` 回答"实际哪个槽在生效"
+        （后者已按 `_infer_runtime_profile` 把 Ollama 主 Provider 折算成 local）——
+        两者在 `custom` 与离线旧值上会不同，这是刻意的。
+        """
+        chat_slot = resolve_chat_slot(self.config)
+        review_slot = resolve_review_slot(self.config)
+        profile = (
+            "custom"
+            if self._has_explicit_slot()
+            else ROUTE_PROFILE_BY_STRATEGY.get(
+                str(getattr(self.config.preferences, "hybrid_strategy", "") or "")
+                .strip()
+                .lower(),
+                # 未知/缺失的策略与 `resolve_review_slot` 一样按远端处理。
+                "cloud",
+            )
+        )
+        return {
+            "profile": profile,
+            "chat": {
+                "slot": chat_slot,
+                "label": ROUTE_SLOT_LABELS.get(chat_slot, chat_slot),
+                "model": self._slot_model(chat_slot),
+            },
+            "review": {
+                "slot": review_slot,
+                "label": ROUTE_SLOT_LABELS.get(review_slot, review_slot),
+                "model": self._slot_model(review_slot),
+            },
+        }
 
     def _config_snapshot(self) -> dict[str, Any]:
         # Report the *active* slot so the TUI footer matches what will actually
@@ -461,6 +569,9 @@ class JsonlBackend:
             ),
             "configuration_warnings": list(getattr(self.config, "_ignored_env_overrides", [])),
             "result_store_path": self.config.result_store.db_path,
+            # CHAT/REVIEW 双槽路由（方案 §5.4）。既有字段一个都不改名、不删除：
+            # provider/model/local 仍然描述"活跃槽"，routing 才是两个槽的真相。
+            "routing": self._routing_snapshot(),
         }
 
     @staticmethod
@@ -512,6 +623,11 @@ class JsonlBackend:
         current = self.config.ai_client.model_provider
         return {
             "providers": providers,
+            # 运行模式预设由后端定义（第 4 项"自定义"进入路由细化页），
+            # 前端只渲染 value/label，不硬编码这一档的存在与否。
+            "runtime_profiles": [
+                {"value": value, "label": label} for value, label in RUNTIME_PROFILES
+            ],
             "api_formats": [
                 {"value": "openai", "label": "OpenAI 兼容"},
                 {"value": "anthropic", "label": "Anthropic"},
@@ -575,14 +691,41 @@ class JsonlBackend:
                 "local_base_url": local_provider.base_url,
                 "local_models": local_models,
             },
+            # 确认页/状态栏显示"用户选的是哪一档预设"以及两个槽各用什么模型（方案 §4.1/§5.4）。
+            "routing": self._routing_snapshot(),
         }
+
+    @staticmethod
+    def _setup_slot(
+        params: dict[str, Any],
+        key: str,
+        allowed: tuple[str, ...],
+        current: str,
+        label: str,
+    ) -> str:
+        """读出路由细化页的一个槽位（docs/dual-model-roles-plan.md §4.2）。
+
+        字段缺失（或为 null）= 部分更新，保留已落盘的值；显式空串 = 清除该槽覆盖，
+        重新跟随运行模式预设（与 config 层 `""` 的语义一致）。非法值必须报错而不是
+        静默回退：这是用户刚刚在细化页做出的选择，悄悄改成别的路由比报错更糟。
+        """
+        if key not in params or params.get(key) is None:
+            return current
+        value = str(params[key]).strip().lower()
+        if not value:
+            return ""
+        if value not in allowed:
+            raise ConfigValidationError(
+                f"{label}槽位仅支持 {'、'.join(allowed[:-1])} 或 {allowed[-1]}。"
+            )
+        return value
 
     def _apply_setup(self, params: dict[str, Any]) -> dict[str, Any]:
         """Apply the TUI wizard atomically and reload the persisted result."""
         profile = (
             str(params.get("runtime_profile", "")).strip().lower() or self.runtime_profile
         )
-        if profile not in {"cloud", "local", "hybrid", "offline"}:
+        if profile not in {"cloud", "local", "hybrid", "offline", "custom"}:
             raise ValueError(f"Unsupported runtime profile: {profile}")
 
         if profile in {"cloud", "hybrid"}:
@@ -636,7 +779,7 @@ class JsonlBackend:
             self.config.preferences.hybrid_strategy = (
                 "remote_only" if profile == "cloud" else "balanced"
             )
-        else:
+        elif profile in {"local", "offline"}:
             local = self.config.local_provider
             local_name = (
                 str(params.get("local_provider", "")).strip().lower() or local.name.lower()
@@ -661,6 +804,27 @@ class JsonlBackend:
             provider.validate()
             self.config.local_provider = ProviderConfig.from_model_provider(provider)
             self.config.preferences.hybrid_strategy = "local_only"
+
+        if profile == "custom":
+            # 自定义：只写两个槽位（方案 §4.2）。凭据仍归各槽自己的 provider 配置，
+            # 这里不碰它们——细化页只决定"用哪个槽"，不决定槽里配了什么。
+            # 两个值都校验通过之后才赋值：任一非法就整单失败，内存里也不留半套状态。
+            preferences = self.config.preferences
+            chat_slot = self._setup_slot(
+                params, "chat_slot", CHAT_SLOT_VALUES, preferences.chat_slot, "对话模型"
+            )
+            review_slot = self._setup_slot(
+                params, "review_slot", REVIEW_SLOT_VALUES, preferences.review_slot, "审查模型"
+            )
+            preferences.chat_slot = chat_slot
+            preferences.review_slot = review_slot
+        else:
+            # 预设是唯一事实来源：清空旧覆盖，否则上一次的 custom 会继续生效（方案 §4.1）。
+            # 旧载荷不带这两个字段，行为与改造前完全一致。
+            self._clear_route_slots()
+        # 显式 review_slot 折算回运行模式预设（方案 §3.2）。预设分支已在上面清空槽位，
+        # 因此这一句对它们是无操作；chat_slot 从不反向写回预设。
+        sync_review_slot_to_strategy(self.config)
 
         github_token = str(params.get("github_token", "")).strip()
         if github_token:
@@ -732,6 +896,9 @@ class JsonlBackend:
         return self._config_snapshot()
 
     async def _model_status(self) -> dict[str, Any]:
+        # 顶层字段仍描述"活跃槽"：`/model <name>`（model.apply）改的也是活跃槽，
+        # 两者必须指向同一个 provider，否则状态与随后的写入会互相矛盾。
+        # 两个槽各自的模型在下面的 `routing` 里（方案 §5.1 #10 / §5.4）。
         provider_config = self.config.ai_client.model_provider
         local = provider_config.name.lower() in {"ollama", "local"}
         status: dict[str, Any] = {
@@ -744,6 +911,7 @@ class JsonlBackend:
             "available": None,
             "models": [],
             "message": "",
+            "routing": self._routing_snapshot(),
         }
         try:
             provider = create_model_provider(provider_config)
@@ -881,7 +1049,180 @@ class JsonlBackend:
             "session_id": session.session_id,
             "messages": session.messages,
             "message_count": len(session.messages),
+            # Lets the TUI show which run the conversation is about (§9.2 E)
+            # without a second round trip; `None` means plain chat.
+            "current_run_id": session.current_run_id,
         }
+
+    def _chat_slot_provider(self) -> ModelProviderConfig:
+        """聊天槽位的 provider 配置（docs/dual-model-roles-plan.md §5.1 #4）。
+
+        聊天不再隐含跟随"活跃槽"（`ai_client`）：显式 `chat_slot` 必须能选到与
+        审查不同的模型。`remote` 槽 = 持久化的主 Provider，`local` 槽 = `local_provider`
+        （与 `ModelSelector` 对两个槽的理解一致）。
+
+        两个例外沿用 `config._active_provider_config()` 与 `ModelSelector.__init__` 的既有判定，
+        且只在**没有**显式 `chat_slot` 时生效——它们决定的是"主槽是不是就是本地槽"：
+        1. 本进程被 `AI_PR_REVIEW_PROVIDER` 覆盖（显式要求这个进程用云端）；
+        2. 主 Provider 自己就是 Ollama/Local（用户自定义的端点/模型就在主槽里）。
+        两者如果照旧按 `local_provider` 走，`local_only` 的老用户会从自己配的端点悄悄
+        换到默认 Ollama，或者"本进程用云端"的覆盖只对审查生效、对聊天失效。
+        """
+        if resolve_chat_slot(self.config) == "remote":
+            return self.config.provider.to_model_provider()
+        if self._has_explicit_value(self.config.preferences, "chat_slot", CHAT_SLOT_VALUES):
+            return self.config.local_provider.to_model_provider()
+        primary_is_local = self.config.provider.name.lower() in {"ollama", "local"}
+        if getattr(self.config, "_env_provider_override", False) or primary_is_local:
+            return self.config.provider.to_model_provider()
+        return self.config.local_provider.to_model_provider()
+
+    def _chat_context_budget(self) -> int:
+        """聊天上下文的 token 预算（§9.D；配置缺省时用构建器的默认值）。"""
+        raw = getattr(self.config.preferences, "chat_context_budget", DEFAULT_TOKEN_BUDGET)
+        try:
+            budget = int(raw)
+        except (TypeError, ValueError):
+            return DEFAULT_TOKEN_BUDGET
+        return budget if budget > 0 else DEFAULT_TOKEN_BUDGET
+
+    def _chat_system_prompt(self, session: Session) -> str:
+        """语言指令 + （绑定了 Run 时的）审查上下文（§9.2 C）。
+
+        上下文只进 system prompt，不写 `session.messages`：否则历史会随每一轮
+        对话重复膨胀并重复计费。构建失败/run 读不到时降级为普通聊天并记 warning，
+        绝不因为"解读不了这次审查"而让对话失败。
+        """
+        language_instruction = (
+            "Respond in English unless the user explicitly asks for another language."
+            if self.config.preferences.language.lower().startswith("en")
+            else "请默认使用中文回答，除非用户明确要求使用其他语言。"
+        )
+        run_id = session.current_run_id
+        if not run_id:
+            return language_instruction
+        context = self._review_context_for_chat(run_id)
+        if context is None:
+            return language_instruction
+        return f"{language_instruction}\n\n{wrap_review_context(run_id, context)}"
+
+    def _review_context_for_chat(self, run_id: str) -> str | None:
+        """渲染注入用的审查上下文；失败或无记录返回 None（降级，§9.2 C）。"""
+        from ai_pr_review.services.result_store import ResultStore
+
+        try:
+            store = ResultStore(self.config.result_store)
+            context = build_review_context(
+                store, run_id, token_budget=self._chat_context_budget()
+            )
+        except Exception as exc:
+            self._warn_context_unavailable(run_id, f"{exc.__class__.__name__}: {exc}")
+            return None
+        if context is None:
+            self._warn_context_unavailable(run_id, "run 不存在或无法读取")
+        return context
+
+    @staticmethod
+    def _warn_context_unavailable(run_id: str, reason: str) -> None:
+        print(
+            f"review context unavailable for run {run_id} ({reason}); "
+            "falling back to plain chat",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    def _bind_session_run(self, session_id: str | None, run_id: str) -> bool:
+        """把会话绑定到某个 Run（§9.2 A）。
+
+        绑定只发生在内存里，且只对**已经存在**的会话生效：没有会话就没有"当前
+        绑定的审查"，凭空造一个会话只会让 `/context` 报出一个用户看不见的状态。
+        """
+        if not session_id or not run_id:
+            return False
+        session = self.sessions.get(session_id)
+        if session is None:
+            return False
+        session.current_run_id = run_id
+        return True
+
+    def _context_status(self, session: Session | None, *, leading: str = "") -> dict[str, Any]:
+        """`/context` 的展示体：当前绑定、PR 标识与 token 估算（含裁剪情况）。"""
+        budget = self._chat_context_budget()
+        run_id = session.current_run_id if session is not None else None
+        if not run_id:
+            return {
+                "text": self._context_text(
+                    leading,
+                    "审查上下文：未绑定",
+                    "完成一次 /review，或用 /context <run_id> 绑定历史 Run，"
+                    "聊天即可解读该次审查结果。",
+                ),
+                "bound": False,
+                "run_id": None,
+                "token_estimate": None,
+                "token_budget": budget,
+                "trimmed": [],
+            }
+        from ai_pr_review.services.result_store import ResultStore
+
+        try:
+            store = ResultStore(self.config.result_store)
+            run = store.get_run_summary(run_id)
+            metadata = store.get_run_metadata(run_id)
+            context = build_review_context_meta(store, run_id, token_budget=budget)
+        except Exception:
+            run, context = None, None
+            metadata = {}
+        if not run or context is None:
+            # 绑定不会因为 Run 被清理就自动消失：用户看到的必须是"读不到"，
+            # 而不是悄悄变回"未绑定"。
+            return {
+                "text": self._context_text(
+                    leading,
+                    "审查上下文：已绑定",
+                    f"Run: {run_id}",
+                    "该 Run 当前无法读取（可能已被清理）；对话会降级为普通聊天。",
+                    "用法：/context off 解绑。",
+                ),
+                "bound": True,
+                "run_id": run_id,
+                "token_estimate": None,
+                "token_budget": budget,
+                "trimmed": [],
+            }
+        lines = [f"Run: {run_id}"]
+        label = describe_run(run, metadata)
+        if label:
+            lines.append(f"PR: {label}")
+        lines.append(f"token 估算: 约 {context.tokens} tokens（预算 {context.budget}）")
+        if context.was_trimmed:
+            lines.append(f"已裁剪: {'、'.join(context.trimmed)}（完整内容见 /explain {run_id}）")
+        lines.append("用法：/context <run_id> 切换 · /context off 解绑")
+        return {
+            "text": self._context_text(leading, "审查上下文：已绑定", *lines),
+            "bound": True,
+            "run_id": run_id,
+            "token_estimate": context.tokens,
+            "token_budget": context.budget,
+            "trimmed": list(context.trimmed),
+            "pr": {"url": run.get("pr_url", ""), "label": label},
+        }
+
+    @staticmethod
+    def _context_text(leading: str, *lines: str) -> str:
+        return "\n".join([line for line in (leading, *lines) if line])
+
+    def _context_switch(self, session: Session, run_id: str) -> dict[str, Any]:
+        """`/context <run_id>`：确认该 Run 可读后才切换绑定。"""
+        from ai_pr_review.services.result_store import ResultStore
+
+        store = ResultStore(self.config.result_store)
+        if not store.get_run_summary(run_id):
+            raise LookupError(run_id)
+        # 原样保留用户输入的 run_id：`/explain` 的 not_found 文案用的也是用户输入，
+        # 而不是去猜一个规范化后的 id。
+        session.current_run_id = run_id
+        return self._context_status(session, leading=f"已切换审查上下文：{run_id}")
 
     async def _chat(
         self,
@@ -890,22 +1231,22 @@ class JsonlBackend:
         on_delta: Callable[[str], Awaitable[None]],
         cancel_event: threading.Event,
     ) -> str:
-        provider_config = self.config.ai_client.model_provider
-        if not provider_config.api_key and provider_config.name.lower() not in {"ollama", "local"}:
+        provider_config = self._chat_slot_provider()
+        # 本地豁免按"选中的 provider 名"判断，而不是按槽位：`remote` 槽也可能是 Ollama
+        # 主 Provider（本地模型），而 `local` 槽在环境覆盖下实际指向云端主槽。按槽位判断
+        # 会给云端 provider 传 reasoning_effort，还会漏掉它缺 Key 的错误。
+        is_local = provider_config.name.lower() in {"ollama", "local"}
+        if not provider_config.api_key and not is_local:
             raise RuntimeError(f"Missing API key for provider: {provider_config.name}")
         provider = create_model_provider(provider_config)
         text = self._truncate(text, 12000)
         history = [*session.messages, {"role": "user", "content": text}]
         chat_options: dict[str, Any] = {
-            "system_prompt": (
-                "Respond in English unless the user explicitly asks for another language."
-                if self.config.preferences.language.lower().startswith("en")
-                else "请默认使用中文回答，除非用户明确要求使用其他语言。"
-            ),
+            "system_prompt": self._chat_system_prompt(session),
             "max_tokens": self.config.ai_client.max_tokens,
             "timeout_seconds": self.config.ai_client.timeout_seconds,
         }
-        if provider_config.name.lower() in {"ollama", "local"}:
+        if is_local:
             # Qwen3.5 / DeepSeek-R1 style locally hosted models otherwise spend
             # the whole answer budget in the reasoning channel and return an
             # empty `content`, which Chat surfaces as a connection failure.
@@ -1426,7 +1767,7 @@ class JsonlBackend:
                 elif command == "help":
                     result(
                         {
-                            "text": "/setup  配置助手\n/status 查看运行状态\n/model  查看当前模型\n/review 开始 PR 审查\n/cancel 取消当前审查\n/retry 重试上一次操作\n/report 查看当前报告\n/export json|markdown 导出当前报告\n/history 查看历史记录\n/explain <run_id> 解释 Finding 与证据\n/feedback <run_id> <finding_id> <status> [note] 记录 Finding 反馈\n/publish [run_id] [--confirm] 预览并发布审查评论到 GitHub\n/demo [case_key|list] 运行离线 Demo\n/showcase 查看参赛演示路径\n/exit   退出 Chat"
+                            "text": "/setup  配置助手\n/status 查看运行状态\n/model  查看当前模型\n/review 开始 PR 审查\n/cancel 取消当前审查\n/retry 重试上一次操作\n/report 查看当前报告\n/export json|markdown 导出当前报告\n/history 查看历史记录\n/explain <run_id> 解释 Finding 与证据\n/context [run_id|off] 查看/切换/解除审查上下文绑定\n/feedback <run_id> <finding_id> <status> [note] 记录 Finding 反馈\n/publish [run_id] [--confirm] 预览并发布审查评论到 GitHub\n/demo [case_key|list] 运行离线 Demo\n/showcase 查看参赛演示路径\n/exit   退出 Chat"
                         }
                     )
                 elif command == "setup":
@@ -1499,7 +1840,14 @@ class JsonlBackend:
                     raw_args = params.get("args", [])
                     args = [str(item) for item in raw_args] if isinstance(raw_args, list) else []
                     if args and not args[0].isdigit():
-                        result(self._history_detail(args[0]))
+                        detail = self._history_detail(args[0])
+                        # 载入历史报告即绑定该 Run（§9.2 A）：屏幕上正在看的这次审查
+                        # 就是接下来对话要解读的对象。
+                        if detail.get("run") is not None:
+                            self._bind_session_run(
+                                str(params.get("session_id", "")), args[0]
+                            )
+                        result(detail)
                     else:
                         limit = int(args[0]) if args and args[0].isdigit() else 10
                         store = ResultStore(self.config.result_store)
@@ -1528,9 +1876,36 @@ class JsonlBackend:
                         error("请提供 Run ID：/explain <run_id>", "invalid_request")
                     else:
                         try:
-                            result(self._explain_run(run_id))
+                            explained = self._explain_run(run_id)
                         except LookupError:
                             error(f"未找到审查记录：{run_id}", "not_found")
+                        else:
+                            # 解释成功即绑定：用户刚刚点名要看的 Run 就是对话主题。
+                            self._bind_session_run(str(params.get("session_id", "")), run_id)
+                            result(explained)
+                elif command == "context":
+                    context_session = self.sessions.get(str(params.get("session_id", "")))
+                    raw_args = params.get("args", [])
+                    args = (
+                        [str(item).strip() for item in raw_args]
+                        if isinstance(raw_args, list)
+                        else []
+                    )
+                    if not args:
+                        result(self._context_status(context_session))
+                    elif context_session is None:
+                        # 绑定状态挂在会话上：没有会话就没有"当前绑定"可切换/解除。
+                        error("Session not found", "not_found")
+                    elif args[0].lower() in {"off", "none"}:
+                        context_session.current_run_id = None
+                        result(
+                            self._context_status(None, leading="已解除审查上下文绑定，回到普通聊天。")
+                        )
+                    else:
+                        try:
+                            result(self._context_switch(context_session, args[0]))
+                        except LookupError as exc:
+                            error(f"未找到审查记录：{exc}", "not_found")
                 elif command == "feedback":
                     raw_args = params.get("args", [])
                     args = (
@@ -1728,6 +2103,11 @@ class JsonlBackend:
                                 raise
                             else:
                                 report = review_result.get("report")
+                                # 只有成功落库的审查才会走到这里（取消/超时/失败都在
+                                # 上面的 except 分支），绑定因此天然只发生在成功 run 上。
+                                self._bind_session_run(
+                                    review_session_id, str(review_result["run_id"])
+                                )
                                 self._publish(
                                     {
                                         "event": "review.completed",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable
 from typing import Any
@@ -18,9 +19,23 @@ from ai_pr_review.services.filter_pipeline import FilterPipeline
 from ai_pr_review.services.finding_localizer import localize_deterministic_finding
 from ai_pr_review.services.model_selector import ModelSelector, TaskComplexity
 from ai_pr_review.services.post_processor import PostProcessor
-from ai_pr_review.services.prompt_assembler import Finding, PromptAssembler, ReviewResult
+from ai_pr_review.services.prompt_assembler import (
+    Finding,
+    PromptAssembler,
+    ReviewResult,
+    related_file_system_rules,
+)
+from ai_pr_review.services.repo_context import FileSystemRepoCache, RepoContextProvider
 from ai_pr_review.services.result_store import ResultStore
 from ai_pr_review.services.review_orchestrator import ReviewArtifacts, ReviewCancelled
+
+logger = logging.getLogger(__name__)
+
+# preferences.repo_context 的取值范围见 config.REPO_CONTEXT_MODES。
+# 字段缺失时按默认 tests+imports / 3 / 4000 处理（与 PreferencesConfig 默认值一致）。
+DEFAULT_REPO_CONTEXT_MODE = "tests+imports"
+DEFAULT_REPO_CONTEXT_MAX_FILES = 3
+DEFAULT_REPO_CONTEXT_BUDGET_TOKENS = 4000
 
 
 class HybridReviewOrchestrator:
@@ -34,12 +49,77 @@ class HybridReviewOrchestrator:
         self.context_builder = standard_review.ContextBuilder()
         self.static_analyzer = StaticAnalyzer()
         self.ast_analyzer = PythonAstAnalyzer()
-        self.prompt_assembler = standard_review.PromptAssembler()
+        # 与标准编排器同一套 response_language：相关文件段的中/英标题跟随用户语言。
+        self.prompt_assembler = standard_review.PromptAssembler(
+            response_language=getattr(config.preferences, "language", "zh-CN")
+        )
         self.finding_validator = FindingValidator()
         # 与标准编排器同一份 `app_config.post_processor`：用户的置信度门槛与
         # 去重规则对默认（hybrid）路径同样生效。
         self.post_processor = PostProcessor(config=config.post_processor)
         self.result_store = ResultStore(config.result_store)
+
+    def _repo_context_mode(self) -> str:
+        """resolve preferences.repo_context；缺失/非法时回退 tests+imports。"""
+        raw = getattr(self.config.preferences, "repo_context", DEFAULT_REPO_CONTEXT_MODE)
+        mode = str(raw or DEFAULT_REPO_CONTEXT_MODE).strip().lower()
+        if mode in {"off", "tests", "tests+imports"}:
+            return mode
+        return DEFAULT_REPO_CONTEXT_MODE
+
+    def _repo_context_limits(self) -> tuple[int, int]:
+        """resolve max_files / budget_tokens；缺失时回退 3 / 4000。"""
+        max_files = getattr(
+            self.config.preferences,
+            "repo_context_max_files",
+            DEFAULT_REPO_CONTEXT_MAX_FILES,
+        )
+        budget = getattr(
+            self.config.preferences,
+            "repo_context_budget_tokens",
+            DEFAULT_REPO_CONTEXT_BUDGET_TOKENS,
+        )
+        try:
+            max_files = int(max_files)
+        except (TypeError, ValueError):
+            max_files = DEFAULT_REPO_CONTEXT_MAX_FILES
+        try:
+            budget = int(budget)
+        except (TypeError, ValueError):
+            budget = DEFAULT_REPO_CONTEXT_BUDGET_TOKENS
+        return max_files, budget
+
+    def _build_repo_provider(self, pr_data) -> RepoContextProvider | None:
+        """按偏好构造预取器；`off` 返回 None（零额外请求）。"""
+        mode = self._repo_context_mode()
+        if mode == "off":
+            return None
+        max_files, budget = self._repo_context_limits()
+        reasons = frozenset({"test"}) if mode == "tests" else None
+
+        def read_file(path: str) -> str | None:
+            return self.pr_fetcher.fetch_file_content(
+                pr_data.owner, pr_data.repo, path, pr_data.head_sha
+            )
+
+        cache = FileSystemRepoCache(pr_data.owner, pr_data.repo, pr_data.head_sha)
+        return RepoContextProvider(
+            read_file=read_file,
+            cache=cache,
+            max_files=max_files,
+            budget_tokens=budget,
+            reasons=reasons,
+        )
+
+    @staticmethod
+    def _related_to_dict(item) -> dict[str, Any]:
+        return {
+            "path": getattr(item, "path", ""),
+            "reason": getattr(item, "reason", ""),
+            "content": getattr(item, "content", ""),
+            "truncated": bool(getattr(item, "truncated", False)),
+            "from_cache": bool(getattr(item, "from_cache", False)),
+        }
 
     def _client_config_for(
         self,
@@ -130,6 +210,20 @@ class HybridReviewOrchestrator:
         # 阶段 3: 构建上下文
         stage("context", f"为 {len(filtered_pr_data.files)} 个文件构建代码上下文")
         file_contexts = []
+        # 仓库感知（L1-b）：预取相关文件，失败一律降级为空，绝不中断审查。
+        repo_files: list[str] = []
+        repo_from_cache = 0
+        repo_truncated: list[str] = []
+        repo_skipped_reason: str | None = None
+        try:
+            repo_provider = self._build_repo_provider(pr_data)
+        except Exception as exc:
+            repo_provider = None
+            repo_skipped_reason = str(exc) or exc.__class__.__name__
+            logger.warning("repo context provider init failed: %s", exc)
+        if repo_provider is None and repo_skipped_reason is None:
+            repo_skipped_reason = "off" if self._repo_context_mode() == "off" else None
+
         for file_diff in filtered_pr_data.files:
             full_content = await asyncio.to_thread(
                 self.pr_fetcher.fetch_file_content,
@@ -143,7 +237,40 @@ class HybridReviewOrchestrator:
                 file_diff.patch or "",
                 full_content or "",
             )
+            related_payloads: list[dict[str, Any]] = []
+            if repo_provider is not None:
+                try:
+                    collected = await asyncio.to_thread(
+                        repo_provider.collect_for_file, file_diff.filename
+                    )
+                except Exception as exc:
+                    # 预取失败降级为空列表；首个原因写进 metadata.skipped_reason。
+                    if repo_skipped_reason is None:
+                        repo_skipped_reason = str(exc) or exc.__class__.__name__
+                    logger.warning(
+                        "repo context prefetch failed for %s: %s",
+                        file_diff.filename,
+                        exc,
+                    )
+                    collected = []
+                for item in collected:
+                    payload = self._related_to_dict(item)
+                    related_payloads.append(payload)
+                    repo_files.append(payload["path"])
+                    if payload["from_cache"]:
+                        repo_from_cache += 1
+                    if payload["truncated"]:
+                        repo_truncated.append(payload["path"])
+            if related_payloads:
+                context = context.model_copy(update={"related_files": related_payloads})
             file_contexts.append((file_diff, context))
+
+        repo_context_meta = {
+            "files": repo_files,
+            "from_cache": repo_from_cache,
+            "truncated": repo_truncated,
+            "skipped_reason": repo_skipped_reason,
+        }
 
         # 阶段 4: 运行确定性规则（所有文件）
         stage("static_rules", "运行静态安全规则和 AST 分析")
@@ -225,6 +352,15 @@ class HybridReviewOrchestrator:
             # 使用所选模型执行审查；低复杂度任务也走本地模型，避免静默丢失
             # 模型发现，并保证本地/远程策略都能产生统一 ReviewResult。
             system_prompt = self.prompt_assembler.build_system_prompt(context.language)
+            # 相关文件注入时追加诚实约束（模块级函数，不依赖 stub 是否实现新方法）。
+            if getattr(context, "related_files", None):
+                response_language = str(
+                    getattr(self.config.preferences, "language", "zh-CN")
+                )
+                system_prompt = (
+                    f"{system_prompt}\n\n"
+                    + related_file_system_rules(response_language)
+                )
             user_prompt = self.prompt_assembler.build_user_prompt(context)
 
             call_started_at = time.perf_counter()
@@ -402,6 +538,9 @@ class HybridReviewOrchestrator:
                 "validation_summary": validation_counts,
                 # 后处理丢掉了多少（门槛/去重），与标准编排器同键同义。
                 "filtered_findings": filtered_findings,
+                # 仓库感知（L1-b §4.7）：本次预取了哪些相关文件、几个来自缓存、
+                # 哪些被截断、以及预取是否被跳过/失败。
+                "repo_context": repo_context_meta,
                 "strategy": stats["strategy"],
                 "hybrid": True,
                 "local_calls": stats["local_calls"],
