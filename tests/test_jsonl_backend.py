@@ -2177,6 +2177,39 @@ def test_repeat_publish_in_one_session_warns_and_posts_again(
     assert REPEAT_PUBLISH_WARNING in preview["text"]
 
 
+def test_repeat_publish_warning_literal_stays_in_publish_text_not_comment_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
+) -> None:
+    """§13.5 F：警告属发布预览/结果 text，不是 GitHub 评论正文；文案字面冻结。"""
+    from ai_pr_review.services.publish_service import REPEAT_PUBLISH_WARNING
+
+    # 字面冻结：常量被改写时本用例必须变红，而不是跟着常量一起绿。
+    assert REPEAT_PUBLISH_WARNING == (
+        "注意：该 Run 在本会话中已发布过一次，再次确认会再创建一条评论。"
+    )
+
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(backend)
+    session_id = _new_session(backend)
+
+    first = _execute(backend, "publish", [run_id, "--confirm"], session_id)["result"]
+    assert first["already_published"] is False
+    assert REPEAT_PUBLISH_WARNING not in first["text"]
+    assert REPEAT_PUBLISH_WARNING not in first["comment_body"]
+
+    second = _execute(backend, "publish", [run_id, "--confirm"], session_id)["result"]
+    assert second["already_published"] is True
+    assert REPEAT_PUBLISH_WARNING in second["text"]
+    assert REPEAT_PUBLISH_WARNING not in second["comment_body"]
+    assert second["comment_body"] == first["comment_body"]
+
+    preview = _execute(backend, "publish", [run_id], session_id)["result"]
+    assert preview["already_published"] is True
+    assert REPEAT_PUBLISH_WARNING in preview["text"]
+    assert REPEAT_PUBLISH_WARNING not in preview["comment_body"]
+
+
 def test_publish_ledger_is_per_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
 ) -> None:
