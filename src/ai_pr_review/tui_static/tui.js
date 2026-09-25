@@ -34989,12 +34989,724 @@ function detailScrollDelta(name, shift, ctrl = false, meta = false) {
 }
 
 // src/review-report.ts
+var asRecord = (value) => value && typeof value === "object" ? value : {};
+var asNumber = (value, fallback = 0) => typeof value === "number" && Number.isFinite(value) ? value : fallback;
+var normalizeSeverity = (value) => {
+  const severity = String(value ?? "").trim().toLowerCase();
+  if (severity === "critical" || severity === "high" || severity === "medium" || severity === "low") {
+    return severity;
+  }
+  return "info";
+};
 function reviewReportPanels(report) {
-  const record = report ?? {};
+  const record = asRecord(report);
   return {
     summary: typeof record.summary === "string" ? record.summary : "",
     findings: Array.isArray(record.findings) ? record.findings : []
   };
+}
+function severityCountsFromFindings(findings) {
+  const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  for (const finding of findings) {
+    counts[normalizeSeverity(asRecord(finding).severity)] += 1;
+  }
+  return counts;
+}
+function evidenceCountsFromFindings(findings) {
+  const counts = { valid: 0, needsReview: 0, invalid: 0, unverified: 0 };
+  for (const finding of findings) {
+    const status = String(asRecord(finding).evidence_status ?? "unverified").trim().toLowerCase();
+    if (status === "valid")
+      counts.valid += 1;
+    else if (status === "needs_review" || status === "needs-review" || status === "review") {
+      counts.needsReview += 1;
+    } else if (status === "invalid")
+      counts.invalid += 1;
+    else
+      counts.unverified += 1;
+  }
+  return counts;
+}
+var severityFromReport = (report, findings) => {
+  const counts = asRecord(asRecord(report.counts).by_severity);
+  if (Object.keys(counts).length > 0) {
+    return {
+      critical: asNumber(counts.critical),
+      high: asNumber(counts.high),
+      medium: asNumber(counts.medium),
+      low: asNumber(counts.low),
+      info: asNumber(counts.info)
+    };
+  }
+  return severityCountsFromFindings(findings);
+};
+var evidenceFromReport = (report, findings) => {
+  const validation = asRecord(asRecord(report.run).validation);
+  if (Object.keys(validation).length > 0) {
+    return {
+      valid: asNumber(validation.valid),
+      needsReview: asNumber(validation.needs_review ?? validation.needsReview),
+      invalid: asNumber(validation.invalid),
+      unverified: asNumber(validation.unverified)
+    };
+  }
+  return evidenceCountsFromFindings(findings);
+};
+function reviewWorkspaceFromReport(report) {
+  const record = asRecord(report);
+  const findings = Array.isArray(record.findings) ? record.findings : [];
+  const pr = asRecord(record.pr);
+  const run = asRecord(record.run);
+  return {
+    summary: typeof record.summary === "string" ? record.summary : "",
+    findings,
+    severity: severityFromReport(record, findings),
+    evidence: evidenceFromReport(record, findings),
+    filesReviewed: asNumber(pr.files_reviewed),
+    filesSkipped: asNumber(pr.files_skipped),
+    durationSeconds: typeof run.duration_seconds === "number" ? run.duration_seconds : undefined,
+    cost: typeof run.total_cost === "number" ? run.total_cost : undefined,
+    runId: typeof run.id === "string" ? run.id : undefined,
+    repository: typeof pr.repository === "string" ? pr.repository : undefined,
+    prNumber: typeof pr.number === "number" ? pr.number : undefined,
+    title: typeof pr.title === "string" ? pr.title : undefined
+  };
+}
+
+// src/review-ui/helpers.ts
+var SEVERITY_COLORS = {
+  critical: "#ff6b6b",
+  high: "#fb8147",
+  medium: "#f3c742",
+  low: "#7edc92",
+  info: "#808080"
+};
+var SEVERITY_RANK = {
+  critical: 0,
+  high: 1,
+  medium: 2,
+  low: 3,
+  info: 4
+};
+var SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];
+var SEVERITY_GLYPH = {
+  critical: "\u2588",
+  high: "\u2593",
+  medium: "\u2592",
+  low: "\u2591",
+  info: "\xB7"
+};
+var UNKNOWN_RANK = 5;
+function isEnLanguage(language) {
+  return String(language ?? "zh-CN").toLowerCase().startsWith("en");
+}
+var normalizeToken = (value) => String(value ?? "").trim().replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().replace(/[\s-]+/g, "_");
+function severityColor(severity) {
+  return SEVERITY_COLORS[normalizeToken(severity)] ?? SEVERITY_COLORS.info;
+}
+function evidenceBadge(status, language) {
+  const en = isEnLanguage(language);
+  switch (normalizeToken(status)) {
+    case "valid":
+      return en ? "\u2713 Valid" : "\u2713 \u6709\u6548";
+    case "needs_review":
+    case "review":
+      return en ? "\u26A0 Needs review" : "\u26A0 \u5F85\u590D\u6838";
+    case "invalid":
+      return en ? "\u2717 Invalid" : "\u2717 \u65E0\u6548";
+    default:
+      return en ? "? Unverified" : "? \u672A\u9A8C\u8BC1";
+  }
+}
+function evidenceColor(status) {
+  switch (normalizeToken(status)) {
+    case "valid":
+      return "#7edc92";
+    case "needs_review":
+    case "review":
+      return "#f3c742";
+    case "invalid":
+      return "#ff6b6b";
+    default:
+      return "#808080";
+  }
+}
+function formatDuration(ms, language) {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0)
+    return "\u2014";
+  const en = isEnLanguage(language);
+  if (ms < 1000)
+    return `${Math.round(ms)}ms`;
+  const totalSeconds = ms / 1000;
+  if (totalSeconds < 60)
+    return `${totalSeconds.toFixed(1)}s`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const seconds = Math.floor(totalSeconds % 60);
+  if (totalMinutes < 60) {
+    return en ? `${totalMinutes}m ${String(seconds).padStart(2, "0")}s` : `${totalMinutes}\u5206${String(seconds).padStart(2, "0")}\u79D2`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return en ? `${hours}h ${String(minutes).padStart(2, "0")}m` : `${hours}\u5C0F\u65F6${String(minutes).padStart(2, "0")}\u5206`;
+}
+var clampCount = (value) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+function severityBar(counts, width = 20) {
+  const size = Number.isFinite(width) && width > 0 ? Math.floor(width) : 20;
+  const amounts = SEVERITY_ORDER.map((key) => clampCount(counts?.[key]));
+  const total = amounts.reduce((sum, value) => sum + value, 0);
+  if (total === 0)
+    return "\u2591".repeat(size);
+  const exact = amounts.map((value) => value / total * size);
+  const allocated = exact.map((value) => Math.floor(value));
+  let leftover = size - allocated.reduce((sum, value) => sum + value, 0);
+  const remainders = exact.map((value, index) => ({ index, rest: value - Math.floor(value) })).sort((a, b) => b.rest - a.rest || a.index - b.index);
+  for (let i = 0;leftover > 0; i = (i + 1) % remainders.length) {
+    allocated[remainders[i].index] += 1;
+    leftover -= 1;
+  }
+  return SEVERITY_ORDER.map((key, index) => SEVERITY_GLYPH[key].repeat(allocated[index])).join("");
+}
+function severityPercent(counts) {
+  const critical = clampCount(counts?.critical);
+  const high = clampCount(counts?.high);
+  const total = SEVERITY_ORDER.reduce((sum, key) => sum + clampCount(counts?.[key]), 0);
+  if (total === 0)
+    return 0;
+  return Math.round((critical + high) / total * 100);
+}
+function rankFindings(findings) {
+  if (!Array.isArray(findings))
+    return [];
+  return findings.map((finding, index) => ({ finding, index })).sort((a, b) => {
+    const rankA = SEVERITY_RANK[normalizeToken(a.finding?.severity)] ?? UNKNOWN_RANK;
+    const rankB = SEVERITY_RANK[normalizeToken(b.finding?.severity)] ?? UNKNOWN_RANK;
+    return rankA - rankB || a.index - b.index;
+  }).map((entry) => entry.finding);
+}
+function progressBar(percent, width = 20) {
+  const size = Number.isFinite(width) && width > 0 ? Math.floor(width) : 20;
+  const clamped = typeof percent === "number" && Number.isFinite(percent) ? Math.min(100, Math.max(0, percent)) : 0;
+  const filled = Math.round(clamped / 100 * size);
+  return `${"\u2588".repeat(filled)}${"\u2591".repeat(size - filled)}`;
+}
+function formatCost(cost) {
+  if (typeof cost !== "number" || !Number.isFinite(cost))
+    return "\u2014";
+  return `$${cost.toFixed(4)}`;
+}
+function formatConfidence(confidence) {
+  if (typeof confidence !== "number" || !Number.isFinite(confidence))
+    return "";
+  return `${Math.round(confidence * 100)}%`;
+}
+function evidenceTotals(counts) {
+  return clampCount(counts?.valid) + clampCount(counts?.needsReview) + clampCount(counts?.invalid) + clampCount(counts?.unverified);
+}
+
+// src/review-ui/ReviewProgressPanel.tsx
+var STATUS_GLYPH = {
+  pending: "\xB7",
+  active: "\u25B6",
+  done: "\u2713",
+  failed: "\u2717",
+  skipped: "\u2212"
+};
+var FILE_GLYPH = {
+  pending: "\xB7",
+  reviewed: "\u2713",
+  skipped: "\u2212",
+  failed: "\u2717"
+};
+var STATUS_COLOR = {
+  pending: "#808080",
+  active: "#fb8147",
+  done: "#7edc92",
+  failed: "#ff6b6b",
+  skipped: "#808080"
+};
+var clampPercent = (value) => {
+  if (typeof value !== "number" || !Number.isFinite(value))
+    return 0;
+  return Math.min(100, Math.max(0, value));
+};
+function ReviewProgressPanel(props) {
+  const en = () => isEnLanguage(props.language);
+  const percent = () => clampPercent(props.progress);
+  const stages = () => Array.isArray(props.stages) ? props.stages : [];
+  const fileStates = () => Array.isArray(props.fileStates) ? props.fileStates : [];
+  const title = () => en() ? "REVIEW PROGRESS" : "\u5BA1\u67E5\u8FDB\u5EA6";
+  const stageLine = () => {
+    const label = props.stageLabel || props.stageId || "\u2014";
+    return props.stageLabel && props.stageId ? `${label} (${props.stageId})` : label;
+  };
+  const filesLine = () => {
+    const done = Number.isFinite(props.filesDone) ? Math.max(0, props.filesDone) : 0;
+    const total = typeof props.filesTotal === "number" && Number.isFinite(props.filesTotal) ? Math.max(0, props.filesTotal) : undefined;
+    const counts = total === undefined ? `${done}` : `${done}/${total}`;
+    return props.currentFile ? `${en() ? "Files" : "\u6587\u4EF6"} ${counts} \xB7 ${props.currentFile}` : `${en() ? "Files" : "\u6587\u4EF6"} ${counts}`;
+  };
+  const metaLine = () => `${en() ? "Elapsed" : "\u5DF2\u7528\u65F6"} ${formatDuration(props.elapsedMs, props.language)} \xB7 ${en() ? "Cost" : "\u6210\u672C"} ${formatCost(props.cost)}`;
+  const hasRouting = () => Boolean(props.routing?.runtimeProfile || props.routing?.routerModel || props.routing?.deepModel);
+  return (() => {
+    var _el$ = createElement("box"), _el$2 = createElement("text"), _el$3 = createElement("text"), _el$4 = createElement("text"), _el$5 = createElement("text"), _el$6 = createElement("span"), _el$7 = createElement("span"), _el$8 = createElement("text"), _el$9 = createElement("text");
+    insertNode(_el$, _el$2);
+    insertNode(_el$, _el$3);
+    insertNode(_el$, _el$4);
+    insertNode(_el$, _el$5);
+    insertNode(_el$, _el$8);
+    insertNode(_el$, _el$9);
+    setProp(_el$, "width", "100%");
+    setProp(_el$, "backgroundColor", "#1e1e1e");
+    setProp(_el$, "borderStyle", "single");
+    setProp(_el$, "borderColor", "#fb8147");
+    setProp(_el$, "paddingLeft", 1);
+    setProp(_el$, "paddingRight", 1);
+    setProp(_el$, "flexDirection", "column");
+    setProp(_el$2, "height", 1);
+    setProp(_el$2, "fg", "#fb8147");
+    insert(_el$2, title);
+    setProp(_el$3, "height", 1);
+    setProp(_el$3, "fg", "#eeeeee");
+    insert(_el$3, () => props.url || "\u2014");
+    setProp(_el$4, "height", 1);
+    setProp(_el$4, "fg", "#808080");
+    insert(_el$4, stageLine);
+    insertNode(_el$5, _el$6);
+    insertNode(_el$5, _el$7);
+    setProp(_el$5, "height", 1);
+    setProp(_el$6, "style", {
+      fg: "#fb8147"
+    });
+    insert(_el$6, () => progressBar(percent(), 16));
+    setProp(_el$7, "style", {
+      fg: "#eeeeee"
+    });
+    insert(_el$7, () => ` ${percent().toFixed(0)}%`);
+    setProp(_el$8, "height", 1);
+    setProp(_el$8, "fg", "#808080");
+    insert(_el$8, filesLine);
+    setProp(_el$9, "height", 1);
+    setProp(_el$9, "fg", "#808080");
+    insert(_el$9, metaLine);
+    insert(_el$, createComponent2(Show, {
+      get when() {
+        return stages().length > 0;
+      },
+      get children() {
+        return [(() => {
+          var _el$0 = createElement("text");
+          setProp(_el$0, "height", 1);
+          setProp(_el$0, "fg", "#f3c742");
+          setProp(_el$0, "marginTop", 1);
+          insert(_el$0, () => en() ? "Stages" : "\u9636\u6BB5");
+          return _el$0;
+        })(), createComponent2(For, {
+          get each() {
+            return stages();
+          },
+          children: (stage) => {
+            const tail = () => {
+              const parts = [];
+              if (typeof stage.durationMs === "number" && Number.isFinite(stage.durationMs)) {
+                parts.push(formatDuration(stage.durationMs, props.language));
+              }
+              if (stage.detail)
+                parts.push(stage.detail);
+              return parts.join(" \xB7 ");
+            };
+            return (() => {
+              var _el$14 = createElement("box"), _el$15 = createElement("text"), _el$16 = createElement("text"), _el$17 = createElement("text");
+              insertNode(_el$14, _el$15);
+              insertNode(_el$14, _el$16);
+              insertNode(_el$14, _el$17);
+              setProp(_el$14, "height", 1);
+              setProp(_el$14, "flexDirection", "row");
+              setProp(_el$15, "width", 2);
+              setProp(_el$15, "height", 1);
+              insert(_el$15, () => STATUS_GLYPH[stage.status] ?? "\xB7");
+              setProp(_el$16, "height", 1);
+              setProp(_el$16, "flexGrow", 1);
+              setProp(_el$16, "fg", "#eeeeee");
+              insert(_el$16, () => stage.label || stage.id);
+              setProp(_el$17, "height", 1);
+              setProp(_el$17, "fg", "#808080");
+              insert(_el$17, tail);
+              effect((_$p) => setProp(_el$15, "fg", STATUS_COLOR[stage.status] ?? "#808080", _$p));
+              return _el$14;
+            })();
+          }
+        })];
+      }
+    }), null);
+    insert(_el$, createComponent2(Show, {
+      get when() {
+        return fileStates().length > 0;
+      },
+      get children() {
+        return [(() => {
+          var _el$1 = createElement("text");
+          setProp(_el$1, "height", 1);
+          setProp(_el$1, "fg", "#f3c742");
+          setProp(_el$1, "marginTop", 1);
+          insert(_el$1, () => en() ? "File list" : "\u6587\u4EF6\u5217\u8868");
+          return _el$1;
+        })(), createComponent2(For, {
+          get each() {
+            return fileStates();
+          },
+          children: (file) => {
+            const tail = () => {
+              const parts = [];
+              if (typeof file.findingsCount === "number") {
+                parts.push(`${file.findingsCount}${en() ? " findings" : " \u4E2A\u95EE\u9898"}`);
+              }
+              if (file.reason)
+                parts.push(file.reason);
+              if (file.error)
+                parts.push(file.error);
+              return parts.join(" \xB7 ");
+            };
+            return (() => {
+              var _el$18 = createElement("box"), _el$19 = createElement("text"), _el$20 = createElement("text"), _el$21 = createElement("text");
+              insertNode(_el$18, _el$19);
+              insertNode(_el$18, _el$20);
+              insertNode(_el$18, _el$21);
+              setProp(_el$18, "height", 1);
+              setProp(_el$18, "flexDirection", "row");
+              setProp(_el$19, "width", 2);
+              setProp(_el$19, "height", 1);
+              insert(_el$19, () => FILE_GLYPH[file.status] ?? "\xB7");
+              setProp(_el$20, "height", 1);
+              setProp(_el$20, "flexGrow", 1);
+              setProp(_el$20, "fg", "#eeeeee");
+              insert(_el$20, () => file.filename);
+              setProp(_el$21, "height", 1);
+              insert(_el$21, tail);
+              effect((_p$) => {
+                var _v$ = file.status === "failed" ? "#ff6b6b" : "#808080", _v$2 = file.error ? "#ff6b6b" : "#808080";
+                _v$ !== _p$.e && (_p$.e = setProp(_el$19, "fg", _v$, _p$.e));
+                _v$2 !== _p$.t && (_p$.t = setProp(_el$21, "fg", _v$2, _p$.t));
+                return _p$;
+              }, {
+                e: undefined,
+                t: undefined
+              });
+              return _el$18;
+            })();
+          }
+        })];
+      }
+    }), null);
+    insert(_el$, createComponent2(Show, {
+      get when() {
+        return hasRouting();
+      },
+      get children() {
+        return [(() => {
+          var _el$10 = createElement("text");
+          setProp(_el$10, "height", 1);
+          setProp(_el$10, "fg", "#f3c742");
+          setProp(_el$10, "marginTop", 1);
+          insert(_el$10, () => en() ? "Routing" : "\u6A21\u578B\u8DEF\u7531");
+          return _el$10;
+        })(), (() => {
+          var _el$11 = createElement("text");
+          setProp(_el$11, "height", 1);
+          setProp(_el$11, "fg", "#eeeeee");
+          insert(_el$11, () => [props.routing?.runtimeProfile, props.routing?.routerModel ? `router ${props.routing.routerModel}` : "", props.routing?.deepModel ? `deep ${props.routing.deepModel}` : ""].filter(Boolean).join(" \xB7 "));
+          return _el$11;
+        })(), createComponent2(Show, {
+          get when() {
+            return props.routing?.reason;
+          },
+          get children() {
+            var _el$12 = createElement("text");
+            setProp(_el$12, "height", 1);
+            setProp(_el$12, "fg", "#808080");
+            insert(_el$12, () => props.routing?.reason);
+            return _el$12;
+          }
+        })];
+      }
+    }), null);
+    insert(_el$, createComponent2(Show, {
+      get when() {
+        return Boolean(props.onCancel);
+      },
+      get children() {
+        var _el$13 = createElement("text");
+        setProp(_el$13, "height", 1);
+        setProp(_el$13, "fg", "#808080");
+        setProp(_el$13, "marginTop", 1);
+        insert(_el$13, () => en() ? "Esc Cancel" : "Esc \u53D6\u6D88\u5BA1\u67E5");
+        return _el$13;
+      }
+    }), null);
+    return _el$;
+  })();
+}
+
+// src/review-ui/ReviewSummaryPanel.tsx
+var SEVERITY_KEYS = ["critical", "high", "medium", "low", "info"];
+var EVIDENCE_KEYS = ["valid", "needsReview", "invalid", "unverified"];
+var EVIDENCE_LABEL = {
+  valid: {
+    en: "Valid",
+    zh: "\u6709\u6548",
+    status: "valid"
+  },
+  needsReview: {
+    en: "Needs review",
+    zh: "\u5F85\u590D\u6838",
+    status: "needs_review"
+  },
+  invalid: {
+    en: "Invalid",
+    zh: "\u65E0\u6548",
+    status: "invalid"
+  },
+  unverified: {
+    en: "Unverified",
+    zh: "\u672A\u9A8C\u8BC1",
+    status: "unverified"
+  }
+};
+function ReviewSummaryPanel(props) {
+  const en = () => isEnLanguage(props.language);
+  const severity = () => props.severity ?? {
+    critical: 0,
+    high: 0,
+    medium: 0,
+    low: 0,
+    info: 0
+  };
+  const evidence = () => props.evidence ?? {
+    valid: 0,
+    needsReview: 0,
+    invalid: 0,
+    unverified: 0
+  };
+  const findings = () => Array.isArray(props.findings) ? props.findings : [];
+  const ranked = () => rankFindings(findings()).slice(0, 5);
+  const title = () => en() ? "REVIEW SUMMARY" : "\u5BA1\u67E5\u6458\u8981";
+  const identityLine = () => {
+    const bits = [];
+    if (props.repository)
+      bits.push(props.repository);
+    if (typeof props.prNumber === "number")
+      bits.push(`#${props.prNumber}`);
+    if (props.title)
+      bits.push(props.title);
+    return bits.length > 0 ? bits.join(" \xB7 ") : "\u2014";
+  };
+  const filesLine = () => `${en() ? "Files" : "\u6587\u4EF6"} ${props.filesReviewed ?? 0}${en() ? " reviewed \xB7 " : " \u5DF2\u5BA1\u67E5 \xB7 "}${props.filesSkipped ?? 0}${en() ? " skipped \xB7 Findings " : " \u5DF2\u8DF3\u8FC7 \xB7 \u95EE\u9898 "}${findings().length}`;
+  const metaLine = () => {
+    const bits = [`${en() ? "Duration" : "\u8017\u65F6"} ${formatDuration((props.durationSeconds ?? 0) * 1000, props.language)}`, `${en() ? "Cost" : "\u6210\u672C"} ${formatCost(props.cost)}`];
+    if (props.runId)
+      bits.push(`run ${props.runId}`);
+    if (props.model)
+      bits.push(props.model);
+    return bits.join(" \xB7 ");
+  };
+  return (() => {
+    var _el$ = createElement("box"), _el$2 = createElement("text"), _el$3 = createElement("text"), _el$4 = createElement("text"), _el$5 = createElement("span"), _el$6 = createElement("span"), _el$7 = createElement("span"), _el$8 = createElement("span"), _el$9 = createElement("text"), _el$0 = createElement("text"), _el$1 = createElement("span"), _el$10 = createElement("span"), _el$11 = createTextNode(` `), _el$12 = createElement("text"), _el$13 = createElement("text"), _el$14 = createElement("text"), _el$15 = createElement("text");
+    insertNode(_el$, _el$2);
+    insertNode(_el$, _el$3);
+    insertNode(_el$, _el$4);
+    insertNode(_el$, _el$9);
+    insertNode(_el$, _el$0);
+    insertNode(_el$, _el$12);
+    insertNode(_el$, _el$13);
+    insertNode(_el$, _el$14);
+    insertNode(_el$, _el$15);
+    setProp(_el$, "width", "100%");
+    setProp(_el$, "backgroundColor", "#1e1e1e");
+    setProp(_el$, "borderStyle", "single");
+    setProp(_el$, "borderColor", "#fb8147");
+    setProp(_el$, "paddingLeft", 1);
+    setProp(_el$, "paddingRight", 1);
+    setProp(_el$, "flexDirection", "column");
+    setProp(_el$2, "height", 1);
+    setProp(_el$2, "fg", "#fb8147");
+    insert(_el$2, title);
+    setProp(_el$3, "height", 1);
+    setProp(_el$3, "fg", "#eeeeee");
+    insert(_el$3, identityLine);
+    insertNode(_el$4, _el$5);
+    insertNode(_el$4, _el$6);
+    insertNode(_el$4, _el$7);
+    insertNode(_el$4, _el$8);
+    setProp(_el$4, "height", 1);
+    setProp(_el$4, "marginTop", 1);
+    setProp(_el$5, "style", {
+      fg: "#f3c742"
+    });
+    insert(_el$5, () => en() ? "Severity " : "\u4E25\u91CD\u7EA7\u522B ");
+    setProp(_el$6, "style", {
+      fg: "#fb8147"
+    });
+    insert(_el$6, () => severityBar(severity(), 16));
+    setProp(_el$7, "style", {
+      fg: "#eeeeee"
+    });
+    insert(_el$7, () => ` ${severityPercent(severity())}%`);
+    setProp(_el$8, "style", {
+      fg: "#808080"
+    });
+    insert(_el$8, () => en() ? " high+" : " \u9AD8\u5371\u53CA\u4EE5\u4E0A");
+    setProp(_el$9, "height", 1);
+    insert(_el$9, createComponent2(For, {
+      each: SEVERITY_KEYS,
+      children: (key, index) => (() => {
+        var _el$17 = createElement("span"), _el$18 = createTextNode(` `);
+        insertNode(_el$17, _el$18);
+        insert(_el$17, () => index() > 0 ? "  " : "", _el$18);
+        insert(_el$17, key, _el$18);
+        insert(_el$17, () => severity()[key] ?? 0, null);
+        effect((_$p) => setProp(_el$17, "style", {
+          fg: severityColor(key)
+        }, _$p));
+        return _el$17;
+      })()
+    }));
+    insertNode(_el$0, _el$1);
+    insertNode(_el$0, _el$10);
+    setProp(_el$0, "height", 1);
+    setProp(_el$0, "marginTop", 1);
+    setProp(_el$1, "style", {
+      fg: "#f3c742"
+    });
+    insert(_el$1, () => en() ? "Evidence " : "\u8BC1\u636E\u5065\u5EB7 ");
+    insertNode(_el$10, _el$11);
+    setProp(_el$10, "style", {
+      fg: "#808080"
+    });
+    insert(_el$10, () => en() ? "total" : "\u5408\u8BA1", _el$11);
+    insert(_el$10, () => evidenceTotals(evidence()), null);
+    setProp(_el$12, "height", 1);
+    insert(_el$12, createComponent2(For, {
+      each: EVIDENCE_KEYS,
+      children: (key, index) => {
+        const meta = EVIDENCE_LABEL[key];
+        return (() => {
+          var _el$19 = createElement("span"), _el$20 = createTextNode(` `);
+          insertNode(_el$19, _el$20);
+          insert(_el$19, () => index() > 0 ? "  " : "", _el$20);
+          insert(_el$19, () => evidenceBadge(meta.status, props.language), _el$20);
+          insert(_el$19, () => evidence()[key] ?? 0, null);
+          effect((_$p) => setProp(_el$19, "style", {
+            fg: evidenceColor(meta.status)
+          }, _$p));
+          return _el$19;
+        })();
+      }
+    }));
+    setProp(_el$13, "height", 1);
+    setProp(_el$13, "fg", "#808080");
+    setProp(_el$13, "marginTop", 1);
+    insert(_el$13, filesLine);
+    setProp(_el$14, "height", 1);
+    setProp(_el$14, "fg", "#808080");
+    insert(_el$14, metaLine);
+    setProp(_el$15, "height", 1);
+    setProp(_el$15, "fg", "#f3c742");
+    setProp(_el$15, "marginTop", 1);
+    insert(_el$15, () => en() ? "Top findings" : "\u91CD\u70B9\u95EE\u9898");
+    insert(_el$, createComponent2(Show, {
+      get when() {
+        return ranked().length > 0;
+      },
+      get fallback() {
+        return (() => {
+          var _el$21 = createElement("text");
+          setProp(_el$21, "height", 1);
+          setProp(_el$21, "fg", "#808080");
+          insert(_el$21, () => en() ? "No findings." : "\u6682\u65E0\u95EE\u9898\u3002");
+          return _el$21;
+        })();
+      },
+      get children() {
+        return createComponent2(For, {
+          get each() {
+            return ranked();
+          },
+          children: (finding, index) => {
+            const confidence = () => formatConfidence(finding.confidence);
+            const location = () => {
+              const base = finding.file ?? "\u2014";
+              return typeof finding.line_start === "number" ? `${base}:${finding.line_start}` : base;
+            };
+            return (() => {
+              var _el$22 = createElement("box"), _el$23 = createElement("text"), _el$24 = createElement("span"), _el$25 = createElement("span"), _el$26 = createElement("span"), _el$27 = createElement("text");
+              insertNode(_el$22, _el$23);
+              insertNode(_el$22, _el$27);
+              setProp(_el$22, "flexDirection", "column");
+              insertNode(_el$23, _el$24);
+              insertNode(_el$23, _el$25);
+              insertNode(_el$23, _el$26);
+              setProp(_el$23, "height", 1);
+              setProp(_el$24, "style", {
+                fg: "#808080"
+              });
+              insert(_el$24, () => `${index() + 1}. `);
+              insert(_el$25, () => `[${String(finding.severity ?? "info").toUpperCase()}]`);
+              setProp(_el$26, "style", {
+                fg: "#eeeeee"
+              });
+              insert(_el$26, () => ` ${finding.title ?? finding.message ?? (en() ? "Untitled" : "\u672A\u547D\u540D\u95EE\u9898")}`);
+              setProp(_el$27, "height", 1);
+              setProp(_el$27, "fg", "#808080");
+              insert(_el$27, location, null);
+              insert(_el$27, createComponent2(Show, {
+                get when() {
+                  return confidence();
+                },
+                get children() {
+                  var _el$28 = createElement("span");
+                  setProp(_el$28, "style", {
+                    fg: "#7edc92"
+                  });
+                  insert(_el$28, () => ` \xB7 ${confidence()}`);
+                  return _el$28;
+                }
+              }), null);
+              insert(_el$27, createComponent2(Show, {
+                get when() {
+                  return finding.evidence_status;
+                },
+                get children() {
+                  var _el$29 = createElement("span");
+                  insert(_el$29, () => ` \xB7 ${evidenceBadge(finding.evidence_status ?? "", props.language)}`);
+                  effect((_$p) => setProp(_el$29, "style", {
+                    fg: evidenceColor(finding.evidence_status ?? "")
+                  }, _$p));
+                  return _el$29;
+                }
+              }), null);
+              effect((_$p) => setProp(_el$25, "style", {
+                fg: severityColor(finding.severity ?? "info")
+              }, _$p));
+              return _el$22;
+            })();
+          }
+        });
+      }
+    }), null);
+    insert(_el$, createComponent2(Show, {
+      get when() {
+        return Boolean(props.onOpenFindings);
+      },
+      get children() {
+        var _el$16 = createElement("text");
+        setProp(_el$16, "height", 1);
+        setProp(_el$16, "fg", "#808080");
+        setProp(_el$16, "marginTop", 1);
+        insert(_el$16, () => en() ? "Ctrl+O Open findings" : "Ctrl+O \u6253\u5F00 Findings");
+        return _el$16;
+      }
+    }), null);
+    return _el$;
+  })();
 }
 
 // src/app.tsx
@@ -35089,6 +35801,57 @@ function QuickStartPanel(props) {
     return _el$4;
   })();
 }
+var REVIEW_STAGE_ORDER = [{
+  id: "fetching",
+  label: "\u83B7\u53D6 PR \u6570\u636E"
+}, {
+  id: "filtering",
+  label: "\u8FC7\u6EE4\u53D8\u66F4\u6587\u4EF6"
+}, {
+  id: "context",
+  label: "\u6784\u5EFA\u4EE3\u7801\u4E0A\u4E0B\u6587"
+}, {
+  id: "static_rules",
+  label: "\u8FD0\u884C\u9759\u6001\u89C4\u5219"
+}, {
+  id: "reviewing",
+  label: "\u6267\u884C AI \u5BA1\u67E5"
+}, {
+  id: "cross_file",
+  label: "\u5206\u6790\u8DE8\u6587\u4EF6\u5F71\u54CD"
+}, {
+  id: "persisting",
+  label: "\u4FDD\u5B58\u5BA1\u67E5\u8BB0\u5F55"
+}];
+var emptySeverityCounts = () => ({
+  critical: 0,
+  high: 0,
+  medium: 0,
+  low: 0,
+  info: 0
+});
+var emptyEvidenceCounts = () => ({
+  valid: 0,
+  needsReview: 0,
+  invalid: 0,
+  unverified: 0
+});
+var emptyReviewWorkspace = () => ({
+  summary: "",
+  findings: [],
+  severity: emptySeverityCounts(),
+  evidence: emptyEvidenceCounts(),
+  filesReviewed: 0,
+  filesSkipped: 0
+});
+var stageIdFromEvent = (stageId, stage) => {
+  const explicit = String(stageId ?? "").trim();
+  if (explicit)
+    return explicit;
+  const label = String(stage ?? "").trim();
+  const match = REVIEW_STAGE_ORDER.find((item) => item.label === label || item.id === label);
+  return match?.id ?? label;
+};
 var isGithubPrUrl = (value) => /^https?:\/\/github\.com\/[^\s/]+\/[^\s/]+\/pull\/\d+(?:\/[^\s]*)?$/i.test(value.trim());
 function Composer(props) {
   const initialDraft = (typeof process !== "undefined" ? process.env?.AI_PR_REVIEW_INITIAL_MESSAGE ?? "" : "").trim();
@@ -37180,6 +37943,16 @@ function App() {
   const [reviewUrl, setReviewUrl] = createSignal("");
   const [reviewSummary, setReviewSummary] = createSignal("");
   const [reviewFindings, setReviewFindings] = createSignal([]);
+  const [reviewWorkspace, setReviewWorkspace] = createSignal(emptyReviewWorkspace());
+  const [reviewStages, setReviewStages] = createSignal(REVIEW_STAGE_ORDER.map((stage) => ({
+    ...stage,
+    status: "pending"
+  })));
+  const [reviewFileStates, setReviewFileStates] = createSignal([]);
+  const [reviewFilesTotal, setReviewFilesTotal] = createSignal(0);
+  const [reviewRouting, setReviewRouting] = createSignal({});
+  const [reviewStartedAt, setReviewStartedAt] = createSignal();
+  const [reviewElapsedMs, setReviewElapsedMs] = createSignal(0);
   const [findingsOpen, setFindingsOpen] = createSignal(false);
   const [historyOpen, setHistoryOpen] = createSignal(false);
   const [historyRuns, setHistoryRuns] = createSignal([]);
@@ -37201,6 +37974,60 @@ function App() {
     setReviewReport(report);
     setReviewSummary(panels.summary);
     setReviewFindings(panels.findings);
+    setReviewWorkspace(reviewWorkspaceFromReport(report));
+  };
+  const resetReviewWorkspaceState = () => {
+    setReviewWorkspace(emptyReviewWorkspace());
+    setReviewStages(REVIEW_STAGE_ORDER.map((stage) => ({
+      ...stage,
+      status: "pending"
+    })));
+    setReviewFileStates([]);
+    setReviewFilesTotal(0);
+    setReviewRouting({});
+    setReviewStartedAt(undefined);
+    setReviewElapsedMs(0);
+  };
+  onMount(() => {
+    const timer = setInterval(() => {
+      const started = reviewStartedAt();
+      if (reviewing() && started)
+        setReviewElapsedMs(Date.now() - started);
+    }, 1000);
+    onCleanup(() => clearInterval(timer));
+  });
+  const updateStageState = (stageId, patch) => {
+    setReviewStages((current) => {
+      const index = current.findIndex((stage) => stage.id === stageId);
+      if (index === -1) {
+        return [...current, {
+          id: stageId,
+          label: patch.label ?? stageId,
+          status: "pending",
+          ...patch
+        }];
+      }
+      return current.map((stage, currentIndex) => currentIndex === index ? {
+        ...stage,
+        ...patch
+      } : stage);
+    });
+  };
+  const updateFileState = (filename, patch) => {
+    setReviewFileStates((current) => {
+      const index = current.findIndex((file) => file.filename === filename);
+      if (index === -1) {
+        return [...current, {
+          filename,
+          status: "pending",
+          ...patch
+        }];
+      }
+      return current.map((file, currentIndex) => currentIndex === index ? {
+        ...file,
+        ...patch
+      } : file);
+    });
   };
   const setErrorState = (message) => {
     setErrorMessage(message);
@@ -37313,6 +38140,20 @@ function App() {
     if (!reviewing())
       startReview(url);
   };
+  const openFindings = () => {
+    setHistoryOpen(false);
+    setModelOpen(false);
+    setSetupOpen(false);
+    setPendingReviewUrl("");
+    if (reviewFindings().length > 0) {
+      setFindingsOpen(true);
+    } else {
+      appendMessage({
+        role: "assistant",
+        content: "\u5F53\u524D\u6CA1\u6709 Findings\u3002\u8BF7\u5148\u6267\u884C /review <PR_URL>\uFF0C\u6216\u4F7F\u7528 /history <run_id> \u52A0\u8F7D\u5305\u542B findings \u7684\u5386\u53F2\u62A5\u544A\u3002"
+      });
+    }
+  };
   const resetSessionUi = () => {
     setMessages([]);
     setStreamingAssistant("");
@@ -37325,6 +38166,7 @@ function App() {
     setReviewUrl("");
     setReviewSummary("");
     setReviewFindings([]);
+    resetReviewWorkspaceState();
     setFindingsOpen(false);
     setHistoryOpen(false);
     setHistoryRuns([]);
@@ -37389,6 +38231,7 @@ function App() {
         setReviewProgress(0);
         setReviewSummary("");
         setReviewFindings([]);
+        resetReviewWorkspaceState();
         setReviewReport({});
         setFindingsOpen(false);
         setErrorMessage("");
@@ -37428,8 +38271,11 @@ function App() {
           setReviewSummary("");
           setReviewFindings([]);
           setReviewReport({});
+          resetReviewWorkspaceState();
           setReviewProgress(0);
           setReviewUrl(String(event.url ?? ""));
+          setReviewStartedAt(Date.now());
+          setReviewElapsedMs(0);
           setBackendStatus("REVIEWING");
           setReviewStage("\u51C6\u5907\u5BA1\u67E5");
           setReviewDetail(`\u6B63\u5728\u5904\u7406 ${String(event.url ?? "PR")}`);
@@ -37438,10 +38284,14 @@ function App() {
         }
         if (event.event === "review.stage") {
           const stage = String(event.stage ?? "\u5BA1\u67E5\u4E2D");
+          const stageId = stageIdFromEvent(event.stage_id, event.stage);
+          const rawStatus = String(event.status ?? "started");
+          const stageStatus = rawStatus === "completed" ? "done" : rawStatus === "failed" ? "failed" : rawStatus === "skipped" ? "skipped" : "active";
           const progressByStage = {
             "\u83B7\u53D6 PR \u6570\u636E": 5,
             "\u8FC7\u6EE4\u53D8\u66F4\u6587\u4EF6": 10,
             "\u6784\u5EFA\u4EE3\u7801\u4E0A\u4E0B\u6587": 20,
+            "\u8FD0\u884C\u9759\u6001\u89C4\u5219": 30,
             "\u6267\u884C AI \u5BA1\u67E5": 70,
             "\u5206\u6790\u8DE8\u6587\u4EF6\u5F71\u54CD": 90,
             "\u4FDD\u5B58\u5BA1\u67E5\u8BB0\u5F55": 98
@@ -37450,12 +38300,53 @@ function App() {
           setReviewProgress(progressByStage[stage] ?? reviewProgress());
           setReviewStage(stage);
           setReviewDetail(String(event.detail ?? ""));
+          updateStageState(stageId, {
+            label: stage,
+            status: stageStatus,
+            detail: String(event.detail ?? ""),
+            durationMs: typeof event.duration_ms === "number" ? event.duration_ms : undefined
+          });
+        }
+        if (event.event === "review.stage_done") {
+          const stage = String(event.stage ?? "");
+          const stageId = stageIdFromEvent(event.stage_id, event.stage);
+          updateStageState(stageId, {
+            label: stage || stageId,
+            status: event.status === "failed" ? "failed" : "done",
+            durationMs: typeof event.duration_ms === "number" ? event.duration_ms : undefined
+          });
+          if (typeof event.progress === "number")
+            setReviewProgress(event.progress);
         }
         if (event.event === "review.file_started") {
-          setReviewFile(String(event.filename ?? ""));
+          const filename = String(event.filename ?? "");
+          setReviewFile(filename);
+          if (typeof event.total === "number" && event.total > 0)
+            setReviewFilesTotal(event.total);
+          updateFileState(filename, {
+            status: "pending"
+          });
         }
         if (event.event === "review.file_done") {
+          const filename = String(event.filename ?? "");
+          const rawStatus = String(event.status ?? "reviewed");
+          const fileStatus = rawStatus === "skipped" ? "skipped" : rawStatus === "failed" ? "failed" : "reviewed";
+          updateFileState(filename, {
+            status: fileStatus,
+            findingsCount: typeof event.findings_count === "number" ? event.findings_count : null,
+            durationMs: typeof event.duration_ms === "number" ? event.duration_ms : undefined,
+            reason: typeof event.reason === "string" ? event.reason : undefined,
+            error: typeof event.message === "string" ? event.message : undefined
+          });
           setReviewFilesDone((count) => count + 1);
+        }
+        if (event.event === "review.model_routing") {
+          setReviewRouting({
+            runtimeProfile: typeof event.runtime_profile === "string" ? event.runtime_profile : undefined,
+            routerModel: typeof event.router_model === "string" ? event.router_model : undefined,
+            deepModel: typeof event.deep_model === "string" ? event.deep_model : undefined,
+            reason: typeof event.reason === "string" ? event.reason : undefined
+          });
         }
         if (event.event === "review.completed") {
           setReviewing(false);
@@ -37464,8 +38355,37 @@ function App() {
           setReviewStage("\u5BA1\u67E5\u5B8C\u6210");
           setReviewDetail(`\u53D1\u73B0 ${String(event.finding_count ?? 0)} \u4E2A\u95EE\u9898 \xB7 Run ${String(event.run_id ?? "")}`);
           setReviewFile("");
+          if (typeof event.duration_seconds === "number") {
+            setReviewElapsedMs(Math.max(0, event.duration_seconds * 1000));
+          }
+          setReviewWorkspace((current) => ({
+            ...current,
+            filesReviewed: typeof event.files_reviewed === "number" ? event.files_reviewed : current.filesReviewed,
+            filesSkipped: typeof event.files_skipped === "number" ? event.files_skipped : current.filesSkipped,
+            durationSeconds: typeof event.duration_seconds === "number" ? event.duration_seconds : current.durationSeconds,
+            cost: typeof event.cost === "number" ? event.cost : current.cost,
+            runId: typeof event.run_id === "string" ? event.run_id : current.runId,
+            severity: event.severity && typeof event.severity === "object" ? {
+              critical: Number(event.severity.critical ?? 0),
+              high: Number(event.severity.high ?? 0),
+              medium: Number(event.severity.medium ?? 0),
+              low: Number(event.severity.low ?? 0),
+              info: Number(event.severity.info ?? 0)
+            } : current.severity,
+            evidence: event.evidence && typeof event.evidence === "object" ? {
+              valid: Number(event.evidence.valid ?? 0),
+              needsReview: Number(event.evidence.needs_review ?? event.evidence.needsReview ?? 0),
+              invalid: Number(event.evidence.invalid ?? 0),
+              unverified: Number(event.evidence.unverified ?? 0)
+            } : current.evidence
+          }));
         }
         if (event.event === "review.failed") {
+          if (typeof event.stage_id === "string") {
+            updateStageState(event.stage_id, {
+              status: "failed"
+            });
+          }
           setReviewing(false);
           setBackendStatus("ERROR");
           setReviewStage("\u5BA1\u67E5\u5931\u8D25");
@@ -37475,6 +38395,11 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           setReviewFile("");
         }
         if (event.event === "review.cancelled") {
+          if (typeof event.stage_id === "string") {
+            updateStageState(event.stage_id, {
+              status: "skipped"
+            });
+          }
           setReviewing(false);
           setBackendStatus("READY");
           setReviewStage("\u5BA1\u67E5\u5DF2\u53D6\u6D88");
@@ -37519,9 +38444,9 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
   });
   onCleanup(() => void backend.stop());
   return (() => {
-    var _el$286 = createElement("box"), _el$287 = createElement("scrollbox"), _el$288 = createElement("box"), _el$336 = createElement("box"), _el$337 = createElement("text"), _el$338 = createElement("text"), _el$339 = createTextNode(` \xB7 `), _el$340 = createTextNode(` \xB7 `), _el$341 = createTextNode(` \xB7 `);
+    var _el$286 = createElement("box"), _el$287 = createElement("scrollbox"), _el$288 = createElement("box"), _el$309 = createElement("box"), _el$310 = createElement("text"), _el$311 = createElement("text"), _el$312 = createTextNode(` \xB7 `), _el$313 = createTextNode(` \xB7 `), _el$314 = createTextNode(` \xB7 `);
     insertNode(_el$286, _el$287);
-    insertNode(_el$286, _el$336);
+    insertNode(_el$286, _el$309);
     setProp(_el$286, "width", "100%");
     setProp(_el$286, "height", "100%");
     setProp(_el$286, "backgroundColor", "#0a0a0a");
@@ -37533,20 +38458,20 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
       },
       get fallback() {
         return (() => {
-          var _el$342 = createElement("box"), _el$343 = createElement("text"), _el$345 = createElement("text"), _el$346 = createTextNode(` \xB7 `);
-          insertNode(_el$342, _el$343);
-          insertNode(_el$342, _el$345);
-          setProp(_el$342, "width", 76);
-          setProp(_el$342, "marginTop", 1);
-          setProp(_el$342, "flexDirection", "row");
-          setProp(_el$342, "justifyContent", "space-between");
-          insertNode(_el$343, createTextNode(`PR REVIEW / CHAT`));
-          setProp(_el$343, "fg", "#fb8147");
-          insertNode(_el$345, _el$346);
-          setProp(_el$345, "fg", "#808080");
-          insert(_el$345, () => runtime().provider_display ?? runtime().provider ?? "", _el$346);
-          insert(_el$345, () => runtime().model ?? "", null);
-          return _el$342;
+          var _el$315 = createElement("box"), _el$316 = createElement("text"), _el$318 = createElement("text"), _el$319 = createTextNode(` \xB7 `);
+          insertNode(_el$315, _el$316);
+          insertNode(_el$315, _el$318);
+          setProp(_el$315, "width", 76);
+          setProp(_el$315, "marginTop", 1);
+          setProp(_el$315, "flexDirection", "row");
+          setProp(_el$315, "justifyContent", "space-between");
+          insertNode(_el$316, createTextNode(`PR REVIEW / CHAT`));
+          setProp(_el$316, "fg", "#fb8147");
+          insertNode(_el$318, _el$319);
+          setProp(_el$318, "fg", "#808080");
+          insert(_el$318, () => runtime().provider_display ?? runtime().provider ?? "", _el$319);
+          insert(_el$318, () => runtime().model ?? "", null);
+          return _el$315;
         })();
       },
       get children() {
@@ -37612,69 +38537,97 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
     }), null);
     insert(_el$288, createComponent2(Show, {
       get when() {
-        return reviewStage();
+        return memo2(() => !!reviewing())() && reviewStage();
       },
       get children() {
-        var _el$297 = createElement("box"), _el$298 = createElement("box"), _el$299 = createElement("text"), _el$300 = createTextNode(`\u25CF `), _el$301 = createElement("text"), _el$302 = createTextNode(`% \xB7 `), _el$303 = createElement("text");
-        insertNode(_el$297, _el$298);
-        insertNode(_el$297, _el$303);
+        var _el$297 = createElement("box");
         setProp(_el$297, "width", 76);
-        setProp(_el$297, "backgroundColor", "#161616");
-        setProp(_el$297, "borderStyle", "single");
-        setProp(_el$297, "paddingLeft", 2);
-        setProp(_el$297, "paddingRight", 2);
         setProp(_el$297, "marginTop", 2);
-        setProp(_el$297, "flexDirection", "column");
+        insert(_el$297, createComponent2(ReviewProgressPanel, {
+          get url() {
+            return reviewUrl();
+          },
+          get stageId() {
+            return reviewStages().find((stage) => stage.status === "active")?.id ?? "";
+          },
+          get stageLabel() {
+            return reviewStage();
+          },
+          get progress() {
+            return reviewProgress();
+          },
+          get stages() {
+            return reviewStages();
+          },
+          get filesDone() {
+            return reviewFilesDone();
+          },
+          get filesTotal() {
+            return reviewFilesTotal() || undefined;
+          },
+          get currentFile() {
+            return reviewFile() || undefined;
+          },
+          get fileStates() {
+            return reviewFileStates();
+          },
+          get routing() {
+            return reviewRouting();
+          },
+          get elapsedMs() {
+            return reviewElapsedMs();
+          },
+          get cost() {
+            return reviewWorkspace().cost;
+          },
+          get language() {
+            return runtime().ui_language;
+          },
+          onCancel: cancelCurrentTask
+        }));
+        return _el$297;
+      }
+    }), null);
+    insert(_el$288, createComponent2(Show, {
+      get when() {
+        return memo2(() => !!!reviewing())() && (reviewStage() === "\u5BA1\u67E5\u5931\u8D25" || reviewStage() === "\u5BA1\u67E5\u5DF2\u53D6\u6D88");
+      },
+      get children() {
+        var _el$298 = createElement("box"), _el$299 = createElement("text"), _el$300 = createTextNode(`\u25CF `), _el$301 = createElement("text");
         insertNode(_el$298, _el$299);
         insertNode(_el$298, _el$301);
-        setProp(_el$298, "flexDirection", "row");
-        setProp(_el$298, "justifyContent", "space-between");
+        setProp(_el$298, "width", 76);
+        setProp(_el$298, "backgroundColor", "#161616");
+        setProp(_el$298, "borderStyle", "single");
+        setProp(_el$298, "paddingLeft", 2);
+        setProp(_el$298, "paddingRight", 2);
+        setProp(_el$298, "marginTop", 2);
+        setProp(_el$298, "flexDirection", "column");
         insertNode(_el$299, _el$300);
         insert(_el$299, reviewStage, null);
-        insertNode(_el$301, _el$302);
-        setProp(_el$301, "fg", "#808080");
-        insert(_el$301, reviewProgress, _el$302);
-        insert(_el$301, (() => {
-          var _c$0 = memo2(() => reviewFilesDone() > 0);
-          return () => _c$0() ? `\u5DF2\u5B8C\u6210 ${reviewFilesDone()} \u4E2A\u6587\u4EF6` : "";
-        })(), null);
-        setProp(_el$303, "fg", "#b0b0b0");
-        insert(_el$303, (() => {
-          var _c$1 = memo2(() => !!reviewFile());
-          return () => _c$1() ? `\u6B63\u5728\u5206\u6790 ${reviewFile()}` : reviewDetail();
-        })());
-        insert(_el$297, createComponent2(Show, {
-          get when() {
-            return reviewProgress() > 0;
-          },
-          get children() {
-            var _el$304 = createElement("text");
-            setProp(_el$304, "fg", "#808080");
-            insert(_el$304, () => `${"\u2588".repeat(Math.max(1, Math.floor(reviewProgress() / 5)))}${"\u2591".repeat(20 - Math.max(1, Math.floor(reviewProgress() / 5)))} ${reviewProgress()}%`);
-            return _el$304;
-          }
-        }), null);
-        insert(_el$297, createComponent2(Show, {
+        setProp(_el$301, "fg", "#b0b0b0");
+        insert(_el$301, reviewDetail);
+        insert(_el$298, createComponent2(Show, {
           get when() {
             return reviewUrl();
           },
           get children() {
-            var _el$305 = createElement("text");
-            setProp(_el$305, "fg", "#808080");
-            insert(_el$305, () => truncateMiddle(reviewUrl(), 68));
-            return _el$305;
+            var _el$302 = createElement("text");
+            setProp(_el$302, "fg", "#808080");
+            insert(_el$302, () => truncateMiddle(reviewUrl(), 68));
+            return _el$302;
           }
         }), null);
         effect((_p$) => {
-          var _v$42 = reviewStage() === "\u5BA1\u67E5\u5B8C\u6210" ? "#5b9b6d" : orange, _v$43 = reviewStage() === "\u5BA1\u67E5\u5B8C\u6210" ? "#7edc92" : reviewStage() === "\u5BA1\u67E5\u5931\u8D25" ? "#ff6b6b" : orange;
-          _v$42 !== _p$.e && (_p$.e = setProp(_el$297, "borderColor", _v$42, _p$.e));
+          var _v$42 = reviewStage() === "\u5BA1\u67E5\u5931\u8D25" ? "#ff6b6b" : orange, _v$43 = reviewStage() === "\u5BA1\u67E5\u5931\u8D25" ? "#ff6b6b" : orange;
+          _v$42 !== _p$.e && (_p$.e = setProp(_el$298, "borderColor", _v$42, _p$.e));
           _v$43 !== _p$.t && (_p$.t = setProp(_el$299, "fg", _v$43, _p$.t));
           return _p$;
         }, {
           e: undefined,
           t: undefined
         });
-        return _el$297;
+        return _el$298;
       }
     }), null);
     insert(_el$288, createComponent2(Show, {
@@ -37682,55 +38635,55 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
         return messages().length > 0 || streamingAssistant();
       },
       get children() {
-        var _el$306 = createElement("box");
-        setProp(_el$306, "width", 76);
-        setProp(_el$306, "marginTop", 2);
-        setProp(_el$306, "flexDirection", "column");
-        insert(_el$306, createComponent2(For, {
+        var _el$303 = createElement("box");
+        setProp(_el$303, "width", 76);
+        setProp(_el$303, "marginTop", 2);
+        setProp(_el$303, "flexDirection", "column");
+        insert(_el$303, createComponent2(For, {
           get each() {
             return messages();
           },
           children: (message) => (() => {
-            var _el$347 = createElement("box"), _el$348 = createElement("text"), _el$349 = createElement("text");
-            insertNode(_el$347, _el$348);
-            insertNode(_el$347, _el$349);
-            setProp(_el$347, "flexDirection", "row");
-            setProp(_el$347, "gap", 1);
-            setProp(_el$347, "paddingBottom", 1);
-            insert(_el$348, () => message.role === "user" ? ">" : "\u25CF");
-            setProp(_el$349, "width", 70);
-            insert(_el$349, () => message.content);
+            var _el$320 = createElement("box"), _el$321 = createElement("text"), _el$322 = createElement("text");
+            insertNode(_el$320, _el$321);
+            insertNode(_el$320, _el$322);
+            setProp(_el$320, "flexDirection", "row");
+            setProp(_el$320, "gap", 1);
+            setProp(_el$320, "paddingBottom", 1);
+            insert(_el$321, () => message.role === "user" ? ">" : "\u25CF");
+            setProp(_el$322, "width", 70);
+            insert(_el$322, () => message.content);
             effect((_p$) => {
               var _v$44 = message.role === "user" ? orange : "#eeeeee", _v$45 = message.role === "user" ? "#eeeeee" : muted;
-              _v$44 !== _p$.e && (_p$.e = setProp(_el$348, "fg", _v$44, _p$.e));
-              _v$45 !== _p$.t && (_p$.t = setProp(_el$349, "fg", _v$45, _p$.t));
+              _v$44 !== _p$.e && (_p$.e = setProp(_el$321, "fg", _v$44, _p$.e));
+              _v$45 !== _p$.t && (_p$.t = setProp(_el$322, "fg", _v$45, _p$.t));
               return _p$;
             }, {
               e: undefined,
               t: undefined
             });
-            return _el$347;
+            return _el$320;
           })()
         }), null);
-        insert(_el$306, createComponent2(Show, {
+        insert(_el$303, createComponent2(Show, {
           get when() {
             return streamingAssistant();
           },
           get children() {
-            var _el$307 = createElement("box"), _el$308 = createElement("text"), _el$310 = createElement("text");
-            insertNode(_el$307, _el$308);
-            insertNode(_el$307, _el$310);
-            setProp(_el$307, "flexDirection", "row");
-            setProp(_el$307, "gap", 1);
-            insertNode(_el$308, createTextNode(`\u25CF`));
-            setProp(_el$308, "fg", "#fb8147");
-            setProp(_el$310, "width", 70);
-            setProp(_el$310, "fg", "#eeeeee");
-            insert(_el$310, streamingAssistant);
-            return _el$307;
+            var _el$304 = createElement("box"), _el$305 = createElement("text"), _el$307 = createElement("text");
+            insertNode(_el$304, _el$305);
+            insertNode(_el$304, _el$307);
+            setProp(_el$304, "flexDirection", "row");
+            setProp(_el$304, "gap", 1);
+            insertNode(_el$305, createTextNode(`\u25CF`));
+            setProp(_el$305, "fg", "#fb8147");
+            setProp(_el$307, "width", 70);
+            setProp(_el$307, "fg", "#eeeeee");
+            insert(_el$307, streamingAssistant);
+            return _el$304;
           }
         }), null);
-        return _el$306;
+        return _el$303;
       }
     }), null);
     insert(_el$288, createComponent2(Show, {
@@ -37738,122 +38691,52 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
         return reviewReport().pr || reviewReport().counts;
       },
       get children() {
-        var _el$311 = createElement("box"), _el$312 = createElement("text"), _el$313 = createTextNode(`REVIEW SUMMARY `), _el$314 = createElement("text"), _el$315 = createElement("text"), _el$316 = createTextNode(`Files `), _el$317 = createTextNode(` reviewed \xB7 `), _el$318 = createTextNode(` skipped \xB7 Findings `), _el$319 = createElement("text"), _el$320 = createTextNode(`Critical `), _el$321 = createTextNode(` \xB7 High `), _el$322 = createTextNode(` \xB7 Medium `), _el$323 = createTextNode(` \xB7 Low `), _el$324 = createElement("text"), _el$325 = createTextNode(`\u8017\u65F6 `), _el$326 = createTextNode(`s \xB7 \u6210\u672C $`), _el$327 = createTextNode(` \xB7 Run `);
-        insertNode(_el$311, _el$312);
-        insertNode(_el$311, _el$314);
-        insertNode(_el$311, _el$315);
-        insertNode(_el$311, _el$319);
-        insertNode(_el$311, _el$324);
-        setProp(_el$311, "width", 76);
-        setProp(_el$311, "backgroundColor", "#141414");
-        setProp(_el$311, "borderStyle", "single");
-        setProp(_el$311, "borderColor", "#5b9b6d");
-        setProp(_el$311, "paddingLeft", 2);
-        setProp(_el$311, "paddingRight", 2);
-        setProp(_el$311, "marginTop", 1);
-        setProp(_el$311, "flexDirection", "column");
-        insertNode(_el$312, _el$313);
-        setProp(_el$312, "fg", "#7edc92");
-        insert(_el$312, (() => {
-          var _c$10 = memo2(() => !!reviewReport().pr?.repository);
-          return () => _c$10() ? `\xB7 ${reviewReport().pr?.repository}` : "";
-        })(), null);
-        setProp(_el$314, "fg", "#eeeeee");
-        insert(_el$314, () => reviewReport().pr?.title ?? "Pull Request");
-        insertNode(_el$315, _el$316);
-        insertNode(_el$315, _el$317);
-        insertNode(_el$315, _el$318);
-        setProp(_el$315, "fg", "#808080");
-        insert(_el$315, (() => {
-          var _c$11 = memo2(() => !!reviewReport().pr?.author);
-          return () => _c$11() ? `Author ${reviewReport().pr?.author} \xB7 ` : "";
-        })(), _el$316);
-        insert(_el$315, () => reviewReport().pr?.files_reviewed ?? "?", _el$317);
-        insert(_el$315, () => reviewReport().pr?.files_skipped ?? "?", _el$318);
-        insert(_el$315, () => reviewReport().counts?.total_findings ?? reviewFindings().length, null);
-        insertNode(_el$319, _el$320);
-        insertNode(_el$319, _el$321);
-        insertNode(_el$319, _el$322);
-        insertNode(_el$319, _el$323);
-        setProp(_el$319, "fg", "#808080");
-        insert(_el$319, () => reviewReport().counts?.by_severity?.critical ?? 0, _el$321);
-        insert(_el$319, () => reviewReport().counts?.by_severity?.high ?? 0, _el$322);
-        insert(_el$319, () => reviewReport().counts?.by_severity?.medium ?? 0, _el$323);
-        insert(_el$319, () => reviewReport().counts?.by_severity?.low ?? 0, null);
-        insertNode(_el$324, _el$325);
-        insertNode(_el$324, _el$326);
-        insertNode(_el$324, _el$327);
-        setProp(_el$324, "fg", "#808080");
-        insert(_el$324, () => reviewReport().run?.duration_seconds?.toFixed(1) ?? "?", _el$326);
-        insert(_el$324, () => reviewReport().run?.total_cost?.toFixed(4) ?? "?", _el$327);
-        insert(_el$324, () => reviewReport().run?.id ?? "?", null);
-        return _el$311;
-      }
-    }), null);
-    insert(_el$288, createComponent2(Show, {
-      get when() {
-        return reviewFindings().length > 0;
-      },
-      get children() {
-        var _el$328 = createElement("box"), _el$329 = createElement("text"), _el$330 = createTextNode(`FINDINGS `), _el$334 = createElement("text");
-        insertNode(_el$328, _el$329);
-        insertNode(_el$328, _el$334);
-        setProp(_el$328, "width", 76);
-        setProp(_el$328, "backgroundColor", "#141414");
-        setProp(_el$328, "borderStyle", "single");
-        setProp(_el$328, "borderColor", "#6b6b6b");
-        setProp(_el$328, "paddingLeft", 2);
-        setProp(_el$328, "paddingRight", 2);
-        setProp(_el$328, "marginTop", 1);
-        setProp(_el$328, "flexDirection", "column");
-        insertNode(_el$329, _el$330);
-        setProp(_el$329, "fg", "#f3c742");
-        insert(_el$329, (() => {
-          var _c$12 = memo2(() => !!reviewSummary());
-          return () => _c$12() ? `\xB7 ${reviewSummary()}` : "";
-        })(), null);
-        insert(_el$328, createComponent2(For, {
-          get each() {
-            return reviewFindings().slice(0, 5);
+        var _el$308 = createElement("box");
+        setProp(_el$308, "width", 76);
+        setProp(_el$308, "marginTop", 1);
+        insert(_el$308, createComponent2(ReviewSummaryPanel, {
+          get repository() {
+            return reviewWorkspace().repository;
           },
-          children: (finding) => (() => {
-            var _el$350 = createElement("box"), _el$351 = createElement("text"), _el$352 = createTextNode(`[`), _el$353 = createTextNode(`]`), _el$354 = createElement("text"), _el$355 = createElement("text");
-            insertNode(_el$350, _el$351);
-            insertNode(_el$350, _el$354);
-            insertNode(_el$350, _el$355);
-            setProp(_el$350, "flexDirection", "row");
-            setProp(_el$350, "gap", 1);
-            insertNode(_el$351, _el$352);
-            insertNode(_el$351, _el$353);
-            insert(_el$351, () => String(finding.severity ?? "info").toUpperCase(), _el$353);
-            setProp(_el$354, "width", 42);
-            setProp(_el$354, "fg", "#eeeeee");
-            insert(_el$354, () => String(finding.title ?? finding.message ?? "\u672A\u547D\u540D\u95EE\u9898"));
-            setProp(_el$355, "fg", "#808080");
-            insert(_el$355, (() => {
-              var _c$14 = memo2(() => !!finding.file);
-              return () => _c$14() ? `${finding.file}:${finding.line_start ?? "?"}` : "";
-            })());
-            effect((_$p) => setProp(_el$351, "fg", finding.severity === "critical" || finding.severity === "high" ? "#ff6b6b" : orange, _$p));
-            return _el$350;
-          })()
-        }), _el$334);
-        insert(_el$328, createComponent2(Show, {
-          get when() {
-            return reviewFindings().length > 5;
+          get prNumber() {
+            return reviewWorkspace().prNumber;
           },
-          get children() {
-            var _el$331 = createElement("text"), _el$332 = createTextNode(`\u8FD8\u6709 `), _el$333 = createTextNode(` \u4E2A\u95EE\u9898\uFF0C\u53EF\u901A\u8FC7\u62A5\u544A\u8BE6\u60C5\u67E5\u770B\u3002`);
-            insertNode(_el$331, _el$332);
-            insertNode(_el$331, _el$333);
-            setProp(_el$331, "fg", "#808080");
-            insert(_el$331, () => reviewFindings().length - 5, _el$333);
-            return _el$331;
-          }
-        }), _el$334);
-        insertNode(_el$334, createTextNode(`Ctrl+O Finding \xB7 Ctrl+L \u5386\u53F2 \xB7 Ctrl+K \u6A21\u578B`));
-        setProp(_el$334, "fg", "#808080");
-        return _el$328;
+          get title() {
+            return reviewWorkspace().title;
+          },
+          get severity() {
+            return reviewWorkspace().severity;
+          },
+          get evidence() {
+            return reviewWorkspace().evidence;
+          },
+          get filesReviewed() {
+            return reviewWorkspace().filesReviewed;
+          },
+          get filesSkipped() {
+            return reviewWorkspace().filesSkipped;
+          },
+          get findings() {
+            return reviewFindings();
+          },
+          get durationSeconds() {
+            return reviewWorkspace().durationSeconds;
+          },
+          get cost() {
+            return reviewWorkspace().cost;
+          },
+          get runId() {
+            return reviewWorkspace().runId;
+          },
+          get model() {
+            return runtime().model;
+          },
+          get language() {
+            return runtime().ui_language;
+          },
+          onOpenFindings: openFindings
+        }));
+        return _el$308;
       }
     }), null);
     insert(_el$286, createComponent2(Composer, {
@@ -37877,20 +38760,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
       onNewSession: resetSessionUi,
       onReviewReport: applyReviewReport,
       onReviewRequest: (url) => setPendingReviewUrl(url),
-      onOpenFindings: () => {
-        setHistoryOpen(false);
-        setModelOpen(false);
-        setSetupOpen(false);
-        setPendingReviewUrl("");
-        if (reviewFindings().length > 0) {
-          setFindingsOpen(true);
-        } else {
-          appendMessage({
-            role: "assistant",
-            content: "\u5F53\u524D\u6CA1\u6709 Findings\u3002\u8BF7\u5148\u6267\u884C /review <PR_URL>\uFF0C\u6216\u4F7F\u7528 /history <run_id> \u52A0\u8F7D\u5305\u542B findings \u7684\u5386\u53F2\u62A5\u544A\u3002"
-          });
-        }
-      },
+      onOpenFindings: openFindings,
       onOpenHistory: () => void openHistory(),
       onOpenModel: () => setModelOpen(true),
       onRetry: retryLastReview,
@@ -37908,7 +38778,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
       get focused() {
         return memo2(() => !!(!findingsOpen() && !historyOpen() && !modelOpen() && !setupOpen() && pendingReviewUrl() === ""))() && reviewStage() !== "\u5BA1\u67E5\u5931\u8D25";
       }
-    }), _el$336);
+    }), _el$309);
     insert(_el$286, createComponent2(Show, {
       get when() {
         return modelOpen();
@@ -37929,7 +38799,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           }
         });
       }
-    }), _el$336);
+    }), _el$309);
     insert(_el$286, createComponent2(Show, {
       get when() {
         return historyOpen();
@@ -37949,7 +38819,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setHistoryOpen(false)
         });
       }
-    }), _el$336);
+    }), _el$309);
     insert(_el$286, createComponent2(Show, {
       get when() {
         return findingsOpen();
@@ -37962,7 +38832,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setFindingsOpen(false)
         });
       }
-    }), _el$336);
+    }), _el$309);
     insert(_el$286, createComponent2(Show, {
       get when() {
         return memo2(() => reviewStage() === "\u5BA1\u67E5\u5931\u8D25")() && reviewUrl();
@@ -37982,7 +38852,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setReviewStage("")
         });
       }
-    }), _el$336);
+    }), _el$309);
     insert(_el$286, createComponent2(Show, {
       get when() {
         return setupOpen();
@@ -38013,7 +38883,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           }
         });
       }
-    }), _el$336);
+    }), _el$309);
     insert(_el$286, createComponent2(Show, {
       get when() {
         return pendingReviewUrl();
@@ -38027,28 +38897,28 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setPendingReviewUrl("")
         });
       }
-    }), _el$336);
-    insertNode(_el$336, _el$337);
-    insertNode(_el$336, _el$338);
-    setProp(_el$336, "width", "100%");
-    setProp(_el$336, "flexShrink", 0);
-    setProp(_el$336, "justifyContent", "space-between");
-    setProp(_el$336, "paddingLeft", 2);
-    setProp(_el$336, "paddingRight", 2);
-    setProp(_el$336, "paddingBottom", 1);
-    setProp(_el$337, "fg", "#808080");
-    insert(_el$337, workspaceRootLabel);
-    insertNode(_el$338, _el$339);
-    insertNode(_el$338, _el$340);
-    insertNode(_el$338, _el$341);
-    insert(_el$338, () => runtime().runtime_profile ?? "RUNTIME", _el$339);
-    insert(_el$338, () => statusLabels[backendStatus()], _el$340);
-    insert(_el$338, () => runtime().model ?? "model", _el$341);
-    insert(_el$338, (() => {
-      var _c$13 = memo2(() => runtime().available === false);
-      return () => _c$13() ? "OFFLINE" : runtime().available === true ? "ONLINE" : "0.1.0";
+    }), _el$309);
+    insertNode(_el$309, _el$310);
+    insertNode(_el$309, _el$311);
+    setProp(_el$309, "width", "100%");
+    setProp(_el$309, "flexShrink", 0);
+    setProp(_el$309, "justifyContent", "space-between");
+    setProp(_el$309, "paddingLeft", 2);
+    setProp(_el$309, "paddingRight", 2);
+    setProp(_el$309, "paddingBottom", 1);
+    setProp(_el$310, "fg", "#808080");
+    insert(_el$310, workspaceRootLabel);
+    insertNode(_el$311, _el$312);
+    insertNode(_el$311, _el$313);
+    insertNode(_el$311, _el$314);
+    insert(_el$311, () => runtime().runtime_profile ?? "RUNTIME", _el$312);
+    insert(_el$311, () => statusLabels[backendStatus()], _el$313);
+    insert(_el$311, () => runtime().model ?? "model", _el$314);
+    insert(_el$311, (() => {
+      var _c$0 = memo2(() => runtime().available === false);
+      return () => _c$0() ? "OFFLINE" : runtime().available === true ? "ONLINE" : "0.1.0";
     })(), null);
-    effect((_$p) => setProp(_el$338, "fg", statusColors[backendStatus()], _$p));
+    effect((_$p) => setProp(_el$311, "fg", statusColors[backendStatus()], _$p));
     return _el$286;
   })();
 }

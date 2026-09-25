@@ -9,11 +9,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import threading
+import time
 import uuid
 from collections.abc import Awaitable
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -34,6 +37,252 @@ from ai_pr_review.services.model_providers.factory import create_model_provider
 # `review.failed`. Verified by
 # `test_orchestrator_cancel_is_reported_as_cancelled_not_failed`.
 from ai_pr_review.services.review_orchestrator import ReviewCancelled
+
+# Display labels for the orchestrator's stage ids. The labels match
+# `cli.stage_labels` and the progress map the TUI already renders, so `stage`
+# stays human-readable while `stage_id` carries the stable machine key.
+REVIEW_STAGE_LABELS: dict[str, str] = {
+    "fetching": "获取 PR 数据",
+    "filtering": "过滤变更文件",
+    "context": "构建代码上下文",
+    "static_rules": "运行静态规则",
+    "reviewing": "执行 AI 审查",
+    "cross_file": "分析跨文件影响",
+    "persisting": "保存审查记录",
+}
+
+# (progress when the stage starts, progress when it completes). Both
+# orchestrators walk these ids in increasing order; unknown ids keep the
+# previous value so the bar never moves backwards.
+REVIEW_STAGE_PROGRESS: dict[str, tuple[int, int]] = {
+    "fetching": (5, 10),
+    "filtering": (10, 20),
+    "context": (20, 30),
+    "static_rules": (30, 50),
+    "reviewing": (70, 90),
+    "cross_file": (90, 98),
+    "persisting": (98, 100),
+}
+
+# Both orchestrators announce the reviewable-file count inside stage details
+# ("正在为 4 个文件构建上下文" / "为 4 个文件构建代码上下文" / "共 4 个文件").
+# The filtering detail ("共 120 个变更文件") is deliberately not matched: it
+# counts every changed file, not the files that will actually be reviewed.
+REVIEW_FILE_TOTAL_PATTERN = re.compile(r"(\d+)\s*个文件")
+
+# `review.model_routing` states the configured policy, not per-file decisions
+# (the orchestrator chooses a model per file and never reports it back).
+REVIEW_ROUTING_REASONS: dict[str, dict[str, str]] = {
+    "local_only": {
+        "zh-CN": "仅本地模型：全部文件由本地模型审查，代码不会离开本机",
+        "en-US": "Local only: every file is reviewed on-device; code never leaves the machine",
+    },
+    "remote_only": {
+        "zh-CN": "仅远程模型：全部文件由远程模型审查",
+        "en-US": "Remote only: every file is reviewed by the remote model",
+    },
+    "hybrid": {
+        "zh-CN": "混合策略：低风险文件走本地模型，高风险或复杂文件走远程模型",
+        "en-US": (
+            "Hybrid: low-risk files use the local model, "
+            "risky or complex files use the remote model"
+        ),
+    },
+}
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _parse_review_file_total(detail: str) -> int | None:
+    match = REVIEW_FILE_TOTAL_PATTERN.search(detail or "")
+    return int(match.group(1)) if match else None
+
+
+def _as_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _review_completed_fields(report: dict[str, Any]) -> dict[str, Any]:
+    """Summary fields for `review.completed`, read from the report payload.
+
+    Everything is derived from data the pipeline actually produced. Counts the
+    orchestrator does not expose stay at their true value (0) instead of being
+    estimated.
+    """
+    pr = report.get("pr") if isinstance(report.get("pr"), dict) else {}
+    counts = report.get("counts") if isinstance(report.get("counts"), dict) else {}
+    run = report.get("run") if isinstance(report.get("run"), dict) else {}
+    findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+
+    by_severity = counts.get("by_severity") if isinstance(counts.get("by_severity"), dict) else {}
+    severity = {
+        level: int(_as_float(by_severity.get(level, 0)))
+        for level in ("critical", "high", "medium", "low", "info")
+    }
+    # `FindingValidator.annotate` stamps `evidence_status`; findings that never
+    # reached the validator keep the model default "unverified".
+    evidence = {"valid": 0, "needs_review": 0, "invalid": 0, "unverified": 0}
+    for finding in findings:
+        status = str(finding.get("evidence_status", "")) if isinstance(finding, dict) else ""
+        evidence[status if status in evidence else "unverified"] += 1
+    return {
+        "files_reviewed": int(_as_float(pr.get("files_reviewed", 0))),
+        "files_skipped": int(_as_float(pr.get("files_skipped", 0))),
+        "severity": severity,
+        "evidence": evidence,
+        "cost": round(_as_float(run.get("total_cost", 0.0)), 6),
+        "duration_seconds": round(_as_float(run.get("duration_seconds", 0.0)), 3),
+    }
+
+
+class _ReviewEventStream:
+    """Publishes the review workspace event contract for one review run.
+
+    The orchestrator only reports stage *starts* (`stage_callback`), so stage
+    durations are measured here: a stage ends when the next one starts, or when
+    the run finishes. Per-file `findings_count` and skipped/failed file events
+    are not exposed by the orchestrator at all — they are reported as null (or
+    omitted) rather than invented. See `docs/claude-review-events.md`.
+    """
+
+    def __init__(
+        self,
+        publish: Callable[[dict[str, Any]], None],
+        session_id: str | None,
+    ) -> None:
+        self._publish = publish
+        self._session_id = session_id
+        self.files_started = 0
+        self.files_total: int | None = None
+        self.last_stage_id: str | None = None
+        self.finished = False
+        self._file_starts: dict[str, list[tuple[float, int]]] = {}
+        self._stage: tuple[str, str, float] | None = None
+        self._progress = 0
+
+    def stage_id_field(self) -> dict[str, str]:
+        """`stage_id` for terminal events, when a stage was running."""
+        return {"stage_id": self.last_stage_id} if self.last_stage_id else {}
+
+    def _emit(self, name: str, **payload: Any) -> None:
+        if self.finished:
+            # `asyncio.gather` does not cancel sibling file tasks, so an
+            # in-flight file can still report `file_done` after the run ended.
+            return
+        self._publish({"event": name, "session_id": self._session_id, **payload})
+
+    def _advance(self, stage_id: str, *, done: bool) -> int:
+        span = REVIEW_STAGE_PROGRESS.get(stage_id)
+        if span is not None:
+            self._progress = max(self._progress, span[1 if done else 0])
+        return self._progress
+
+    def started(self, url: str) -> None:
+        self._emit("review.started", url=url, started_at=_utc_now())
+
+    def routing(self, routing: dict[str, Any] | None) -> None:
+        """Emit `review.model_routing` once, when the backend can name the models."""
+        if routing:
+            self._emit("review.model_routing", **routing)
+
+    def stage(self, stage_id: str, detail: str = "") -> None:
+        now = time.perf_counter()
+        self._close_stage(now)
+        if self.files_total is None:
+            self.files_total = _parse_review_file_total(detail)
+        label = REVIEW_STAGE_LABELS.get(stage_id, stage_id)
+        self.last_stage_id = stage_id
+        self._stage = (stage_id, label, now)
+        self._emit(
+            "review.stage",
+            stage_id=stage_id,
+            stage=label,
+            status="started",
+            detail=detail,
+            progress=self._advance(stage_id, done=False),
+            started_at=_utc_now(),
+        )
+
+    def _close_stage(
+        self,
+        now: float,
+        status: str = "completed",
+        message: str | None = None,
+        recovery: str | None = None,
+    ) -> None:
+        if self._stage is None:
+            return
+        stage_id, label, started_at = self._stage
+        self._stage = None
+        payload: dict[str, Any] = {
+            "stage_id": stage_id,
+            "stage": label,
+            "status": status,
+            "progress": self._advance(stage_id, done=status == "completed"),
+            "duration_ms": max(0, round((now - started_at) * 1000)),
+        }
+        if message is not None:
+            payload["message"] = message
+        if recovery is not None:
+            payload["recovery"] = recovery
+        self._emit("review.stage_done", **payload)
+
+    def file_started(self, filename: str, model: str = "") -> None:
+        self.files_started += 1
+        self._file_starts.setdefault(filename, []).append(
+            (time.perf_counter(), self.files_started)
+        )
+        self._emit(
+            "review.file_started",
+            filename=filename,
+            model=model,
+            index=self.files_started,
+            total=self.files_total,
+            started_at=_utc_now(),
+        )
+
+    def file_done(self, filename: str) -> None:
+        starts = self._file_starts.get(filename) or []
+        started_at, index = starts.pop(0) if starts else (None, None)
+        if not starts:
+            self._file_starts.pop(filename, None)
+        self._emit(
+            "review.file_done",
+            filename=filename,
+            index=index,
+            total=self.files_total,
+            status="reviewed",
+            # The orchestrator keeps per-file finding counts internal.
+            findings_count=None,
+            duration_ms=(
+                None
+                if started_at is None
+                else max(0, round((time.perf_counter() - started_at) * 1000))
+            ),
+        )
+
+    def complete(self) -> None:
+        """Close the last stage after a successful run."""
+        self._close_stage(time.perf_counter(), status="completed")
+        self.finished = True
+
+    def abort(
+        self,
+        status: str,
+        *,
+        message: str | None = None,
+        recovery: str | None = None,
+    ) -> None:
+        """Close the in-flight stage after a cancellation or a failure."""
+        self._close_stage(
+            time.perf_counter(), status=status, message=message, recovery=recovery
+        )
+        self.finished = True
 
 
 @dataclass
@@ -602,17 +851,70 @@ class JsonlBackend:
         else:
             events.append(event)
 
+    def _review_routing(self) -> dict[str, Any] | None:
+        """Describe the model routing policy the next review will follow.
+
+        This mirrors `ModelSelector`'s slot resolution (main provider when it is
+        Ollama/Local, otherwise the persisted local slot) so the event states
+        the policy that will actually be applied. It is not a per-file decision
+        log: the orchestrator picks a model per file and never reports back.
+        Returns None when no model can be named, because a routing event full of
+        guesses would be worse than no event.
+        """
+        strategy = (
+            str(getattr(self.config.preferences, "hybrid_strategy", "") or "").strip().lower()
+        )
+        provider = self.config.provider
+        provider_is_local = provider.name.lower() in {"ollama", "local"}
+        local_slot = provider if provider_is_local else self.config.local_provider
+        remote_slot = self.config.ai_client.model_provider if provider_is_local else provider
+        local_model = (
+            str(getattr(local_slot, "default_model", "") or "").strip()
+            or str(getattr(self.config.ai_client, "local_model", "") or "").strip()
+            or None
+        )
+        remote_is_local = str(getattr(remote_slot, "name", "") or "").lower() in {
+            "ollama",
+            "local",
+        }
+        remote_model = (
+            None
+            if remote_is_local
+            else (str(getattr(remote_slot, "default_model", "") or "").strip() or None)
+        )
+        if strategy == "local_only" or remote_model is None:
+            bucket, router_model, deep_model = "local_only", None, local_model
+        elif strategy == "remote_only":
+            bucket, router_model, deep_model = "remote_only", None, remote_model
+        else:
+            bucket, router_model, deep_model = "hybrid", local_model, remote_model
+        if not deep_model:
+            return None
+        language = (
+            "en-US"
+            if str(getattr(self.config.preferences, "ui_language", "")).lower().startswith("en")
+            else "zh-CN"
+        )
+        return {
+            "runtime_profile": self.runtime_profile,
+            "router_model": router_model,
+            "deep_model": deep_model,
+            "reason": REVIEW_ROUTING_REASONS[bucket][language],
+        }
+
     async def _run_review(
         self,
         pr_url: str,
         session_id: str | None,
         events: list[dict[str, Any]],
         cancel_event: asyncio.Event | None = None,
+        stream: _ReviewEventStream | None = None,
     ) -> dict[str, Any]:
-        """Run the production review pipeline and publish live stage events."""
+        """Run the production review pipeline and publish live workspace events."""
         from ai_pr_review.cli import build_report_payload, run_review
 
-        self._publish({"event": "review.started", "session_id": session_id, "url": pr_url}, events)
+        if stream is None:
+            stream = _ReviewEventStream(lambda event: self._publish(event, events), session_id)
 
         def check_cancelled() -> None:
             if cancel_event is not None and cancel_event.is_set():
@@ -620,51 +922,50 @@ class JsonlBackend:
 
         def stage_callback(stage: str, detail: str = "") -> None:
             check_cancelled()
-            self._publish(
-                {
-                    "event": "review.stage",
-                    "session_id": session_id,
-                    "stage": stage,
-                    "detail": detail,
-                },
-                events,
-            )
+            stream.stage(stage, detail)
 
         def file_started(filename: str, active_model: str) -> None:
             check_cancelled()
-            self._publish(
-                {
-                    "event": "review.file_started",
-                    "session_id": session_id,
-                    "filename": filename,
-                    "model": active_model,
-                },
-                events,
-            )
+            stream.file_started(filename, active_model)
 
         def file_done(filename: str) -> None:
             check_cancelled()
-            self._publish(
-                {
-                    "event": "review.file_done",
-                    "session_id": session_id,
-                    "filename": filename,
-                },
-                events,
-            )
+            stream.file_done(filename)
 
-        artifacts = await run_review(
-            pr_url,
-            config=self.config,
-            progress_console=None,
-            stage_callback=stage_callback,
-            progress_callback=file_started,
-            file_done_callback=file_done,
-            cancel_check=((lambda: cancel_event.is_set()) if cancel_event is not None else None),
-        )
-        # The orchestrators re-check before persisting, but a cancel racing the
-        # very last stage must not be reported as a successful review either.
-        check_cancelled()
+        try:
+            stream.started(pr_url)
+            stream.routing(self._review_routing())
+            artifacts = await run_review(
+                pr_url,
+                config=self.config,
+                progress_console=None,
+                stage_callback=stage_callback,
+                progress_callback=file_started,
+                file_done_callback=file_done,
+                cancel_check=(
+                    (lambda: cancel_event.is_set()) if cancel_event is not None else None
+                ),
+            )
+            # The orchestrators re-check before persisting, but a cancel racing
+            # the very last stage must not be reported as a successful review.
+            check_cancelled()
+            stream.complete()
+        except ReviewCancelled:
+            stream.abort("skipped")
+            raise
+        except BaseException as exc:
+            # Also covers the CancelledError raised by `asyncio.wait_for` on
+            # timeout: the stage must be closed either way, otherwise the TUI
+            # timeline keeps spinning on a run that already ended.
+            stream.abort(
+                "failed",
+                message=str(exc) or exc.__class__.__name__,
+                recovery=(
+                    self._classify_error(exc)["recovery"] if isinstance(exc, Exception) else None
+                ),
+            )
+            raise
+
         payload = build_report_payload(artifacts)
         findings = payload.get("findings", [])
         finding_count = len(findings) if isinstance(findings, list) else 0
@@ -1053,10 +1354,19 @@ class JsonlBackend:
                             cancel_event = asyncio.Event()
                             if review_session_id is not None:
                                 self.review_cancellations[review_session_id] = cancel_event
+                            # Shared with `_run_review` so terminal events can
+                            # name the stage that was running when it ended.
+                            stream = _ReviewEventStream(
+                                lambda event: self._publish(event, events), review_session_id
+                            )
                             try:
                                 review_result = await asyncio.wait_for(
                                     self._run_review(
-                                        args[0], review_session_id, events, cancel_event
+                                        args[0],
+                                        review_session_id,
+                                        events,
+                                        cancel_event,
+                                        stream,
                                     ),
                                     timeout=self.review_timeout_seconds,
                                 )
@@ -1072,6 +1382,7 @@ class JsonlBackend:
                                         "session_id": review_session_id,
                                         "message": "审查超过最大运行时间。",
                                         **details,
+                                        **stream.stage_id_field(),
                                     },
                                     events,
                                 )
@@ -1085,6 +1396,7 @@ class JsonlBackend:
                                         "event": "review.cancelled",
                                         "session_id": review_session_id,
                                         "message": "审查已取消",
+                                        **stream.stage_id_field(),
                                     },
                                     events,
                                 )
@@ -1097,17 +1409,22 @@ class JsonlBackend:
                                         "session_id": review_session_id,
                                         "message": str(exc),
                                         **details,
+                                        **stream.stage_id_field(),
                                     },
                                     events,
                                 )
                                 raise
                             else:
+                                report = review_result.get("report")
                                 self._publish(
                                     {
                                         "event": "review.completed",
                                         "session_id": review_session_id,
                                         "run_id": review_result["run_id"],
                                         "finding_count": review_result["finding_count"],
+                                        **_review_completed_fields(
+                                            report if isinstance(report, dict) else {}
+                                        ),
                                     },
                                     events,
                                 )

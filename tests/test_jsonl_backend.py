@@ -5,6 +5,7 @@ import contextlib
 import json
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -352,7 +353,12 @@ def test_review_cancelled_after_pipeline_returns_is_not_reported_completed(
     cancel_event = asyncio.Event()
     asyncio.run(run())
 
-    assert [event["event"] for event in published] == ["review.started"]
+    # 没有阶段被启动，因此不产生 review.stage_done；关键是绝不能报成完成。
+    events_published = [event["event"] for event in published]
+    assert events_published[0] == "review.started"
+    assert "review.completed" not in events_published
+    assert "review.failed" not in events_published
+    assert set(events_published) <= {"review.started", "review.model_routing"}
 
 
 def test_cancel_covers_chat_and_review_in_same_session(tmp_path: Path) -> None:
@@ -1035,6 +1041,530 @@ def test_config_setup_persists_github_and_interface_preferences(tmp_path: Path) 
 
     with pytest.raises(ConfigValidationError, match="GitHub Token"):
         backend._apply_setup({"runtime_profile": "cloud", "github_token": "bad-token"})
+
+
+# ---------------------------------------------------------------------------
+# Review workspace event contract (docs/review-workspace-contract.md §3)
+# ---------------------------------------------------------------------------
+
+
+def _review_request(request_id: str = "review") -> dict:
+    return {
+        "id": request_id,
+        "method": "command.execute",
+        "params": {
+            "name": "review",
+            "args": ["https://github.com/example/repo/pull/31"],
+            "session_id": "session-1",
+        },
+    }
+
+
+def _finding(
+    *,
+    severity: str = "high",
+    filename: str = "src/module_0.py",
+    evidence_status: str = "valid",
+) -> Any:
+    from ai_pr_review.services.prompt_assembler import Finding
+
+    return Finding(
+        severity=severity,
+        category="correctness",
+        file=filename,
+        line_start=1,
+        line_end=1,
+        title=f"{severity} finding",
+        problem="problem",
+        suggestion="suggestion",
+        confidence=0.8,
+        code_snippet="x = 1",
+        evidence_status=evidence_status,
+    )
+
+
+def _review_artifacts(
+    *,
+    included: int = 2,
+    excluded: int = 1,
+    findings: list[Any] | None = None,
+    total_cost: float = 0.0124,
+    duration_seconds: float = 42.3,
+) -> Any:
+    """Build real artifacts so `build_report_payload` is exercised for real."""
+    from ai_pr_review.models.pr_data import FileDiff, FileStatus, PRData
+    from ai_pr_review.services.filter_pipeline import (
+        FilterPipelineResult,
+        FilterReason,
+        FilterReasonCode,
+        FilterResult,
+    )
+    from ai_pr_review.services.prompt_assembler import ReviewResult
+    from ai_pr_review.services.review_orchestrator import ReviewArtifacts
+
+    files = [
+        FileDiff(
+            filename=f"src/module_{index}.py",
+            status=FileStatus.MODIFIED,
+            additions=3,
+            deletions=1,
+            changes=4,
+        )
+        for index in range(included + excluded)
+    ]
+    results = [FilterResult(file=file, included=True) for file in files[:included]]
+    results.extend(
+        FilterResult(
+            file=file,
+            included=False,
+            reasons=[
+                FilterReason(
+                    code=FilterReasonCode.EXCLUDED_BY_PATTERN,
+                    action="exclude",
+                    message="命中黑名单规则",
+                )
+            ],
+        )
+        for file in files[included:]
+    )
+    return ReviewArtifacts(
+        pr_data=PRData(
+            pr_number=31,
+            title="Review workspace contract",
+            author="octocat",
+            state="open",
+            head_sha="a" * 40,
+            base_sha="b" * 40,
+            head_ref="feature",
+            base_ref="main",
+            url="https://github.com/example/repo/pull/31",
+            owner="example",
+            repo="repo",
+            files=files,
+        ),
+        filter_result=FilterPipelineResult(results=results),
+        review_result=ReviewResult(summary="审查完成", findings=findings or []),
+        total_cost=total_cost,
+        duration_seconds=duration_seconds,
+        run_id="run-31",
+        validation_summary={"valid": 1, "needs_review": 1, "invalid": 1},
+    )
+
+
+def test_review_stage_events_report_ids_progress_and_measured_durations(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """契约 §3.2/§3.3：阶段事件必须带 stage_id/status/progress/started_at，
+    `review.stage_done` 的 duration_ms 由后端实测，且顺序为 started → 各阶段 → completed。
+    """
+    stages = ("fetching", "filtering", "context", "static_rules", "reviewing", "persisting")
+
+    async def run() -> list[dict]:
+        published: list[dict] = []
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=published.append)
+        # 固定为本地策略，让路由事件的内容可预测
+        backend._apply_runtime_profile("local")
+
+        async def fake_run_review(pr_url, **kwargs):
+            stage_callback = kwargs["stage_callback"]
+            for stage in stages:
+                stage_callback(stage, f"{stage} 详情")
+                await asyncio.sleep(0.02)
+            return _review_artifacts()
+
+        monkeypatch.setattr("ai_pr_review.cli.run_review", fake_run_review)
+        responses = await backend.handle(_review_request())
+        assert responses[0]["ok"] is True
+        return published
+
+    published = asyncio.run(run())
+    assert [event["event"] for event in published] == [
+        "review.started",
+        "review.model_routing",
+        *[
+            name
+            for stage in stages
+            for name in ("review.stage", "review.stage_done")
+        ],
+        "review.completed",
+    ]
+
+    started = published[0]
+    assert started["url"] == "https://github.com/example/repo/pull/31"
+    assert started["started_at"]
+
+    stage_events = [event for event in published if event["event"] == "review.stage"]
+    assert [event["stage_id"] for event in stage_events] == list(stages)
+    assert [event["stage"] for event in stage_events] == [
+        "获取 PR 数据",
+        "过滤变更文件",
+        "构建代码上下文",
+        "运行静态规则",
+        "执行 AI 审查",
+        "保存审查记录",
+    ]
+    assert all(event["status"] == "started" for event in stage_events)
+    assert all(event["started_at"] for event in stage_events)
+    assert [event["progress"] for event in stage_events] == [5, 10, 20, 30, 70, 98]
+    assert stage_events[4]["detail"] == "reviewing 详情"
+
+    done_events = [event for event in published if event["event"] == "review.stage_done"]
+    assert [event["stage_id"] for event in done_events] == list(stages)
+    assert all(event["status"] == "completed" for event in done_events)
+    # 实测时长：每个阶段之间真的等待了 20ms（最后一个阶段紧随结束，不做下界断言）
+    assert all(event["duration_ms"] >= 15 for event in done_events[:-1])
+    assert all(event["duration_ms"] >= 0 for event in done_events)
+    assert done_events[-1]["progress"] == 100
+
+    progress = [
+        event["progress"]
+        for event in published
+        if event["event"] in {"review.stage", "review.stage_done"}
+    ]
+    assert progress == sorted(progress)
+
+    completed = published[-1]
+    assert completed["run_id"] == "run-31"
+    # 原有字段保持可用（这份 fixture 没有任何 finding）
+    assert completed["finding_count"] == 0
+
+
+def test_review_file_events_report_index_total_and_never_fake_findings_count(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """契约 §3.4/§3.5：文件事件带 index/total；每文件 findings_count 未知时为 null。
+
+    当前 orchestrator 不暴露每文件 finding 数，因此必须是 null，不能编造 0。
+    """
+
+    async def run() -> list[dict]:
+        published: list[dict] = []
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=published.append)
+
+        async def fake_run_review(pr_url, **kwargs):
+            stage_callback = kwargs["stage_callback"]
+            progress_callback = kwargs["progress_callback"]
+            file_done_callback = kwargs["file_done_callback"]
+            stage_callback("context", "正在为 2 个文件构建上下文")
+            progress_callback("src/a.py", "本地/qwen3.5:4b")
+            await asyncio.sleep(0.02)
+            file_done_callback("src/a.py")
+            progress_callback("src/b.py", "远程/deepseek-chat")
+            file_done_callback("src/b.py")
+            return _review_artifacts(included=2, excluded=1)
+
+        monkeypatch.setattr("ai_pr_review.cli.run_review", fake_run_review)
+        await backend.handle(_review_request())
+        return published
+
+    published = asyncio.run(run())
+    file_started = [event for event in published if event["event"] == "review.file_started"]
+    assert [event["filename"] for event in file_started] == ["src/a.py", "src/b.py"]
+    assert [event["index"] for event in file_started] == [1, 2]
+    assert all(event["total"] == 2 for event in file_started)
+    assert all(event["started_at"] for event in file_started)
+    # 旧字段保持可用：模型标签仍逐个文件上报
+    assert [event["model"] for event in file_started] == [
+        "本地/qwen3.5:4b",
+        "远程/deepseek-chat",
+    ]
+
+    file_done = [event for event in published if event["event"] == "review.file_done"]
+    assert [event["filename"] for event in file_done] == ["src/a.py", "src/b.py"]
+    assert [event["index"] for event in file_done] == [1, 2]
+    assert all(event["total"] == 2 for event in file_done)
+    assert all(event["status"] == "reviewed" for event in file_done)
+    assert all("findings_count" in event and event["findings_count"] is None for event in file_done)
+    assert all(event["duration_ms"] is not None for event in file_done)
+    assert file_done[0]["duration_ms"] >= 15
+
+
+def test_review_file_total_is_null_when_the_orchestrator_never_reports_it(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """过滤阶段报的是「变更文件数」，不能拿来当审查文件总数。"""
+
+    async def run() -> list[dict]:
+        published: list[dict] = []
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=published.append)
+
+        async def fake_run_review(pr_url, **kwargs):
+            kwargs["stage_callback"]("filtering", "共 120 个变更文件，正在过滤")
+            kwargs["progress_callback"]("src/a.py", "")
+            kwargs["file_done_callback"]("src/a.py")
+            return _review_artifacts()
+
+        monkeypatch.setattr("ai_pr_review.cli.run_review", fake_run_review)
+        await backend.handle(_review_request())
+        return published
+
+    published = asyncio.run(run())
+    file_started = next(event for event in published if event["event"] == "review.file_started")
+    file_done = next(event for event in published if event["event"] == "review.file_done")
+    assert file_started["total"] is None
+    assert file_done["total"] is None
+
+
+def test_review_stage_progress_table_stays_monotonic_for_both_orchestrators() -> None:
+    from ai_pr_review.backend.jsonl_server import (
+        REVIEW_STAGE_LABELS,
+        REVIEW_STAGE_PROGRESS,
+    )
+
+    standard = ("fetching", "filtering", "context", "reviewing", "cross_file", "persisting")
+    hybrid = ("fetching", "filtering", "context", "static_rules", "reviewing", "persisting")
+    for order in (standard, hybrid):
+        progress: list[int] = []
+        for stage_id in order:
+            assert stage_id in REVIEW_STAGE_LABELS
+            start, done = REVIEW_STAGE_PROGRESS[stage_id]
+            assert start <= done
+            progress.extend((start, done))
+        assert progress == sorted(progress)
+
+
+def test_review_file_total_parsing_covers_both_orchestrators() -> None:
+    from ai_pr_review.backend.jsonl_server import _parse_review_file_total
+
+    assert _parse_review_file_total("正在为 4 个文件构建上下文") == 4
+    assert _parse_review_file_total("为 7 个文件构建代码上下文") == 7
+    assert _parse_review_file_total("开始智能分级审查，共 6 个文件") == 6
+    assert _parse_review_file_total("共 120 个变更文件，正在过滤") is None
+    assert _parse_review_file_total("开始逐文件审查（并发 4）") is None
+
+
+def test_review_completed_carries_severity_evidence_files_cost_and_duration(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """契约 §3.7：review.completed 增加汇总字段，且原有字段保持可用。"""
+    findings = [
+        _finding(severity="critical", evidence_status="valid"),
+        _finding(severity="high", evidence_status="needs_review"),
+        _finding(severity="medium", evidence_status="invalid"),
+        _finding(severity="low", evidence_status="unverified"),
+    ]
+
+    async def run() -> list[dict]:
+        published: list[dict] = []
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=published.append)
+
+        async def fake_run_review(pr_url, **kwargs):
+            return _review_artifacts(
+                included=18,
+                excluded=4,
+                findings=findings,
+                total_cost=0.0124,
+                duration_seconds=42.3,
+            )
+
+        monkeypatch.setattr("ai_pr_review.cli.run_review", fake_run_review)
+        await backend.handle(_review_request())
+        return published
+
+    published = asyncio.run(run())
+    completed = next(event for event in published if event["event"] == "review.completed")
+    assert completed["run_id"] == "run-31"
+    assert completed["finding_count"] == 4
+    assert completed["files_reviewed"] == 18
+    assert completed["files_skipped"] == 4
+    assert completed["severity"] == {
+        "critical": 1,
+        "high": 1,
+        "medium": 1,
+        "low": 1,
+        "info": 0,
+    }
+    assert completed["evidence"] == {
+        "valid": 1,
+        "needs_review": 1,
+        "invalid": 1,
+        "unverified": 1,
+    }
+    assert completed["cost"] == pytest.approx(0.0124)
+    assert completed["duration_seconds"] == pytest.approx(42.3)
+
+    # 未经过 validator 的 finding（缺 evidence_status）计入 unverified，而不是被丢掉
+    from ai_pr_review.backend.jsonl_server import _review_completed_fields
+
+    fallback = _review_completed_fields(
+        {"findings": [{"severity": "high"}], "counts": {"by_severity": {"high": 1}}}
+    )
+    assert fallback["evidence"] == {
+        "valid": 0,
+        "needs_review": 0,
+        "invalid": 0,
+        "unverified": 1,
+    }
+
+
+def test_review_model_routing_states_the_configured_policy(tmp_path: Path) -> None:
+    backend = JsonlBackend(tmp_path / "config.json")
+
+    backend.config.preferences.hybrid_strategy = "balanced"
+    # 固定槽位，避免环境变量改写 Provider 后断言漂移
+    backend.config.provider.name = "deepseek"
+    backend.config.provider.default_model = "deepseek-chat"
+    backend.config.local_provider.default_model = "qwen3.5:4b"
+    hybrid = backend._review_routing()
+    assert hybrid is not None
+    assert hybrid["runtime_profile"] == backend.runtime_profile
+    assert hybrid["router_model"] == "qwen3.5:4b"
+    assert hybrid["deep_model"] == "deepseek-chat"
+    assert hybrid["reason"]
+
+    backend.config.preferences.hybrid_strategy = "remote_only"
+    remote = backend._review_routing()
+    assert remote is not None
+    assert remote["router_model"] is None
+    assert remote["deep_model"] == "deepseek-chat"
+
+    backend.config.preferences.hybrid_strategy = "local_only"
+    local = backend._review_routing()
+    assert local is not None
+    assert local["router_model"] is None
+    assert local["deep_model"] == "qwen3.5:4b"
+
+
+def test_review_model_routing_follows_the_ui_language(tmp_path: Path) -> None:
+    backend = JsonlBackend(tmp_path / "config.json")
+    backend.config.preferences.ui_language = "en-US"
+    backend.config.preferences.hybrid_strategy = "balanced"
+    backend.config.provider.name = "deepseek"
+    backend.config.provider.default_model = "deepseek-chat"
+    routing = backend._review_routing()
+    assert routing is not None
+    assert routing["reason"].startswith("Hybrid")
+
+
+def test_review_model_routing_is_emitted_once_per_review(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> list[dict]:
+        published: list[dict] = []
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=published.append)
+
+        async def fake_run_review(pr_url, **kwargs):
+            kwargs["stage_callback"]("fetching", "正在读取 PR 元数据与变更内容")
+            kwargs["stage_callback"]("filtering", "共 3 个变更文件，正在过滤")
+            return _review_artifacts()
+
+        monkeypatch.setattr("ai_pr_review.cli.run_review", fake_run_review)
+        await backend.handle(_review_request())
+        return published
+
+    published = asyncio.run(run())
+    names = [event["event"] for event in published]
+    assert names.count("review.model_routing") == 1
+    # 路由必须在阶段开始前就已知，TUI 才能在审查进行中显示它
+    assert names.index("review.model_routing") < names.index("review.stage")
+
+
+def test_failed_review_marks_the_running_stage_failed(monkeypatch, tmp_path: Path) -> None:
+    """契约 §3.3/§3.8：失败时 stage_done 带 failed + message，review.failed 带 stage_id。"""
+
+    async def run() -> list[dict]:
+        published: list[dict] = []
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=published.append)
+
+        async def fake_run_review(pr_url, **kwargs):
+            kwargs["stage_callback"]("reviewing", "开始逐文件审查（并发 2）")
+            raise RuntimeError("模型供应商网络请求失败。")
+
+        monkeypatch.setattr("ai_pr_review.cli.run_review", fake_run_review)
+        responses = await backend.handle(_review_request())
+        assert responses[0]["ok"] is False
+        return published
+
+    published = asyncio.run(run())
+    stage_done = next(event for event in published if event["event"] == "review.stage_done")
+    assert stage_done["stage_id"] == "reviewing"
+    assert stage_done["status"] == "failed"
+    assert stage_done["message"] == "模型供应商网络请求失败。"
+    assert stage_done["duration_ms"] >= 0
+    # 失败阶段不能把进度推到该阶段的完成值
+    assert stage_done["progress"] == 70
+
+    failed = next(event for event in published if event["event"] == "review.failed")
+    assert failed["stage_id"] == "reviewing"
+    assert failed["code"] == "backend_error"
+    assert failed["recovery"]
+
+
+def test_cancelled_review_marks_the_running_stage_skipped(monkeypatch, tmp_path: Path) -> None:
+    """取消不是失败：阶段标记为 skipped，review.cancelled 带上 stage_id。"""
+
+    async def run() -> list[dict]:
+        from ai_pr_review.services.review_orchestrator import (
+            ReviewCancelled as OrchestratorCancelled,
+        )
+
+        published: list[dict] = []
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=published.append)
+
+        async def fake_run_review(pr_url, **kwargs):
+            kwargs["stage_callback"]("reviewing", "开始逐文件审查（并发 2）")
+            # 与 /cancel 命令一样，设置后端登记的取消句柄
+            backend.review_cancellations["session-1"].set()
+            assert kwargs["cancel_check"]() is True
+            raise OrchestratorCancelled()
+
+        monkeypatch.setattr("ai_pr_review.cli.run_review", fake_run_review)
+        responses = await backend.handle(_review_request())
+        assert responses[0]["result"]["cancelled"] is True
+        return published
+
+    published = asyncio.run(run())
+    stage_done = next(event for event in published if event["event"] == "review.stage_done")
+    assert stage_done["stage_id"] == "reviewing"
+    assert stage_done["status"] == "skipped"
+    assert "message" not in stage_done
+
+    cancelled = next(event for event in published if event["event"] == "review.cancelled")
+    assert cancelled["stage_id"] == "reviewing"
+    assert "review.failed" not in [event["event"] for event in published]
+
+
+def test_review_event_stream_drops_events_after_the_run_finished() -> None:
+    """`gather` 不会取消同批文件任务，迟到的 file_done 不能落到已结束的审查上。"""
+    from ai_pr_review.backend.jsonl_server import _ReviewEventStream
+
+    published: list[dict] = []
+    stream = _ReviewEventStream(published.append, "session-1")
+    stream.started("https://github.com/example/repo/pull/31")
+    stream.stage("fetching", "正在读取 PR 元数据与变更内容")
+    stream.file_started("src/a.py")
+    stream.complete()
+    stream.file_done("src/a.py")
+    stream.abort("failed", message="late")
+    stream.stage("filtering", "共 3 个变更文件，正在过滤")
+
+    assert [event["event"] for event in published] == [
+        "review.started",
+        "review.stage",
+        "review.file_started",
+        "review.stage_done",
+    ]
+    assert stream.finished is True
+
+
+def test_review_event_stream_keeps_progress_for_unknown_stages() -> None:
+    from ai_pr_review.backend.jsonl_server import _ReviewEventStream
+
+    published: list[dict] = []
+    stream = _ReviewEventStream(published.append, "session-1")
+    stream.stage("fetching", "")
+    stream.stage("mystery_stage", "")
+    stream.complete()
+
+    assert [event["event"] for event in published] == [
+        "review.stage",
+        "review.stage_done",
+        "review.stage",
+        "review.stage_done",
+    ]
+    assert published[2]["stage_id"] == "mystery_stage"
+    assert published[2]["stage"] == "mystery_stage"
+    # 未知阶段沿用上一个已到达的进度（此处为 fetching 的完成值），不会倒退
+    assert published[2]["progress"] == published[1]["progress"]
+    assert stream.stage_id_field() == {"stage_id": "mystery_stage"}
 
 
 def test_local_chat_disables_reasoning_channel(monkeypatch, tmp_path: Path) -> None:

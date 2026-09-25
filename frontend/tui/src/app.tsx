@@ -6,7 +6,15 @@ import { sendWithSessionRecovery } from "./session-recovery"
 import { commandCompletion, commandEnterAction, commandMatches } from "./command-menu"
 import { truncateMiddle, workspaceRootLabel } from "./format"
 import { detailScrollDelta } from "./keymap"
-import { reviewReportPanels } from "./review-report"
+import {
+  reviewReportPanels,
+  reviewWorkspaceFromReport,
+  type EvidenceCounts,
+  type ReviewWorkspaceData,
+  type SeverityCounts,
+} from "./review-report"
+import { ReviewProgressPanel } from "./review-ui/ReviewProgressPanel"
+import { ReviewSummaryPanel } from "./review-ui/ReviewSummaryPanel"
 import type { InputRenderable, TextareaRenderable, KeyBinding, ScrollBoxRenderable } from "@opentui/core"
 
 const orange = "#fb8147"
@@ -146,6 +154,72 @@ type ReviewReport = {
   counts?: { total_findings?: number; by_severity?: Record<string, number> }
   pr?: { title?: string; repository?: string; author?: string; url?: string; files_reviewed?: number; files_skipped?: number }
   run?: { id?: string; duration_seconds?: number; total_cost?: number }
+}
+
+type ReviewStageState = {
+  id: string
+  label: string
+  status: "pending" | "active" | "done" | "failed" | "skipped"
+  durationMs?: number
+  detail?: string
+}
+
+type ReviewFileState = {
+  filename: string
+  status: "pending" | "reviewed" | "skipped" | "failed"
+  findingsCount?: number | null
+  durationMs?: number
+  reason?: string
+  error?: string
+}
+
+type ReviewModelRouting = {
+  runtimeProfile?: string
+  routerModel?: string
+  deepModel?: string
+  reason?: string
+}
+
+const REVIEW_STAGE_ORDER: Array<{ id: string; label: string }> = [
+  { id: "fetching", label: "获取 PR 数据" },
+  { id: "filtering", label: "过滤变更文件" },
+  { id: "context", label: "构建代码上下文" },
+  { id: "static_rules", label: "运行静态规则" },
+  { id: "reviewing", label: "执行 AI 审查" },
+  { id: "cross_file", label: "分析跨文件影响" },
+  { id: "persisting", label: "保存审查记录" },
+]
+
+const emptySeverityCounts = (): SeverityCounts => ({
+  critical: 0,
+  high: 0,
+  medium: 0,
+  low: 0,
+  info: 0,
+})
+
+const emptyEvidenceCounts = (): EvidenceCounts => ({
+  valid: 0,
+  needsReview: 0,
+  invalid: 0,
+  unverified: 0,
+})
+
+const emptyReviewWorkspace = (): ReviewWorkspaceData => ({
+  summary: "",
+  findings: [],
+  severity: emptySeverityCounts(),
+  evidence: emptyEvidenceCounts(),
+  filesReviewed: 0,
+  filesSkipped: 0,
+})
+
+const stageIdFromEvent = (stageId: unknown, stage: unknown): string => {
+  const explicit = String(stageId ?? "").trim()
+  if (explicit) return explicit
+  const label = String(stage ?? "").trim()
+  const match = REVIEW_STAGE_ORDER.find((item) => item.label === label || item.id === label)
+  return match?.id ?? label
 }
 type HistoryRun = { id?: string; repo_owner?: string; repo_name?: string; pr_url?: string; total_findings?: number; duration_seconds?: number; total_cost?: number; created_at?: string; model?: string }
 type HistoryStats = { total_runs?: number; unique_prs?: number; total_findings?: number; total_cost?: number; latest_run_at?: string }
@@ -1873,6 +1947,15 @@ export function App() {
   const [reviewUrl, setReviewUrl] = createSignal("")
   const [reviewSummary, setReviewSummary] = createSignal("")
   const [reviewFindings, setReviewFindings] = createSignal<ReviewFinding[]>([])
+  const [reviewWorkspace, setReviewWorkspace] = createSignal<ReviewWorkspaceData>(emptyReviewWorkspace())
+  const [reviewStages, setReviewStages] = createSignal<ReviewStageState[]>(
+    REVIEW_STAGE_ORDER.map((stage) => ({ ...stage, status: "pending" })),
+  )
+  const [reviewFileStates, setReviewFileStates] = createSignal<ReviewFileState[]>([])
+  const [reviewFilesTotal, setReviewFilesTotal] = createSignal(0)
+  const [reviewRouting, setReviewRouting] = createSignal<ReviewModelRouting>({})
+  const [reviewStartedAt, setReviewStartedAt] = createSignal<number>()
+  const [reviewElapsedMs, setReviewElapsedMs] = createSignal(0)
   const [findingsOpen, setFindingsOpen] = createSignal(false)
   const [historyOpen, setHistoryOpen] = createSignal(false)
   const [historyRuns, setHistoryRuns] = createSignal<HistoryRun[]>([])
@@ -1900,6 +1983,57 @@ export function App() {
     setReviewReport(report)
     setReviewSummary(panels.summary)
     setReviewFindings(panels.findings as ReviewFinding[])
+    setReviewWorkspace(reviewWorkspaceFromReport(report))
+  }
+
+  const resetReviewWorkspaceState = () => {
+    setReviewWorkspace(emptyReviewWorkspace())
+    setReviewStages(REVIEW_STAGE_ORDER.map((stage) => ({ ...stage, status: "pending" })))
+    setReviewFileStates([])
+    setReviewFilesTotal(0)
+    setReviewRouting({})
+    setReviewStartedAt(undefined)
+    setReviewElapsedMs(0)
+  }
+
+  onMount(() => {
+    const timer = setInterval(() => {
+      const started = reviewStartedAt()
+      if (reviewing() && started) setReviewElapsedMs(Date.now() - started)
+    }, 1000)
+    onCleanup(() => clearInterval(timer))
+  })
+
+  const updateStageState = (stageId: string, patch: Partial<ReviewStageState>) => {
+    setReviewStages((current) => {
+      const index = current.findIndex((stage) => stage.id === stageId)
+      if (index === -1) {
+        return [
+          ...current,
+          {
+            id: stageId,
+            label: patch.label ?? stageId,
+            status: "pending",
+            ...patch,
+          },
+        ]
+      }
+      return current.map((stage, currentIndex) =>
+        currentIndex === index ? { ...stage, ...patch } : stage,
+      )
+    })
+  }
+
+  const updateFileState = (filename: string, patch: Partial<ReviewFileState>) => {
+    setReviewFileStates((current) => {
+      const index = current.findIndex((file) => file.filename === filename)
+      if (index === -1) {
+        return [...current, { filename, status: "pending", ...patch }]
+      }
+      return current.map((file, currentIndex) =>
+        currentIndex === index ? { ...file, ...patch } : file,
+      )
+    })
   }
 
   const setErrorState = (message: string) => {
@@ -1999,6 +2133,21 @@ export function App() {
     if (!reviewing()) void startReview(url)
   }
 
+  const openFindings = () => {
+    setHistoryOpen(false)
+    setModelOpen(false)
+    setSetupOpen(false)
+    setPendingReviewUrl("")
+    if (reviewFindings().length > 0) {
+      setFindingsOpen(true)
+    } else {
+      appendMessage({
+        role: "assistant",
+        content: "当前没有 Findings。请先执行 /review <PR_URL>，或使用 /history <run_id> 加载包含 findings 的历史报告。",
+      })
+    }
+  }
+
   const resetSessionUi = () => {
     setMessages([])
     setStreamingAssistant("")
@@ -2011,6 +2160,7 @@ export function App() {
     setReviewUrl("")
     setReviewSummary("")
     setReviewFindings([])
+    resetReviewWorkspaceState()
     setFindingsOpen(false)
     setHistoryOpen(false)
     setHistoryRuns([])
@@ -2066,6 +2216,7 @@ export function App() {
         setReviewProgress(0)
         setReviewSummary("")
         setReviewFindings([])
+        resetReviewWorkspaceState()
         setReviewReport({})
         setFindingsOpen(false)
         setErrorMessage("")
@@ -2100,8 +2251,11 @@ export function App() {
           setReviewSummary("")
           setReviewFindings([])
           setReviewReport({})
+          resetReviewWorkspaceState()
           setReviewProgress(0)
           setReviewUrl(String(event.url ?? ""))
+          setReviewStartedAt(Date.now())
+          setReviewElapsedMs(0)
           setBackendStatus("REVIEWING")
           setReviewStage("准备审查")
           setReviewDetail(`正在处理 ${String(event.url ?? "PR")}`)
@@ -2110,10 +2264,21 @@ export function App() {
         }
         if (event.event === "review.stage") {
           const stage = String(event.stage ?? "审查中")
+          const stageId = stageIdFromEvent(event.stage_id, event.stage)
+          const rawStatus = String(event.status ?? "started")
+          const stageStatus =
+            rawStatus === "completed"
+              ? "done"
+              : rawStatus === "failed"
+                ? "failed"
+                : rawStatus === "skipped"
+                  ? "skipped"
+                  : "active"
           const progressByStage: Record<string, number> = {
             "获取 PR 数据": 5,
             "过滤变更文件": 10,
             "构建代码上下文": 20,
+            "运行静态规则": 30,
             "执行 AI 审查": 70,
             "分析跨文件影响": 90,
             "保存审查记录": 98,
@@ -2122,12 +2287,54 @@ export function App() {
           setReviewProgress(progressByStage[stage] ?? reviewProgress())
           setReviewStage(stage)
           setReviewDetail(String(event.detail ?? ""))
+          updateStageState(stageId, {
+            label: stage,
+            status: stageStatus,
+            detail: String(event.detail ?? ""),
+            durationMs: typeof event.duration_ms === "number" ? event.duration_ms : undefined,
+          })
+        }
+        if (event.event === "review.stage_done") {
+          const stage = String(event.stage ?? "")
+          const stageId = stageIdFromEvent(event.stage_id, event.stage)
+          updateStageState(stageId, {
+            label: stage || stageId,
+            status: event.status === "failed" ? "failed" : "done",
+            durationMs: typeof event.duration_ms === "number" ? event.duration_ms : undefined,
+          })
+          if (typeof event.progress === "number") setReviewProgress(event.progress)
         }
         if (event.event === "review.file_started") {
-          setReviewFile(String(event.filename ?? ""))
+          const filename = String(event.filename ?? "")
+          setReviewFile(filename)
+          if (typeof event.total === "number" && event.total > 0) setReviewFilesTotal(event.total)
+          updateFileState(filename, { status: "pending" })
         }
         if (event.event === "review.file_done") {
+          const filename = String(event.filename ?? "")
+          const rawStatus = String(event.status ?? "reviewed")
+          const fileStatus =
+            rawStatus === "skipped"
+              ? "skipped"
+              : rawStatus === "failed"
+                ? "failed"
+                : "reviewed"
+          updateFileState(filename, {
+            status: fileStatus,
+            findingsCount: typeof event.findings_count === "number" ? event.findings_count : null,
+            durationMs: typeof event.duration_ms === "number" ? event.duration_ms : undefined,
+            reason: typeof event.reason === "string" ? event.reason : undefined,
+            error: typeof event.message === "string" ? event.message : undefined,
+          })
           setReviewFilesDone((count) => count + 1)
+        }
+        if (event.event === "review.model_routing") {
+          setReviewRouting({
+            runtimeProfile: typeof event.runtime_profile === "string" ? event.runtime_profile : undefined,
+            routerModel: typeof event.router_model === "string" ? event.router_model : undefined,
+            deepModel: typeof event.deep_model === "string" ? event.deep_model : undefined,
+            reason: typeof event.reason === "string" ? event.reason : undefined,
+          })
         }
         if (event.event === "review.completed") {
           setReviewing(false)
@@ -2136,8 +2343,56 @@ export function App() {
           setReviewStage("审查完成")
           setReviewDetail(`发现 ${String(event.finding_count ?? 0)} 个问题 · Run ${String(event.run_id ?? "")}`)
           setReviewFile("")
+          if (typeof event.duration_seconds === "number") {
+            setReviewElapsedMs(Math.max(0, event.duration_seconds * 1000))
+          }
+          setReviewWorkspace((current) => ({
+            ...current,
+            filesReviewed:
+              typeof event.files_reviewed === "number"
+                ? event.files_reviewed
+                : current.filesReviewed,
+            filesSkipped:
+              typeof event.files_skipped === "number"
+                ? event.files_skipped
+                : current.filesSkipped,
+            durationSeconds:
+              typeof event.duration_seconds === "number"
+                ? event.duration_seconds
+                : current.durationSeconds,
+            cost: typeof event.cost === "number" ? event.cost : current.cost,
+            runId: typeof event.run_id === "string" ? event.run_id : current.runId,
+            severity:
+              event.severity && typeof event.severity === "object"
+                ? {
+                    critical: Number((event.severity as Record<string, unknown>).critical ?? 0),
+                    high: Number((event.severity as Record<string, unknown>).high ?? 0),
+                    medium: Number((event.severity as Record<string, unknown>).medium ?? 0),
+                    low: Number((event.severity as Record<string, unknown>).low ?? 0),
+                    info: Number((event.severity as Record<string, unknown>).info ?? 0),
+                  }
+                : current.severity,
+            evidence:
+              event.evidence && typeof event.evidence === "object"
+                ? {
+                    valid: Number((event.evidence as Record<string, unknown>).valid ?? 0),
+                    needsReview: Number(
+                      (event.evidence as Record<string, unknown>).needs_review ??
+                        (event.evidence as Record<string, unknown>).needsReview ??
+                        0,
+                    ),
+                    invalid: Number((event.evidence as Record<string, unknown>).invalid ?? 0),
+                    unverified: Number(
+                      (event.evidence as Record<string, unknown>).unverified ?? 0,
+                    ),
+                  }
+                : current.evidence,
+          }))
         }
         if (event.event === "review.failed") {
+          if (typeof event.stage_id === "string") {
+            updateStageState(event.stage_id, { status: "failed" })
+          }
           setReviewing(false)
           setBackendStatus("ERROR")
           setReviewStage("审查失败")
@@ -2146,6 +2401,9 @@ export function App() {
           setReviewFile("")
         }
         if (event.event === "review.cancelled") {
+          if (typeof event.stage_id === "string") {
+            updateStageState(event.stage_id, { status: "skipped" })
+          }
           setReviewing(false)
           setBackendStatus("READY")
           setReviewStage("审查已取消")
@@ -2204,20 +2462,31 @@ export function App() {
           <text fg={muted}>可用恢复：Ctrl+R /retry · /model status · /model local · /model cloud · /new</text>
         </box>
       </Show>
-      <Show when={reviewStage()}>
-        <box width={76} backgroundColor="#161616" borderStyle="single" borderColor={reviewStage() === "审查完成" ? "#5b9b6d" : orange} paddingLeft={2} paddingRight={2} marginTop={2} flexDirection="column">
-          <box flexDirection="row" justifyContent="space-between">
-            <text fg={reviewStage() === "审查完成" ? "#7edc92" : reviewStage() === "审查失败" ? "#ff6b6b" : orange}>● {reviewStage()}</text>
-            <text fg={muted}>{reviewProgress()}% · {reviewFilesDone() > 0 ? `已完成 ${reviewFilesDone()} 个文件` : ""}</text>
-          </box>
-          <text fg="#b0b0b0">{reviewFile() ? `正在分析 ${reviewFile()}` : reviewDetail()}</text>
-          <Show when={reviewProgress() > 0}>
-            <text fg={muted}>{`${"█".repeat(Math.max(1, Math.floor(reviewProgress() / 5)))}${"░".repeat(20 - Math.max(1, Math.floor(reviewProgress() / 5)))} ${reviewProgress()}%`}</text>
-          </Show>
+      <Show when={reviewing() && reviewStage()}>
+        <box width={76} marginTop={2}>
+          <ReviewProgressPanel
+            url={reviewUrl()}
+            stageId={reviewStages().find((stage) => stage.status === "active")?.id ?? ""}
+            stageLabel={reviewStage()}
+            progress={reviewProgress()}
+            stages={reviewStages()}
+            filesDone={reviewFilesDone()}
+            filesTotal={reviewFilesTotal() || undefined}
+            currentFile={reviewFile() || undefined}
+            fileStates={reviewFileStates()}
+            routing={reviewRouting()}
+            elapsedMs={reviewElapsedMs()}
+            cost={reviewWorkspace().cost}
+            language={runtime().ui_language}
+            onCancel={cancelCurrentTask}
+          />
+        </box>
+      </Show>
+      <Show when={!reviewing() && (reviewStage() === "审查失败" || reviewStage() === "审查已取消")}>
+        <box width={76} backgroundColor="#161616" borderStyle="single" borderColor={reviewStage() === "审查失败" ? "#ff6b6b" : orange} paddingLeft={2} paddingRight={2} marginTop={2} flexDirection="column">
+          <text fg={reviewStage() === "审查失败" ? "#ff6b6b" : orange}>● {reviewStage()}</text>
+          <text fg="#b0b0b0">{reviewDetail()}</text>
           <Show when={reviewUrl()}>
-            {/* PR URLs are long and differ at both ends; cut the middle so the
-                repo and the PR number both stay readable in 80 columns. The
-                panel is 76 wide, minus its border (2) and padding (4). */}
             <text fg={muted}>{truncateMiddle(reviewUrl(), 68)}</text>
           </Show>
         </box>
@@ -2239,26 +2508,23 @@ export function App() {
         </box>
       </Show>
       <Show when={reviewReport().pr || reviewReport().counts}>
-        <box width={76} backgroundColor="#141414" borderStyle="single" borderColor="#5b9b6d" paddingLeft={2} paddingRight={2} marginTop={1} flexDirection="column">
-          <text fg="#7edc92">REVIEW SUMMARY {reviewReport().pr?.repository ? `· ${reviewReport().pr?.repository}` : ""}</text>
-          <text fg="#eeeeee">{reviewReport().pr?.title ?? "Pull Request"}</text>
-          <text fg={muted}>{reviewReport().pr?.author ? `Author ${reviewReport().pr?.author} · ` : ""}Files {reviewReport().pr?.files_reviewed ?? "?"} reviewed · {reviewReport().pr?.files_skipped ?? "?"} skipped · Findings {reviewReport().counts?.total_findings ?? reviewFindings().length}</text>
-          <text fg={muted}>Critical {reviewReport().counts?.by_severity?.critical ?? 0} · High {reviewReport().counts?.by_severity?.high ?? 0} · Medium {reviewReport().counts?.by_severity?.medium ?? 0} · Low {reviewReport().counts?.by_severity?.low ?? 0}</text>
-          <text fg={muted}>耗时 {reviewReport().run?.duration_seconds?.toFixed(1) ?? "?"}s · 成本 ${reviewReport().run?.total_cost?.toFixed(4) ?? "?"} · Run {reviewReport().run?.id ?? "?"}</text>
-        </box>
-      </Show>
-      <Show when={reviewFindings().length > 0}>
-        <box width={76} backgroundColor="#141414" borderStyle="single" borderColor="#6b6b6b" paddingLeft={2} paddingRight={2} marginTop={1} flexDirection="column">
-          <text fg="#f3c742">FINDINGS {reviewSummary() ? `· ${reviewSummary()}` : ""}</text>
-          <For each={reviewFindings().slice(0, 5)}>{(finding) =>
-            <box flexDirection="row" gap={1}>
-              <text fg={finding.severity === "critical" || finding.severity === "high" ? "#ff6b6b" : orange}>[{String(finding.severity ?? "info").toUpperCase()}]</text>
-              <text width={42} fg="#eeeeee">{String(finding.title ?? finding.message ?? "未命名问题")}</text>
-              <text fg={muted}>{finding.file ? `${finding.file}:${finding.line_start ?? "?"}` : ""}</text>
-            </box>
-          }</For>
-          <Show when={reviewFindings().length > 5}><text fg={muted}>还有 {reviewFindings().length - 5} 个问题，可通过报告详情查看。</text></Show>
-          <text fg={muted}>Ctrl+O Finding · Ctrl+L 历史 · Ctrl+K 模型</text>
+        <box width={76} marginTop={1}>
+          <ReviewSummaryPanel
+            repository={reviewWorkspace().repository}
+            prNumber={reviewWorkspace().prNumber}
+            title={reviewWorkspace().title}
+            severity={reviewWorkspace().severity}
+            evidence={reviewWorkspace().evidence}
+            filesReviewed={reviewWorkspace().filesReviewed}
+            filesSkipped={reviewWorkspace().filesSkipped}
+            findings={reviewFindings()}
+            durationSeconds={reviewWorkspace().durationSeconds}
+            cost={reviewWorkspace().cost}
+            runId={reviewWorkspace().runId}
+            model={runtime().model}
+            language={runtime().ui_language}
+            onOpenFindings={openFindings}
+          />
         </box>
       </Show>
         </box>
@@ -2278,20 +2544,7 @@ export function App() {
         onNewSession={resetSessionUi}
         onReviewReport={applyReviewReport}
         onReviewRequest={(url) => setPendingReviewUrl(url)}
-        onOpenFindings={() => {
-          setHistoryOpen(false)
-          setModelOpen(false)
-          setSetupOpen(false)
-          setPendingReviewUrl("")
-          if (reviewFindings().length > 0) {
-            setFindingsOpen(true)
-          } else {
-            appendMessage({
-              role: "assistant",
-              content: "当前没有 Findings。请先执行 /review <PR_URL>，或使用 /history <run_id> 加载包含 findings 的历史报告。",
-            })
-          }
-        }}
+        onOpenFindings={openFindings}
         onOpenHistory={() => void openHistory()}
         onOpenModel={() => setModelOpen(true)}
         onRetry={retryLastReview}
