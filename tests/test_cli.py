@@ -381,11 +381,17 @@ def test_cli_publishes_comment(monkeypatch, tmp_path: Path):
 
     assert result.exit_code == 0
     assert len(created_fetchers) == 2
-    assert created_fetchers[-1].comment_body is not None
-    assert "## 🤖 AI PR Review Report" in created_fetchers[-1].comment_body
-    assert "| Total Findings | 1 |" in created_fetchers[-1].comment_body
-    assert "### High Findings" in created_fetchers[-1].comment_body
-    assert "# AI PR Review Report" not in created_fetchers[-1].comment_body
+    body = created_fetchers[-1].comment_body
+    assert body is not None
+    # v2 comment: the temp config is zh-CN, so the chrome is Chinese while the
+    # findings themselves stay as the model wrote them.
+    assert "## 🤖 AI PR 审查报告" in body
+    assert "**`owner/repo`** · [PR #42](https://github.com/owner/repo/pull/42)" in body
+    assert "@alice" in body  # the PR author is carried into the target line
+    assert "> **1 个问题**" in body
+    assert "<summary><b>⚠️ 高风险 · 1 条</b></summary>" in body
+    assert "### 📌 Review summary" not in body
+    assert "# AI PR Review Report" not in body
 
 
 def test_cli_returns_exit_code_1_on_service_error(monkeypatch, tmp_path: Path):

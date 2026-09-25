@@ -802,3 +802,81 @@ Everything below was reproduced by Codex, not taken from an agent report:
    Bun installed, so that wheel's SHA-256 no longer describes the current tree.
    Rebuild the wheel (`AI_PR_REVIEW_STANDALONE_TUI=1`) if a matching artifact is
    needed.
+
+### 13.4 GitHub comment format v2 (2026-09-25)
+
+The first live comment (issuecomment-5826836965) exposed a readability problem:
+the model summary was one long per-file blob, there were no line links, no
+evidence badges, no provenance and no severity folding. `render_github_comment`
+now builds a review-oriented layout:
+
+1. **Target line** — `repo · PR # · title · N files changed`;
+2. **Stats line** — severity counts plus an evidence-health breakdown
+   (valid / needs review / invalid / unverified);
+3. **Provenance line** — model, run id, duration, cost (only when the caller
+   supplies them);
+4. **🎯 Fix first (top 3)** — one line per finding with a clickable
+   `file:line` blob link, confidence and evidence badge;
+5. **One collapsible block per severity** — critical expanded, the rest
+   collapsed, each finding a compact card
+   (`#### n. icon title` + `location · confidence · evidence · category · source`);
+6. **Collapsible per-file summary** — file-by-file prose moved out of the scan
+   path, with the pre-file overview kept as 结论摘要 / Review summary;
+7. **Footer** — evidence-first ratio, model, run, commit.
+
+Rules that keep the output honest and renderable:
+
+- `file:line` becomes `https://github.com/{owner}/{repo}/blob/{head_sha}/path#L…`
+  only when the commit is known; a missing sha falls back to plain code text
+  rather than a link that 404s (fork PRs keep their commit outside the base
+  repository, so the fallback matters);
+- model/rule prose is HTML-escaped (`&`, `<`, `>`), a leading `#` is neutralised
+  and path/code spans fall back to double backticks: without this, GitHub's
+  sanitizer silently deletes evidence such as `<head>` or `target="_blank"`;
+- chrome follows `GitHubCommentMeta.language` (中文 when the UI language is
+  Chinese, English otherwise); model/rule prose is never rewritten;
+- long problem+suggestion text is folded behind `<details>`;
+- `github_comment_template`, when configured, still wins over the built-in
+  layout.
+
+Evidence: `tests/test_report_renderer.py` (6 new tests: layout, localization,
+link/fallback, folding, escaping, backtick paths),
+`tests/test_cli.py::test_cli_publishes_comment`,
+`tests/test_jsonl_backend.py::test_publish_comment_is_regenerated_from_the_stored_run`,
+and the real-run render at `_p5_verify/reports/p5-v2-comment-preview.md`
+(12,377 chars, 11/11 balanced `<details>`).
+
+### 13.5 Audit disposition (claude-p5-comment-format)
+
+Claude Code audited the v2 layout read-only (`docs/claude-p5-comment-format.md`)
+and reported 1 blocker, 6 major and 8 minor items. Everything below is the
+integration owner's decision, not the auditor's:
+
+| ID | Finding | Disposition |
+|---|---|---|
+| F1 | Fork blob links: the docstring promised a fallback the code never had | fixed — `GitHubCommentMeta.from_fork` switches to the PR files view; the docstring now describes the real behaviour |
+| F2 | No review timestamp, so a republished run looked fresh | fixed — `reviewed_at` (stored `created_at` for history, current UTC for a fresh review) |
+| F3 | Publish path dropped review coverage | fixed — target line reports `已审查 14/18 个文件（跳过 4）` |
+| F4 | No size budget; folding hides but never shortens | fixed — 24k soft cap degrades in documented steps and ends with an explicit truncation marker |
+| F5 | 「证据有效」over-claimed what the validator proves | fixed — badges now say 校验通过 / 待人工确认 / 校验不成立 / 未校验, and the stats line states the scope (location + snippet) |
+| F6 | First screen had no clickable PR link | fixed — `[PR #N](url)` plus the author when it is not a placeholder |
+| F8 | Two different severity icon sets in one comment | fixed — cards use the same icon set as the group headers |
+| F9 | Half the block used hard breaks, half did not | fixed — stats + evidence + provenance merged into one blockquote with uniform hard breaks |
+| F11 | False precision on cost, `$0.0000` read as free, ambiguous file counts | fixed — `≈ $x`, `成本未记录`, and 「模型摘要覆盖的 N 个文件」 |
+| F12 | A snippet containing ``` could close its own fence | fixed — fence length follows the longest backtick run in the snippet |
+| F13 | `**Code**：` stayed English under a Chinese UI | fixed — 代码 |
+| F14 | Unpaired backticks in model prose | accepted — prose is collapsed to one line per paragraph, so damage is bounded; escaping backticks would destroy the model's intended code spans |
+| F10 | `run` not localised; `Finding.sources` has no schema constraint | partially fixed — `run` stays (the CLI/TUI call it "Run ID"); constraining `sources` is a schema/validator change (it also drives `static_rule` branching in `finding_validator.py` / `finding_localizer.py`) and is tracked as follow-up |
+| F7 | Three different evidence-vocabulary sets across terminal, TUI and comment | partially fixed — the comment now matches the validator's actual meaning; unifying the terminal and TUI strings is a separate pass |
+| F15 | Top-3 entries have no anchors into the detail blocks | not adopted — the collapsed detail blocks are deliberate (short first screen, one click for depth); anchors would lengthen every shortlist row |
+
+Follow-ups opened by this audit (not started):
+
+1. constrain `Finding.sources` like `category` (pattern + normalisation), so
+   `static_rule` branching cannot be spoofed by a model-supplied variant;
+2. unify the evidence vocabulary across terminal / TUI / comment;
+3. carry the PR head repository (or an `is_fork` flag) in `PRData` so the
+   publish path can set `from_fork` automatically instead of defaulting to
+   same-repo links;
+4. localise the deterministic rule messages (the visible English prose on
+   `static_rule` findings is content, not chrome).

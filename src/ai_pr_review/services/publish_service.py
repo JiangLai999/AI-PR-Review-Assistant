@@ -24,7 +24,7 @@ from ai_pr_review.config import AppConfig
 from ai_pr_review.models.pr_data import PRData
 from ai_pr_review.services.exceptions import InvalidPRURLError
 from ai_pr_review.services.pr_fetcher import PRFetcher
-from ai_pr_review.services.report_renderer import ReportRenderer
+from ai_pr_review.services.report_renderer import GitHubCommentMeta, ReportRenderer
 from ai_pr_review.services.result_store import ResultStore
 from ai_pr_review.utils.github_url_parser import ParsedPRUrl, parse_pr_url
 
@@ -128,6 +128,26 @@ def _github_token(config: AppConfig) -> str:
     return str(token or "").strip()
 
 
+def _as_float(value: Any) -> float | None:
+    """SQLite hands back REAL/None; anything unusable becomes None."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_count(value: Any) -> int | None:
+    """SQLite hand-back for the file counts; None means "not recorded"."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _stored_run_pr_data(
     run: dict[str, Any],
     metadata: dict[str, Any],
@@ -225,9 +245,25 @@ class PublishService:
         if not _github_token(self.config):
             raise PublishError("missing_credentials", _MISSING_CREDENTIALS_MESSAGE)
 
+        pr_data = _stored_run_pr_data(run, self.store.get_run_metadata(resolved), parsed, pr_url)
         comment_body = ReportRenderer(self.config.report_renderer).render_github_comment(
             result,
-            _stored_run_pr_data(run, self.store.get_run_metadata(resolved), parsed, pr_url),
+            pr_data,
+            meta=GitHubCommentMeta(
+                language=getattr(self.config.preferences, "ui_language", "zh-CN"),
+                run_id=resolved,
+                model=str(run.get("model") or ""),
+                duration_seconds=_as_float(run.get("duration_seconds")),
+                cost=_as_float(run.get("total_cost")),
+                head_sha=str(run.get("head_sha") or ""),
+                # A republished historical run must not look freshly reviewed.
+                reviewed_at=str(run.get("created_at") or ""),
+                files_reviewed=_as_count(run.get("included_files")),
+                files_skipped=_as_count(run.get("excluded_files")),
+                # Fork detection needs the head repository, which PRData does
+                # not carry yet (see docs/claude-p5-comment-format.md F1).
+                from_fork=False,
+            ),
         )
         return PublishTarget(
             run_id=resolved,

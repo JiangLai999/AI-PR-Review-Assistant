@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -2217,9 +2218,11 @@ def test_publish_comment_is_regenerated_from_the_stored_run(
     assert body.startswith("## 🤖")
     assert "stored summary" in body
     assert "stored finding 0" in body and "stored finding 1" in body
-    # "Files Changed" uses the count the run recorded (total_files=4) — the
+    # The file-count line uses the count the run recorded (total_files=4) — the
     # per-file list is gone from the database and must not read as 0.
-    assert "| Files Changed | 4 |" in body
+    assert re.search(r"4\s*(个变更文件|files changed)", body)
+    # v2 header carries provenance so a reader can find the run again.
+    assert "run `" in body and "提交 `" in body
 
 
 def test_publish_reports_the_stored_pr_title_and_never_invents_an_author(

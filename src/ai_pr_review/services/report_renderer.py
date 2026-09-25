@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import io
 import json
+import re
 from dataclasses import asdict, dataclass
+from urllib.parse import quote
 
 from rich.console import Console
 from rich.panel import Panel
@@ -43,6 +45,119 @@ MARKDOWN_HEADING_ICONS = {
     "low": "ℹ️",
     "info": "📝",
 }
+
+#: GitHub comment layout (v2). Kept separate from the terminal/markdown
+#: renderers so those outputs stay byte-stable.
+GITHUB_SEVERITY_ICONS = {
+    "critical": "🛑",
+    "high": "⚠️",
+    "medium": "🔎",
+    "low": "ℹ️",
+    "info": "📝",
+}
+
+#: Chinese chrome for the comment. Model/rule prose is data and is never
+#: rewritten; only the surrounding labels follow `GitHubCommentMeta.language`.
+GITHUB_SEVERITY_LABELS_ZH = {
+    "critical": "严重",
+    "high": "高风险",
+    "medium": "中风险",
+    "low": "低风险",
+    "info": "提示",
+}
+GITHUB_STATS_LABELS_ZH = {
+    "critical": "严重",
+    "high": "高",
+    "medium": "中",
+    "low": "低",
+    "info": "提示",
+}
+GITHUB_CATEGORY_LABELS_ZH = {
+    "correctness": "正确性",
+    "security": "安全",
+    "resource": "资源",
+    "error_handling": "错误处理",
+    "performance": "性能",
+    "concurrency": "并发",
+    "architecture": "架构",
+}
+_DEFAULT_GITHUB_TITLE = "AI PR Review Report"
+_DEFAULT_GITHUB_TITLE_ZH = "AI PR 审查报告"
+
+#: Fence language for the optional code snippet, so GitHub highlights it.
+_FENCE_LANGUAGES = {
+    "py": "python",
+    "js": "javascript",
+    "mjs": "javascript",
+    "cjs": "javascript",
+    "ts": "typescript",
+    "tsx": "tsx",
+    "jsx": "jsx",
+    "sh": "bash",
+    "ps1": "powershell",
+    "json": "json",
+    "yml": "yaml",
+    "yaml": "yaml",
+    "html": "html",
+    "css": "css",
+    "scss": "scss",
+    "sql": "sql",
+    "go": "go",
+    "rs": "rust",
+    "java": "java",
+    "rb": "ruby",
+    "php": "php",
+    "cs": "csharp",
+    "c": "c",
+    "h": "c",
+    "cpp": "cpp",
+    "hpp": "cpp",
+}
+
+#: A paragraph inside the model summary that starts with a file path is split
+#: out into the collapsible per-file section instead of drowning the top of the
+#: comment.
+_SUMMARY_FILE_PREFIX = re.compile(
+    r"^(?P<path>[\w./\\-]+\.(?:py|js|mjs|cjs|ts|tsx|jsx|java|go|rs|rb|php|cs|kt|swift|c|h|cpp|hpp|"
+    r"sh|ps1|sql|html|css|scss|less|json|ya?ml|toml|ini|cfg|md|txt|png|jpg|jpeg|svg|webp|lock))"
+    r"\s*[:：]\s*(?P<body>.+)$",
+    re.DOTALL,
+)
+
+#: Problem/suggestion text longer than this is folded behind `<details>` so the
+#: scan path stays one screen per finding.
+_GITHUB_FOLD_THRESHOLD = 320
+
+
+@dataclass(slots=True)
+class GitHubCommentMeta:
+    """Optional enrichment for the GitHub comment header.
+
+    Everything is optional: without it the comment still renders, it just has
+    no model/run/cost line. `language` accepts `zh*` / anything else for English.
+
+    ``from_fork`` exists because the renderer cannot tell on its own: a fork PR
+    keeps its head commit outside the base repository, so a
+    ``blob/<head_sha>`` link 404s. Callers that fetched the PR can say so, and
+    the renderer then falls back to the PR files view.
+    """
+
+    language: str = "en"
+    run_id: str = ""
+    model: str = ""
+    duration_seconds: float | None = None
+    cost: float | None = None
+    head_sha: str = ""
+    reviewed_at: str = ""
+    files_reviewed: int | None = None
+    files_skipped: int | None = None
+    from_fork: bool = False
+
+
+#: GitHub rejects comment bodies above 65,536 characters. Stay well below that
+#: and truncate loudly instead of failing the whole publish.
+_GITHUB_SOFT_LIMIT = 24_000
+_GITHUB_COMPACT_FINDINGS_PER_SEVERITY = 6
 
 
 @dataclass(slots=True)
@@ -264,8 +379,20 @@ class ReportRenderer:
             indent=self._config.json_indent,
         )
 
-    def render_github_comment(self, result: ReviewResult, pr_data: PRData) -> str:
-        """渲染 GitHub PR Comment。"""
+    def render_github_comment(
+        self,
+        result: ReviewResult,
+        pr_data: PRData,
+        *,
+        meta: GitHubCommentMeta | None = None,
+    ) -> str:
+        """Render the GitHub PR comment (v2 layout).
+
+        Optimised for a reviewer who opens the comment once: target and stats
+        first, a ranked "fix these first" shortlist, one collapsible block per
+        severity, clickable `file:line` links, an evidence badge on every
+        finding, and the long per-file model summary folded away at the bottom.
+        """
         context = self._build_context(
             result,
             pr_data,
@@ -274,55 +401,535 @@ class ReportRenderer:
         if self._config.github_comment_template is not None:
             return self._config.github_comment_template.format_map(asdict(context))
 
-        lines = [
-            f"## 🤖 {context.title}",
-            "",
-            "### Summary",
-            "| Metric | Value |",
-            "|--------|-------|",
-            f"| Files Changed | {context.files_changed} |",
-            f"| Total Findings | {context.total_findings} |",
-            f"| Critical | {context.critical_count} |",
-            f"| High | {context.high_count} |",
-            f"| Medium | {context.medium_count} |",
-            f"| Low | {context.low_count} |",
-            f"| Info | {context.info_count} |",
-            "",
+        options = meta or GitHubCommentMeta()
+        return self._render_github_comment_v2(result, pr_data, context, options)
+
+    # ------------------------------------------------------------------
+    # GitHub comment v2 building blocks
+    # ------------------------------------------------------------------
+    def _render_github_comment_v2(
+        self,
+        result: ReviewResult,
+        pr_data: PRData,
+        context: RenderedReportContext,
+        meta: GitHubCommentMeta,
+    ) -> str:
+        zh = str(meta.language or "").lower().startswith("zh")
+        grouped = self._group_findings(result.findings)
+        ranked = [
+            finding
+            for severity in SEVERITY_ORDER
+            for finding in sorted(grouped[severity], key=lambda item: item.confidence, reverse=True)
         ]
+        evidence_counts = self._github_evidence_counts(result.findings)
 
-        if context.summary:
-            lines.extend(["**Summary**: " + context.summary, ""])
+        title = context.title
+        if zh and title == _DEFAULT_GITHUB_TITLE:
+            title = _DEFAULT_GITHUB_TITLE_ZH
+        lines = [f"## 🤖 {title}", ""]
+        lines.extend([self._github_target_line(context, meta, zh), ""])
 
-        findings_by_severity = self._group_findings(result.findings)
-        if not any(findings_by_severity.values()):
+        # One blockquote block: stats, evidence, provenance. Every line but the
+        # last gets an explicit hard break so no renderer can join them.
+        quote_lines = list(self._github_stats_line(context, evidence_counts, zh))
+        meta_line = self._github_meta_line(meta, zh)
+        if meta_line:
+            quote_lines.append(meta_line)
+        lines.extend(
+            [
+                "> " + "  \n> ".join(quote_lines),
+                "",
+            ]
+        )
+
+        if not ranked:
             lines.extend(
                 [
-                    "### Findings",
+                    "### ✅ " + ("未发现问题" if zh else "No findings"),
                     "",
-                    "No findings.",
+                    (
+                        "本次审查在变更范围内未发现需要修复的问题。"
+                        if zh
+                        else "This review found nothing that needs fixing in the changed files."
+                    ),
                     "",
-                    "---",
-                    "*Generated by AI PR Review Assistant*",
                 ]
             )
-            return "\n".join(lines)
+        else:
+            lines.extend(self._github_top_findings(ranked, pr_data, meta, zh))
+            lines.extend(self._github_severity_sections(grouped, pr_data, meta, zh))
 
-        for severity in SEVERITY_ORDER:
-            findings = findings_by_severity[severity]
-            if not findings:
-                continue
-
-            lines.extend([f"### {SEVERITY_LABELS[severity]} Findings", ""])
-            for finding in findings:
-                lines.extend(
-                    self._render_github_finding(
-                        finding,
-                        include_code_snippet=self._config.include_code_snippets_in_github_comment,
-                    )
-                )
+        summary_block = self._github_summary_block(context.summary, zh)
+        lines.extend(summary_block)
 
         lines.extend(["---", "*Generated by AI PR Review Assistant*"])
-        return "\n".join(lines)
+        footer = self._github_footer(meta, evidence_counts, context, zh)
+        if footer:
+            lines.append(footer)
+
+        body = "\n".join(lines)
+        if len(body) <= _GITHUB_SOFT_LIMIT:
+            return body
+
+        # Too long for one comment: first drop the per-file prose, then shorten
+        # each severity block, and finally cut with an explicit marker. Never
+        # silently publish a truncated report.
+        compact: list[str] = [f"## 🤖 {title}", "", self._github_target_line(context, meta, zh), ""]
+        compact.extend(["> " + "  \n> ".join(quote_lines), ""])
+        if ranked:
+            compact.extend(self._github_top_findings(ranked, pr_data, meta, zh))
+            compact.extend(
+                self._github_severity_sections(
+                    grouped,
+                    pr_data,
+                    meta,
+                    zh,
+                    max_per_severity=_GITHUB_COMPACT_FINDINGS_PER_SEVERITY,
+                )
+            )
+        compact.extend(
+            [
+                "> ⚠️ "
+                + (
+                    f"评论超过 {_GITHUB_SOFT_LIMIT} 字符，逐文件摘要已省略，低优先级条目已折叠为计数。"
+                    if zh
+                    else f"Comment exceeded {_GITHUB_SOFT_LIMIT} characters: per-file prose omitted, lower-priority entries kept as counts."
+                ),
+                "",
+                "---",
+                "*Generated by AI PR Review Assistant*",
+            ]
+        )
+        footer = self._github_footer(meta, evidence_counts, context, zh)
+        if footer:
+            compact.append(footer)
+        compact_body = "\n".join(compact)
+        if len(compact_body) <= _GITHUB_SOFT_LIMIT:
+            return compact_body
+        marker = (
+            f"\n\n> ⛔ 评论过长已截断（{len(compact_body)} 字符）；完整报告请运行 "
+            f"`pr-review history {meta.run_id[:8] or '<run>'}`。\n"
+            if zh
+            else f"\n\n> ⛔ Comment truncated ({len(compact_body)} chars); run "
+            f"`pr-review history {meta.run_id[:8] or '<run>'}` for the full report.\n"
+        )
+        return compact_body[: max(0, _GITHUB_SOFT_LIMIT - len(marker))] + marker
+
+    def _github_severity_sections(
+        self,
+        grouped: dict[str, list[Finding]],
+        pr_data: PRData,
+        meta: GitHubCommentMeta,
+        zh: bool,
+        *,
+        max_per_severity: int | None = None,
+    ) -> list[str]:
+        lines: list[str] = []
+        for severity in SEVERITY_ORDER:
+            findings = sorted(grouped[severity], key=lambda item: item.confidence, reverse=True)
+            if not findings:
+                continue
+            shown = findings if max_per_severity is None else findings[:max_per_severity]
+            section = self._github_severity_block(
+                severity,
+                shown,
+                pr_data,
+                meta,
+                zh,
+                include_code_snippet=self._config.include_code_snippets_in_github_comment,
+            )
+            if len(shown) < len(findings):
+                hidden = len(findings) - len(shown)
+                section.insert(
+                    -2,
+                    (
+                        f"> … 另有 {hidden} 条同类问题未展开（见 `pr-review history {meta.run_id[:8]}`）"
+                        if zh
+                        else f"> … {hidden} more in this severity (see `pr-review history {meta.run_id[:8]}`)"
+                    ),
+                )
+                section.insert(-1, "")
+            lines.extend(section)
+        return lines
+
+    def _github_target_line(
+        self, context: RenderedReportContext, meta: GitHubCommentMeta, zh: bool
+    ) -> str:
+        pr_ref = f"PR #{context.pr_number}"
+        if context.pr_url:
+            pr_ref = f"[{pr_ref}]({context.pr_url})"
+        files_label = (
+            f"{context.files_changed} 个变更文件"
+            if zh
+            else f"{context.files_changed} files changed"
+        )
+        target = f"**{self._github_code_span(context.repository)}** · {pr_ref}"
+        if context.pr_title:
+            target += f" · {self._github_escape_prose(context.pr_title)}"
+        elif zh:
+            target += " · （未记录标题）"
+        if context.author and context.author != "unknown":
+            target += f" · @{self._github_escape_prose(context.author)}"
+        coverage = ""
+        reviewed = meta.files_reviewed
+        skipped = meta.files_skipped or 0
+        if reviewed is not None:
+            if zh:
+                coverage = f" · 已审查 {reviewed}/{context.files_changed} 个文件"
+                coverage += f"（跳过 {skipped}）" if skipped else ""
+            else:
+                coverage = f" · reviewed {reviewed}/{context.files_changed} files"
+                coverage += f" (skipped {skipped})" if skipped else ""
+        return f"{target} · {files_label}{coverage}"
+
+    @staticmethod
+    def _github_evidence_counts(findings: list[Finding]) -> dict[str, int]:
+        counts = {"valid": 0, "needs_review": 0, "invalid": 0, "unverified": 0}
+        for finding in findings:
+            status = str(finding.evidence_status or "unverified").strip().lower()
+            counts[status if status in counts else "unverified"] += 1
+        return counts
+
+    @staticmethod
+    def _github_evidence_badge(status: str, zh: bool) -> str:
+        """Describe the *validation* result, not the truth of the finding.
+
+        `FindingValidator` only checks that the quoted file/lines/snippet are
+        self-consistent with the diff. Saying「证据有效」for that over-claims, so
+        the badges spell out what was validated.
+        """
+        table = {
+            "valid": ("✅ validated", "✅ 校验通过"),
+            "needs_review": ("🔍 needs review", "🔍 待人工确认"),
+            "invalid": ("⛔ invalid", "⛔ 校验不成立"),
+            "unverified": ("❔ unverified", "❔ 未校验"),
+        }
+        fallback = table["unverified"]
+        label = table.get(str(status or "").strip().lower(), fallback)
+        return label[1] if zh else label[0]
+
+    def _github_stats_line(
+        self,
+        context: RenderedReportContext,
+        evidence: dict[str, int],
+        zh: bool,
+    ) -> list[str]:
+        """Findings-distribution line plus the evidence-validation line."""
+        counts = {
+            "critical": context.critical_count,
+            "high": context.high_count,
+            "medium": context.medium_count,
+            "low": context.low_count,
+            "info": context.info_count,
+        }
+        severity_bits = []
+        for severity in SEVERITY_ORDER:
+            if counts[severity] <= 0:
+                continue
+            label = (
+                GITHUB_STATS_LABELS_ZH[severity]
+                if zh
+                else SEVERITY_LABELS[severity].lower()
+            )
+            severity_bits.append(f"{GITHUB_SEVERITY_ICONS[severity]} {counts[severity]} {label}")
+        total_label = "个问题" if zh else "findings"
+        head = f"**{context.total_findings} {total_label}**"
+        if severity_bits:
+            head += " · " + " · ".join(severity_bits)
+        evidence_label = "证据校验（位置与片段自洽）" if zh else "evidence (location + snippet)"
+        evidence_bits = " · ".join(
+            f"{self._github_evidence_badge(key, zh)} {evidence[key]}"
+            for key in ("valid", "needs_review", "invalid", "unverified")
+        )
+        return [head, f"**{evidence_label}** {evidence_bits}"]
+
+    @staticmethod
+    def _github_meta_line(meta: GitHubCommentMeta, zh: bool) -> str:
+        bits: list[str] = []
+        if meta.reviewed_at:
+            bits.append(f"{'审查于' if zh else 'reviewed'} {meta.reviewed_at}")
+        if meta.model:
+            bits.append(f"模型 `{meta.model}`" if zh else f"model `{meta.model}`")
+        if meta.run_id:
+            bits.append(f"run `{meta.run_id[:8]}`")
+        if meta.duration_seconds is not None:
+            bits.append(
+                f"耗时 {meta.duration_seconds:.1f}s" if zh else f"{meta.duration_seconds:.1f}s"
+            )
+        if meta.cost is not None:
+            # Local token×price estimate, not a bill: mark it as such.
+            if meta.cost <= 0:
+                bits.append("成本未记录" if zh else "cost not recorded")
+            else:
+                bits.append(f"≈ ${meta.cost:.4f}")
+        return " · ".join(bits)
+
+    @staticmethod
+    def _github_blob_link(finding: Finding, pr_data: PRData, head_sha: str) -> str | None:
+        """`file:line` deep link, when the commit is known.
+
+        Only a missing sha is handled here. A fork PR has a non-empty sha whose
+        commit lives in the fork, so callers that know the PR is from a fork must
+        set `GitHubCommentMeta.from_fork` — the renderer then links the PR files
+        view instead of a blob URL that would 404.
+        """
+        sha = (head_sha or "").strip()
+        if not sha:
+            return None
+        path = quote(str(finding.file or ""), safe="/")
+        if not path:
+            return None
+        url = f"https://github.com/{pr_data.owner}/{pr_data.repo}/blob/{sha}/{path}"
+        if finding.line_start:
+            url += f"#L{finding.line_start}"
+            if finding.line_end and finding.line_end != finding.line_start:
+                url += f"-L{finding.line_end}"
+        return url
+
+    def _github_location(
+        self, finding: Finding, pr_data: PRData, meta: GitHubCommentMeta
+    ) -> str:
+        label = f"{finding.file}:{finding.line_start}"
+        if finding.line_end and finding.line_end != finding.line_start:
+            label = f"{finding.file}:{finding.line_start}-{finding.line_end}"
+        link = None
+        if meta.from_fork:
+            # The head commit is not in the base repository, so a blob URL would
+            # 404; the PR files view always exists.
+            files_url = f"https://github.com/{pr_data.owner}/{pr_data.repo}/pull/{pr_data.pr_number}/files"
+            link = files_url
+        else:
+            link = self._github_blob_link(finding, pr_data, meta.head_sha)
+        span = self._github_code_span(label)
+        return f"[{span}]({link})" if link else span
+
+    def _github_top_findings(
+        self,
+        ranked: list[Finding],
+        pr_data: PRData,
+        meta: GitHubCommentMeta,
+        zh: bool,
+    ) -> list[str]:
+        limit = 3
+        heading = "🎯 优先修复" if zh else "🎯 Fix first"
+        lines = [f"### {heading}（Top {min(limit, len(ranked))}）" if zh else f"### {heading} (top {min(limit, len(ranked))})", ""]
+        for index, finding in enumerate(ranked[:limit], start=1):
+            confidence = f"{finding.confidence * 100:.0f}%"
+            lines.append(
+                f"{index}. {GITHUB_SEVERITY_ICONS[finding.severity]} "
+                f"**{self._github_escape_prose(finding.title)}** · "
+                f"{self._github_location(finding, pr_data, meta)} · {confidence} · "
+                f"{self._github_evidence_badge(finding.evidence_status, zh)}"
+            )
+        lines.append("")
+        return lines
+
+    def _github_severity_block(
+        self,
+        severity: str,
+        findings: list[Finding],
+        pr_data: PRData,
+        meta: GitHubCommentMeta,
+        zh: bool,
+        *,
+        include_code_snippet: bool,
+    ) -> list[str]:
+        if zh:
+            title = f"{GITHUB_SEVERITY_ICONS[severity]} {GITHUB_SEVERITY_LABELS_ZH[severity]} · {len(findings)} 条"
+        else:
+            title = f"{GITHUB_SEVERITY_ICONS[severity]} {SEVERITY_LABELS[severity]} · {len(findings)}"
+        # Only the most severe block is expanded: the shortlist above already
+        # carries the headline items, so everything else stays one click away.
+        opening = "<details open>" if severity == "critical" else "<details>"
+        lines = [opening, f"<summary><b>{title}</b></summary>", ""]
+        for index, finding in enumerate(findings, start=1):
+            lines.extend(
+                self._github_finding_card(
+                    finding,
+                    index,
+                    pr_data,
+                    meta,
+                    zh,
+                    include_code_snippet=include_code_snippet,
+                )
+            )
+        lines.extend(["</details>", ""])
+        return lines
+
+    def _github_finding_card(
+        self,
+        finding: Finding,
+        index: int,
+        pr_data: PRData,
+        meta: GitHubCommentMeta,
+        zh: bool,
+        *,
+        include_code_snippet: bool,
+    ) -> list[str]:
+        confidence = f"{finding.confidence * 100:.0f}%"
+        sources = ", ".join(f"`{source}`" for source in (finding.sources or []))
+        detail_bits = [
+            self._github_location(finding, pr_data, meta),
+            (f"置信度 {confidence}" if zh else f"confidence {confidence}"),
+            self._github_evidence_badge(finding.evidence_status, zh),
+        ]
+        if finding.category:
+            category = (
+                GITHUB_CATEGORY_LABELS_ZH.get(finding.category, finding.category)
+                if zh
+                else finding.category
+            )
+            detail_bits.append(f"`{category}`")
+        if sources:
+            detail_bits.append(sources)
+
+        lines = [
+            f"#### {index}. {GITHUB_SEVERITY_ICONS[finding.severity]} "
+            f"{self._github_escape_prose(finding.title)}",
+            " · ".join(detail_bits),
+            "",
+        ]
+        if finding.evidence_issues:
+            escaped_issues = [self._github_escape_prose(issue) for issue in finding.evidence_issues]
+            issues = "；".join(escaped_issues) if zh else "; ".join(escaped_issues)
+            lines.extend([f"> ⚠️ {'证据疑点' if zh else 'evidence issues'}：{issues}", ""])
+
+        problem_label = "问题" if zh else "Problem"
+        suggestion_label = "建议" if zh else "Suggestion"
+        code_label = "代码" if zh else "Code"
+        fence = self._github_fence_language(finding.file)
+        problem = self._github_escape_prose(finding.problem)
+        suggestion = self._github_escape_prose(finding.suggestion)
+        fold = len(problem) + len(suggestion) > _GITHUB_FOLD_THRESHOLD
+        if fold:
+            lines.extend(
+                [
+                    "<details>",
+                    f"<summary>{problem_label} / {suggestion_label}</summary>",
+                    "",
+                    f"**{problem_label}**：{problem}",
+                    "",
+                    f"**{suggestion_label}**：{suggestion}",
+                    "",
+                ]
+            )
+            if include_code_snippet and finding.code_snippet:
+                lines.extend(self._github_code_block(finding.code_snippet, fence, code_label))
+            lines.extend(["</details>", ""])
+            return lines
+
+        lines.extend([f"**{problem_label}**：{problem}", "", f"**{suggestion_label}**：{suggestion}", ""])
+        if include_code_snippet and finding.code_snippet:
+            lines.extend(self._github_code_block(finding.code_snippet, fence, code_label))
+        return lines
+
+    @staticmethod
+    def _github_code_block(snippet: str, fence: str, label: str) -> list[str]:
+        """Fence the snippet with a delimiter the snippet itself cannot close."""
+        body = str(snippet or "")
+        longest = max((len(run) for run in re.findall(r"`+", body)), default=0)
+        delimiter = "`" * max(3, longest + 1)
+        return [f"**{label}**：", f"{delimiter}{fence}", body, delimiter, ""]
+
+    @staticmethod
+    def _github_fence_language(filename: str) -> str:
+        suffix = str(filename or "").rsplit(".", 1)[-1].lower() if "." in str(filename or "") else ""
+        return _FENCE_LANGUAGES.get(suffix, "")
+
+    @staticmethod
+    def _github_escape_prose(text: object) -> str:
+        """Escape model/rule prose so GitHub renders it literally.
+
+        GitHub strips unknown HTML tags: a model sentence containing `<head>` or
+        `target="_blank"` would silently lose those words. Escaping the angle
+        brackets keeps the reviewer's evidence intact, and a leading `#` is
+        neutralised so prose cannot inject a heading.
+        """
+        value = str(text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        value = " ".join(value.split())
+        return re.sub(r"^(#{1,6})(\s)", r"\\\1\2", value)
+
+    @staticmethod
+    def _github_code_span(text: object) -> str:
+        """Backtick span that survives a backtick inside the value."""
+        value = str(text or "").strip()
+        if "`" in value:
+            return f"`` {value} ``"
+        return f"`{value}`"
+
+    def _github_summary_block(self, summary: str, zh: bool) -> list[str]:
+        """Split the model summary so file-by-file prose stops dominating.
+
+        Anything before the first `path:` paragraph stays visible as the review
+        conclusion; the per-file paragraphs move into a collapsed block.
+        """
+        text = str(summary or "").strip()
+        if not text:
+            return []
+
+        overview: list[str] = []
+        per_file: list[tuple[str, str]] = []
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            match = _SUMMARY_FILE_PREFIX.match(line)
+            if match:
+                per_file.append((match.group("path"), match.group("body").strip()))
+            elif per_file:
+                path, body = per_file[-1]
+                per_file[-1] = (path, f"{body} {line}".strip())
+            else:
+                overview.append(line)
+
+        lines: list[str] = []
+        if overview:
+            heading = "### 📌 结论摘要" if zh else "### 📌 Review summary"
+            lines.extend(
+                [heading, "", self._github_escape_prose(" ".join(overview)), ""]
+            )
+        if per_file:
+            heading = (
+                f"📄 模型摘要覆盖的 {len(per_file)} 个文件"
+                if zh
+                else f"📄 Model summary by file ({len(per_file)} files)"
+            )
+            lines.extend(["<details>", f"<summary><b>{heading}</b></summary>", ""])
+            for path, body in per_file:
+                lines.extend(
+                    [
+                        f"**{self._github_code_span(path)}**",
+                        "",
+                        f"> {self._github_escape_prose(body)}",
+                        "",
+                    ]
+                )
+            lines.extend(["</details>", ""])
+        return lines
+
+    def _github_footer(
+        self,
+        meta: GitHubCommentMeta,
+        evidence: dict[str, int],
+        context: RenderedReportContext,
+        zh: bool,
+    ) -> str:
+        bits: list[str] = []
+        if zh:
+            bits.append(
+                f"证据优先 · 位置与片段校验通过 {evidence['valid']}/{context.total_findings}"
+            )
+        else:
+            bits.append(
+                f"evidence-first · {evidence['valid']}/{context.total_findings} locations and snippets validated"
+            )
+        if meta.model:
+            bits.append(f"{'模型' if zh else 'model'} `{meta.model}`")
+        if meta.run_id:
+            bits.append(f"run `{meta.run_id[:8]}`")
+        if meta.head_sha:
+            bits.append(f"{'提交' if zh else 'commit'} `{meta.head_sha[:7]}`")
+        return f"<sub>{' · '.join(bits)}</sub>"
 
     def _build_payload(
         self,

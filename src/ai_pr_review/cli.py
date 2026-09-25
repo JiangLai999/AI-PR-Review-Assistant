@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -106,7 +107,7 @@ from ai_pr_review.services.hybrid_orchestrator import HybridReviewOrchestrator
 from ai_pr_review.services.model_providers.factory import create_model_provider
 from ai_pr_review.services.pr_fetcher import PRFetcher
 from ai_pr_review.services.prompt_assembler import ReviewResult
-from ai_pr_review.services.report_renderer import ReportRenderer
+from ai_pr_review.services.report_renderer import GitHubCommentMeta, ReportRenderer
 from ai_pr_review.services.result_store import ResultStore
 from ai_pr_review.services.review_orchestrator import (
     ReviewArtifacts,
@@ -1631,6 +1632,17 @@ def render_github_comment_report(
     return ReportRenderer(app_config.report_renderer).render_github_comment(
         artifacts.review_result or ReviewResult(summary="", findings=[]),
         artifacts.pr_data,
+        meta=GitHubCommentMeta(
+            language=getattr(app_config.preferences, "ui_language", "zh-CN"),
+            run_id=artifacts.run_id or "",
+            model=app_config.ai_client.model or "",
+            duration_seconds=artifacts.duration_seconds,
+            cost=artifacts.total_cost,
+            head_sha=getattr(artifacts.pr_data, "head_sha", "") or "",
+            reviewed_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            files_reviewed=artifacts.filter_result.included_count,
+            files_skipped=artifacts.filter_result.excluded_count,
+        ),
     )
 
 
