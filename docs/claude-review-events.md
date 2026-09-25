@@ -189,6 +189,12 @@ not emitted rather than sent with guessed values.
 * `cost` is `total_run_cost` rounded to 6 decimals; `duration_seconds` is the
   orchestrator's measured duration rounded to 3 decimals.
 * `run_id` and `finding_count` are unchanged (backward compatible).
+* `filtered` (added 2026-09-25) carries the post-processor counts so a live
+  0-finding result can explain itself: `{"threshold": 0.6,
+  "below_threshold": 3, "duplicates": 0}`. It is **omitted** when the run has no
+  post-processing metadata — never sent as an empty object, because that would
+  claim "nothing was filtered" for a run where that was never measured.
+  `threshold` is the value in force at review time, not the current config.
 
 ### 2.8 `review.failed` / `review.cancelled`
 

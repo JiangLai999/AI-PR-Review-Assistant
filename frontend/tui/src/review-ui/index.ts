@@ -31,15 +31,18 @@ export {
   clampLine,
   demoView,
   displayWidth,
+  effectiveWorkbenchLayout,
   filterBarView,
   fitBorderedContent,
   hasClosingBorder,
+  hasLoneSurrogate,
   panelContentBudget,
   publishDialogView,
   PUBLISH_DIALOG_STATES,
   riskBadge,
   scrubCredentials,
   showcaseView,
+  statusBarView,
   truncateCommentBody,
 } from "./panel-model"
 export type {
@@ -59,6 +62,9 @@ export type {
   ShowcaseReadiness,
   ShowcaseStep,
   ShowcaseView,
+  StatusBarModel,
+  StatusBarPhase,
+  StatusBarView,
 } from "./panel-model"
 
 export { BorderedPanel } from "./BorderedPanel"
@@ -73,8 +79,12 @@ export { ReviewActionBar } from "./ReviewActionBar"
 export type { ReviewActionBarProps } from "./ReviewActionBar"
 export { ReviewProgressPanel } from "./ReviewProgressPanel"
 export type { ReviewProgressPanelProps } from "./ReviewProgressPanel"
+export { ReviewStatusBar } from "./ReviewStatusBar"
+export type { ReviewStatusBarProps } from "./ReviewStatusBar"
 export { ReviewSummaryPanel } from "./ReviewSummaryPanel"
 export type { ReviewSummaryPanelProps } from "./ReviewSummaryPanel"
+export { ReviewWorkbench } from "./ReviewWorkbench"
+export type { ReviewWorkbenchLayout, ReviewWorkbenchProps } from "./ReviewWorkbench"
 export { ReviewWorkspace } from "./ReviewWorkspace"
 export type { ReviewWorkspaceLayout, ReviewWorkspaceProps } from "./ReviewWorkspace"
 export { ShowcasePanel } from "./ShowcasePanel"

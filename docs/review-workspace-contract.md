@@ -154,6 +154,20 @@ Extend the existing event with summary fields:
 }
 ```
 
+The event may also carry `filtered` when the run recorded post-processing
+counts, so a live 0-finding result can explain itself without re-fetching the
+report:
+
+```json
+{"filtered": {"threshold": 0.6, "below_threshold": 3, "duplicates": 0}}
+```
+
+The key is **omitted** when the run has no such metadata (older runs, or a run
+that never went through the post-processor): an empty object would claim
+"nothing was filtered", which cannot be known. `run.filtered` in the report
+payload carries the same shape, and `threshold` is the value that was in force
+when the review ran — not today's configuration.
+
 ### 3.8 Failure and cancellation
 
 `review.failed` and `review.cancelled` keep their current fields and add

@@ -22,6 +22,7 @@ export const chatCommands: readonly ChatCommand[] = [
   { name: "/publish", description: "预览并发布审查评论到 GitHub", argument: "[run_id] [--confirm]" },
   { name: "/demo", description: "运行离线演示用例", argument: "[case_key|list]" },
   { name: "/showcase", description: "查看参赛演示路径" },
+  { name: "/workbench", description: "展开 / 收起审查工作台" },
   { name: "/new", description: "开始新会话" },
 ]
 

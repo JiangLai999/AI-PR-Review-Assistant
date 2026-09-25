@@ -10,20 +10,29 @@ import {
   evidenceColor,
   formatDuration,
   isEnLanguage,
+  progressBar,
   rankFindings,
   severityColor,
 } from "./helpers"
-import type { EvidenceCounts, ReviewFinding } from "./types"
+import type { EvidenceCounts, ReviewFinding, SeverityCounts } from "./types"
 
 // ---------------------------------------------------------------------------
 // Width-safe single-line text
 // ---------------------------------------------------------------------------
 
-/** Display width with CJK / fullwidth counted as 2 columns. */
+/** Display width with CJK / fullwidth / emoji counted as 2 columns. */
 export function displayWidth(value: string): number {
   let width = 0
   for (const char of String(value ?? "")) {
     const code = char.codePointAt(0) ?? 0
+    // Variation selectors and zero-width joiners contribute nothing.
+    if (
+      (code >= 0x200b && code <= 0x200f) ||
+      (code >= 0xfe00 && code <= 0xfe0f) ||
+      code === 0x200d
+    ) {
+      continue
+    }
     width +=
       (code >= 0x1100 && code <= 0x115f) ||
       (code >= 0x2e80 && code <= 0xa4cf) ||
@@ -31,7 +40,11 @@ export function displayWidth(value: string): number {
       (code >= 0xf900 && code <= 0xfaff) ||
       (code >= 0xfe30 && code <= 0xfe6f) ||
       (code >= 0xff00 && code <= 0xff60) ||
-      (code >= 0xffe0 && code <= 0xffe6)
+      (code >= 0xffe0 && code <= 0xffe6) ||
+      // Emoji & pictographs render double-width in modern terminals.
+      (code >= 0x1f000 && code <= 0x1faff) ||
+      (code >= 0x2600 && code <= 0x27bf) ||
+      (code >= 0x2b00 && code <= 0x2bff)
         ? 2
         : 1
   }
@@ -55,6 +68,28 @@ export function clampLine(value: string, max: number): string {
     used += w
   }
   return `${out}…`
+}
+
+/**
+ * True when `value` contains a lone UTF-16 surrogate — i.e. a code point was
+ * cut in half. `clampLine` iterates by code point so it never produces one;
+ * tests use this to prove rendered status text is width-safe.
+ */
+export function hasLoneSurrogate(value: string): boolean {
+  const text = String(value ?? "")
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i)
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = i + 1 < text.length ? text.charCodeAt(i + 1) : 0
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        i += 1
+        continue
+      }
+      return true
+    }
+    if (code >= 0xdc00 && code <= 0xdfff) return true
+  }
+  return false
 }
 
 // ---------------------------------------------------------------------------
@@ -564,6 +599,184 @@ export function demoView(opts?: {
     findings: ranked.map((finding) => toFindingLine(finding, opts?.language)),
     empty: ranked.length === 0,
   }
+}
+
+// ---------------------------------------------------------------------------
+// ReviewStatusBar — single-row workbench status line
+// ---------------------------------------------------------------------------
+
+export type StatusBarPhase = "running" | "done" | "idle"
+
+export type StatusBarModel = {
+  phase: StatusBarPhase
+  progress?: number
+  stageLabel?: string
+  filesDone?: number
+  filesTotal?: number
+  findingCount?: number
+  severity?: SeverityCounts
+  threshold?: number | null
+  belowThreshold?: number | null
+  toggleKey?: string
+  language?: string
+  /** Clamp the final line to this many columns. */
+  maxWidth?: number
+}
+
+export type StatusBarView = {
+  text: string
+  phase: StatusBarPhase
+}
+
+const STATUS_SEVERITY_GLYPH: Record<string, string> = {
+  critical: "🛑",
+  high: "⚠️",
+  medium: "⚡",
+  low: "ℹ️",
+  info: "·",
+}
+
+const STATUS_SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"] as const
+
+function statusBarSeverityParenthetical(severity: SeverityCounts | undefined): string {
+  if (!severity) return ""
+  const parts: string[] = []
+  for (const key of STATUS_SEVERITY_ORDER) {
+    const value = severity?.[key]
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      parts.push(`${STATUS_SEVERITY_GLYPH[key] ?? "·"}${Math.floor(value)}`)
+    }
+  }
+  return parts.join(" ")
+}
+
+/**
+ * One-row status bar text for the workbench. Fragments appear only when their
+ * data is present — missing fields are omitted, never rendered as a fake 0.
+ * The final line is clamped with `clampLine` (code-point safe, no half CJK).
+ */
+export function statusBarView(model?: StatusBarModel | null): StatusBarView {
+  const en = isEnLanguage(model?.language)
+  const phase: StatusBarPhase =
+    model?.phase === "running" || model?.phase === "done" || model?.phase === "idle"
+      ? model.phase
+      : "idle"
+  const toggleKey = String(model?.toggleKey ?? "Alt+W").trim() || "Alt+W"
+  const fragments: string[] = []
+
+  const hasProgress =
+    typeof model?.progress === "number" && Number.isFinite(model.progress)
+  const progressPercent = hasProgress
+    ? Math.min(100, Math.max(0, Math.round(model!.progress as number)))
+    : 0
+
+  const filesDone =
+    typeof model?.filesDone === "number" && Number.isFinite(model.filesDone)
+      ? Math.max(0, Math.floor(model.filesDone))
+      : undefined
+  const filesTotal =
+    typeof model?.filesTotal === "number" && Number.isFinite(model.filesTotal)
+      ? Math.max(0, Math.floor(model.filesTotal))
+      : undefined
+
+  const findingCount =
+    typeof model?.findingCount === "number" && Number.isFinite(model.findingCount)
+      ? Math.max(0, Math.floor(model.findingCount))
+      : undefined
+  const severityTotal = model?.severity
+    ? STATUS_SEVERITY_ORDER.reduce((sum, key) => {
+        const value = model.severity?.[key]
+        return sum + (typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0)
+      }, 0)
+    : undefined
+  const issueCount = findingCount ?? (model?.severity ? severityTotal : undefined)
+
+  const threshold =
+    typeof model?.threshold === "number" && Number.isFinite(model.threshold)
+      ? model.threshold
+      : undefined
+  const belowThreshold =
+    typeof model?.belowThreshold === "number" && Number.isFinite(model.belowThreshold)
+      ? Math.max(0, Math.floor(model.belowThreshold))
+      : undefined
+
+  let head: string
+  if (phase === "running") {
+    head = en ? "Reviewing" : "审查中"
+    const stage = String(model?.stageLabel ?? "").trim()
+    if (stage) head = `${head} · ${clampLine(stage, 24)}`
+    if (hasProgress) {
+      head = `${head} ${progressBar(progressPercent, 6)} ${progressPercent}%`
+    }
+  } else if (phase === "done") {
+    head = en ? "Review done" : "审查完成"
+    if (issueCount !== undefined) {
+      const sev = statusBarSeverityParenthetical(model?.severity)
+      const label = en
+        ? `${issueCount} ${issueCount === 1 ? "issue" : "issues"}`
+        : `${issueCount} 问题`
+      fragments.push(sev ? `${label}（${sev}）` : label)
+    }
+  } else {
+    head = en ? "Ready" : "就绪"
+    if (hasProgress) {
+      head = `${head} ${progressBar(progressPercent, 6)} ${progressPercent}%`
+    }
+    if (issueCount !== undefined) {
+      fragments.push(en ? `${issueCount} issues` : `${issueCount} 问题`)
+    }
+  }
+
+  if (phase === "running") {
+    if (filesDone !== undefined) {
+      fragments.push(
+        filesTotal === undefined
+          ? en
+            ? `Files ${filesDone}`
+            : `文件 ${filesDone}`
+          : en
+            ? `Files ${filesDone}/${filesTotal}`
+            : `文件 ${filesDone}/${filesTotal}`,
+      )
+    }
+  }
+
+  if (phase === "running") {
+    fragments.push(`${toggleKey} ${en ? "expand" : "展开"}`)
+    fragments.push(en ? "Ctrl+C cancel" : "Ctrl+C 取消")
+  } else if (phase === "done") {
+    fragments.push(`${toggleKey} ${en ? "open workbench" : "打开工作台"}`)
+  }
+
+  if (threshold !== undefined && belowThreshold !== undefined) {
+    fragments.push(
+      en
+        ? `threshold ${threshold.toFixed(2)} filtered ${belowThreshold}`
+        : `门槛 ${threshold.toFixed(2)} 过滤 ${belowThreshold} 条`,
+    )
+  } else if (threshold !== undefined) {
+    fragments.push(en ? `threshold ${threshold.toFixed(2)}` : `门槛 ${threshold.toFixed(2)}`)
+  } else if (belowThreshold !== undefined) {
+    fragments.push(en ? `filtered ${belowThreshold}` : `过滤 ${belowThreshold} 条`)
+  }
+
+  const raw = [head, ...fragments].join(" · ")
+  const maxWidth =
+    typeof model?.maxWidth === "number" && Number.isFinite(model.maxWidth) && model.maxWidth > 0
+      ? Math.floor(model.maxWidth)
+      : 200
+  return { text: clampLine(raw, maxWidth), phase }
+}
+
+/**
+ * `collapsed` forces the one-row bar regardless of the requested layout.
+ * Pure so the render matrix can assert it without a terminal.
+ */
+export function effectiveWorkbenchLayout(
+  layout: "three" | "two" | "bar",
+  collapsed?: boolean,
+): "three" | "two" | "bar" {
+  return collapsed === true ? "bar" : layout
 }
 
 // ---------------------------------------------------------------------------

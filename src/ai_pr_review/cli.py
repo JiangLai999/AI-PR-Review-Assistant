@@ -40,11 +40,13 @@ from ai_pr_review.chat_session import (
 from ai_pr_review.config import (
     CONFIG_PATH_ENV_VAR,
     DEFAULT_CONFIG_PATH,
+    DEFAULT_WORKBENCH_MODE,
     MODEL_PROVIDER_PRESETS,
     PROJECT_CONFIG_DIRNAME,
     PROJECT_CONFIG_FILENAME,
     PROJECT_LOCAL_CONFIG_FILENAME,
     PROVIDER_MODEL_PRESETS,
+    WORKBENCH_MODES,
     AIClientConfig,
     AppConfig,
     ConfigValidationError,
@@ -1120,6 +1122,9 @@ def _prompt_interface_preferences(
         auto_publish_comment=current.auto_publish_comment,
         hybrid_strategy=getattr(current, "hybrid_strategy", "balanced"),
         max_cost_per_review=getattr(current, "max_cost_per_review", 0.50),
+        # 本阶段不提问，但必须原样带回：PreferencesConfig 是整体重建的，
+        # 漏掉一个字段就等于每次跑向导都把它悄悄重置成默认值。
+        workbench_mode=getattr(current, "workbench_mode", DEFAULT_WORKBENCH_MODE),
     )
 
 
@@ -1127,11 +1132,13 @@ def _prompt_preferences(console: Console, current: PreferencesConfig) -> Prefere
     _render_section_header(
         console,
         "输出偏好",
-        "输出格式和默认发布行为会优先读取配置文件，并允许命令行参数覆盖。",
+        "输出格式、默认发布行为和审查工作台显示方式会优先读取配置文件，并允许命令行参数覆盖。",
         language=getattr(current, "ui_language", "zh-CN"),
         step=6,
         title_en="OUTPUT PREFERENCES",
-        subtitle_en="Choose the default output format and publishing behavior.",
+        subtitle_en=(
+            "Choose the default output format, publishing behavior, and review workbench display."
+        ),
     )
     language = getattr(current, "ui_language", "zh-CN")
     import sys
@@ -1156,6 +1163,21 @@ def _prompt_preferences(console: Console, current: PreferencesConfig) -> Prefere
             language=language,
         )
         auto_publish_comment = publish_value == "yes"
+        workbench_mode = _pixel_select(
+            title=tr(language, "审查工作台", "REVIEW WORKBENCH"),
+            text=tr(
+                language,
+                "选择审查工作台的显示方式",
+                "Choose how the review workbench is displayed",
+            ),
+            values=[
+                ("auto", tr(language, "自动展开（审查时展开）", "Auto (expand on review)")),
+                ("always", tr(language, "常驻（始终保持展开）", "Always (keep it open)")),
+                ("off", tr(language, "仅手动（Alt+W 打开）", "Off (open with Alt+W)")),
+            ],
+            default=getattr(current, "workbench_mode", DEFAULT_WORKBENCH_MODE),
+            language=language,
+        )
     else:
         output_format = Prompt.ask(
             tr(language, "默认输出格式", "Default output format"),
@@ -1172,6 +1194,16 @@ def _prompt_preferences(console: Console, current: PreferencesConfig) -> Prefere
             default=current.auto_publish_comment,
             console=console,
         )
+        workbench_mode = Prompt.ask(
+            tr(
+                language,
+                "审查工作台（auto 自动展开 / always 常驻 / off 仅手动）",
+                "Review workbench (auto / always / off)",
+            ),
+            choices=list(WORKBENCH_MODES),
+            default=getattr(current, "workbench_mode", DEFAULT_WORKBENCH_MODE),
+            console=console,
+        )
     return PreferencesConfig(
         output_format=output_format,
         language=current.language,
@@ -1180,6 +1212,7 @@ def _prompt_preferences(console: Console, current: PreferencesConfig) -> Prefere
         auto_publish_comment=auto_publish_comment,
         hybrid_strategy=getattr(current, "hybrid_strategy", "balanced"),
         max_cost_per_review=getattr(current, "max_cost_per_review", 0.50),
+        workbench_mode=workbench_mode,
     )
 
 
@@ -1204,6 +1237,7 @@ def _render_config_summary(
         f"{tr(language, '界面语言', 'UI language'):<24} {getattr(preferences, 'ui_language', 'zh-CN')}",
         f"{tr(language, '模型回复语言', 'Model language'):<24} {preferences.language}",
         f"{tr(language, '聊天布局', 'Chat layout'):<24} {getattr(preferences, 'chat_layout', 'compact')}",
+        f"{tr(language, '审查工作台', 'Review workbench'):<24} {getattr(preferences, 'workbench_mode', DEFAULT_WORKBENCH_MODE)}",
     ]
     pixel_print_frame(
         console,
@@ -1531,6 +1565,27 @@ async def run_review(
             progress.stop()
 
 
+def report_filtered_section(stats: Any) -> dict[str, Any]:
+    """The report's `run.filtered` block: what the post-processor dropped.
+
+    Shares `comment_filter_disclosure` with the GitHub comment's audit line so
+    the report, the comment and the `review.completed` event cannot disagree
+    about the same run. The TUI reads `report.run.filtered.threshold` /
+    `.below_threshold` to explain a 0-finding review that had candidates.
+
+    Only the numbers the run actually measured survive; a run that recorded no
+    stats gets an empty dict, and callers omit the key entirely (see
+    `build_report_payload`). `{"below_threshold": 0}` would claim "nothing was
+    filtered" about a run that never ran the post-processor — the same reason
+    the comment renderer drops a `None` fragment instead of printing 0.
+    """
+    return {
+        key: value
+        for key, value in comment_filter_disclosure(stats).items()
+        if value is not None
+    }
+
+
 def build_report_payload(artifacts: ReviewArtifacts) -> dict:
     renderer = ReportRenderer()
     payload = json.loads(
@@ -1548,6 +1603,12 @@ def build_report_payload(artifacts: ReviewArtifacts) -> dict:
         "total_cost": artifacts.total_cost,
         "validation": artifacts.validation_summary,
     }
+    # 过滤披露（TUI `report.run.filtered.*`，见 frontend/tui/src/empty-findings.ts）。
+    # 没有记录到统计时**省略该键**而不是给空 dict/0：这个键在场就意味着「本条
+    # 陈述来自本 run 的实测」，缺失则是一个明确的「未记录」，两者不可混淆。
+    filtered = report_filtered_section(artifacts.filtered_findings)
+    if filtered:
+        payload["run"]["filtered"] = filtered
     if artifacts.review_plan is not None:
         payload["plan"] = artifacts.review_plan.model_dump(mode="json")
     return payload
@@ -3402,6 +3463,12 @@ def history_command(
     default=None,
     help="Set default review output format.",
 )
+@click.option(
+    "--workbench",
+    type=click.Choice(list(WORKBENCH_MODES)),
+    default=None,
+    help="Set workbench display: auto expands on review, always keeps it open, off is manual.",
+)
 @click.pass_context
 def preferences_command(
     ctx: click.Context,
@@ -3409,6 +3476,7 @@ def preferences_command(
     response_language: str | None,
     chat_layout: str | None,
     output_format: str | None,
+    workbench: str | None,
 ) -> None:
     """Show or update CLI preferences."""
     config_path = _config_path_from_context(ctx)
@@ -3422,7 +3490,18 @@ def preferences_command(
         output_format=output_format,
         save_key_checker=_active_config_has_saved_api_key,
     )
+    # 工作台模式不在 apply_workspace_preferences 的参数里，这里单独落盘，
+    # 保证 `pr-review preferences --workbench off` 一条命令即可脚本化。
+    if workbench is not None:
+        config.preferences.workbench_mode = workbench
+        config.save(config_path, save_key=_active_config_has_saved_api_key(config_path))
+    payload["workbench_mode"] = config.preferences.workbench_mode
     click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+# 契约同时使用 `pr-review config preferences ...` 这一写法；两种入口共用同一实现，
+# 避免非交互参数校验出现两套。
+config_command.add_command(preferences_command, "preferences")
 
 
 def _open_tui_frontend(
@@ -4087,6 +4166,7 @@ __all__ = [
     "preferences_command",
     "plan_command",
     "feedback_command",
+    "report_filtered_section",
     "demo_command",
     "serve_command",
     "history_command",

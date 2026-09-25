@@ -1093,6 +1093,7 @@ def _review_artifacts(
     findings: list[Any] | None = None,
     total_cost: float = 0.0124,
     duration_seconds: float = 42.3,
+    filtered_findings: dict[str, Any] | None = None,
 ) -> Any:
     """Build real artifacts so `build_report_payload` is exercised for real."""
     from ai_pr_review.models.pr_data import FileDiff, FileStatus, PRData
@@ -1151,6 +1152,7 @@ def _review_artifacts(
         duration_seconds=duration_seconds,
         run_id="run-31",
         validation_summary={"valid": 1, "needs_review": 1, "invalid": 1},
+        filtered_findings=filtered_findings or {},
     )
 
 
@@ -1515,6 +1517,141 @@ def test_review_completed_carries_severity_evidence_files_cost_and_duration(
         "invalid": 0,
         "unverified": 1,
     }
+
+
+def test_review_completed_carries_the_filtered_block(monkeypatch, tmp_path: Path) -> None:
+    """契约 §3.7 加法扩展：事件带上报告 `run.filtered` 的同一份过滤披露。
+
+    TUI 据此在实时审查的 0 findings 场景解释「候选被门槛过滤」，无需再取报告。
+    """
+
+    async def run() -> list[dict]:
+        published: list[dict] = []
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=published.append)
+
+        async def fake_run_review(pr_url, **kwargs):
+            return _review_artifacts(
+                filtered_findings={
+                    "before": 6,
+                    "after": 2,
+                    "below_threshold": 4,
+                    "duplicates": 0,
+                    "threshold": 0.7,
+                    "severity_sorted": True,
+                }
+            )
+
+        monkeypatch.setattr("ai_pr_review.cli.run_review", fake_run_review)
+        await backend.handle(_review_request())
+        return published
+
+    published = asyncio.run(run())
+    completed = next(event for event in published if event["event"] == "review.completed")
+
+    assert completed["filtered"] == {
+        "threshold": 0.7,
+        "below_threshold": 4,
+        "duplicates": 0,
+    }
+    # 原有字段名与语义不变（加法式扩展）
+    assert completed["run_id"] == "run-31"
+    assert completed["finding_count"] == 0
+    assert completed["files_reviewed"] == 2
+    assert completed["files_skipped"] == 1
+    assert completed["severity"] == {
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "info": 0,
+    }
+    assert completed["evidence"] == {
+        "valid": 0,
+        "needs_review": 0,
+        "invalid": 0,
+        "unverified": 0,
+    }
+    assert completed["cost"] == pytest.approx(0.0124)
+    assert completed["duration_seconds"] == pytest.approx(42.3)
+
+
+def test_review_completed_omits_filtered_when_the_run_recorded_nothing(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """没有过滤统计时事件不带 `filtered`，也不伪造 `below_threshold: 0`。"""
+
+    async def run() -> list[dict]:
+        published: list[dict] = []
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=published.append)
+
+        async def fake_run_review(pr_url, **kwargs):
+            return _review_artifacts()  # filtered_findings={}
+
+        monkeypatch.setattr("ai_pr_review.cli.run_review", fake_run_review)
+        await backend.handle(_review_request())
+        return published
+
+    completed = next(
+        event for event in asyncio.run(run()) if event["event"] == "review.completed"
+    )
+    assert "filtered" not in completed
+
+    from ai_pr_review.backend.jsonl_server import _review_completed_fields
+
+    # 直接喂坏形状的 run 段：不抛异常、不补 0，只是没有该键
+    for report in (
+        {},
+        {"run": {}},
+        {"run": {"filtered": "not-a-dict"}},
+        {"run": {"filtered": {}}},
+    ):
+        assert "filtered" not in _review_completed_fields(report)
+
+
+def test_history_report_carries_the_filtered_block_from_run_metadata(tmp_path: Path) -> None:
+    """`/history <run_id>` 的报告也带 `run.filtered`（TUI 对历史 run 同样要解释 0 findings）。"""
+    backend = JsonlBackend(tmp_path / "config.json")
+    run_id = _save_publishable_run(
+        backend,
+        findings=0,
+        metadata={
+            "filtered_findings": {
+                "before": 3,
+                "after": 0,
+                "below_threshold": 3,
+                "duplicates": 0,
+                "threshold": 0.85,
+            }
+        },
+    )
+    legacy_run_id = _save_publishable_run(backend, findings=0)
+
+    async def run() -> tuple[dict, dict]:
+        opened = await backend.handle(
+            {
+                "id": "1",
+                "method": "command.execute",
+                "params": {"name": "history", "args": [run_id]},
+            }
+        )
+        legacy = await backend.handle(
+            {
+                "id": "2",
+                "method": "command.execute",
+                "params": {"name": "history", "args": [legacy_run_id]},
+            }
+        )
+        return opened[0]["result"]["report"], legacy[0]["result"]["report"]
+
+    report, legacy_report = asyncio.run(run())
+
+    assert report["run"]["filtered"] == {
+        "threshold": 0.85,
+        "below_threshold": 3,
+        "duplicates": 0,
+    }
+    # 旧 run 没有该 metadata：省略而不是编造
+    assert "filtered" not in legacy_report["run"]
 
 
 def test_review_model_routing_states_the_configured_policy(tmp_path: Path) -> None:

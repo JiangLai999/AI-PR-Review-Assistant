@@ -14,7 +14,12 @@ import ai_pr_review.cli as cli_module
 import ai_pr_review.config as config_module
 import ai_pr_review.services.review_orchestrator as orchestrator_module
 from ai_pr_review.cli import main
-from ai_pr_review.config import AppConfig, ReportRendererConfig, ResultStoreConfig
+from ai_pr_review.config import (
+    AppConfig,
+    PostProcessorConfig,
+    ReportRendererConfig,
+    ResultStoreConfig,
+)
 from ai_pr_review.models.pr_data import FileDiff, FileStatus, PRData
 from ai_pr_review.services.context_builder import FileContext
 from ai_pr_review.services.exceptions import PRFetcherError
@@ -345,6 +350,127 @@ def test_cli_infers_json_format_from_output_extension(monkeypatch, tmp_path: Pat
     assert '"total_findings": 1' in content
     assert '"repository": "owner/repo"' in content
     assert '"filter"' in content
+
+
+def _report_payload_artifacts(
+    *, filtered_findings: dict | None = None, findings: list[Finding] | None = None
+):
+    """Artifacts for `build_report_payload`, built from the shared PR stub."""
+    from ai_pr_review.services.review_orchestrator import ReviewArtifacts
+
+    pr_data = StubPRFetcher().pr
+    results = [FilterResult(file=file_diff, included=True) for file_diff in pr_data.files]
+    return ReviewArtifacts(
+        pr_data=pr_data,
+        filter_result=FilterPipelineResult(results=results),
+        review_result=ReviewResult(summary="审查完成", findings=findings or []),
+        total_cost=0.0124,
+        duration_seconds=42.3,
+        run_id="run-42",
+        filtered_findings=filtered_findings or {},
+    )
+
+
+def test_report_payload_run_carries_the_filtered_threshold_and_counts():
+    """报告载荷的 TUI 契约：`report.run.filtered.{threshold,below_threshold}`。
+
+    见 `frontend/tui/src/empty-findings.ts`：0 findings 时它据此解释「模型给出 N 条
+    候选但都低于门槛 X，已过滤」。
+    """
+    artifacts = _report_payload_artifacts(
+        filtered_findings={
+            "before": 5,
+            "after": 2,
+            "below_threshold": 3,
+            "duplicates": 0,
+            "threshold": 0.7,
+            "severity_sorted": True,
+        }
+    )
+
+    payload = cli_module.build_report_payload(artifacts)
+
+    assert payload["run"]["filtered"] == {
+        "threshold": 0.7,
+        "below_threshold": 3,
+        "duplicates": 0,
+    }
+    # TUI 用 `typeof value === "number"` 判定「有数据」，所以必须是真数字
+    assert isinstance(payload["run"]["filtered"]["threshold"], float)
+    assert isinstance(payload["run"]["filtered"]["below_threshold"], int)
+
+    # 与评论审计行共用同一份归一化：同一个 run 的两种披露不许漂移
+    from ai_pr_review.services.publish_service import comment_filter_disclosure
+
+    disclosure = comment_filter_disclosure(artifacts.filtered_findings)
+    assert payload["run"]["filtered"]["below_threshold"] == disclosure["below_threshold"]
+    assert payload["run"]["filtered"]["threshold"] == disclosure["threshold"]
+
+
+def test_report_payload_never_fabricates_filtered_counts():
+    """没有记录到过滤统计时省略 `filtered` 键，不伪造 0 / 门槛。"""
+    payload = cli_module.build_report_payload(_report_payload_artifacts())
+
+    assert "filtered" not in payload["run"]
+
+    # 只有部分键（旧 run 或坏数据）：只保留实测到的数字，不补门槛、不补 0
+    partial = cli_module.build_report_payload(
+        _report_payload_artifacts(filtered_findings={"below_threshold": 2, "duplicates": 0})
+    )
+    assert partial["run"]["filtered"] == {"below_threshold": 2, "duplicates": 0}
+
+    # 一个数字都没记录 → 整块省略（而非 {"below_threshold": 0} 这种伪造陈述）
+    garbage = cli_module.build_report_payload(
+        _report_payload_artifacts(
+            filtered_findings={"below_threshold": None, "threshold": "not-a-number"}
+        )
+    )
+    assert "filtered" not in garbage["run"]
+
+
+def test_cli_json_report_discloses_the_confidence_threshold(monkeypatch, tmp_path: Path):
+    """端到端：CLI 的 `--format json` 输出（`build_report_payload`）带过滤披露。"""
+    install_success_stubs(monkeypatch)
+    config = configure_temp_app(monkeypatch, tmp_path)
+    runner = CliRunner()
+    output_path = tmp_path / "report.json"
+
+    result = runner.invoke(
+        main,
+        ["https://github.com/owner/repo/pull/42", "--output", str(output_path)],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["counts"]["total_findings"] == 1
+    filtered = payload["run"]["filtered"]
+    assert filtered["threshold"] == pytest.approx(config.post_processor.confidence_threshold)
+    assert filtered["below_threshold"] == 0
+    assert filtered["duplicates"] == 0
+
+
+def test_cli_json_report_explains_a_zero_finding_run_filtered_by_threshold(
+    monkeypatch, tmp_path: Path
+):
+    """端到端：候选全部低于门槛 → 0 findings，但披露仍说明被过滤了几条。"""
+    install_success_stubs(monkeypatch)
+    configure_temp_app(
+        monkeypatch, tmp_path, post_processor=PostProcessorConfig(confidence_threshold=0.99)
+    )
+    runner = CliRunner()
+    output_path = tmp_path / "report.json"
+
+    result = runner.invoke(
+        main,
+        ["https://github.com/owner/repo/pull/42", "--output", str(output_path)],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    # StubAIClient 的 finding confidence=0.95 < 0.99：被门槛丢弃而不是消失
+    assert payload["counts"]["total_findings"] == 0
+    assert payload["run"]["filtered"]["threshold"] == pytest.approx(0.99)
+    assert payload["run"]["filtered"]["below_threshold"] == 1
 
 
 def test_cli_publishes_comment(monkeypatch, tmp_path: Path):
@@ -955,8 +1081,161 @@ def test_cli_preferences_command_updates_preferences(monkeypatch, tmp_path: Path
     assert payload["language"] == "en-US"
     assert payload["chat_layout"] == "split"
     assert payload["output_format"] == "json"
+    assert payload["workbench_mode"] == "auto"
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["ai_client"]["api_key"] == "deepseek-key"
+
+
+def test_cli_preferences_command_sets_workbench_mode(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+    config = config_module.AppConfig.from_env()
+    config.ai_client = config_module.AIClientConfig(
+        provider="deepseek",
+        api_key="deepseek-key",
+        model="deepseek-chat",
+        base_url="https://api.deepseek.com/v1",
+        api_format="openai",
+    )
+    config.save(config_path, save_key=True)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["preferences", "--workbench", "off"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["workbench_mode"] == "off"
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["preferences"]["workbench_mode"] == "off"
+    # --workbench 不该碰其他偏好，也不该把已保存的 Key 丢掉。
+    assert persisted["preferences"]["chat_layout"] == "compact"
+    assert persisted["ai_client"]["api_key"] == "deepseek-key"
+    assert config_module.AppConfig.load(config_path).preferences.workbench_mode == "off"
+
+
+def test_cli_config_preferences_alias_sets_workbench_mode(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["config", "preferences", "--workbench", "always"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)["workbench_mode"] == "always"
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["preferences"]["workbench_mode"] == "always"
+
+
+def test_cli_preferences_command_rejects_invalid_workbench_mode(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["preferences", "--workbench", "sometimes"])
+
+    assert result.exit_code == 2
+    assert "Invalid value" in result.output
+    assert not config_path.exists()
+
+
+def test_cli_config_export_snapshot_carries_workbench_mode(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    export_path = tmp_path / "export.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+    config = config_module.AppConfig.from_env()
+    config.ai_client = config_module.AIClientConfig(
+        provider="deepseek",
+        api_key="deepseek-key",
+        model="deepseek-chat",
+        base_url="https://api.deepseek.com/v1",
+        api_format="openai",
+    )
+    config.preferences.workbench_mode = "off"
+    config.save(config_path, save_key=True)
+
+    runner = CliRunner()
+    export_result = runner.invoke(main, ["config", "export", "--output", str(export_path)])
+    show_result = runner.invoke(main, ["config", "show"])
+
+    assert export_result.exit_code == 0
+    assert json.loads(export_path.read_text(encoding="utf-8"))["preferences"][
+        "workbench_mode"
+    ] == "off"
+    assert show_result.exit_code == 0
+    assert json.loads(show_result.output)["preferences"]["workbench_mode"] == "off"
+
+
+def test_cli_config_quick_wizard_sets_workbench_mode(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["config", "--quick"],
+        input=(
+            "zh-CN\n"
+            "compact\n"
+            "zh-CN\n"
+            "3\n"
+            "deepseek-key\n"
+            "1\n"
+            "deepseek-chat\n"
+            "32768\n"
+            "4096\n"
+            "ghp_123456789012345678901234567890123456\n"
+            "terminal\n"
+            "n\n"
+            "off\n"
+            "y\n"
+        ),
+    )
+
+    assert result.exit_code == 0
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["preferences"]["workbench_mode"] == "off"
+    assert config_module.AppConfig.load(config_path).preferences.workbench_mode == "off"
+
+
+def test_cli_config_quick_wizard_keeps_existing_workbench_mode(monkeypatch, tmp_path: Path):
+    """向导会整体重建 PreferencesConfig；第 2 阶段不带回该字段就会静默重置。"""
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+    config = config_module.AppConfig.from_env()
+    config.preferences = config_module.PreferencesConfig(workbench_mode="off")
+    config.save(config_path, save_key=True)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["config", "--quick"],
+        input=(
+            "zh-CN\n"
+            "compact\n"
+            "zh-CN\n"
+            "3\n"
+            "deepseek-key\n"
+            "1\n"
+            "deepseek-chat\n"
+            "32768\n"
+            "4096\n"
+            "ghp_123456789012345678901234567890123456\n"
+            "terminal\n"
+            "n\n"
+            "\n"
+            "y\n"
+        ),
+    )
+
+    assert result.exit_code == 0
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["preferences"]["workbench_mode"] == "off"
 
 
 def test_cli_chat_message_uses_configured_provider(monkeypatch, tmp_path: Path):
@@ -1368,7 +1647,7 @@ def test_cli_config_quick_wizard_saves_provider(monkeypatch, tmp_path: Path):
     result = runner.invoke(
         main,
         ["config", "--quick"],
-        input="zh-CN\ncompact\nzh-CN\n3\ndeepseek-key\n1\ndeepseek-chat\n32768\n4096\nghp_123456789012345678901234567890123456\nterminal\nn\ny\n",
+        input="zh-CN\ncompact\nzh-CN\n3\ndeepseek-key\n1\ndeepseek-chat\n32768\n4096\nghp_123456789012345678901234567890123456\nterminal\nn\n\ny\n",
     )
 
     assert result.exit_code == 0
@@ -1401,7 +1680,7 @@ def test_cli_config_quick_wizard_no_save_key_omits_key(monkeypatch, tmp_path: Pa
         result = runner.invoke(
             main,
             ["config", "--quick", "--no-save-key"],
-            input="zh-CN\ncompact\nzh-CN\n3\ndeepseek-key\n1\ndeepseek-chat\n32768\n4096\nghp_123456789012345678901234567890123456\nterminal\nn\n",
+            input="zh-CN\ncompact\nzh-CN\n3\ndeepseek-key\n1\ndeepseek-chat\n32768\n4096\nghp_123456789012345678901234567890123456\nterminal\nn\n\n",
         )
 
     assert result.exit_code == 0
@@ -1419,7 +1698,7 @@ def test_cli_config_quick_wizard_save_key_persists_key_after_warning(monkeypatch
     result = runner.invoke(
         main,
         ["config", "--quick", "--save-key"],
-        input="zh-CN\ncompact\nzh-CN\n3\ndeepseek-key\n1\ndeepseek-chat\n32768\n4096\nghp_123456789012345678901234567890123456\nterminal\nn\ny\n",
+        input="zh-CN\ncompact\nzh-CN\n3\ndeepseek-key\n1\ndeepseek-chat\n32768\n4096\nghp_123456789012345678901234567890123456\nterminal\nn\n\ny\n",
     )
 
     assert result.exit_code == 0
@@ -1455,6 +1734,7 @@ def test_cli_config_quick_wizard_rejects_empty_github_token(monkeypatch, tmp_pat
             "ghp_123456789012345678901234567890123456\n"
             "terminal\n"
             "n\n"
+            "\n"
             "y\n"
         ),
     )
@@ -1486,6 +1766,7 @@ def test_cli_config_quick_wizard_rejects_invalid_github_token_format(monkeypatch
             "ghp_123456789012345678901234567890123456\n"
             "terminal\n"
             "n\n"
+            "\n"
             "y\n"
         ),
     )

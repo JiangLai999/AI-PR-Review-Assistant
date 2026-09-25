@@ -28,18 +28,26 @@ import {
   PublishConfirmDialog,
   ReviewActionBar,
   ReviewProgressPanel,
+  ReviewStatusBar,
   ReviewSummaryPanel,
+  ReviewWorkbench,
   ReviewWorkspace,
   ShowcasePanel,
+  displayWidth,
+  effectiveWorkbenchLayout,
   filterFindings,
   hasClosingBorder,
+  hasLoneSurrogate,
   sortFindings,
+  statusBarView,
   type EvidenceCounts,
   type PublishDialogState,
   type PublishPreview,
   type ReviewFileState,
   type ReviewFinding,
   type ReviewStageState,
+  type ReviewWorkbenchLayout,
+  type ReviewWorkbenchProps,
   type ReviewWorkspaceProps,
   type SeverityCounts,
 } from "../src/review-ui"
@@ -1217,6 +1225,330 @@ for (const scene of overflowCases) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// ReviewWorkbench: three/two/bar × 80x24 / 102x51 / 120x30 / 209x51
+// ---------------------------------------------------------------------------
+
+/** Distinctive one-cell marker so children stay assertable even in a narrow chat column. */
+const CHAT_MARKER = "▣"
+const CHAT_PLACEHOLDER = "CHAT-PLACEHOLDER-OK"
+
+const workbenchStatusRunning = {
+  phase: "running" as const,
+  progress: 70,
+  stageLabel: "AI 审查",
+  filesDone: 7,
+  filesTotal: 18,
+  toggleKey: "Alt+W",
+  language: "zh-CN",
+}
+
+const workbenchStatusDone = {
+  phase: "done" as const,
+  findingCount: 2,
+  severity: { critical: 1, high: 1, medium: 0, low: 0, info: 0 },
+  threshold: 0.6,
+  belowThreshold: 3,
+  toggleKey: "Alt+W",
+  language: "zh-CN",
+}
+
+function WorkbenchScene(props: {
+  layout: ReviewWorkbenchLayout
+  collapsed?: boolean
+  phase: "running" | "done"
+  /** Clamp budget for the status row (chat-column width). */
+  statusBarWidth: number
+  progress?: ReviewWorkbenchProps["progress"]
+  summary?: ReviewWorkbenchProps["summary"]
+  language?: string
+}) {
+  const status =
+    props.phase === "running"
+      ? { ...workbenchStatusRunning, width: props.statusBarWidth }
+      : { ...workbenchStatusDone, width: props.statusBarWidth }
+  return (
+    <box width="100%" height="100%" flexDirection="column" backgroundColor="#0a0a0a">
+      <ReviewWorkbench
+        layout={props.layout}
+        collapsed={props.collapsed}
+        progress={props.progress}
+        summary={props.summary}
+        status={status}
+        onOpenFindings={() => {}}
+        onExplain={() => {}}
+        onFeedback={() => {}}
+        onExport={() => {}}
+        language={props.language ?? "zh-CN"}
+      >
+        <text height={1} fg="#7edc92">
+          {CHAT_MARKER}
+          {CHAT_PLACEHOLDER}
+        </text>
+      </ReviewWorkbench>
+    </box>
+  )
+}
+
+function assertNoHalfCjk(frame: string, label: string) {
+  if (hasLoneSurrogate(frame)) {
+    throw new Error(`${label}: frame contains a half character (lone surrogate)`)
+  }
+  for (const line of frame.split("\n")) {
+    if (hasLoneSurrogate(line)) {
+      throw new Error(`${label}: row contains a half character (lone surrogate)`)
+    }
+  }
+}
+
+/** Chat-column width available for the status row at this terminal size. */
+function chatWidthFor(layout: ReviewWorkbenchLayout, collapsed: boolean, width: number): number {
+  const effective = effectiveWorkbenchLayout(layout, collapsed)
+  if (effective === "bar") return width
+  if (effective === "three") return Math.max(8, width - 26 - 52)
+  return Math.max(8, width - 44)
+}
+
+type WorkbenchCase = {
+  name: string
+  layout: ReviewWorkbenchLayout
+  collapsed?: boolean
+  width: number
+  height: number
+  phase: "running" | "done"
+  /** Side rails are only contract-sized at the matching breakpoints. */
+  expectRails: boolean
+  expectLabels: string[]
+  forbidLabels: string[]
+}
+
+const workbenchSizes = [
+  [80, 24],
+  [102, 51],
+  [120, 30],
+  [209, 51],
+] as const
+
+const workbenchCases: WorkbenchCase[] = []
+for (const layout of ["three", "two", "bar"] as const) {
+  for (const [width, height] of workbenchSizes) {
+    for (const phase of ["running", "done"] as const) {
+      const rails = layout !== "bar"
+      workbenchCases.push({
+        name: `workbench-${layout}-${phase}-${width}x${height}`,
+        layout,
+        width,
+        height,
+        phase,
+        expectRails: rails,
+        // Phase prefix survives an 8-column clamp (审查中 … / 审查完…).
+        expectLabels:
+          phase === "running"
+            ? [CHAT_MARKER, "审查中"]
+            : [CHAT_MARKER, "审查完"],
+        forbidLabels: ["NaN", "undefined"],
+      })
+    }
+  }
+}
+
+// collapsed always forces the bar, even when layout says three/two.
+workbenchCases.push(
+  {
+    name: "workbench-collapsed-three-209x51",
+    layout: "three",
+    collapsed: true,
+    width: 209,
+    height: 51,
+    phase: "done",
+    expectRails: false,
+    expectLabels: [CHAT_MARKER, "审查完成", "Alt+W"],
+    forbidLabels: ["REVIEW PROGRESS", "审查进度", "REVIEW SUMMARY", "审查摘要", "ACTIONS", "操作"],
+  },
+  {
+    name: "workbench-collapsed-two-120x30",
+    layout: "two",
+    collapsed: true,
+    width: 120,
+    height: 30,
+    phase: "running",
+    expectRails: false,
+    expectLabels: [CHAT_MARKER, "审查中", "Alt+W"],
+    forbidLabels: ["REVIEW PROGRESS", "审查进度", "REVIEW SUMMARY", "审查摘要", "ACTIONS", "操作"],
+  },
+)
+
+for (const scene of workbenchCases) {
+  const statusBarWidth = chatWidthFor(scene.layout, scene.collapsed === true, scene.width)
+  const expectedStatus = statusBarView({
+    ...(scene.phase === "running" ? workbenchStatusRunning : workbenchStatusDone),
+    maxWidth: statusBarWidth,
+  })
+  const view = await testRender(
+    () => (
+      <WorkbenchScene
+        layout={scene.layout}
+        collapsed={scene.collapsed}
+        phase={scene.phase}
+        statusBarWidth={statusBarWidth}
+        progress={workspaceProgress}
+        summary={workspaceSummary}
+        language="zh-CN"
+      />
+    ),
+    { width: scene.width, height: scene.height },
+  )
+  try {
+    await view.renderOnce()
+    const frame = view.captureCharFrame()
+    console.log(`\n===== ${scene.width}x${scene.height} · ${scene.name} =====\n`)
+    console.log(frame)
+    for (const label of scene.expectLabels) {
+      if (!frame.includes(label)) {
+        throw new Error(`${scene.name}: expected label missing: ${label}`)
+      }
+    }
+    // Alt+W / file counts only appear when the clamped status still has room.
+    if (expectedStatus.text.includes("Alt+W") && !frame.includes("Alt+W")) {
+      throw new Error(`${scene.name}: clamped status should still show Alt+W`)
+    }
+    if (
+      expectedStatus.text.includes("文件") &&
+      scene.phase === "running" &&
+      expectedStatus.text.includes("7/18") &&
+      !frame.includes("7/18")
+    ) {
+      throw new Error(`${scene.name}: clamped status should still show files 7/18`)
+    }
+    for (const label of scene.forbidLabels) {
+      if (frame.includes(label)) {
+        throw new Error(`${scene.name}: forbidden label present: ${label}`)
+      }
+    }
+    assertNoHalfCjk(frame, scene.name)
+
+    // Status copy must flip with phase (running vs done pair shares a layout).
+    if (scene.phase === "running" && frame.includes("审查完成")) {
+      throw new Error(`${scene.name}: running frame must not show done copy`)
+    }
+    if (scene.phase === "done" && frame.includes("审查中")) {
+      throw new Error(`${scene.name}: done frame must not show running copy`)
+    }
+
+    // The status row must match the width-safe model. Wide emoji may occupy
+    // two char-frame cells, so fall back to the pre-emoji head when needed.
+    const statusNeedle = expectedStatus.text
+    const emojiAt = statusNeedle.search(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u)
+    if (emojiAt < 0) {
+      if (!frame.includes(statusNeedle)) {
+        throw new Error(
+          `${scene.name}: expected clamped status text missing: ${JSON.stringify(statusNeedle)}`,
+        )
+      }
+    } else {
+      const head = statusNeedle.slice(0, emojiAt)
+      if (head.length > 0 && !frame.includes(head)) {
+        throw new Error(
+          `${scene.name}: expected status head missing: ${JSON.stringify(head)}`,
+        )
+      }
+    }
+
+    // Rails are present only for three/two; bar must stay a single status row
+    // plus the chat children.
+    const hasProgressRail = frame.includes("REVIEW PROGRESS") || frame.includes("审查进度")
+    const hasSummaryRail = frame.includes("REVIEW SUMMARY") || frame.includes("审查摘要")
+    if (scene.expectRails && !(hasProgressRail || hasSummaryRail)) {
+      throw new Error(`${scene.name}: expected a progress/summary rail`)
+    }
+    if (!scene.expectRails && (hasProgressRail || hasSummaryRail)) {
+      throw new Error(`${scene.name}: bar/collapsed must not render side rails`)
+    }
+  } finally {
+    view.renderer.destroy()
+  }
+}
+
+// Status bar alone: contract copy is width-safe even when clamped hard.
+for (const maxWidth of [12, 24, 40, 80]) {
+  for (const phase of ["running", "done"] as const) {
+    const model =
+      phase === "running"
+        ? {
+            phase: "running" as const,
+            progress: 70,
+            stageLabel: "很长的阶段名称用来触发裁剪",
+            filesDone: 7,
+            filesTotal: 18,
+            language: "zh-CN",
+            maxWidth,
+          }
+        : {
+            phase: "done" as const,
+            findingCount: 2,
+            severity: { critical: 1, high: 1, medium: 0, low: 0, info: 0 },
+            threshold: 0.6,
+            belowThreshold: 3,
+            language: "zh-CN",
+            maxWidth,
+          }
+    const view = statusBarView(model)
+    if (displayWidth(view.text) > maxWidth) {
+      throw new Error(`statusBarView ${phase} maxWidth=${maxWidth}: overflowed (${view.text})`)
+    }
+    if (hasLoneSurrogate(view.text)) {
+      throw new Error(`statusBarView ${phase} maxWidth=${maxWidth}: half character in ${view.text}`)
+    }
+    const rendered = await testRender(
+      () => (
+        <box width="100%" height="100%" flexDirection="column" backgroundColor="#0a0a0a">
+          <ReviewStatusBar
+            phase={model.phase}
+            progress={model.progress}
+            stageLabel={model.stageLabel}
+            filesDone={model.filesDone}
+            filesTotal={model.filesTotal}
+            findingCount={model.findingCount}
+            severity={model.severity}
+            threshold={model.threshold}
+            belowThreshold={model.belowThreshold}
+            language={model.language}
+            width={maxWidth}
+          />
+          <text height={1} fg="#7edc92">
+            {CHAT_MARKER}
+          </text>
+        </box>
+      ),
+      { width: maxWidth, height: 4 },
+    )
+    try {
+      await rendered.renderOnce()
+      const frame = rendered.captureCharFrame()
+      console.log(`\n===== ${maxWidth}x4 · status-bar-${phase}-clamp =====\n`)
+      console.log(frame)
+      if (!frame.includes(CHAT_MARKER)) {
+        throw new Error(`status-bar-${phase}-clamp ${maxWidth}: children placeholder missing`)
+      }
+      if (hasLoneSurrogate(frame)) {
+        throw new Error(`status-bar-${phase}-clamp ${maxWidth}: half character in frame`)
+      }
+    } finally {
+      rendered.renderer.destroy()
+    }
+  }
+}
+
+// Pure layout resolver: collapsed forces bar for every layout.
+for (const layout of ["three", "two", "bar"] as const) {
+  if (effectiveWorkbenchLayout(layout, true) !== "bar") {
+    throw new Error(`effectiveWorkbenchLayout(${layout}, true) must be bar`)
+  }
+  if (effectiveWorkbenchLayout(layout, false) !== layout) {
+    throw new Error(`effectiveWorkbenchLayout(${layout}, false) must stay ${layout}`)
+  }
+}
+
 console.log(
-  "\nmanual-review-workspace-check: rendered progress/summary/stacked/empty at 80x24 and 120x30; wide@120x30, narrow@80x24, and action availability (incl. publish Alt+P / filter Ctrl+F at wide 120x30 and narrow 80x24); filter bar; publish dialog (5 states); showcase; demo; overflow closing-border at 80x24 and 120x30",
+  "\nmanual-review-workspace-check: rendered progress/summary/stacked/empty at 80x24 and 120x30; wide@120x30, narrow@80x24, and action availability (incl. publish Alt+P / filter Ctrl+F at wide 120x30 and narrow 80x24); filter bar; publish dialog (5 states); showcase; demo; overflow closing-border at 80x24 and 120x30; workbench three/two/bar × 80x24 / 102x51 / 120x30 / 209x51 (running+done, collapsed forces bar, no half CJK)",
 )

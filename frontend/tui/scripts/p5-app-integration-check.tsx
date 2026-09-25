@@ -127,7 +127,9 @@ async function runCommand(
 
 async function appFlows() {
   console.log("\n[A] integrated App against the real backend")
-  const view = await testRender(() => <App />, { width: 100, height: 34, kittyKeyboard: true })
+  // Tall terminal: the transcript line is appended above the review workspace,
+  // and 34 rows push it out of the captured viewport.
+  const view = await testRender(() => <App />, { width: 100, height: 60, kittyKeyboard: true })
   try {
     await settle(view)
     const boot = view.captureCharFrame()
@@ -415,6 +417,156 @@ async function publishPreviewFlow() {
  * mode uses the ambient config (real token, real history), so
  * `AI_PR_REVIEW_CONFIG` must stay unset.
  */
+/**
+ * Part E: the zero-findings surfaces.
+ *
+ * A real session showed Ctrl+O answering "请先执行 /review" right after a review
+ * that legitimately found nothing. This part loads a seeded zero-finding run
+ * (three candidates dropped by the 0.6 threshold) and checks what Ctrl+O and
+ * Ctrl+F now say.
+ */
+/**
+ * Part F: layout baseline.
+ *
+ * `P5_CHECK_ONLY=baseline` renders the App with **no review in the session** at
+ * a few sizes and writes the frames to a directory given by `P5_BASELINE_DIR`.
+ * The workbench phase captures these before the layout change and diffs them
+ * afterwards, so "the chat layout does not move when no review is running" is a
+ * checked fact instead of a promise.
+ */
+async function layoutBaseline() {
+  const target = (process.env.P5_BASELINE_DIR ?? "").trim()
+  if (!target) {
+    console.log("\n[F] baseline: SKIP (set P5_BASELINE_DIR)")
+    return
+  }
+  mkdirSync(target, { recursive: true })
+  console.log(`\n[F] layout baseline -> ${target}`)
+  for (const [width, height] of [
+    [80, 24],
+    [120, 30],
+  ] as const) {
+    const view = await testRender(() => <App />, { width, height, kittyKeyboard: true })
+    try {
+      await settle(view)
+      const frame = view.captureCharFrame()
+      const file = join(target, `no-review-${width}x${height}.txt`)
+      writeFileSync(file, frame, "utf8")
+      console.log(`  wrote ${file}`)
+    } finally {
+      view.renderer.destroy()
+    }
+  }
+}
+
+/**
+ * Part G: workbench state machine on the real App.
+ *
+ * Loads a stored run (that is the `done` phase), then checks: the two-column
+ * layout at 120x30 keeps the transcript visible, `Alt+W` folds the panels into
+ * the one-line status bar, and a composer draft survives the toggle.
+ */
+async function workbenchSurfaces() {
+  console.log("\n[G] workbench state machine (120x30)")
+  const work = join(tmpdir(), "ai-pr-review-p5-publish-check")
+  let runId = ""
+  try {
+    runId = readFileSync(join(work, "run_id.txt"), "utf8").trim()
+  } catch {
+    console.log("  SKIP  seeded run not found; run seed_publish_preview.py")
+    return
+  }
+  process.env.AI_PR_REVIEW_CONFIG = join(work, "config.json")
+
+  const view = await testRender(() => <App />, { width: 120, height: 30, kittyKeyboard: true })
+  try {
+    await settle(view)
+    await runCommand(view, `/history ${runId}`, 2)
+    const expanded = view.captureCharFrame()
+    check(/审查摘要|重点问题/.test(expanded), "loading a run opens the workbench panels")
+    check(
+      /SQL 注入风险|历史报告|独立验收/.test(expanded),
+      "the transcript stays visible next to the review column",
+    )
+    check(/Alt\+W/.test(expanded), "the Alt+W hint appears while the workbench is active")
+    if (!/审查摘要|重点问题/.test(expanded)) dumpFrame(expanded, "workbench-expanded")
+
+    await view.mockInput.typeText("draft-kept")
+    view.mockInput.pressKey("w", { meta: true })
+    await settle(view, 5)
+    const collapsed = view.captureCharFrame()
+    check(/draft-kept/.test(collapsed), "composer draft survives Alt+W")
+    check(
+      /Alt\+W (打开工作台|展开)/.test(collapsed),
+      "collapsing folds the panels into the one-line status bar",
+    )
+    check(!/审查摘要/.test(collapsed), "the summary panel is hidden while collapsed")
+    if (!/Alt\+W/.test(collapsed)) dumpFrame(collapsed, "workbench-collapsed")
+
+    view.mockInput.pressKey("w", { meta: true })
+    await settle(view, 5)
+    check(/审查摘要|重点问题/.test(view.captureCharFrame()), "Alt+W expands the workbench again")
+  } finally {
+    view.renderer.destroy()
+  }
+
+  // 80 columns: no room for rails, so the status bar must still be there.
+  const narrow = await testRender(() => <App />, { width: 80, height: 24, kittyKeyboard: true })
+  try {
+    await settle(narrow)
+    await runCommand(narrow, `/history ${runId}`, 2)
+    const narrowFrame = narrow.captureCharFrame()
+    check(
+      /审查完成|review done/.test(narrowFrame) && /Alt\+W/.test(narrowFrame),
+      "80x24 degrades to the one-line status bar instead of showing nothing",
+    )
+    check(!/审查摘要/.test(narrowFrame), "80x24 does not try to fit the summary rail")
+    if (!/Alt\+W/.test(narrowFrame)) dumpFrame(narrowFrame, "workbench-narrow")
+  } finally {
+    narrow.renderer.destroy()
+  }
+}
+
+async function zeroFindingsSurfaces() {
+  console.log("\n[E] zero-findings wording (Ctrl+O / Ctrl+F)")
+  const work = join(tmpdir(), "ai-pr-review-p5-publish-check")
+  let runId = ""
+  try {
+    runId = readFileSync(join(work, "run_id_zero.txt"), "utf8").trim()
+  } catch {
+    console.log("  SKIP  seeded zero-finding run not found; run seed_publish_preview.py")
+    return
+  }
+  process.env.AI_PR_REVIEW_CONFIG = join(work, "config.json")
+
+  const view = await testRender(() => <App />, { width: 100, height: 34, kittyKeyboard: true })
+  try {
+    await settle(view)
+    await runCommand(view, `/history ${runId}`, 2)
+
+    view.mockInput.pressKey("o", { ctrl: true })
+    await settle(view, 6)
+    const listFrame = view.captureCharFrame()
+    const listOk =
+      /未发现问题/.test(listFrame) &&
+      /3 条候选/.test(listFrame) &&
+      /门槛 0\.60/.test(listFrame) &&
+      !/请先执行 \/review/.test(listFrame)
+    check(listOk, "Ctrl+O after a clean review explains the zero result with the threshold")
+    if (!listOk) dumpFrame(listFrame, "zero-findings-list")
+
+    view.mockInput.pressKey("f", { ctrl: true })
+    await settle(view, 6)
+    const filterFrame = view.captureCharFrame()
+    const filterOk =
+      /没有需要筛选的问题/.test(filterFrame) && !/请先执行 \/review/.test(filterFrame)
+    check(filterOk, "Ctrl+F after a clean review no longer asks for a new review")
+    if (!filterOk) dumpFrame(filterFrame, "zero-findings-filter")
+  } finally {
+    view.renderer.destroy()
+  }
+}
+
 async function livePublishFlow() {
   console.log("\n[D] live publish against GitHub")
   const runId = (process.env.P5_LIVE_RUN_ID ?? "").trim()
@@ -485,6 +637,9 @@ if (!only || only === "app") await appFlows()
 if (!only || only === "publish") await publishPreviewFlow()
 if (!only || only === "overlays") await overlayStates()
 if (only === "live") await livePublishFlow()
+if (!only || only === "zero") await zeroFindingsSurfaces()
+if (only === "baseline") await layoutBaseline()
+if (!only || only === "workbench") await workbenchSurfaces()
 
 console.log("\n== summary ==")
 console.log(JSON.stringify({ failures }, null, 2))

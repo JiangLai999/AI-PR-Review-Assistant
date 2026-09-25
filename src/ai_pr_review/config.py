@@ -580,6 +580,31 @@ class ProviderConfig:
         return payload
 
 
+# 审查工作台显示模式（preferences.workbench_mode）：
+# auto=审查开始时自动展开（Alt+W 可收起）；always=工作台常驻；off=仅 Alt+W 手动打开。
+WORKBENCH_MODES: tuple[str, ...] = ("auto", "always", "off")
+DEFAULT_WORKBENCH_MODE = "auto"
+
+
+def normalize_workbench_mode(value: object) -> str:
+    """把任意输入归一化为合法的 ``workbench_mode``。
+
+    旧版本写出的配置没有这个字段，手改配置也可能写错值，两种情况都必须能加载，
+    因此非法值只回退到 ``auto`` 并记录一次 warning，不抛异常。提示里不回显原值：
+    配置内容可能含终端控制字符或误粘贴的密钥。
+    """
+    normalized = str(value or "").strip().lower()
+    if normalized in WORKBENCH_MODES:
+        return normalized
+    warnings.warn(
+        "配置项 preferences.workbench_mode 的值不受支持，已回退为 auto"
+        "（可选值：auto、always、off）。",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return DEFAULT_WORKBENCH_MODE
+
+
 @dataclass
 class PreferencesConfig:
     """User-facing CLI preferences."""
@@ -591,6 +616,11 @@ class PreferencesConfig:
     auto_publish_comment: bool = False
     hybrid_strategy: str = "balanced"  # 新增：双模型协作策略
     max_cost_per_review: float = 0.50  # 新增：单次审查最大成本
+    workbench_mode: str = DEFAULT_WORKBENCH_MODE  # 审查工作台显示模式
+
+    def __post_init__(self) -> None:
+        # 属性一旦构造出来就保证合法，加载/导入/向导三条路径因此共用同一套回退规则。
+        self.workbench_mode = normalize_workbench_mode(self.workbench_mode)
 
 
 @dataclass
@@ -980,7 +1010,12 @@ class AppConfig:
         if isinstance(data.get("github_token"), str):
             self.github_token = str(data["github_token"])
         if isinstance(data.get("preferences"), dict):
-            self.preferences = PreferencesConfig(**data["preferences"])
+            # Preferences grow over time (`workbench_mode` is the newest one), so a
+            # config written by a newer release must not crash an older install
+            # before the user can reach `pr-review config`.
+            self.preferences = PreferencesConfig(
+                **self._filter_dataclass_payload(PreferencesConfig, data["preferences"])
+            )
         model_provider_data = data.get("model_provider")
         if isinstance(model_provider_data, dict):
             provider = ModelProviderConfig(**model_provider_data)

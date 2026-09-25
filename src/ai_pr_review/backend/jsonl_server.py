@@ -131,6 +131,12 @@ def _review_completed_fields(report: dict[str, Any]) -> dict[str, Any]:
     Everything is derived from data the pipeline actually produced. Counts the
     orchestrator does not expose stay at their true value (0) instead of being
     estimated.
+
+    `filtered` is additive (contract §3.7 extension): it repeats the report's
+    `run.filtered` block when the run recorded one, so the live TUI can explain
+    a 0-finding review without re-reading the report. Runs that recorded no
+    filter stats get no `filtered` key rather than a fabricated
+    `{"below_threshold": 0}`.
     """
     pr = report.get("pr") if isinstance(report.get("pr"), dict) else {}
     counts = report.get("counts") if isinstance(report.get("counts"), dict) else {}
@@ -148,7 +154,7 @@ def _review_completed_fields(report: dict[str, Any]) -> dict[str, Any]:
     for finding in findings:
         status = str(finding.get("evidence_status", "")) if isinstance(finding, dict) else ""
         evidence[status if status in evidence else "unverified"] += 1
-    return {
+    fields: dict[str, Any] = {
         "files_reviewed": int(_as_float(pr.get("files_reviewed", 0))),
         "files_skipped": int(_as_float(pr.get("files_skipped", 0))),
         "severity": severity,
@@ -156,6 +162,12 @@ def _review_completed_fields(report: dict[str, Any]) -> dict[str, Any]:
         "cost": round(_as_float(run.get("total_cost", 0.0)), 6),
         "duration_seconds": round(_as_float(run.get("duration_seconds", 0.0)), 3),
     }
+    # Passed through verbatim, not re-derived: `build_report_payload` already
+    # normalized it, and the event must not disagree with the report.
+    filtered = run.get("filtered")
+    if isinstance(filtered, dict) and filtered:
+        fields["filtered"] = dict(filtered)
+    return fields
 
 
 class _ReviewEventStream:
@@ -439,6 +451,9 @@ class JsonlBackend:
             "output_format": self.config.preferences.output_format,
             "auto_publish_comment": self.config.preferences.auto_publish_comment,
             "chat_layout": getattr(self.config.preferences, "chat_layout", "compact"),
+            # Workbench Phase 1: the TUI needs this to decide whether a review
+            # opens the side panels automatically (auto | always | off).
+            "workbench_mode": getattr(self.config.preferences, "workbench_mode", "auto"),
             "api_format": provider.api_format,
             "api_key_configured": bool(provider.api_key or local),
             "github_token_configured": bool(
@@ -516,6 +531,11 @@ class JsonlBackend:
                 {"value": "split", "label": "分栏 / Split"},
                 {"value": "plain", "label": "纯文本 / Plain"},
             ],
+            "workbench_modes": [
+                {"value": "auto", "label": "自动 / Auto（审查时展开，可 Alt+W 收起）"},
+                {"value": "always", "label": "常驻 / Always（一直显示工作台）"},
+                {"value": "off", "label": "关闭 / Off（只在状态条里显示进度）"},
+            ],
             "local": {
                 "provider": local_provider.name,
                 "display_name": local_provider.display_name,
@@ -541,6 +561,8 @@ class JsonlBackend:
                 "output_format": self.config.preferences.output_format,
                 "auto_publish_comment": self.config.preferences.auto_publish_comment,
                 "chat_layout": self.config.preferences.chat_layout,
+                # Lets the TUI wizard preselect the current workbench mode.
+                "workbench_mode": getattr(self.config.preferences, "workbench_mode", "auto"),
                 # The active slot can be local while a fully configured cloud
                 # slot is still persisted. The wizard must preselect the remote
                 # slot when the user switches back to Cloud/Hybrid.
@@ -667,6 +689,14 @@ class JsonlBackend:
             if chat_layout not in {"compact", "split", "plain"}:
                 raise ConfigValidationError("Chat 布局仅支持 compact、split 或 plain。")
             preferences.chat_layout = chat_layout
+        workbench_mode = str(params.get("workbench_mode", "")).strip()
+        if workbench_mode:
+            # Single source of truth: config.WORKBENCH_MODES owns the vocabulary.
+            from ai_pr_review.config import WORKBENCH_MODES
+
+            if workbench_mode not in WORKBENCH_MODES:
+                raise ConfigValidationError("审查工作台仅支持 auto、always 或 off。")
+            preferences.workbench_mode = workbench_mode
         if "auto_publish_comment" in params:
             auto_publish = params["auto_publish_comment"]
             if not isinstance(auto_publish, bool):
@@ -1087,6 +1117,9 @@ class JsonlBackend:
         return "\n".join(lines)
 
     def _history_detail(self, run_id: str) -> dict[str, Any]:
+        # Imported here (not at module level) for the same reason `_run_review`
+        # imports the report builder lazily: the CLI pulls in click/rich.
+        from ai_pr_review.cli import report_filtered_section
         from ai_pr_review.services.result_store import ResultStore
 
         store = ResultStore(self.config.result_store)
@@ -1118,6 +1151,15 @@ class JsonlBackend:
                 "total_cost": run.get("total_cost", 0),
             },
         }
+        # Same `run.filtered` block a fresh review reports, from the stats the
+        # orchestrator stored (`metadata["filtered_findings"]`), so the TUI's
+        # empty-findings hint can explain a stored 0-finding run too. Runs saved
+        # before that key existed (or with a malformed one) simply have no block.
+        filtered = report_filtered_section(
+            metadata.get("filtered_findings") if isinstance(metadata, dict) else None
+        )
+        if filtered:
+            report["run"]["filtered"] = filtered
         # A run loaded from history becomes the current report, so /report and
         # /export work on it exactly as they do right after a fresh review.
         # Without this they answered "当前会话还没有可导出的审查报告。" even

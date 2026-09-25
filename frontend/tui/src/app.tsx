@@ -20,6 +20,7 @@ import {
   type ShowcasePanelData,
 } from "./review-report"
 import { ReviewProgressPanel } from "./review-ui/ReviewProgressPanel"
+import { ReviewStatusBar } from "./review-ui/ReviewStatusBar"
 import { ReviewSummaryPanel } from "./review-ui/ReviewSummaryPanel"
 import { ReviewActionBar } from "./review-ui/ReviewActionBar"
 import { ReviewWorkspace } from "./review-ui/ReviewWorkspace"
@@ -39,6 +40,7 @@ import {
   hasActiveCriteria,
   type FindingsFilterState,
 } from "./findings-filter"
+import { emptyFindingsMessage } from "./empty-findings"
 import type { InputRenderable, TextareaRenderable, KeyBinding, ScrollBoxRenderable } from "@opentui/core"
 
 const orange = "#fb8147"
@@ -95,6 +97,8 @@ type RuntimeSnapshot = {
   model?: string
   strategy?: string
   runtime_profile?: string
+  /** auto | always | off — when the review workbench shows itself. */
+  workbench_mode?: string
   local?: boolean
   api_key_configured?: boolean
   available?: boolean | null
@@ -278,6 +282,10 @@ function Composer(props: {
   onShowcase: () => void
   /** Focus the findings filter overlay (`Ctrl+F`). */
   onFilterFindings: () => void
+  /** Fold / unfold the review workbench (`Alt+W`, `/workbench`). */
+  onToggleWorkbench: () => void
+  /** Show the `Alt+W 工作台` hint only when a workbench exists. */
+  workbenchActive?: boolean
   onRetry: () => void
   reviewing: boolean
   busy: boolean
@@ -424,6 +432,11 @@ function Composer(props: {
     // never leave the user staring at a bare text reply.
     if (text === "/showcase") {
       props.onShowcase()
+      submitLock = false
+      return
+    }
+    if (text === "/workbench") {
+      props.onToggleWorkbench()
       submitLock = false
       return
     }
@@ -600,6 +613,11 @@ function Composer(props: {
       key.stopPropagation?.()
       return
     }
+    if (props.focused !== false && key.meta === true && key.name === "w") {
+      props.onToggleWorkbench()
+      key.stopPropagation?.()
+      return
+    }
     if (props.focused === false) return
     if (key.name === "tab" && matches().length === 0) {
       key.preventDefault()
@@ -697,6 +715,9 @@ function Composer(props: {
         <text><span style={{ fg: "#eeeeee" }}>Ctrl+P</span> <span style={{ fg: muted }}>设置</span></text>
         <text><span style={{ fg: "#eeeeee" }}>Ctrl+L</span> <span style={{ fg: muted }}>历史</span></text>
         <text><span style={{ fg: "#eeeeee" }}>Ctrl+K</span> <span style={{ fg: muted }}>模型</span></text>
+        <Show when={props.workbenchActive}>
+          <text><span style={{ fg: "#eeeeee" }}>Alt+W</span> <span style={{ fg: muted }}>工作台</span></text>
+        </Show>
       </box>
     </box>
   )
@@ -739,6 +760,7 @@ type SetupOptions = {
   ui_languages?: ChoiceOption[]
   output_formats?: ChoiceOption[]
   chat_layouts?: ChoiceOption[]
+  workbench_modes?: ChoiceOption[]
   local: LocalSetupOption
   current: {
     runtime_profile?: string
@@ -757,6 +779,7 @@ type SetupOptions = {
     output_format?: string
     auto_publish_comment?: boolean
     chat_layout?: string
+    workbench_mode?: string
     local_model?: string
   }
 }
@@ -1087,6 +1110,7 @@ type SetupScreen =
   | "output_format"
   | "auto_publish"
   | "chat_layout"
+  | "workbench"
   | "summary"
 
 const screenStages: Record<SetupScreen, number> = {
@@ -1104,6 +1128,7 @@ const screenStages: Record<SetupScreen, number> = {
   output_format: 5,
   auto_publish: 5,
   chat_layout: 5,
+  workbench: 5,
   summary: 6,
 }
 
@@ -1131,6 +1156,7 @@ const screenTitles: Record<SetupScreen, string> = {
   output_format: "选择默认输出格式",
   auto_publish: "是否自动发布 GitHub 评论",
   chat_layout: "选择 Chat 布局",
+  workbench: "选择审查工作台模式",
   summary: "确认并保存",
 }
 
@@ -1155,6 +1181,7 @@ function SetupWizardDialog(props: SetupDialogProps) {
   const [outputFormatIndex, setOutputFormatIndex] = createSignal(0)
   const [autoPublishIndex, setAutoPublishIndex] = createSignal(1)
   const [chatLayoutIndex, setChatLayoutIndex] = createSignal(0)
+  const [workbenchIndex, setWorkbenchIndex] = createSignal(0)
   const [baseUrl, setBaseUrl] = createSignal("")
   const [apiKey, setApiKey] = createSignal("")
   const [localBaseUrl, setLocalBaseUrl] = createSignal("")
@@ -1179,6 +1206,12 @@ function SetupWizardDialog(props: SetupDialogProps) {
       { value: "split", label: "分栏 / Split" },
       { value: "plain", label: "纯文本 / Plain" },
     ]
+  const workbenchModes = () =>
+    options()?.workbench_modes ?? [
+      { value: "auto", label: "自动 / Auto（审查时展开，可 Alt+W 收起）" },
+      { value: "always", label: "常驻 / Always（一直显示工作台）" },
+      { value: "off", label: "关闭 / Off（只用一行状态条显示进度）" },
+    ]
   const local = () => options()?.local
   const selectedRuntime = () => runtimeOptions[runtimeIndex()]?.value ?? "cloud"
   const needsCloud = () => selectedRuntime() === "cloud" || selectedRuntime() === "hybrid"
@@ -1194,6 +1227,7 @@ function SetupWizardDialog(props: SetupDialogProps) {
   const selectedResponseLanguage = () => uiLanguages()[responseLanguageIndex()]?.value ?? "zh-CN"
   const selectedOutputFormat = () => outputFormats()[outputFormatIndex()]?.value ?? "terminal"
   const selectedChatLayout = () => chatLayouts()[chatLayoutIndex()]?.value ?? "compact"
+  const selectedWorkbenchMode = () => workbenchModes()[workbenchIndex()]?.value ?? "auto"
   const autoPublish = () => autoPublishIndex() === 0
   const remoteKeyConfigured = () =>
     options()?.current.remote_api_key_configured ?? options()?.current.api_key_configured ?? false
@@ -1220,6 +1254,7 @@ function SetupWizardDialog(props: SetupDialogProps) {
     "output_format",
     "auto_publish",
     "chat_layout",
+    "workbench",
     "summary",
   ]
   const localOrder: SetupScreen[] = [
@@ -1232,6 +1267,7 @@ function SetupWizardDialog(props: SetupDialogProps) {
     "output_format",
     "auto_publish",
     "chat_layout",
+    "workbench",
     "summary",
   ]
   const order = () => (needsCloud() ? cloudOrder : localOrder)
@@ -1281,6 +1317,7 @@ function SetupWizardDialog(props: SetupDialogProps) {
         output_format: selectedOutputFormat(),
         auto_publish_comment: autoPublish(),
         chat_layout: selectedChatLayout(),
+        workbench_mode: selectedWorkbenchMode(),
       }
       if (needsCloud()) {
         const provider = selectedProvider()
@@ -1368,6 +1405,9 @@ function SetupWizardDialog(props: SetupDialogProps) {
       )
       setOutputFormatIndex(indexOfValue(payload.output_formats ?? [], payload.current.output_format))
       setChatLayoutIndex(indexOfValue(payload.chat_layouts ?? [], payload.current.chat_layout))
+      setWorkbenchIndex(
+        indexOfValue(payload.workbench_modes ?? [], payload.current.workbench_mode),
+      )
       setAutoPublishIndex(payload.current.auto_publish_comment ? 0 : 1)
     } catch (cause) {
       setError(String(cause))
@@ -1642,6 +1682,23 @@ function SetupWizardDialog(props: SetupDialogProps) {
             descriptionColor={muted}
             selectedDescriptionColor="#ffd0bb"
             onChange={(index) => setChatLayoutIndex(index)}
+          />
+        </box>
+      </Show>
+      <Show when={!loading() && screen() === "workbench"}>
+        <box marginTop={1} flexGrow={1}>
+          <select
+            options={workbenchModes().map((item) => ({ name: item.label, description: item.value, value: item.value }))}
+            selectedIndex={workbenchIndex()}
+            focused
+            showDescription
+            width="100%"
+            height={8}
+            selectedBackgroundColor="#5a2e1c"
+            selectedTextColor="#ffffff"
+            descriptionColor={muted}
+            selectedDescriptionColor="#ffd0bb"
+            onChange={(index) => setWorkbenchIndex(index)}
           />
         </box>
       </Show>
@@ -2340,6 +2397,11 @@ export function App() {
   const [activeFindingIndex, setActiveFindingIndex] = createSignal(0)
   const [feedbackOpen, setFeedbackOpen] = createSignal(false)
   const [reviewActionMessage, setReviewActionMessage] = createSignal("")
+  // Workbench (Phase 1): auto-open on review start, Alt+W to fold it away.
+  // `collapsed` is per session; the persisted preference is `workbench_mode`
+  // (auto | always | off) and only decides the *automatic* behaviour.
+  const [workbenchCollapsed, setWorkbenchCollapsed] = createSignal(false)
+  const [workbenchManualOpen, setWorkbenchManualOpen] = createSignal(false)
   const [historyOpen, setHistoryOpen] = createSignal(false)
   const [historyRuns, setHistoryRuns] = createSignal<HistoryRun[]>([])
   const [historyStats, setHistoryStats] = createSignal<HistoryStats>({})
@@ -2371,6 +2433,129 @@ export function App() {
   const compactHome = () => dimensions().height < 28
 
   const appendMessage = (message: ChatMessage) => setMessages((current) => [...current, message])
+
+  // ---------------------------------------------------------------------
+  // Workbench state machine (docs/workbench-phase1-contract.md §1)
+  // idle ──review──▶ running ──done──▶ collapsed ──Alt+W──▶ running/done
+  // ---------------------------------------------------------------------
+  const workbenchMode = (): "auto" | "always" | "off" => {
+    const mode = String(runtime().workbench_mode ?? "").trim().toLowerCase()
+    return mode === "always" || mode === "off" ? mode : "auto"
+  }
+  const reviewPhase = (): "idle" | "running" | "done" => {
+    if (reviewing() || reviewStarting()) return "running"
+    const report = reviewReport() as Record<string, unknown>
+    const run = (report.run ?? {}) as Record<string, unknown>
+    const hasReport = Boolean(
+      reviewWorkspace().runId || run.id || report.pr || report.counts || reviewStage(),
+    )
+    return hasReport ? "done" : "idle"
+  }
+  /** Whether the workbench surface is on screen at all. */
+  const workbenchVisible = (): boolean => {
+    if (workbenchManualOpen()) return true
+    const mode = workbenchMode()
+    if (mode === "always") return true
+    const phase = reviewPhase()
+    if (mode === "off") return phase === "running"
+    return phase !== "idle"
+  }
+  /** Expanded panels vs. a single status line. */
+  const workbenchExpanded = (): boolean =>
+    workbenchVisible() && !workbenchCollapsed() && workbenchMode() !== "off"
+  const reviewLayout = (): "three" | "two" | "bar" => {
+    if (!workbenchExpanded()) return "bar"
+    if (dimensions().width >= 140 && dimensions().height >= 26) return "three"
+    if (dimensions().width >= 100 && dimensions().height >= 26) return "two"
+    return "bar"
+  }
+  /**
+   * Rails can only exist in `three`/`two`; at 80 columns (or a short window) the
+   * workbench degrades to the one-line status bar instead of showing nothing.
+   */
+  const workbenchPanelsVisible = (): boolean =>
+    workbenchExpanded() && reviewLayout() !== "bar"
+  /** Column widths (docs/workbench-phase1-contract.md §2). */
+  const leftColumnWidth = 26
+  const rightColumnWidth = (): number => (reviewLayout() === "three" ? 52 : 44)
+  /**
+   * Width of the chat content column. While the workbench is off this stays 76
+   * so the idle layout is byte-identical to the previous release.
+   */
+  const chatContentWidth = (): number => {
+    if (!workbenchExpanded()) return 76
+    const layout = reviewLayout()
+    if (layout === "three") {
+      return Math.max(56, dimensions().width - leftColumnWidth - rightColumnWidth() - 2)
+    }
+    if (layout === "two") {
+      return Math.max(56, dimensions().width - rightColumnWidth() - 2)
+    }
+    return Math.max(56, Math.min(96, dimensions().width - 4))
+  }
+  const toggleWorkbench = () => {
+    if (!workbenchVisible()) {
+      setWorkbenchManualOpen(true)
+      setWorkbenchCollapsed(false)
+      appendMessage({
+        role: "assistant",
+        content: reviewPhase() === "idle"
+          ? "已打开审查工作台。发起一次 /review 后这里会显示进度与发现。"
+          : "已打开审查工作台。",
+      })
+      return
+    }
+    const next = !workbenchCollapsed()
+    setWorkbenchCollapsed(next)
+    if (!next) setWorkbenchManualOpen(true)
+    setReviewActionMessage(
+      next ? "审查工作台已收起（Alt+W 可再次展开，数据保留）。" : "审查工作台已展开。",
+    )
+  }
+  /** Post-processing disclosure carried by the report payload (P6 §12.4). */
+  const reportFiltered = (): { threshold?: number; belowThreshold?: number } => {
+    const report = reviewReport() as Record<string, unknown>
+    const run = (report.run ?? {}) as Record<string, unknown>
+    const filtered = (run.filtered ?? {}) as Record<string, unknown>
+    const asNumber = (value: unknown): number | undefined =>
+      typeof value === "number" && Number.isFinite(value) ? value : undefined
+    return {
+      threshold: asNumber(filtered.threshold),
+      belowThreshold: asNumber(filtered.below_threshold),
+    }
+  }
+  /**
+   * One-line workbench status (collapsed, narrow terminal, or `workbench_mode=off`).
+   * Superseded by MiMo Code's `ReviewStatusBar`; kept for the plain-text
+   * fallback used by the harness when the component is unavailable.
+   */
+  const workbenchStatusText = (): string => {
+    const phase = reviewPhase()
+    const zh = !String(runtime().ui_language ?? "zh").toLowerCase().startsWith("en")
+    const files = reviewFilesTotal() > 0 ? `${reviewFilesDone()}/${reviewFilesTotal()}` : ""
+    if (phase === "running") {
+      const parts = [
+        zh ? "审查中" : "reviewing",
+        `${reviewProgress()}%`,
+        files ? (zh ? `文件 ${files}` : `files ${files}`) : "",
+        zh ? "Alt+W 展开" : "Alt+W expand",
+        zh ? "Ctrl+C 取消" : "Ctrl+C cancel",
+      ].filter(Boolean)
+      return parts.join(" · ")
+    }
+    if (phase === "done") {
+      const counts = reviewWorkspace().severity
+      const parts = [
+        zh ? "审查完成" : "review done",
+        zh ? `${reviewFindings().length} 问题` : `${reviewFindings().length} findings`,
+        counts.critical ? `🛑${counts.critical}` : "",
+        counts.high ? `⚠️${counts.high}` : "",
+        zh ? "Alt+W 打开工作台" : "Alt+W open workbench",
+      ].filter(Boolean)
+      return parts.join(" · ")
+    }
+    return zh ? "工作台已打开 · 发起 /review 开始审查" : "Workbench open · run /review to start"
+  }
 
   // Single place that turns a report into visible panels, so a new caller
   // cannot populate the summary while forgetting the findings list.
@@ -2532,6 +2717,32 @@ export function App() {
     if (!reviewing()) void startReview(url)
   }
 
+  /**
+   * Context for the "nothing to show" wording: a finished review with zero
+   * findings must not read like "you never ran a review".
+   */
+  const findingsEmptyContext = () => {
+    const workspace = reviewWorkspace()
+    const report = reviewReport() as Record<string, unknown>
+    const run = (report.run ?? {}) as Record<string, unknown>
+    const filtered = (run.filtered ?? {}) as Record<string, unknown>
+    const asNumber = (value: unknown): number | null =>
+      typeof value === "number" && Number.isFinite(value) ? value : null
+    const stage = reviewStage()
+    const failed = stage === "审查失败" || stage === "审查已取消"
+    return {
+      running: reviewing(),
+      hasReport: Boolean(workspace.runId || run.id || report.pr || report.counts) || (!failed && Boolean(stage)),
+      failed,
+      repository: workspace.repository,
+      prNumber: workspace.prNumber,
+      runId: currentRunId(),
+      threshold: asNumber(filtered.threshold),
+      belowThreshold: asNumber(filtered.below_threshold),
+      language: runtime().ui_language,
+    }
+  }
+
   const openFindings = () => {
     setHistoryOpen(false)
     setModelOpen(false)
@@ -2542,7 +2753,7 @@ export function App() {
     } else {
       appendMessage({
         role: "assistant",
-        content: "当前没有 Findings。请先执行 /review <PR_URL>，或使用 /history <run_id> 加载包含 findings 的历史报告。",
+        content: emptyFindingsMessage("list", findingsEmptyContext()),
       })
     }
   }
@@ -2568,7 +2779,7 @@ export function App() {
     if (reviewFindings().length === 0) {
       appendMessage({
         role: "assistant",
-        content: "当前没有可筛选的 Findings。先执行 /review <PR_URL> 或 /history <run_id>。",
+        content: emptyFindingsMessage("filter", findingsEmptyContext()),
       })
       return
     }
@@ -2727,7 +2938,7 @@ export function App() {
     if (!reviewFindings()[index]) {
       appendMessage({
         role: "assistant",
-        content: "当前没有可反馈的 Finding。请先用 Ctrl+O 打开 Findings 并选择一条问题。",
+        content: emptyFindingsMessage("feedback", findingsEmptyContext()),
       })
       return
     }
@@ -3117,13 +3328,24 @@ export function App() {
       }>
         <PixelLogo language={runtime().ui_language} />
       </Show>
+      {/* Middle row: review panels live outside the chat scrollbox, so they can
+          no longer push the transcript out of view. The chat column keeps a
+          stable position in the tree, which is what keeps the composer's draft
+          and cursor alive across Alt+W. */}
+      <box width="100%" flexGrow={1} flexDirection="row" minHeight={0}>
+      <Show when={reviewLayout() === "three" && reviewProgressProps()}>
+        <box width={leftColumnWidth} flexShrink={0} marginRight={1} flexDirection="column" minHeight={0}>
+          <ReviewProgressPanel {...reviewProgressProps()!} />
+        </box>
+      </Show>
+      <box flexGrow={1} minWidth={0} flexDirection="column" alignItems="center">
       <scrollbox width="100%" flexGrow={1} scrollY stickyScroll stickyStart="bottom" scrollbarOptions={{ showArrows: false }}>
         <box width="100%" alignItems="center" flexDirection="column">
       <Show when={messages().length === 0 && !composerDraft() && !streamingAssistant() && !errorMessage() && !reviewStage() && !compactHome()}>
         <QuickStartPanel language={runtime().ui_language} />
       </Show>
       <Show when={errorMessage()}>
-        <box width={76} backgroundColor="#241616" borderStyle="single" borderColor="#ff6b6b" paddingLeft={2} paddingRight={2} marginTop={2} flexDirection="column">
+        <box width={chatContentWidth()} backgroundColor="#241616" borderStyle="single" borderColor="#ff6b6b" paddingLeft={2} paddingRight={2} marginTop={2} flexDirection="column">
           <text fg="#ff6b6b">ERROR // RECOVERY</text>
           <text fg="#eeeeee">{errorMessage()}</text>
           <text fg={muted}>建议：检查模型状态、配置 Endpoint，或使用 Ctrl+P 切换运行时。</text>
@@ -3131,7 +3353,7 @@ export function App() {
         </box>
       </Show>
       <Show when={reviewFindings().length > 0}>
-        <box width={76} marginTop={1} flexDirection="column">
+        <box width={chatContentWidth()} marginTop={1} flexDirection="column">
           <FindingsFilterBar
             active={hasActiveCriteria(findingsFilter()) || findingsFilter().sort !== "severity"}
             query={findingsFilter().query}
@@ -3141,43 +3363,6 @@ export function App() {
             shown={visibleFindingCounts().shown}
             total={visibleFindingCounts().total}
             language={runtime().ui_language}
-          />
-        </box>
-      </Show>
-      <Show when={isWideReview() && (reviewing() || reviewReport().pr || reviewReport().counts)}>
-        <box width={76} height={Math.max(20, dimensions().height - 8)} marginTop={2}>
-          <ReviewWorkspace
-            layout="wide"
-            progress={reviewProgressProps()}
-            summary={reviewSummaryProps()}
-            findings={visibleFindings()}
-            onOpenFindings={openFindings}
-            onExplain={() => void explainCurrentRun()}
-            onFeedback={() => openFeedback()}
-            onExport={() => void exportCurrentReport()}
-            onPublish={() => void startPublish("")}
-            onFilter={openFindingsFilter}
-            language={runtime().ui_language}
-          />
-        </box>
-      </Show>
-      <Show when={!isWideReview() && reviewing() && reviewStage()}>
-        <box width={76} marginTop={2}>
-          <ReviewProgressPanel
-            url={reviewUrl()}
-            stageId={reviewStages().find((stage) => stage.status === "active")?.id ?? ""}
-            stageLabel={reviewStage()}
-            progress={reviewProgress()}
-            stages={reviewStages()}
-            filesDone={reviewFilesDone()}
-            filesTotal={reviewFilesTotal() || undefined}
-            currentFile={reviewFile() || undefined}
-            fileStates={reviewFileStates()}
-            routing={reviewRouting()}
-            elapsedMs={reviewElapsedMs()}
-            cost={reviewWorkspace().cost}
-            language={runtime().ui_language}
-            onCancel={cancelCurrentTask}
           />
         </box>
       </Show>
@@ -3191,62 +3376,47 @@ export function App() {
         </box>
       </Show>
       <Show when={messages().length > 0 || streamingAssistant()}>
-        <box width={76} marginTop={2} flexDirection="column">
+        <box width={chatContentWidth()} marginTop={2} flexDirection="column">
           <For each={messages()}>{(message) =>
             <box flexDirection="row" gap={1} paddingBottom={1}>
               <text fg={message.role === "user" ? orange : "#eeeeee"}>{message.role === "user" ? ">" : "●"}</text>
-              <text width={70} fg={message.role === "user" ? "#eeeeee" : muted}>{message.content}</text>
+              <text width={Math.max(24, chatContentWidth() - 6)} fg={message.role === "user" ? "#eeeeee" : muted}>{message.content}</text>
             </box>
           }</For>
           <Show when={streamingAssistant()}>
             <box flexDirection="row" gap={1}>
               <text fg={orange}>●</text>
-              <text width={70} fg="#eeeeee">{streamingAssistant()}</text>
+              <text width={Math.max(24, chatContentWidth() - 6)} fg="#eeeeee">{streamingAssistant()}</text>
             </box>
           </Show>
         </box>
       </Show>
-      <Show when={!isWideReview() && (reviewReport().pr || reviewReport().counts)}>
-        <box width={76} marginTop={1}>
-          <ReviewSummaryPanel
-            repository={reviewWorkspace().repository}
-            prNumber={reviewWorkspace().prNumber}
-            title={reviewWorkspace().title}
-            severity={reviewWorkspace().severity}
-            evidence={reviewWorkspace().evidence}
-            filesReviewed={reviewWorkspace().filesReviewed}
-            filesSkipped={reviewWorkspace().filesSkipped}
-            findings={visibleFindings()}
-            durationSeconds={reviewWorkspace().durationSeconds}
-            cost={reviewWorkspace().cost}
-            runId={reviewWorkspace().runId}
-            model={runtime().model}
-            language={runtime().ui_language}
-            onOpenFindings={openFindings}
-          />
-        </box>
-      </Show>
-      <Show when={!isWideReview() && (reviewReport().pr || reviewReport().counts)}>
-        <box width={76} marginTop={1}>
-          <ReviewActionBar
-            onOpenFindings={openFindings}
-            onExplain={() => void explainCurrentRun()}
-            onFeedback={() => openFeedback()}
-            onExport={() => void exportCurrentReport()}
-            onPublish={() => void startPublish("")}
-            onFilter={openFindingsFilter}
-            language={runtime().ui_language}
-          />
-        </box>
-      </Show>
       <Show when={reviewActionMessage()}>
-        <box width={76} backgroundColor="#141414" borderStyle="single" borderColor="#7edc92" paddingLeft={2} paddingRight={2} marginTop={1} flexDirection="column">
+        <box width={chatContentWidth()} backgroundColor="#141414" borderStyle="single" borderColor="#7edc92" paddingLeft={2} paddingRight={2} marginTop={1} flexDirection="column">
           <text fg="#7edc92">REVIEW ACTION // 操作结果</text>
           <text fg="#eeeeee">{reviewActionMessage()}</text>
         </box>
       </Show>
         </box>
       </scrollbox>
+      {/* Collapsed / narrow workbench: one line above the composer. The wording
+          and width-safe clamping live in MiMo Code's ReviewStatusBar. */}
+      <Show when={workbenchVisible() && !workbenchPanelsVisible()}>
+        <ReviewStatusBar
+          phase={reviewPhase()}
+          progress={reviewProgress()}
+          stageLabel={reviewStage()}
+          filesDone={reviewFilesDone()}
+          filesTotal={reviewFilesTotal() || undefined}
+          findingCount={reviewFindings().length}
+          severity={reviewWorkspace().severity}
+          threshold={reportFiltered().threshold}
+          belowThreshold={reportFiltered().belowThreshold}
+          toggleKey="Alt+W"
+          language={runtime().ui_language}
+          width={Math.max(12, chatContentWidth() - 2)}
+        />
+      </Show>
       <Composer
         mode={mode()}
         setMode={setMode}
@@ -3275,6 +3445,8 @@ export function App() {
         onRetry={retryLastReview}
         reviewing={reviewing()}
         onCancel={cancelCurrentTask}
+        onToggleWorkbench={toggleWorkbench}
+        workbenchActive={workbenchVisible()}
         onDraftChange={setComposerDraft}
         onChatRequestStart={setActiveChatRequestId}
         onChatRequestEnd={() => setActiveChatRequestId(undefined)}
@@ -3294,6 +3466,33 @@ export function App() {
           reviewStage() !== "审查失败"
         }
       />
+      </box>
+      {/* Right column: summary + actions (and, in the two-column layout, the
+          progress panel too — 120x30 has no room for a separate left column). */}
+      <Show when={reviewLayout() !== "bar" && workbenchVisible()}>
+        <box width={rightColumnWidth()} flexShrink={0} marginLeft={1} flexDirection="column" minHeight={0}>
+          <Show when={reviewLayout() === "two" && reviewProgressProps()}>
+            <box flexShrink={0} marginBottom={1}>
+              <ReviewProgressPanel {...reviewProgressProps()!} />
+            </box>
+          </Show>
+          <Show when={reviewSummaryProps()}>
+            <box flexGrow={1} minHeight={0}>
+              <ReviewSummaryPanel {...reviewSummaryProps()!} />
+            </box>
+          </Show>
+          <ReviewActionBar
+            onOpenFindings={openFindings}
+            onExplain={() => void explainCurrentRun()}
+            onFeedback={() => openFeedback()}
+            onExport={() => void exportCurrentReport()}
+            onPublish={() => void startPublish("")}
+            onFilter={openFindingsFilter}
+            language={runtime().ui_language}
+          />
+        </box>
+      </Show>
+      </box>
       <Show when={modelOpen()}>
         <ModelDialog
           backend={backend}
@@ -3411,7 +3610,7 @@ export function App() {
       </Show>
       <box width="100%" flexShrink={0} justifyContent="space-between" paddingLeft={2} paddingRight={2} paddingBottom={1}>
         <text fg={muted}>{workspaceRootLabel()}</text>
-        <text fg={statusColors[backendStatus()]}>{runtime().runtime_profile ?? "RUNTIME"} · {statusLabels[backendStatus()]} · {runtime().model ?? "model"} · {runtime().available === false ? "OFFLINE" : runtime().available === true ? "ONLINE" : "0.1.0"}</text>
+        <text fg={statusColors[backendStatus()]}>{runtime().runtime_profile ?? "RUNTIME"} · {statusLabels[backendStatus()]} · {runtime().model ?? "model"} · {runtime().available === false ? "OFFLINE" : runtime().available === true ? "ONLINE" : "0.1.0"} · {dimensions().width}×{dimensions().height}</text>
       </box>
     </box>
   )

@@ -4,19 +4,22 @@ import {
   clampLine,
   demoView,
   displayWidth,
+  effectiveWorkbenchLayout,
   filterBarView,
   fitBorderedContent,
   hasClosingBorder,
+  hasLoneSurrogate,
   panelContentBudget,
   publishDialogView,
   PUBLISH_DIALOG_STATES,
   riskBadge,
   scrubCredentials,
   showcaseView,
+  statusBarView,
   truncateCommentBody,
 } from "./panel-model"
 import type { PublishDialogState } from "./panel-model"
-import type { ReviewFinding } from "./types"
+import type { ReviewFinding, SeverityCounts } from "./types"
 
 // ---------------------------------------------------------------------------
 // Single-line clamping (filter bar "never wrap / never exceed width")
@@ -27,6 +30,18 @@ test("displayWidth counts CJK as two columns", () => {
   expect(displayWidth("审查进度")).toBe(8)
   expect(displayWidth("")).toBe(0)
   expect(displayWidth(undefined as unknown as string)).toBe(0)
+})
+
+test("displayWidth counts emoji as two and variation selectors as zero", () => {
+  expect(displayWidth("🛑")).toBe(2)
+  // ⚠ + VS16 is one emoji cell, not 2 columns for the selector.
+  expect(displayWidth("⚠️")).toBe(2)
+  // （ = 2, 🛑 = 2, 1 = 1, space = 1, ⚠️ = 2, 1 = 1, ） = 2
+  expect(displayWidth("（🛑1 ⚠️1）")).toBe(11)
+  // Clamp must budget for the double-width emoji so the terminal never cuts one.
+  const clamped = clampLine("审查完成 · 2 问题（🛑1 ⚠️1） · Alt+W 打开工作台", 24)
+  expect(displayWidth(clamped)).toBeLessThanOrEqual(24)
+  expect(hasLoneSurrogate(clamped)).toBe(false)
 })
 
 test("clampLine never exceeds the budget and never emits a newline", () => {
@@ -526,4 +541,190 @@ test("hasClosingBorder rejects content-overwritten border rows", () => {
   // The pre-fix defect painted content over the closing glyph.
   expect(hasClosingBorder("└─✓─Stage─2─label───1.0s─┘")).toBe(false)
   expect(hasClosingBorder("└──────────────────────────────────────┘")).toBe(true)
+})
+
+// ---------------------------------------------------------------------------
+// ReviewStatusBar — phase copy, omitted fragments, width-safe Chinese
+// ---------------------------------------------------------------------------
+
+test("statusBarView running matches the contract and includes files + toggle + cancel", () => {
+  const view = statusBarView({
+    phase: "running",
+    progress: 70,
+    filesDone: 7,
+    filesTotal: 18,
+    language: "zh-CN",
+  })
+  expect(view.phase).toBe("running")
+  expect(view.text).toBe("审查中 ████░░ 70% · 文件 7/18 · Alt+W 展开 · Ctrl+C 取消")
+  expect(view.text.includes("\n")).toBe(false)
+  expect(hasLoneSurrogate(view.text)).toBe(false)
+})
+
+test("statusBarView done shows issue count, severity glyphs and open hint", () => {
+  const severity: SeverityCounts = { critical: 1, high: 1, medium: 0, low: 0, info: 0 }
+  const view = statusBarView({
+    phase: "done",
+    findingCount: 2,
+    severity,
+    language: "zh-CN",
+  })
+  expect(view.text).toContain("审查完成")
+  expect(view.text).toContain("2 问题")
+  expect(view.text).toContain("🛑1")
+  expect(view.text).toContain("⚠️1")
+  expect(view.text).toContain("Alt+W 打开工作台")
+  expect(hasLoneSurrogate(view.text)).toBe(false)
+})
+
+test("statusBarView omits missing fragments instead of inventing zeros", () => {
+  const running = statusBarView({ phase: "running", language: "zh-CN" })
+  expect(running.text).toBe("审查中 · Alt+W 展开 · Ctrl+C 取消")
+  expect(running.text).not.toContain("文件")
+  expect(running.text).not.toContain("0%")
+  expect(running.text).not.toContain("门槛")
+
+  const done = statusBarView({ phase: "done", language: "zh-CN" })
+  expect(done.text).toBe("审查完成 · Alt+W 打开工作台")
+  expect(done.text).not.toContain("问题")
+  expect(done.text).not.toContain("门槛")
+
+  // Explicit zeros are real data and may render.
+  const zeroFiles = statusBarView({
+    phase: "running",
+    filesDone: 0,
+    filesTotal: 0,
+    language: "zh-CN",
+  })
+  expect(zeroFiles.text).toContain("文件 0/0")
+})
+
+test("statusBarView appends threshold / below-threshold filter segment when present", () => {
+  const both = statusBarView({
+    phase: "done",
+    findingCount: 5,
+    threshold: 0.6,
+    belowThreshold: 3,
+    language: "zh-CN",
+  })
+  expect(both.text).toContain("门槛 0.60 过滤 3 条")
+
+  const onlyThreshold = statusBarView({
+    phase: "done",
+    threshold: 0.6,
+    language: "zh-CN",
+  })
+  expect(onlyThreshold.text).toContain("门槛 0.60")
+  expect(onlyThreshold.text).not.toContain("过滤")
+
+  const onlyFiltered = statusBarView({
+    phase: "done",
+    belowThreshold: 3,
+    language: "zh-CN",
+  })
+  expect(onlyFiltered.text).toContain("过滤 3 条")
+  expect(onlyFiltered.text).not.toContain("门槛")
+
+  // null means "no threshold" — never invent a 0.00 filter line.
+  const none = statusBarView({
+    phase: "done",
+    threshold: null,
+    belowThreshold: null,
+    language: "zh-CN",
+  })
+  expect(none.text).not.toContain("门槛")
+  expect(none.text).not.toContain("过滤")
+})
+
+test("statusBarView English copy and custom toggle key", () => {
+  const running = statusBarView({
+    phase: "running",
+    progress: 40,
+    filesDone: 1,
+    filesTotal: 2,
+    toggleKey: "F2",
+    language: "en",
+  })
+  expect(running.text).toContain("Reviewing")
+  expect(running.text).toContain("Files 1/2")
+  expect(running.text).toContain("F2 expand")
+  expect(running.text).toContain("Ctrl+C cancel")
+
+  const done = statusBarView({
+    phase: "done",
+    findingCount: 1,
+    severity: { critical: 0, high: 0, medium: 0, low: 1, info: 0 },
+    toggleKey: "F2",
+    language: "en",
+  })
+  expect(done.text).toContain("Review done")
+  expect(done.text).toContain("1 issue")
+  expect(done.text).toContain("F2 open workbench")
+})
+
+test("statusBarView clamps without half characters (no lone surrogates)", () => {
+  const longStage = "很长的阶段名称".repeat(8)
+  const view = statusBarView({
+    phase: "running",
+    progress: 70,
+    stageLabel: longStage,
+    filesDone: 7,
+    filesTotal: 18,
+    language: "zh-CN",
+    maxWidth: 20,
+  })
+  expect(displayWidth(view.text)).toBeLessThanOrEqual(20)
+  expect(view.text.includes("\n")).toBe(false)
+  expect(hasLoneSurrogate(view.text)).toBe(false)
+  expect(view.text.endsWith("…")).toBe(true)
+
+  // Odd budgets must still cut on a code-point boundary.
+  for (const max of [1, 2, 3, 5, 7, 9, 11, 13]) {
+    const clipped = statusBarView({
+      phase: "running",
+      stageLabel: "审查进度面板标题比较长",
+      progress: 10,
+      language: "zh-CN",
+      maxWidth: max,
+    })
+    expect(displayWidth(clipped.text)).toBeLessThanOrEqual(max)
+    expect(hasLoneSurrogate(clipped.text)).toBe(false)
+  }
+})
+
+test("hasLoneSurrogate flags split code points and accepts intact text", () => {
+  expect(hasLoneSurrogate("审查进度")).toBe(false)
+  expect(hasLoneSurrogate("🛑⚠️")).toBe(false)
+  expect(hasLoneSurrogate("")).toBe(false)
+  expect(hasLoneSurrogate("a\uD800b")).toBe(true)
+  expect(hasLoneSurrogate("\uDC00")).toBe(true)
+})
+
+test("effectiveWorkbenchLayout collapses every layout to bar", () => {
+  expect(effectiveWorkbenchLayout("three", true)).toBe("bar")
+  expect(effectiveWorkbenchLayout("two", true)).toBe("bar")
+  expect(effectiveWorkbenchLayout("bar", true)).toBe("bar")
+  expect(effectiveWorkbenchLayout("three", false)).toBe("three")
+  expect(effectiveWorkbenchLayout("two", undefined)).toBe("two")
+  expect(effectiveWorkbenchLayout("bar", undefined)).toBe("bar")
+})
+
+test("statusBarView survives undefined and malformed input", () => {
+  expect(() => statusBarView(undefined)).not.toThrow()
+  expect(() => statusBarView(null)).not.toThrow()
+  const junk = statusBarView({
+    phase: "nope" as unknown as "running",
+    progress: Number.NaN,
+    filesDone: Number.POSITIVE_INFINITY,
+    filesTotal: -3,
+    findingCount: Number.NaN,
+    severity: { critical: Number.NaN, high: -1 } as SeverityCounts,
+    threshold: Number.NaN,
+    belowThreshold: Number.POSITIVE_INFINITY,
+    language: "en",
+  })
+  expect(junk.phase).toBe("idle")
+  expect(junk.text.includes("NaN")).toBe(false)
+  expect(junk.text.includes("undefined")).toBe(false)
+  expect(hasLoneSurrogate(junk.text)).toBe(false)
 })
