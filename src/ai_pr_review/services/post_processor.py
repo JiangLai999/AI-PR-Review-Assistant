@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Hashable
+from typing import Any
 
 from ai_pr_review.config import PostProcessorConfig
 from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
@@ -24,15 +25,44 @@ class PostProcessor:
 
     def process(self, result: ReviewResult) -> ReviewResult:
         """后处理 Review 结果。"""
-        findings = self.filter_by_confidence(
+        return self.process_with_stats(result)[0]
+
+    def process_with_stats(self, result: ReviewResult) -> tuple[ReviewResult, dict[str, Any]]:
+        """后处理 Review 结果，并返回本次后处理的计数。
+
+        这是「按用户配置的门槛丢噪音 → 去重 → 按严重程度排序」的唯一实现：
+        `process()` 委托给它，标准编排器与 hybrid 编排器因此共用同一套行为与
+        同一份 `app_config.post_processor`。
+
+        返回的 `stats` 只陈述事实，不估算，可直接落进 run metadata：
+
+        | 键 | 含义 |
+        |---|---|
+        | `before` | 进入后处理的 finding 条数 |
+        | `after` | 后处理之后剩下的条数 |
+        | `below_threshold` | 因 `confidence_threshold` 被丢弃的条数 |
+        | `duplicates` | 被去重规则合并掉的条数 |
+        | `severity_sorted` | 返回的 finding 确实按严重程度有序（对结果的自检） |
+        """
+        above_threshold = self.filter_by_confidence(
             result.findings,
             threshold=self._config.confidence_threshold,
         )
-        findings = self.deduplicate(findings)
-        findings = self.sort_by_severity(findings)
+        deduplicated = self.deduplicate(above_threshold)
+        findings = self.sort_by_severity(deduplicated)
+
         payload = result.model_dump()
         payload["findings"] = [finding.model_dump() for finding in findings]
-        return ReviewResult.model_validate(payload)
+        processed = ReviewResult.model_validate(payload)
+
+        severity_ranks = [SEVERITY_ORDER[finding.severity] for finding in findings]
+        return processed, {
+            "before": len(result.findings),
+            "after": len(findings),
+            "below_threshold": len(result.findings) - len(above_threshold),
+            "duplicates": len(above_threshold) - len(deduplicated),
+            "severity_sorted": severity_ranks == sorted(severity_ranks),
+        }
 
     def filter_by_confidence(self, findings: list[Finding], threshold: float) -> list[Finding]:
         """按置信度过滤。"""

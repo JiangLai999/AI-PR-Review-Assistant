@@ -7,7 +7,13 @@ from typing import Any
 
 import pytest
 
-from ai_pr_review.config import AIClientConfig, AppConfig, PRFetcherConfig, ResultStoreConfig
+from ai_pr_review.config import (
+    AIClientConfig,
+    AppConfig,
+    PostProcessorConfig,
+    PRFetcherConfig,
+    ResultStoreConfig,
+)
 from ai_pr_review.models.pr_data import FileDiff, FileStatus, PRData
 from ai_pr_review.services.context_builder import FileContext
 from ai_pr_review.services.filter_pipeline import (
@@ -16,6 +22,7 @@ from ai_pr_review.services.filter_pipeline import (
     FilterReasonCode,
 )
 from ai_pr_review.services.hybrid_orchestrator import HybridReviewOrchestrator
+from ai_pr_review.services.post_processor import PostProcessor
 from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
 from ai_pr_review.services.review_orchestrator import (
     ReviewOrchestrator,
@@ -210,6 +217,10 @@ class StubPostProcessor:
     def process(self, result: ReviewResult) -> ReviewResult:
         return result
 
+    def process_with_stats(self, result: ReviewResult) -> tuple[ReviewResult, dict[str, Any]]:
+        """透传桩：不改变 finding，也不谎报计数（空字典 = 没统计）。"""
+        return result, {}
+
 
 class StubResultStore:
     def __init__(self, *args, **kwargs):
@@ -324,6 +335,7 @@ def _patch_standard_orchestrator(
     *,
     filter_pipeline: type = StubFilterPipeline,
     ai_client: type = StubAIClient,
+    post_processor: type = StubPostProcessor,
 ) -> None:
     monkeypatch.setattr("ai_pr_review.services.review_orchestrator.PRFetcher", StubPRFetcher)
     monkeypatch.setattr(
@@ -337,7 +349,7 @@ def _patch_standard_orchestrator(
     )
     monkeypatch.setattr("ai_pr_review.services.review_orchestrator.AIClient", ai_client)
     monkeypatch.setattr(
-        "ai_pr_review.services.review_orchestrator.PostProcessor", StubPostProcessor
+        "ai_pr_review.services.review_orchestrator.PostProcessor", post_processor
     )
     monkeypatch.setattr("ai_pr_review.services.review_orchestrator.ResultStore", StubResultStore)
 
@@ -347,9 +359,13 @@ def _patch_hybrid_orchestrator(
     *,
     filter_pipeline: type = StubFilterPipeline,
     ai_client: type = StubAIClient,
+    post_processor: type = StubPostProcessor,
 ) -> None:
     _patch_standard_orchestrator(
-        monkeypatch, filter_pipeline=filter_pipeline, ai_client=ai_client
+        monkeypatch,
+        filter_pipeline=filter_pipeline,
+        ai_client=ai_client,
+        post_processor=post_processor,
     )
     monkeypatch.setattr(
         "ai_pr_review.services.hybrid_orchestrator.ModelSelector", StubModelSelector
@@ -363,6 +379,12 @@ def _patch_hybrid_orchestrator(
     # 混合编排器直接用自己模块里的 ResultStore 名字构造，必须单独替换。
     monkeypatch.setattr(
         "ai_pr_review.services.hybrid_orchestrator.ResultStore", StubResultStore
+    )
+    # PostProcessor 同理：hybrid 直接 import，得替换它自己模块里的名字。
+    # 默认透传，让「证据校验」「回调」等用例不受后处理影响；后处理用例显式传
+    # `post_processor=PostProcessor`（真实实现）。
+    monkeypatch.setattr(
+        "ai_pr_review.services.hybrid_orchestrator.PostProcessor", post_processor
     )
 
 
@@ -720,9 +742,11 @@ def evidence_finding(
     line: int = 1,
     snippet: str = "new",
     sources: list[str] | None = None,
+    severity: str = "medium",
+    confidence: float = 0.9,
 ) -> Finding:
     return Finding(
-        severity="medium",
+        severity=severity,
         category="correctness",
         file=file,
         line_start=line,
@@ -730,7 +754,7 @@ def evidence_finding(
         title=title,
         problem="problem",
         suggestion="suggestion",
-        confidence=0.9,
+        confidence=confidence,
         code_snippet=snippet,
         sources=list(sources) if sources is not None else ["ai_analysis"],
     )
@@ -904,3 +928,220 @@ def test_orchestrators_record_a_missing_author_as_an_empty_string(monkeypatch, t
         )
     )
     assert RecordingResultStore.last.saved_metadata["pr_author"] == ""
+
+
+# ---------------------------------------------------------------------------
+# hybrid 后处理：置信度门槛 / 去重 / 严重度排序
+# （docs/claude-p6-hybrid-postprocess.md）
+# ---------------------------------------------------------------------------
+
+PR_URL = "https://github.com/owner/repo/pull/42"
+
+
+def _config_with_threshold(tmp_path, threshold: float = 0.6) -> AppConfig:
+    """用户显式配置的门槛：hybrid 路径此前完全忽略它。"""
+    config = _standard_config(tmp_path)
+    config.post_processor = PostProcessorConfig(confidence_threshold=threshold)
+    return config
+
+
+def test_hybrid_orchestrator_drops_findings_below_the_configured_threshold(
+    monkeypatch, tmp_path
+):
+    """cli.run_review 默认走 hybrid：用户配置的门槛 0.6 必须在这里生效。
+
+    Codex 实测缺陷：hybrid 从不调用 PostProcessor，配置的置信度门槛与去重被
+    整个绕开，0.50/0.55 的低置信度 finding 直接进入报告与 GitHub 评论。
+    """
+    model_findings = {
+        "src/file_0.py": [
+            evidence_finding("src/file_0.py", title="Kept issue", confidence=0.85),
+            evidence_finding("src/file_0.py", title="Noise below threshold", confidence=0.50),
+        ]
+    }
+
+    _patch_hybrid_orchestrator(
+        monkeypatch,
+        ai_client=scenario_ai_client_factory(model_findings),
+        post_processor=PostProcessor,  # 真实后处理，不是透传桩
+    )
+    monkeypatch.setattr(
+        "ai_pr_review.services.hybrid_orchestrator.ResultStore", RecordingResultStore
+    )
+
+    artifacts = asyncio.run(
+        HybridReviewOrchestrator(_config_with_threshold(tmp_path)).review(PR_URL)
+    )
+
+    assert [finding.title for finding in artifacts.review_result.findings] == ["Kept issue"]
+    expected_stats = {
+        "before": 2,
+        "after": 1,
+        "below_threshold": 1,
+        "duplicates": 0,
+        "severity_sorted": True,
+    }
+    assert artifacts.filtered_findings == expected_stats
+    assert RecordingResultStore.last.saved_metadata["filtered_findings"] == expected_stats
+    # 标题只报后处理之后的真实条数，不把被丢掉的噪音算进去。
+    assert artifacts.review_result.summary == "审查完成，发现 1 个问题"
+
+
+def test_hybrid_reports_nothing_when_the_only_finding_is_below_the_threshold(
+    monkeypatch, tmp_path
+):
+    """门槛 0.6 + 0.55 的 finding → 结果为空，且 below_threshold=1。"""
+    model_findings = {
+        "src/file_0.py": [
+            evidence_finding("src/file_0.py", title="Half-confident guess", confidence=0.55)
+        ]
+    }
+
+    _patch_hybrid_orchestrator(
+        monkeypatch,
+        ai_client=scenario_ai_client_factory(model_findings),
+        post_processor=PostProcessor,
+    )
+    monkeypatch.setattr(
+        "ai_pr_review.services.hybrid_orchestrator.ResultStore", RecordingResultStore
+    )
+
+    artifacts = asyncio.run(
+        HybridReviewOrchestrator(_config_with_threshold(tmp_path)).review(PR_URL)
+    )
+
+    assert artifacts.review_result.findings == []
+    assert artifacts.filtered_findings == {
+        "before": 1,
+        "after": 0,
+        "below_threshold": 1,
+        "duplicates": 0,
+        "severity_sorted": True,
+    }
+    assert artifacts.review_result.summary == "审查完成，发现 0 个问题"
+    assert (
+        RecordingResultStore.last.saved_metadata["filtered_findings"]["below_threshold"] == 1
+    )
+
+
+def test_hybrid_and_standard_paths_post_process_identically(monkeypatch, tmp_path):
+    """同一输入下两条路径的 finding 顺序与去重结果逐条一致（共用同一入口）。"""
+
+    def scenario() -> dict[str, list[Finding]]:
+        return {
+            "src/file_0.py": [
+                # info 但置信度低于门槛 → 丢
+                evidence_finding(
+                    "src/file_0.py",
+                    title="low confidence info",
+                    line=1,
+                    severity="info",
+                    confidence=0.55,
+                ),
+                # 与下一条同一 (file, category, line//10) → 去重只留更优的那条
+                evidence_finding(
+                    "src/file_0.py", title="medium duplicate (worse)", line=11, confidence=0.70
+                ),
+                evidence_finding(
+                    "src/file_0.py", title="medium duplicate (better)", line=12, confidence=0.92
+                ),
+                evidence_finding(
+                    "src/file_0.py",
+                    title="critical issue",
+                    line=30,
+                    severity="critical",
+                    confidence=0.99,
+                ),
+                evidence_finding(
+                    "src/file_0.py", title="high issue", line=40, severity="high", confidence=0.80
+                ),
+            ]
+        }
+
+    expected_order = [
+        ("critical issue", "critical", 30),
+        ("high issue", "high", 40),
+        ("medium duplicate (better)", "medium", 12),
+    ]
+    expected_stats = {
+        "before": 5,
+        "after": 3,
+        "below_threshold": 1,
+        "duplicates": 1,
+        "severity_sorted": True,
+    }
+
+    _patch_hybrid_orchestrator(
+        monkeypatch,
+        ai_client=scenario_ai_client_factory(scenario()),
+        post_processor=PostProcessor,
+    )
+    monkeypatch.setattr(
+        "ai_pr_review.services.hybrid_orchestrator.ResultStore", RecordingResultStore
+    )
+    hybrid_artifacts = asyncio.run(
+        HybridReviewOrchestrator(_config_with_threshold(tmp_path)).review(PR_URL)
+    )
+    hybrid_metadata = RecordingResultStore.last.saved_metadata
+
+    _patch_standard_orchestrator(
+        monkeypatch,
+        ai_client=scenario_ai_client_factory(scenario()),
+        post_processor=PostProcessor,
+    )
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.ResultStore", RecordingResultStore
+    )
+    standard_artifacts = asyncio.run(
+        ReviewOrchestrator(_config_with_threshold(tmp_path)).review(PR_URL)
+    )
+    standard_metadata = RecordingResultStore.last.saved_metadata
+
+    def order_of(artifacts) -> list[tuple[str, str, int]]:
+        return [
+            (finding.title, finding.severity, finding.line_start)
+            for finding in artifacts.review_result.findings
+        ]
+
+    assert order_of(hybrid_artifacts) == expected_order
+    assert order_of(standard_artifacts) == expected_order
+    assert hybrid_artifacts.filtered_findings == expected_stats
+    assert standard_artifacts.filtered_findings == expected_stats
+    # run metadata 同键同值：库里能解释「模型给了 5 条、为什么只留下 3 条」。
+    assert hybrid_metadata["filtered_findings"] == expected_stats
+    assert standard_metadata["filtered_findings"] == expected_stats
+
+
+def test_post_processor_process_still_applies_threshold_dedup_and_severity_sort():
+    """`process()` 现在只是 `process_with_stats()` 的薄壳，行为必须逐字不变。"""
+    processor = PostProcessor(PostProcessorConfig(confidence_threshold=0.6))
+    result = ReviewResult(
+        summary="原始 summary",
+        findings=[
+            evidence_finding("src/a.py", title="noise", line=1, severity="low", confidence=0.40),
+            evidence_finding("src/a.py", title="duplicate (worse)", line=11, confidence=0.65),
+            evidence_finding("src/a.py", title="duplicate (better)", line=12, confidence=0.90),
+            evidence_finding(
+                "src/a.py", title="critical", line=40, severity="critical", confidence=0.95
+            ),
+        ],
+    )
+
+    processed = processor.process(result)
+    processed_with_stats, stats = processor.process_with_stats(result)
+
+    assert processed == processed_with_stats
+    assert processed.summary == "原始 summary"
+    assert [(finding.title, finding.severity) for finding in processed.findings] == [
+        ("critical", "critical"),
+        ("duplicate (better)", "medium"),
+    ]
+    assert stats == {
+        "before": 4,
+        "after": 2,
+        "below_threshold": 1,
+        "duplicates": 1,
+        "severity_sorted": True,
+    }
+    # 入参不被就地修改：调用方仍能看到后处理前的完整 finding 列表。
+    assert len(result.findings) == 4

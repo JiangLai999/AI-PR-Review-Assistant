@@ -17,6 +17,7 @@ from ai_pr_review.services.evidence.finding_validator import FindingValidator
 from ai_pr_review.services.filter_pipeline import FilterPipeline
 from ai_pr_review.services.finding_localizer import localize_deterministic_finding
 from ai_pr_review.services.model_selector import ModelSelector, TaskComplexity
+from ai_pr_review.services.post_processor import PostProcessor
 from ai_pr_review.services.prompt_assembler import Finding, PromptAssembler, ReviewResult
 from ai_pr_review.services.result_store import ResultStore
 from ai_pr_review.services.review_orchestrator import ReviewArtifacts, ReviewCancelled
@@ -35,6 +36,9 @@ class HybridReviewOrchestrator:
         self.ast_analyzer = PythonAstAnalyzer()
         self.prompt_assembler = standard_review.PromptAssembler()
         self.finding_validator = FindingValidator()
+        # 与标准编排器同一份 `app_config.post_processor`：用户的置信度门槛与
+        # 去重规则对默认（hybrid）路径同样生效。
+        self.post_processor = PostProcessor(config=config.post_processor)
         self.result_store = ResultStore(config.result_store)
 
     async def review(
@@ -62,6 +66,11 @@ class HybridReviewOrchestrator:
 
         每条 finding（模型与确定性规则）都会经 `FindingValidator` 标注证据状态，
         计数写进 `metadata["validation_summary"]` 与 `ReviewArtifacts.validation_summary`。
+
+        写库前，组装好的结果再经 `PostProcessor.process_with_stats`（与标准编排器
+        同一入口、同一份 `app_config.post_processor`）做置信度门槛、去重与严重程度
+        排序；过滤计数写进 `metadata["filtered_findings"]` 与
+        `ReviewArtifacts.filtered_findings`。
         """
         start_time = time.perf_counter()
 
@@ -243,7 +252,15 @@ class HybridReviewOrchestrator:
         # 获取统计信息
         stats = self.model_selector.get_statistics()
 
-        # 构建最终结果；空审查范围必须保留过滤原因，便于 CLI / Web 解释。
+        # 写库前走与标准编排器同一个后处理入口（同一份 app_config.post_processor）：
+        # 置信度门槛、去重、严重程度排序只此一份实现，默认（hybrid）路径不再把
+        # 低于门槛的噪音直接写进报告与 GitHub 评论。
+        review_result, filtered_findings = self.post_processor.process_with_stats(
+            ReviewResult(summary="", findings=all_findings)
+        )
+
+        # 构建最终 summary；空审查范围必须保留过滤原因，便于 CLI / Web 解释。
+        # 非空时报后处理之后的真实条数——被门槛滤掉的 finding 不该留在标题里。
         if filter_result.included_count == 0:
             reason_labels = {
                 "excluded_by_pattern": "命中黑名单规则",
@@ -264,8 +281,8 @@ class HybridReviewOrchestrator:
             else:
                 summary = "No reviewable files remained after filtering."
         else:
-            summary = f"审查完成，发现 {len(all_findings)} 个问题"
-        review_result = ReviewResult(summary=summary, findings=all_findings)
+            summary = f"审查完成，发现 {len(review_result.findings)} 个问题"
+        review_result = review_result.model_copy(update={"summary": summary})
 
         artifacts = ReviewArtifacts(
             pr_data=filtered_pr_data,
@@ -276,6 +293,7 @@ class HybridReviewOrchestrator:
             duration_seconds=duration,
             run_id="",  # 将由 ResultStore 生成
             validation_summary=validation_counts,
+            filtered_findings=filtered_findings,
         )
 
         # Re-check right before persisting: cancelling after the last stage
@@ -310,6 +328,8 @@ class HybridReviewOrchestrator:
                 },
                 # 与标准编排器同名字段：hybrid 也把证据校验计数落在 run metadata 里。
                 "validation_summary": validation_counts,
+                # 后处理丢掉了多少（门槛/去重），与标准编排器同键同义。
+                "filtered_findings": filtered_findings,
                 "strategy": stats["strategy"],
                 "hybrid": True,
                 "local_calls": stats["local_calls"],

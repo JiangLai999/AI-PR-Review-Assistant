@@ -120,6 +120,9 @@ class ReviewArtifacts:
     run_id: str | None = None
     review_plan: ReviewPlan | None = None
     validation_summary: dict[str, int] = field(default_factory=dict)
+    # PostProcessor 的过滤计数（before/after/below_threshold/duplicates/
+    # severity_sorted），与 run metadata 的 `filtered_findings` 同源同值。
+    filtered_findings: dict[str, Any] = field(default_factory=dict)
     cross_file_impacts: list[CrossFileImpact] = field(default_factory=list)
     interface_impacts: list[InterfaceImpact] = field(default_factory=list)
 
@@ -295,7 +298,7 @@ class ReviewOrchestrator:
             summary="\n".join(summaries) if summaries else self._build_empty_summary(filter_result),
             findings=findings,
         )
-        review_result = self._post_processor.process(raw_result)
+        review_result, filtered_findings = self._post_processor.process_with_stats(raw_result)
         if not review_result.summary.strip():
             review_result = review_result.model_copy(
                 update={"summary": self._build_empty_summary(filter_result)}
@@ -359,6 +362,9 @@ class ReviewOrchestrator:
                     },
                 },
                 "validation_summary": validation_counts,
+                # 后处理丢掉了多少（门槛/去重）：报告与历史 Run 都能解释
+                # 「模型给了 N 条、库里为什么只有 M 条」。
+                "filtered_findings": filtered_findings,
                 "cross_file_impacts": [
                     impact.model_dump(mode="json") for impact in cross_file_impacts
                 ],
@@ -375,6 +381,7 @@ class ReviewOrchestrator:
             run_id=run_id,
             review_plan=review_plan,
             validation_summary=validation_counts,
+            filtered_findings=filtered_findings,
             cross_file_impacts=cross_file_impacts,
             interface_impacts=interface_impacts,
         )
