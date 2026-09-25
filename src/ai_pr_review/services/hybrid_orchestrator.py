@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from ai_pr_review.config import AIClientConfig, AppConfig
+from ai_pr_review.config import AIClientConfig, AppConfig, ModelProviderConfig
 from ai_pr_review.models.pr_data import FileDiff
 from ai_pr_review.services import review_orchestrator as standard_review
 from ai_pr_review.services.analyzers.python_ast_analyzer import PythonAstAnalyzer
@@ -40,6 +40,38 @@ class HybridReviewOrchestrator:
         # 去重规则对默认（hybrid）路径同样生效。
         self.post_processor = PostProcessor(config=config.post_processor)
         self.result_store = ResultStore(config.result_store)
+
+    def _client_config_for(
+        self,
+        selected_config: ModelProviderConfig,
+        model_name: str,
+        *,
+        is_local: bool,
+    ) -> AIClientConfig:
+        """Per-file client config.
+
+        The base is the user's AI client config, so budgets and limits carry
+        over — but a **local** Ollama call must not inherit the cloud price
+        table (3.0/15.0 per million). Real evidence: a `local_only` run with zero
+        remote calls reported ≈$0.0311, i.e. it was billed as if DeepSeek had
+        answered every file.
+        """
+        price_overrides: dict[str, float] = (
+            {"input_cost_per_million": 0.0, "output_cost_per_million": 0.0} if is_local else {}
+        )
+        return AIClientConfig(
+            **{
+                **self.config.ai_client.__dict__,
+                "provider": selected_config.name,
+                "api_key": selected_config.api_key,
+                "model": model_name,
+                "base_url": selected_config.base_url,
+                "api_format": selected_config.api_format,
+                "headers": dict(selected_config.headers),
+                "extra_params": dict(selected_config.extra_params),
+                **price_overrides,
+            }
+        )
 
     async def review(
         self,
@@ -156,6 +188,9 @@ class HybridReviewOrchestrator:
         stage("reviewing", f"开始智能分级审查，共 {len(file_contexts)} 个文件")
 
         reviewed_count = 0
+        # 失败文件也要计数：本编排器会吞掉单文件异常继续跑，如果只看 findings
+        # 数量，一把坏掉的 API Key 会被读成“审查完成，发现 0 个问题”。
+        failed_files: list[dict[str, str]] = []
         total_cost = 0.0
         for file_diff, context in file_contexts:
             # 每个文件开始前检查：已请求取消立即抛出，剩余文件不再发起模型调用。
@@ -196,20 +231,9 @@ class HybridReviewOrchestrator:
             try:
                 selected_config = self.config.ai_client.model_provider
                 if is_local:
-                    from ai_pr_review.config import ModelProviderConfig
-
                     selected_config = ModelProviderConfig.from_name("ollama", model_name=model_name)
-                selected_ai_config = AIClientConfig(
-                    **{
-                        **self.config.ai_client.__dict__,
-                        "provider": selected_config.name,
-                        "api_key": selected_config.api_key,
-                        "model": model_name,
-                        "base_url": selected_config.base_url,
-                        "api_format": selected_config.api_format,
-                        "headers": dict(selected_config.headers),
-                        "extra_params": dict(selected_config.extra_params),
-                    }
+                selected_ai_config = self._client_config_for(
+                    selected_config, model_name, is_local=is_local
                 )
                 selected_client = standard_review.AIClient(selected_ai_config)
                 # 在飞的调用同样要能被取消：否则按了 Esc 还得等这次调用跑完。
@@ -227,13 +251,17 @@ class HybridReviewOrchestrator:
             except Exception as e:
                 # 该文件的模型调用失败：如实上报 failed（findings_count 未知，
                 # 不是 0），再按本编排器原有语义吞掉异常继续处理下一个文件。
+                failure_message = str(e) or e.__class__.__name__
+                failed_files.append(
+                    {"filename": file_diff.filename, "error": failure_message}
+                )
                 standard_review.emit_file_result(
                     file_result_callback,
                     file_diff.filename,
                     "failed",
                     findings_count=None,
                     duration_ms=standard_review.elapsed_ms(call_started_at),
-                    error=str(e) or e.__class__.__name__,
+                    error=failure_message,
                 )
                 result = ReviewResult(
                     summary=f"审查失败: {e}",
@@ -249,13 +277,15 @@ class HybridReviewOrchestrator:
                     duration_ms=standard_review.elapsed_ms(call_started_at),
                     error=None,
                 )
+                # 只统计真正完成的文件：失败文件进 failed_files。此前这个
+                # 计数把失败也算了进去，summary 会同时报"N 个已审查"和
+                # "N 个未能审查"，自相矛盾。
+                reviewed_count += 1
 
             # 模型产出与确定性规则产出走同一条校验路径：调用点就在该文件的
             # (file_diff, context) 旁边，校验必然拿到正确的文件内容。
             for finding in result.findings:
                 record(finding, file_diff, context)
-
-            reviewed_count += 1
 
             # 文件完成回调
             if file_done_callback:
@@ -296,6 +326,18 @@ class HybridReviewOrchestrator:
                 )
             else:
                 summary = "No reviewable files remained after filtering."
+        elif failed_files and reviewed_count == 0:
+            # 全部文件都失败时绝不能报"审查完成，发现 0 个问题"：那会把一把
+            # 失效的 API Key 伪装成一次干净的审查（真实事故场景）。
+            summary = (
+                f"审查失败：{len(failed_files)} 个文件均未能完成模型审查"
+                f"（首个错误：{failed_files[0]['error']}）"
+            )
+        elif failed_files:
+            summary = (
+                f"审查完成（部分失败）：{reviewed_count} 个文件已审查，"
+                f"{len(failed_files)} 个文件未能审查，发现 {len(review_result.findings)} 个问题"
+            )
         else:
             summary = f"审查完成，发现 {len(review_result.findings)} 个问题"
         review_result = review_result.model_copy(update={"summary": summary})
@@ -316,6 +358,20 @@ class HybridReviewOrchestrator:
         # callback used to still write a run into history and report completion.
         if cancel_check is not None and cancel_check():
             raise ReviewCancelled()
+
+        # Describe the routing that actually happened (honest metadata).
+        # `getattr` keeps custom/test selectors (which may only implement the
+        # public `select_model_for_task` surface) working.
+        local_model = getattr(self.model_selector, "local_model", "") or self.config.local_provider.default_model
+        remote_model = getattr(self.model_selector, "remote_model", "") or self.config.ai_client.model
+        if stats["local_calls"] and stats["remote_calls"]:
+            routing_model_used = f"{local_model} + {remote_model}"
+        elif stats["local_calls"]:
+            routing_model_used = local_model
+        elif stats["remote_calls"]:
+            routing_model_used = remote_model
+        else:
+            routing_model_used = local_model
 
         # 保存到数据库
         run_id = self.result_store.save_result(
@@ -350,7 +406,14 @@ class HybridReviewOrchestrator:
                 "hybrid": True,
                 "local_calls": stats["local_calls"],
                 "remote_calls": stats["remote_calls"],
-                "routing_model": self.model_selector.local_model,
+                # 逐文件失败（文件名 + 错误）必须留痕：summary 只说总量，
+                # 这里回答"到底是哪个文件、因为什么没审查"。
+                "failed_files": failed_files,
+                "failed_file_count": len(failed_files),
+                # What actually ran, not just what is configured: a remote_only
+                # run used to record the *local* model here, which made `/history`
+                # and the CLI report read as if Ollama had done the review.
+                "routing_model": routing_model_used,
             },
         )
 

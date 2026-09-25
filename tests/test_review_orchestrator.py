@@ -535,6 +535,63 @@ def test_hybrid_file_result_callback_reports_reviewed_and_failed(monkeypatch, tm
     assert sorted(done) == [f"src/file_{index}.py" for index in range(4)]
 
 
+def test_hybrid_reports_every_file_failure_as_a_failure(monkeypatch, tmp_path):
+    """每一份文件都失败时必须报「审查失败」，不能读成干净的 0 findings。
+
+    真实事故场景：远程 API Key 缺失/失效时，``AIAuthenticationError`` 会被
+    逐文件吞掉（本编排器的原语义），整轮照常写库。若只看 findings 数量，
+    输出会是「审查完成，发现 0 个问题」——用户会误以为代码没有问题。
+    """
+    all_files = {f"src/file_{index}.py" for index in range(4)}
+
+    class AlwaysFailingAIClient(SelectiveFailingAIClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, fail_files=all_files, **kwargs)
+
+    _patch_hybrid_orchestrator(monkeypatch, ai_client=AlwaysFailingAIClient)
+    monkeypatch.setattr(
+        "ai_pr_review.services.hybrid_orchestrator.ResultStore", RecordingResultStore
+    )
+
+    artifacts = asyncio.run(
+        HybridReviewOrchestrator(_standard_config(tmp_path)).review(PR_URL)
+    )
+
+    assert artifacts.review_result.findings == []
+    assert artifacts.review_result.summary.startswith("审查失败：")
+    assert "均未能完成模型审查" in artifacts.review_result.summary
+    saved = RecordingResultStore.last.saved_metadata
+    assert saved["failed_file_count"] == 4
+    assert sorted(item["filename"] for item in saved["failed_files"]) == sorted(all_files)
+    assert all(item["error"] for item in saved["failed_files"])
+
+
+def test_hybrid_partial_file_failure_is_visible_in_the_summary(monkeypatch, tmp_path):
+    """部分文件失败时，标题必须写明未审查的文件数，而不是只报 findings。"""
+
+    class OneFailingAIClient(SelectiveFailingAIClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, fail_files={"src/file_1.py"}, **kwargs)
+
+    _patch_hybrid_orchestrator(monkeypatch, ai_client=OneFailingAIClient)
+    monkeypatch.setattr(
+        "ai_pr_review.services.hybrid_orchestrator.ResultStore", RecordingResultStore
+    )
+
+    artifacts = asyncio.run(
+        HybridReviewOrchestrator(_standard_config(tmp_path)).review(PR_URL)
+    )
+
+    assert artifacts.review_result.summary.startswith("审查完成（部分失败）")
+    assert "1 个文件未能审查" in artifacts.review_result.summary
+    assert artifacts.review_result.summary.endswith(
+        f"发现 {len(artifacts.review_result.findings)} 个问题"
+    )
+    saved = RecordingResultStore.last.saved_metadata
+    assert saved["failed_file_count"] == 1
+    assert saved["failed_files"][0]["filename"] == "src/file_1.py"
+
+
 def test_cli_run_review_forwards_file_result_callback(monkeypatch, tmp_path):
     """cli.run_review 原样转发 file_result_callback，旧关键字参数一个不少。"""
     from ai_pr_review import cli
@@ -946,6 +1003,33 @@ def _config_with_threshold(tmp_path, threshold: float = 0.6) -> AppConfig:
     config = _standard_config(tmp_path)
     config.post_processor = PostProcessorConfig(confidence_threshold=threshold)
     return config
+
+
+def test_hybrid_local_calls_are_not_billed_at_cloud_rates(monkeypatch, tmp_path):
+    """local_only 的本地调用必须按 0 成本计费，不能套用云端价格表。
+
+    Codex 实测缺陷：一次 local_only 运行（local=2 / remote=0）报告
+    ≈$0.0311，与远程运行一模一样 —— 因为它复用了远程的
+    input/output_cost_per_million。
+    """
+    from ai_pr_review.config import ModelProviderConfig
+
+    _patch_hybrid_orchestrator(monkeypatch)
+    orchestrator = HybridReviewOrchestrator(_config_with_threshold(tmp_path))
+    remote_prices = orchestrator.config.ai_client
+    assert remote_prices.input_cost_per_million > 0  # 云端槽位确实带价格
+
+    ollama = ModelProviderConfig.from_name("ollama", model_name="qwen3.5:4b")
+    local_config = orchestrator._client_config_for(ollama, "qwen3.5:4b", is_local=True)
+    remote_config = orchestrator._client_config_for(ollama, "qwen3.5:4b", is_local=False)
+
+    assert local_config.input_cost_per_million == 0.0
+    assert local_config.output_cost_per_million == 0.0
+    assert local_config.model == "qwen3.5:4b"
+    assert local_config.base_url == ollama.base_url
+    # 远程路径保持用户配置的价格表，不受本地路径影响。
+    assert remote_config.input_cost_per_million == remote_prices.input_cost_per_million
+    assert remote_config.output_cost_per_million == remote_prices.output_cost_per_million
 
 
 def test_hybrid_orchestrator_drops_findings_below_the_configured_threshold(
