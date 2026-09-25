@@ -2463,9 +2463,13 @@ export function App() {
   /** Expanded panels vs. a single status line. */
   const workbenchExpanded = (): boolean =>
     workbenchVisible() && !workbenchCollapsed() && workbenchMode() !== "off"
-  const reviewLayout = (): "three" | "two" | "bar" => {
+  /**
+   * Two rails only, at every size (user decision 2026-09-25): the full-screen
+   * 209x51 terminal keeps the same two-column shape as 120x30 — chat on the
+   * left, review on the right — instead of growing a second side rail.
+   */
+  const reviewLayout = (): "two" | "bar" => {
     if (!workbenchExpanded()) return "bar"
-    if (dimensions().width >= 140 && dimensions().height >= 26) return "three"
     if (dimensions().width >= 100 && dimensions().height >= 26) return "two"
     return "bar"
   }
@@ -2475,9 +2479,16 @@ export function App() {
    */
   const workbenchPanelsVisible = (): boolean =>
     workbenchExpanded() && reviewLayout() !== "bar"
-  /** Column widths (docs/workbench-phase1-contract.md §2). */
-  const leftColumnWidth = 26
-  const rightColumnWidth = (): number => (reviewLayout() === "three" ? 52 : 44)
+  /**
+   * Review rail width. Proportional so a 209-column terminal gets a roomier
+   * rail than a 120-column one, while the chat column keeps at least ~60
+   * columns.
+   */
+  const rightColumnWidth = (): number => {
+    const width = dimensions().width
+    const proportional = Math.round(width * 0.33)
+    return Math.max(38, Math.min(proportional, width - 62))
+  }
   /**
    * Width of the chat content column. While the workbench is off this stays 76
    * so the idle layout is byte-identical to the previous release.
@@ -2485,9 +2496,6 @@ export function App() {
   const chatContentWidth = (): number => {
     if (!workbenchExpanded()) return 76
     const layout = reviewLayout()
-    if (layout === "three") {
-      return Math.max(56, dimensions().width - leftColumnWidth - rightColumnWidth() - 2)
-    }
     if (layout === "two") {
       return Math.max(56, dimensions().width - rightColumnWidth() - 2)
     }
@@ -2658,6 +2666,11 @@ export function App() {
       backendStatus() === "CANCELLING"
     ) return
     setBackendStatus("CANCELLING")
+    // Say what is happening and what to expect: the user previously saw a stuck
+    // "取消中" with no explanation while the backend finished an in-flight call.
+    setReviewActionMessage(
+      "已请求取消：正在中止当前模型调用，通常几秒内结束（若某个文件调用刚发出，最多等它返回）。",
+    )
     void backend.request(
       "command.execute",
       { name: "cancel", session_id: currentSession },
@@ -2668,9 +2681,21 @@ export function App() {
           // The request may not have reached the backend yet; never leave the
           // UI indefinitely stuck in CANCELLING when nothing was cancelled.
           setBackendStatus(reviewing() ? "REVIEWING" : "THINKING")
+          setReviewActionMessage(
+            `取消失败：后端未确认取消（${
+              response.error?.message ?? "当前没有正在运行的任务"
+            }）。审查可能仍在运行，可再按 Esc 重试，或用 /status 查看。`,
+          )
+          return
         }
+        setReviewActionMessage("取消已确认，正在等后端收尾（不会写入历史记录）。")
       })
-      .catch((error) => setErrorState(String(error)))
+      .catch((error) => {
+        setBackendStatus(reviewing() ? "REVIEWING" : "READY")
+        setReviewActionMessage(
+          `取消请求超时或失败：${String(error)}。审查可能仍在运行；可再按 Esc 重试。`,
+        )
+      })
   }
 
   const startReview = async (url: string) => {
@@ -3328,16 +3353,45 @@ export function App() {
       }>
         <PixelLogo language={runtime().ui_language} />
       </Show>
+      {/* Minimised workbench banner: full width directly under the header, so it
+          never sits inside the chat column or pushes the composer around. */}
+      {/* `always` keeps the *panels* available, but a banner that only says
+          "就绪 0% · 0 问题" before any review has run is noise — hide it until
+          there is something to report (or the user opens the workbench). */}
+      <Show
+        when={
+          workbenchVisible() &&
+          !workbenchPanelsVisible() &&
+          (reviewPhase() !== "idle" || workbenchManualOpen())
+        }
+      >
+        <box width="100%" flexShrink={0} flexDirection="column" paddingLeft={2} paddingRight={2}>
+          <ReviewStatusBar
+            phase={reviewPhase()}
+            progress={reviewProgress()}
+            stageLabel={reviewStage()}
+            filesDone={reviewFilesDone()}
+            filesTotal={reviewFilesTotal() || undefined}
+            findingCount={reviewFindings().length}
+            severity={reviewWorkspace().severity}
+            threshold={reportFiltered().threshold}
+            belowThreshold={reportFiltered().belowThreshold}
+            toggleKey="Alt+W"
+            language={runtime().ui_language}
+            width={Math.max(12, dimensions().width - 4)}
+          />
+          <Show when={reviewActionMessage()}>
+            <text width={Math.max(12, dimensions().width - 4)} fg="#7edc92">
+              {reviewActionMessage()}
+            </text>
+          </Show>
+        </box>
+      </Show>
       {/* Middle row: review panels live outside the chat scrollbox, so they can
           no longer push the transcript out of view. The chat column keeps a
           stable position in the tree, which is what keeps the composer's draft
           and cursor alive across Alt+W. */}
       <box width="100%" flexGrow={1} flexDirection="row" minHeight={0}>
-      <Show when={reviewLayout() === "three" && reviewProgressProps()}>
-        <box width={leftColumnWidth} flexShrink={0} marginRight={1} flexDirection="column" minHeight={0}>
-          <ReviewProgressPanel {...reviewProgressProps()!} />
-        </box>
-      </Show>
       <box flexGrow={1} minWidth={0} flexDirection="column" alignItems="center">
       <scrollbox width="100%" flexGrow={1} scrollY stickyScroll stickyStart="bottom" scrollbarOptions={{ showArrows: false }}>
         <box width="100%" alignItems="center" flexDirection="column">
@@ -3391,32 +3445,8 @@ export function App() {
           </Show>
         </box>
       </Show>
-      <Show when={reviewActionMessage()}>
-        <box width={chatContentWidth()} backgroundColor="#141414" borderStyle="single" borderColor="#7edc92" paddingLeft={2} paddingRight={2} marginTop={1} flexDirection="column">
-          <text fg="#7edc92">REVIEW ACTION // 操作结果</text>
-          <text fg="#eeeeee">{reviewActionMessage()}</text>
-        </box>
-      </Show>
         </box>
       </scrollbox>
-      {/* Collapsed / narrow workbench: one line above the composer. The wording
-          and width-safe clamping live in MiMo Code's ReviewStatusBar. */}
-      <Show when={workbenchVisible() && !workbenchPanelsVisible()}>
-        <ReviewStatusBar
-          phase={reviewPhase()}
-          progress={reviewProgress()}
-          stageLabel={reviewStage()}
-          filesDone={reviewFilesDone()}
-          filesTotal={reviewFilesTotal() || undefined}
-          findingCount={reviewFindings().length}
-          severity={reviewWorkspace().severity}
-          threshold={reportFiltered().threshold}
-          belowThreshold={reportFiltered().belowThreshold}
-          toggleKey="Alt+W"
-          language={runtime().ui_language}
-          width={Math.max(12, chatContentWidth() - 2)}
-        />
-      </Show>
       <Composer
         mode={mode()}
         setMode={setMode}
@@ -3479,6 +3509,24 @@ export function App() {
           <Show when={reviewSummaryProps()}>
             <box flexGrow={1} minHeight={0}>
               <ReviewSummaryPanel {...reviewSummaryProps()!} />
+            </box>
+          </Show>
+          {/* Action feedback belongs to the workbench, not to the transcript. */}
+          <Show when={reviewActionMessage()}>
+            <box
+              width="100%"
+              flexShrink={0}
+              backgroundColor="#141414"
+              borderStyle="single"
+              borderColor="#7edc92"
+              paddingLeft={1}
+              paddingRight={1}
+              flexDirection="column"
+            >
+              <text fg="#7edc92" height={1}>
+                REVIEW ACTION
+              </text>
+              <text fg="#eeeeee">{reviewActionMessage()}</text>
             </box>
           </Show>
           <ReviewActionBar

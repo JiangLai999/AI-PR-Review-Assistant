@@ -527,6 +527,80 @@ async function workbenchSurfaces() {
   }
 }
 
+/** Column index of the first occurrence of `needle`, or -1. */
+function columnOf(frame: string, needle: string): number {
+  for (const line of frame.split("\n")) {
+    const at = line.indexOf(needle)
+    if (at >= 0) return at
+  }
+  return -1
+}
+
+/**
+ * Part H: rail geometry.
+ *
+ * User decision 2026-09-25: every size uses the same two-column shape — chat on
+ * the left, review on the right — including the 209x51 full-screen terminal.
+ * `REVIEW ACTION` must live in the rail, never inside the chat column.
+ */
+async function railGeometry() {
+  console.log("\n[H] rail geometry (two columns at every size)")
+  const work = join(tmpdir(), "ai-pr-review-p5-publish-check")
+  let runId = ""
+  try {
+    runId = readFileSync(join(work, "run_id.txt"), "utf8").trim()
+  } catch {
+    console.log("  SKIP  seeded run not found; run seed_publish_preview.py")
+    return
+  }
+  process.env.AI_PR_REVIEW_CONFIG = join(work, "config.json")
+
+  for (const [width, height] of [
+    [120, 30],
+    [209, 51],
+  ] as const) {
+    const view = await testRender(() => <App />, { width, height, kittyKeyboard: true })
+    try {
+      await settle(view)
+      await runCommand(view, `/history ${runId}`, 2)
+      const frame = view.captureCharFrame()
+      const half = Math.floor(width / 2)
+      const summary = columnOf(frame, "审查摘要")
+      // A stored run has no live progress panel (`reviewProgressProps()` is
+      // undefined outside a running review), so assert the real invariant:
+      // no review panel may appear in the left half at any size.
+      const reviewPanelsInLeftHalf = ["审查进度", "审查摘要", "操作"].some((title) => {
+        const column = columnOf(frame, title)
+        return column >= 0 && column < half
+      })
+      check(
+        summary > half && !reviewPanelsInLeftHalf,
+        `${width}x${height} keeps chat left and the review rail right (no left rail)`,
+        `summary@${summary} half=${half} reviewPanelOnLeft=${reviewPanelsInLeftHalf}`,
+      )
+      check(
+        columnOf(frame, "历史报告") >= 0 && columnOf(frame, "历史报告") < half,
+        `${width}x${height} keeps the transcript in the left (chat) column`,
+      )
+      if (summary <= half) dumpFrame(frame, `rail-${width}x${height}`)
+
+      // An action result must render in the rail, not in the transcript.
+      view.mockInput.pressKey("e", { meta: true })
+      await settle(view, 8)
+      const withAction = view.captureCharFrame()
+      const actionColumn = columnOf(withAction, "REVIEW ACTION")
+      check(
+        actionColumn > half,
+        `${width}x${height} shows REVIEW ACTION inside the rail`,
+        `at column ${actionColumn}`,
+      )
+      if (actionColumn <= half) dumpFrame(withAction, `rail-action-${width}x${height}`)
+    } finally {
+      view.renderer.destroy()
+    }
+  }
+}
+
 async function zeroFindingsSurfaces() {
   console.log("\n[E] zero-findings wording (Ctrl+O / Ctrl+F)")
   const work = join(tmpdir(), "ai-pr-review-p5-publish-check")
@@ -640,6 +714,7 @@ if (only === "live") await livePublishFlow()
 if (!only || only === "zero") await zeroFindingsSurfaces()
 if (only === "baseline") await layoutBaseline()
 if (!only || only === "workbench") await workbenchSurfaces()
+if (!only || only === "rail") await railGeometry()
 
 console.log("\n== summary ==")
 console.log(JSON.stringify({ failures }, null, 2))

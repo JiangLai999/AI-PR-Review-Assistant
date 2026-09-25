@@ -71,6 +71,11 @@ class HybridReviewOrchestrator:
         同一入口、同一份 `app_config.post_processor`）做置信度门槛、去重与严重程度
         排序；过滤计数写进 `metadata["filtered_findings"]` 与
         `ReviewArtifacts.filtered_findings`。
+
+        `cancel_check()` 在每个文件边界被调用，并在模型调用进行中被轮询（见
+        `review_orchestrator.call_with_cancellation`）：返回 True 时抛出
+        `ReviewCancelled`，在飞的调用随取消中止，剩余文件不再发起调用，且不写库、
+        不为没有结论的文件发 `reviewed`/`failed` 回调。
         """
         start_time = time.perf_counter()
 
@@ -153,6 +158,10 @@ class HybridReviewOrchestrator:
         reviewed_count = 0
         total_cost = 0.0
         for file_diff, context in file_contexts:
+            # 每个文件开始前检查：已请求取消立即抛出，剩余文件不再发起模型调用。
+            if cancel_check is not None and cancel_check():
+                raise ReviewCancelled()
+
             # 评估文件复杂度
             complexity = self.model_selector.evaluate_file_complexity(
                 file_path=file_diff.filename,
@@ -203,11 +212,18 @@ class HybridReviewOrchestrator:
                     }
                 )
                 selected_client = standard_review.AIClient(selected_ai_config)
-                response = await selected_client.review_code(system_prompt, user_prompt)
+                # 在飞的调用同样要能被取消：否则按了 Esc 还得等这次调用跑完。
+                response = await standard_review.call_with_cancellation(
+                    lambda: selected_client.review_code(system_prompt, user_prompt),
+                    cancel_check,
+                )
                 result = response
                 call_cost = getattr(selected_client, "total_run_cost", 0.0)
                 total_cost += call_cost
                 self.model_selector.record_cost(call_cost)
+            except ReviewCancelled:
+                # 取消不是"这个文件审查失败"：不报 failed，也不继续下一个文件。
+                raise
             except Exception as e:
                 # 该文件的模型调用失败：如实上报 failed（findings_count 未知，
                 # 不是 0），再按本编排器原有语义吞掉异常继续处理下一个文件。

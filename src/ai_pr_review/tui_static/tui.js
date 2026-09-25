@@ -39679,22 +39679,20 @@ function App() {
   const reviewLayout = () => {
     if (!workbenchExpanded())
       return "bar";
-    if (dimensions().width >= 140 && dimensions().height >= 26)
-      return "three";
     if (dimensions().width >= 100 && dimensions().height >= 26)
       return "two";
     return "bar";
   };
   const workbenchPanelsVisible = () => workbenchExpanded() && reviewLayout() !== "bar";
-  const leftColumnWidth = 26;
-  const rightColumnWidth = () => reviewLayout() === "three" ? 52 : 44;
+  const rightColumnWidth = () => {
+    const width = dimensions().width;
+    const proportional = Math.round(width * 0.33);
+    return Math.max(38, Math.min(proportional, width - 62));
+  };
   const chatContentWidth = () => {
     if (!workbenchExpanded())
       return 76;
     const layout = reviewLayout();
-    if (layout === "three") {
-      return Math.max(56, dimensions().width - leftColumnWidth - rightColumnWidth() - 2);
-    }
     if (layout === "two") {
       return Math.max(56, dimensions().width - rightColumnWidth() - 2);
     }
@@ -39846,6 +39844,7 @@ function App() {
     if (!currentSession || !reviewing() && !reviewStarting() && !activeChatRequestId() || backendStatus() === "CANCELLING")
       return;
     setBackendStatus("CANCELLING");
+    setReviewActionMessage("\u5DF2\u8BF7\u6C42\u53D6\u6D88\uFF1A\u6B63\u5728\u4E2D\u6B62\u5F53\u524D\u6A21\u578B\u8C03\u7528\uFF0C\u901A\u5E38\u51E0\u79D2\u5185\u7ED3\u675F\uFF08\u82E5\u67D0\u4E2A\u6587\u4EF6\u8C03\u7528\u521A\u53D1\u51FA\uFF0C\u6700\u591A\u7B49\u5B83\u8FD4\u56DE\uFF09\u3002");
     backend.request("command.execute", {
       name: "cancel",
       session_id: currentSession
@@ -39854,8 +39853,14 @@ function App() {
     }).then((response) => {
       if (!response.ok || response.result?.cancelled === false) {
         setBackendStatus(reviewing() ? "REVIEWING" : "THINKING");
+        setReviewActionMessage(`\u53D6\u6D88\u5931\u8D25\uFF1A\u540E\u7AEF\u672A\u786E\u8BA4\u53D6\u6D88\uFF08${response.error?.message ?? "\u5F53\u524D\u6CA1\u6709\u6B63\u5728\u8FD0\u884C\u7684\u4EFB\u52A1"}\uFF09\u3002\u5BA1\u67E5\u53EF\u80FD\u4ECD\u5728\u8FD0\u884C\uFF0C\u53EF\u518D\u6309 Esc \u91CD\u8BD5\uFF0C\u6216\u7528 /status \u67E5\u770B\u3002`);
+        return;
       }
-    }).catch((error) => setErrorState(String(error)));
+      setReviewActionMessage("\u53D6\u6D88\u5DF2\u786E\u8BA4\uFF0C\u6B63\u5728\u7B49\u540E\u7AEF\u6536\u5C3E\uFF08\u4E0D\u4F1A\u5199\u5165\u5386\u53F2\u8BB0\u5F55\uFF09\u3002");
+    }).catch((error) => {
+      setBackendStatus(reviewing() ? "REVIEWING" : "READY");
+      setReviewActionMessage(`\u53D6\u6D88\u8BF7\u6C42\u8D85\u65F6\u6216\u5931\u8D25\uFF1A${String(error)}\u3002\u5BA1\u67E5\u53EF\u80FD\u4ECD\u5728\u8FD0\u884C\uFF1B\u53EF\u518D\u6309 Esc \u91CD\u8BD5\u3002`);
+    });
   };
   const startReview = async (url) => {
     if (reviewing() || reviewStarting())
@@ -40467,9 +40472,9 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
   });
   onCleanup(() => void backend.stop());
   return (() => {
-    var _el$323 = createElement("box"), _el$324 = createElement("box"), _el$326 = createElement("box"), _el$327 = createElement("scrollbox"), _el$328 = createElement("box"), _el$355 = createElement("box"), _el$356 = createElement("text"), _el$357 = createElement("text"), _el$358 = createTextNode(` \xB7 `), _el$359 = createTextNode(` \xB7 `), _el$360 = createTextNode(` \xB7 `), _el$361 = createTextNode(` \xB7 `), _el$362 = createTextNode(`\xD7`);
-    insertNode(_el$323, _el$324);
-    insertNode(_el$323, _el$355);
+    var _el$323 = createElement("box"), _el$326 = createElement("box"), _el$327 = createElement("box"), _el$328 = createElement("scrollbox"), _el$329 = createElement("box"), _el$356 = createElement("box"), _el$357 = createElement("text"), _el$358 = createElement("text"), _el$359 = createTextNode(` \xB7 `), _el$360 = createTextNode(` \xB7 `), _el$361 = createTextNode(` \xB7 `), _el$362 = createTextNode(` \xB7 `), _el$363 = createTextNode(`\xD7`);
+    insertNode(_el$323, _el$326);
+    insertNode(_el$323, _el$356);
     setProp(_el$323, "width", "100%");
     setProp(_el$323, "height", "100%");
     setProp(_el$323, "backgroundColor", "#0a0a0a");
@@ -40481,20 +40486,20 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
       },
       get fallback() {
         return (() => {
-          var _el$363 = createElement("box"), _el$364 = createElement("text"), _el$366 = createElement("text"), _el$367 = createTextNode(` \xB7 `);
-          insertNode(_el$363, _el$364);
-          insertNode(_el$363, _el$366);
-          setProp(_el$363, "width", 76);
-          setProp(_el$363, "marginTop", 1);
-          setProp(_el$363, "flexDirection", "row");
-          setProp(_el$363, "justifyContent", "space-between");
-          insertNode(_el$364, createTextNode(`PR REVIEW / CHAT`));
-          setProp(_el$364, "fg", "#fb8147");
-          insertNode(_el$366, _el$367);
-          setProp(_el$366, "fg", "#808080");
-          insert(_el$366, () => runtime().provider_display ?? runtime().provider ?? "", _el$367);
-          insert(_el$366, () => runtime().model ?? "", null);
-          return _el$363;
+          var _el$364 = createElement("box"), _el$365 = createElement("text"), _el$367 = createElement("text"), _el$368 = createTextNode(` \xB7 `);
+          insertNode(_el$364, _el$365);
+          insertNode(_el$364, _el$367);
+          setProp(_el$364, "width", 76);
+          setProp(_el$364, "marginTop", 1);
+          setProp(_el$364, "flexDirection", "row");
+          setProp(_el$364, "justifyContent", "space-between");
+          insertNode(_el$365, createTextNode(`PR REVIEW / CHAT`));
+          setProp(_el$365, "fg", "#fb8147");
+          insertNode(_el$367, _el$368);
+          setProp(_el$367, "fg", "#808080");
+          insert(_el$367, () => runtime().provider_display ?? runtime().provider ?? "", _el$368);
+          insert(_el$367, () => runtime().model ?? "", null);
+          return _el$364;
         })();
       },
       get children() {
@@ -40504,251 +40509,19 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           }
         });
       }
-    }), _el$324);
-    insertNode(_el$324, _el$326);
-    setProp(_el$324, "width", "100%");
-    setProp(_el$324, "flexGrow", 1);
-    setProp(_el$324, "flexDirection", "row");
-    setProp(_el$324, "minHeight", 0);
-    insert(_el$324, createComponent2(Show, {
-      get when() {
-        return memo2(() => reviewLayout() === "three")() && reviewProgressProps();
-      },
-      get children() {
-        var _el$325 = createElement("box");
-        setProp(_el$325, "width", 26);
-        setProp(_el$325, "flexShrink", 0);
-        setProp(_el$325, "marginRight", 1);
-        setProp(_el$325, "flexDirection", "column");
-        setProp(_el$325, "minHeight", 0);
-        insert(_el$325, createComponent2(ReviewProgressPanel, mergeProps3(() => reviewProgressProps())));
-        return _el$325;
-      }
     }), _el$326);
-    insertNode(_el$326, _el$327);
-    setProp(_el$326, "flexGrow", 1);
-    setProp(_el$326, "minWidth", 0);
-    setProp(_el$326, "flexDirection", "column");
-    setProp(_el$326, "alignItems", "center");
-    insertNode(_el$327, _el$328);
-    setProp(_el$327, "width", "100%");
-    setProp(_el$327, "flexGrow", 1);
-    setProp(_el$327, "scrollY", true);
-    setProp(_el$327, "stickyScroll", true);
-    setProp(_el$327, "stickyStart", "bottom");
-    setProp(_el$327, "scrollbarOptions", {
-      showArrows: false
-    });
-    setProp(_el$328, "width", "100%");
-    setProp(_el$328, "alignItems", "center");
-    setProp(_el$328, "flexDirection", "column");
-    insert(_el$328, createComponent2(Show, {
+    insert(_el$323, createComponent2(Show, {
       get when() {
-        return memo2(() => !!(messages().length === 0 && !composerDraft() && !streamingAssistant() && !errorMessage() && !reviewStage()))() && !compactHome();
+        return memo2(() => !!(workbenchVisible() && !workbenchPanelsVisible()))() && (reviewPhase() !== "idle" || workbenchManualOpen());
       },
       get children() {
-        return createComponent2(QuickStartPanel, {
-          get language() {
-            return runtime().ui_language;
-          }
-        });
-      }
-    }), null);
-    insert(_el$328, createComponent2(Show, {
-      get when() {
-        return errorMessage();
-      },
-      get children() {
-        var _el$329 = createElement("box"), _el$330 = createElement("text"), _el$332 = createElement("text"), _el$333 = createElement("text"), _el$335 = createElement("text");
-        insertNode(_el$329, _el$330);
-        insertNode(_el$329, _el$332);
-        insertNode(_el$329, _el$333);
-        insertNode(_el$329, _el$335);
-        setProp(_el$329, "backgroundColor", "#241616");
-        setProp(_el$329, "borderStyle", "single");
-        setProp(_el$329, "borderColor", "#ff6b6b");
-        setProp(_el$329, "paddingLeft", 2);
-        setProp(_el$329, "paddingRight", 2);
-        setProp(_el$329, "marginTop", 2);
-        setProp(_el$329, "flexDirection", "column");
-        insertNode(_el$330, createTextNode(`ERROR // RECOVERY`));
-        setProp(_el$330, "fg", "#ff6b6b");
-        setProp(_el$332, "fg", "#eeeeee");
-        insert(_el$332, errorMessage);
-        insertNode(_el$333, createTextNode(`\u5EFA\u8BAE\uFF1A\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u3001\u914D\u7F6E Endpoint\uFF0C\u6216\u4F7F\u7528 Ctrl+P \u5207\u6362\u8FD0\u884C\u65F6\u3002`));
-        setProp(_el$333, "fg", "#808080");
-        insertNode(_el$335, createTextNode(`\u53EF\u7528\u6062\u590D\uFF1ACtrl+R /retry \xB7 /model status \xB7 /model local \xB7 /model cloud \xB7 /new`));
-        setProp(_el$335, "fg", "#808080");
-        effect((_$p) => setProp(_el$329, "width", chatContentWidth(), _$p));
-        return _el$329;
-      }
-    }), null);
-    insert(_el$328, createComponent2(Show, {
-      get when() {
-        return reviewFindings().length > 0;
-      },
-      get children() {
-        var _el$337 = createElement("box");
-        setProp(_el$337, "marginTop", 1);
-        setProp(_el$337, "flexDirection", "column");
-        insert(_el$337, createComponent2(FindingsFilterBar, {
-          get active() {
-            return hasActiveCriteria(findingsFilter()) || findingsFilter().sort !== "severity";
-          },
-          get query() {
-            return findingsFilter().query;
-          },
-          get severity() {
-            return memo2(() => findingsFilter().severity === "all")() ? undefined : findingsFilter().severity;
-          },
-          get evidence() {
-            return memo2(() => findingsFilter().evidence === "all")() ? undefined : findingsFilter().evidence;
-          },
-          get sort() {
-            return findingsFilter().sort;
-          },
-          get shown() {
-            return visibleFindingCounts().shown;
-          },
-          get total() {
-            return visibleFindingCounts().total;
-          },
-          get language() {
-            return runtime().ui_language;
-          }
-        }));
-        effect((_$p) => setProp(_el$337, "width", chatContentWidth(), _$p));
-        return _el$337;
-      }
-    }), null);
-    insert(_el$328, createComponent2(Show, {
-      get when() {
-        return memo2(() => !!!reviewing())() && (reviewStage() === "\u5BA1\u67E5\u5931\u8D25" || reviewStage() === "\u5BA1\u67E5\u5DF2\u53D6\u6D88");
-      },
-      get children() {
-        var _el$338 = createElement("box"), _el$339 = createElement("text"), _el$340 = createTextNode(`\u25CF `), _el$341 = createElement("text");
-        insertNode(_el$338, _el$339);
-        insertNode(_el$338, _el$341);
-        setProp(_el$338, "width", 76);
-        setProp(_el$338, "backgroundColor", "#161616");
-        setProp(_el$338, "borderStyle", "single");
-        setProp(_el$338, "paddingLeft", 2);
-        setProp(_el$338, "paddingRight", 2);
-        setProp(_el$338, "marginTop", 2);
-        setProp(_el$338, "flexDirection", "column");
-        insertNode(_el$339, _el$340);
-        insert(_el$339, reviewStage, null);
-        setProp(_el$341, "fg", "#b0b0b0");
-        insert(_el$341, reviewDetail);
-        insert(_el$338, createComponent2(Show, {
-          get when() {
-            return reviewUrl();
-          },
-          get children() {
-            var _el$342 = createElement("text");
-            setProp(_el$342, "fg", "#808080");
-            insert(_el$342, () => truncateMiddle(reviewUrl(), 68));
-            return _el$342;
-          }
-        }), null);
-        effect((_p$) => {
-          var _v$44 = reviewStage() === "\u5BA1\u67E5\u5931\u8D25" ? "#ff6b6b" : orange, _v$45 = reviewStage() === "\u5BA1\u67E5\u5931\u8D25" ? "#ff6b6b" : orange;
-          _v$44 !== _p$.e && (_p$.e = setProp(_el$338, "borderColor", _v$44, _p$.e));
-          _v$45 !== _p$.t && (_p$.t = setProp(_el$339, "fg", _v$45, _p$.t));
-          return _p$;
-        }, {
-          e: undefined,
-          t: undefined
-        });
-        return _el$338;
-      }
-    }), null);
-    insert(_el$328, createComponent2(Show, {
-      get when() {
-        return messages().length > 0 || streamingAssistant();
-      },
-      get children() {
-        var _el$343 = createElement("box");
-        setProp(_el$343, "marginTop", 2);
-        setProp(_el$343, "flexDirection", "column");
-        insert(_el$343, createComponent2(For, {
-          get each() {
-            return messages();
-          },
-          children: (message) => (() => {
-            var _el$368 = createElement("box"), _el$369 = createElement("text"), _el$370 = createElement("text");
-            insertNode(_el$368, _el$369);
-            insertNode(_el$368, _el$370);
-            setProp(_el$368, "flexDirection", "row");
-            setProp(_el$368, "gap", 1);
-            setProp(_el$368, "paddingBottom", 1);
-            insert(_el$369, () => message.role === "user" ? ">" : "\u25CF");
-            insert(_el$370, () => message.content);
-            effect((_p$) => {
-              var _v$46 = message.role === "user" ? orange : "#eeeeee", _v$47 = Math.max(24, chatContentWidth() - 6), _v$48 = message.role === "user" ? "#eeeeee" : muted;
-              _v$46 !== _p$.e && (_p$.e = setProp(_el$369, "fg", _v$46, _p$.e));
-              _v$47 !== _p$.t && (_p$.t = setProp(_el$370, "width", _v$47, _p$.t));
-              _v$48 !== _p$.a && (_p$.a = setProp(_el$370, "fg", _v$48, _p$.a));
-              return _p$;
-            }, {
-              e: undefined,
-              t: undefined,
-              a: undefined
-            });
-            return _el$368;
-          })()
-        }), null);
-        insert(_el$343, createComponent2(Show, {
-          get when() {
-            return streamingAssistant();
-          },
-          get children() {
-            var _el$344 = createElement("box"), _el$345 = createElement("text"), _el$347 = createElement("text");
-            insertNode(_el$344, _el$345);
-            insertNode(_el$344, _el$347);
-            setProp(_el$344, "flexDirection", "row");
-            setProp(_el$344, "gap", 1);
-            insertNode(_el$345, createTextNode(`\u25CF`));
-            setProp(_el$345, "fg", "#fb8147");
-            setProp(_el$347, "fg", "#eeeeee");
-            insert(_el$347, streamingAssistant);
-            effect((_$p) => setProp(_el$347, "width", Math.max(24, chatContentWidth() - 6), _$p));
-            return _el$344;
-          }
-        }), null);
-        effect((_$p) => setProp(_el$343, "width", chatContentWidth(), _$p));
-        return _el$343;
-      }
-    }), null);
-    insert(_el$328, createComponent2(Show, {
-      get when() {
-        return reviewActionMessage();
-      },
-      get children() {
-        var _el$348 = createElement("box"), _el$349 = createElement("text"), _el$351 = createElement("text");
-        insertNode(_el$348, _el$349);
-        insertNode(_el$348, _el$351);
-        setProp(_el$348, "backgroundColor", "#141414");
-        setProp(_el$348, "borderStyle", "single");
-        setProp(_el$348, "borderColor", "#7edc92");
-        setProp(_el$348, "paddingLeft", 2);
-        setProp(_el$348, "paddingRight", 2);
-        setProp(_el$348, "marginTop", 1);
-        setProp(_el$348, "flexDirection", "column");
-        insertNode(_el$349, createTextNode(`REVIEW ACTION // \u64CD\u4F5C\u7ED3\u679C`));
-        setProp(_el$349, "fg", "#7edc92");
-        setProp(_el$351, "fg", "#eeeeee");
-        insert(_el$351, reviewActionMessage);
-        effect((_$p) => setProp(_el$348, "width", chatContentWidth(), _$p));
-        return _el$348;
-      }
-    }), null);
-    insert(_el$326, createComponent2(Show, {
-      get when() {
-        return memo2(() => !!workbenchVisible())() && !workbenchPanelsVisible();
-      },
-      get children() {
-        return createComponent2(ReviewStatusBar, {
+        var _el$324 = createElement("box");
+        setProp(_el$324, "width", "100%");
+        setProp(_el$324, "flexShrink", 0);
+        setProp(_el$324, "flexDirection", "column");
+        setProp(_el$324, "paddingLeft", 2);
+        setProp(_el$324, "paddingRight", 2);
+        insert(_el$324, createComponent2(ReviewStatusBar, {
           get phase() {
             return reviewPhase();
           },
@@ -40781,12 +40554,225 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
             return runtime().ui_language;
           },
           get width() {
-            return Math.max(12, chatContentWidth() - 2);
+            return Math.max(12, dimensions().width - 4);
+          }
+        }), null);
+        insert(_el$324, createComponent2(Show, {
+          get when() {
+            return reviewActionMessage();
+          },
+          get children() {
+            var _el$325 = createElement("text");
+            setProp(_el$325, "fg", "#7edc92");
+            insert(_el$325, reviewActionMessage);
+            effect((_$p) => setProp(_el$325, "width", Math.max(12, dimensions().width - 4), _$p));
+            return _el$325;
+          }
+        }), null);
+        return _el$324;
+      }
+    }), _el$326);
+    insertNode(_el$326, _el$327);
+    setProp(_el$326, "width", "100%");
+    setProp(_el$326, "flexGrow", 1);
+    setProp(_el$326, "flexDirection", "row");
+    setProp(_el$326, "minHeight", 0);
+    insertNode(_el$327, _el$328);
+    setProp(_el$327, "flexGrow", 1);
+    setProp(_el$327, "minWidth", 0);
+    setProp(_el$327, "flexDirection", "column");
+    setProp(_el$327, "alignItems", "center");
+    insertNode(_el$328, _el$329);
+    setProp(_el$328, "width", "100%");
+    setProp(_el$328, "flexGrow", 1);
+    setProp(_el$328, "scrollY", true);
+    setProp(_el$328, "stickyScroll", true);
+    setProp(_el$328, "stickyStart", "bottom");
+    setProp(_el$328, "scrollbarOptions", {
+      showArrows: false
+    });
+    setProp(_el$329, "width", "100%");
+    setProp(_el$329, "alignItems", "center");
+    setProp(_el$329, "flexDirection", "column");
+    insert(_el$329, createComponent2(Show, {
+      get when() {
+        return memo2(() => !!(messages().length === 0 && !composerDraft() && !streamingAssistant() && !errorMessage() && !reviewStage()))() && !compactHome();
+      },
+      get children() {
+        return createComponent2(QuickStartPanel, {
+          get language() {
+            return runtime().ui_language;
           }
         });
       }
     }), null);
-    insert(_el$326, createComponent2(Composer, {
+    insert(_el$329, createComponent2(Show, {
+      get when() {
+        return errorMessage();
+      },
+      get children() {
+        var _el$330 = createElement("box"), _el$331 = createElement("text"), _el$333 = createElement("text"), _el$334 = createElement("text"), _el$336 = createElement("text");
+        insertNode(_el$330, _el$331);
+        insertNode(_el$330, _el$333);
+        insertNode(_el$330, _el$334);
+        insertNode(_el$330, _el$336);
+        setProp(_el$330, "backgroundColor", "#241616");
+        setProp(_el$330, "borderStyle", "single");
+        setProp(_el$330, "borderColor", "#ff6b6b");
+        setProp(_el$330, "paddingLeft", 2);
+        setProp(_el$330, "paddingRight", 2);
+        setProp(_el$330, "marginTop", 2);
+        setProp(_el$330, "flexDirection", "column");
+        insertNode(_el$331, createTextNode(`ERROR // RECOVERY`));
+        setProp(_el$331, "fg", "#ff6b6b");
+        setProp(_el$333, "fg", "#eeeeee");
+        insert(_el$333, errorMessage);
+        insertNode(_el$334, createTextNode(`\u5EFA\u8BAE\uFF1A\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u3001\u914D\u7F6E Endpoint\uFF0C\u6216\u4F7F\u7528 Ctrl+P \u5207\u6362\u8FD0\u884C\u65F6\u3002`));
+        setProp(_el$334, "fg", "#808080");
+        insertNode(_el$336, createTextNode(`\u53EF\u7528\u6062\u590D\uFF1ACtrl+R /retry \xB7 /model status \xB7 /model local \xB7 /model cloud \xB7 /new`));
+        setProp(_el$336, "fg", "#808080");
+        effect((_$p) => setProp(_el$330, "width", chatContentWidth(), _$p));
+        return _el$330;
+      }
+    }), null);
+    insert(_el$329, createComponent2(Show, {
+      get when() {
+        return reviewFindings().length > 0;
+      },
+      get children() {
+        var _el$338 = createElement("box");
+        setProp(_el$338, "marginTop", 1);
+        setProp(_el$338, "flexDirection", "column");
+        insert(_el$338, createComponent2(FindingsFilterBar, {
+          get active() {
+            return hasActiveCriteria(findingsFilter()) || findingsFilter().sort !== "severity";
+          },
+          get query() {
+            return findingsFilter().query;
+          },
+          get severity() {
+            return memo2(() => findingsFilter().severity === "all")() ? undefined : findingsFilter().severity;
+          },
+          get evidence() {
+            return memo2(() => findingsFilter().evidence === "all")() ? undefined : findingsFilter().evidence;
+          },
+          get sort() {
+            return findingsFilter().sort;
+          },
+          get shown() {
+            return visibleFindingCounts().shown;
+          },
+          get total() {
+            return visibleFindingCounts().total;
+          },
+          get language() {
+            return runtime().ui_language;
+          }
+        }));
+        effect((_$p) => setProp(_el$338, "width", chatContentWidth(), _$p));
+        return _el$338;
+      }
+    }), null);
+    insert(_el$329, createComponent2(Show, {
+      get when() {
+        return memo2(() => !!!reviewing())() && (reviewStage() === "\u5BA1\u67E5\u5931\u8D25" || reviewStage() === "\u5BA1\u67E5\u5DF2\u53D6\u6D88");
+      },
+      get children() {
+        var _el$339 = createElement("box"), _el$340 = createElement("text"), _el$341 = createTextNode(`\u25CF `), _el$342 = createElement("text");
+        insertNode(_el$339, _el$340);
+        insertNode(_el$339, _el$342);
+        setProp(_el$339, "width", 76);
+        setProp(_el$339, "backgroundColor", "#161616");
+        setProp(_el$339, "borderStyle", "single");
+        setProp(_el$339, "paddingLeft", 2);
+        setProp(_el$339, "paddingRight", 2);
+        setProp(_el$339, "marginTop", 2);
+        setProp(_el$339, "flexDirection", "column");
+        insertNode(_el$340, _el$341);
+        insert(_el$340, reviewStage, null);
+        setProp(_el$342, "fg", "#b0b0b0");
+        insert(_el$342, reviewDetail);
+        insert(_el$339, createComponent2(Show, {
+          get when() {
+            return reviewUrl();
+          },
+          get children() {
+            var _el$343 = createElement("text");
+            setProp(_el$343, "fg", "#808080");
+            insert(_el$343, () => truncateMiddle(reviewUrl(), 68));
+            return _el$343;
+          }
+        }), null);
+        effect((_p$) => {
+          var _v$44 = reviewStage() === "\u5BA1\u67E5\u5931\u8D25" ? "#ff6b6b" : orange, _v$45 = reviewStage() === "\u5BA1\u67E5\u5931\u8D25" ? "#ff6b6b" : orange;
+          _v$44 !== _p$.e && (_p$.e = setProp(_el$339, "borderColor", _v$44, _p$.e));
+          _v$45 !== _p$.t && (_p$.t = setProp(_el$340, "fg", _v$45, _p$.t));
+          return _p$;
+        }, {
+          e: undefined,
+          t: undefined
+        });
+        return _el$339;
+      }
+    }), null);
+    insert(_el$329, createComponent2(Show, {
+      get when() {
+        return messages().length > 0 || streamingAssistant();
+      },
+      get children() {
+        var _el$344 = createElement("box");
+        setProp(_el$344, "marginTop", 2);
+        setProp(_el$344, "flexDirection", "column");
+        insert(_el$344, createComponent2(For, {
+          get each() {
+            return messages();
+          },
+          children: (message) => (() => {
+            var _el$369 = createElement("box"), _el$370 = createElement("text"), _el$371 = createElement("text");
+            insertNode(_el$369, _el$370);
+            insertNode(_el$369, _el$371);
+            setProp(_el$369, "flexDirection", "row");
+            setProp(_el$369, "gap", 1);
+            setProp(_el$369, "paddingBottom", 1);
+            insert(_el$370, () => message.role === "user" ? ">" : "\u25CF");
+            insert(_el$371, () => message.content);
+            effect((_p$) => {
+              var _v$46 = message.role === "user" ? orange : "#eeeeee", _v$47 = Math.max(24, chatContentWidth() - 6), _v$48 = message.role === "user" ? "#eeeeee" : muted;
+              _v$46 !== _p$.e && (_p$.e = setProp(_el$370, "fg", _v$46, _p$.e));
+              _v$47 !== _p$.t && (_p$.t = setProp(_el$371, "width", _v$47, _p$.t));
+              _v$48 !== _p$.a && (_p$.a = setProp(_el$371, "fg", _v$48, _p$.a));
+              return _p$;
+            }, {
+              e: undefined,
+              t: undefined,
+              a: undefined
+            });
+            return _el$369;
+          })()
+        }), null);
+        insert(_el$344, createComponent2(Show, {
+          get when() {
+            return streamingAssistant();
+          },
+          get children() {
+            var _el$345 = createElement("box"), _el$346 = createElement("text"), _el$348 = createElement("text");
+            insertNode(_el$345, _el$346);
+            insertNode(_el$345, _el$348);
+            setProp(_el$345, "flexDirection", "row");
+            setProp(_el$345, "gap", 1);
+            insertNode(_el$346, createTextNode(`\u25CF`));
+            setProp(_el$346, "fg", "#fb8147");
+            setProp(_el$348, "fg", "#eeeeee");
+            insert(_el$348, streamingAssistant);
+            effect((_$p) => setProp(_el$348, "width", Math.max(24, chatContentWidth() - 6), _$p));
+            return _el$345;
+          }
+        }), null);
+        effect((_$p) => setProp(_el$344, "width", chatContentWidth(), _$p));
+        return _el$344;
+      }
+    }), null);
+    insert(_el$327, createComponent2(Composer, {
       get mode() {
         return mode();
       },
@@ -40837,41 +40823,65 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
         return memo2(() => !!(!findingsOpen() && !feedbackOpen() && !historyOpen() && !modelOpen() && !setupOpen() && !filterOpen() && !publishOpen() && !demoOpen() && !showcaseOpen() && pendingReviewUrl() === ""))() && reviewStage() !== "\u5BA1\u67E5\u5931\u8D25";
       }
     }), null);
-    insert(_el$324, createComponent2(Show, {
+    insert(_el$326, createComponent2(Show, {
       get when() {
         return memo2(() => reviewLayout() !== "bar")() && workbenchVisible();
       },
       get children() {
-        var _el$352 = createElement("box");
-        setProp(_el$352, "flexShrink", 0);
-        setProp(_el$352, "marginLeft", 1);
-        setProp(_el$352, "flexDirection", "column");
-        setProp(_el$352, "minHeight", 0);
-        insert(_el$352, createComponent2(Show, {
+        var _el$349 = createElement("box");
+        setProp(_el$349, "flexShrink", 0);
+        setProp(_el$349, "marginLeft", 1);
+        setProp(_el$349, "flexDirection", "column");
+        setProp(_el$349, "minHeight", 0);
+        insert(_el$349, createComponent2(Show, {
           get when() {
             return memo2(() => reviewLayout() === "two")() && reviewProgressProps();
           },
           get children() {
-            var _el$353 = createElement("box");
-            setProp(_el$353, "flexShrink", 0);
-            setProp(_el$353, "marginBottom", 1);
-            insert(_el$353, createComponent2(ReviewProgressPanel, mergeProps3(() => reviewProgressProps())));
-            return _el$353;
+            var _el$350 = createElement("box");
+            setProp(_el$350, "flexShrink", 0);
+            setProp(_el$350, "marginBottom", 1);
+            insert(_el$350, createComponent2(ReviewProgressPanel, mergeProps3(() => reviewProgressProps())));
+            return _el$350;
           }
         }), null);
-        insert(_el$352, createComponent2(Show, {
+        insert(_el$349, createComponent2(Show, {
           get when() {
             return reviewSummaryProps();
           },
           get children() {
-            var _el$354 = createElement("box");
-            setProp(_el$354, "flexGrow", 1);
-            setProp(_el$354, "minHeight", 0);
-            insert(_el$354, createComponent2(ReviewSummaryPanel, mergeProps3(() => reviewSummaryProps())));
-            return _el$354;
+            var _el$351 = createElement("box");
+            setProp(_el$351, "flexGrow", 1);
+            setProp(_el$351, "minHeight", 0);
+            insert(_el$351, createComponent2(ReviewSummaryPanel, mergeProps3(() => reviewSummaryProps())));
+            return _el$351;
           }
         }), null);
-        insert(_el$352, createComponent2(ReviewActionBar, {
+        insert(_el$349, createComponent2(Show, {
+          get when() {
+            return reviewActionMessage();
+          },
+          get children() {
+            var _el$352 = createElement("box"), _el$353 = createElement("text"), _el$355 = createElement("text");
+            insertNode(_el$352, _el$353);
+            insertNode(_el$352, _el$355);
+            setProp(_el$352, "width", "100%");
+            setProp(_el$352, "flexShrink", 0);
+            setProp(_el$352, "backgroundColor", "#141414");
+            setProp(_el$352, "borderStyle", "single");
+            setProp(_el$352, "borderColor", "#7edc92");
+            setProp(_el$352, "paddingLeft", 1);
+            setProp(_el$352, "paddingRight", 1);
+            setProp(_el$352, "flexDirection", "column");
+            insertNode(_el$353, createTextNode(`REVIEW ACTION`));
+            setProp(_el$353, "fg", "#7edc92");
+            setProp(_el$353, "height", 1);
+            setProp(_el$355, "fg", "#eeeeee");
+            insert(_el$355, reviewActionMessage);
+            return _el$352;
+          }
+        }), null);
+        insert(_el$349, createComponent2(ReviewActionBar, {
           onOpenFindings: openFindings,
           onExplain: () => void explainCurrentRun(),
           onFeedback: () => openFeedback(),
@@ -40882,8 +40892,8 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
             return runtime().ui_language;
           }
         }), null);
-        effect((_$p) => setProp(_el$352, "width", rightColumnWidth(), _$p));
-        return _el$352;
+        effect((_$p) => setProp(_el$349, "width", rightColumnWidth(), _$p));
+        return _el$349;
       }
     }), null);
     insert(_el$323, createComponent2(Show, {
@@ -40906,7 +40916,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           }
         });
       }
-    }), _el$355);
+    }), _el$356);
     insert(_el$323, createComponent2(Show, {
       get when() {
         return historyOpen();
@@ -40926,7 +40936,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setHistoryOpen(false)
         });
       }
-    }), _el$355);
+    }), _el$356);
     insert(_el$323, createComponent2(Show, {
       get when() {
         return findingsOpen();
@@ -40951,7 +40961,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setFindingsOpen(false)
         });
       }
-    }), _el$355);
+    }), _el$356);
     insert(_el$323, createComponent2(Show, {
       get when() {
         return memo2(() => !!feedbackOpen())() && reviewFindings()[activeFindingIndex()];
@@ -40971,7 +40981,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setFeedbackOpen(false)
         });
       }
-    }), _el$355);
+    }), _el$356);
     insert(_el$323, createComponent2(Show, {
       get when() {
         return memo2(() => reviewStage() === "\u5BA1\u67E5\u5931\u8D25")() && reviewUrl();
@@ -40991,7 +41001,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setReviewStage("")
         });
       }
-    }), _el$355);
+    }), _el$356);
     insert(_el$323, createComponent2(Show, {
       get when() {
         return filterOpen();
@@ -41019,7 +41029,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClear: clearFindingsFilter
         });
       }
-    }), _el$355);
+    }), _el$356);
     insert(_el$323, createComponent2(Show, {
       get when() {
         return publishOpen();
@@ -41046,7 +41056,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: dismissPublish
         });
       }
-    }), _el$355);
+    }), _el$356);
     insert(_el$323, createComponent2(Show, {
       get when() {
         return demoOpen();
@@ -41062,7 +41072,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setDemoOpen(false)
         });
       }
-    }), _el$355);
+    }), _el$356);
     insert(_el$323, createComponent2(Show, {
       get when() {
         return showcaseOpen();
@@ -41078,7 +41088,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setShowcaseOpen(false)
         });
       }
-    }), _el$355);
+    }), _el$356);
     insert(_el$323, createComponent2(Show, {
       get when() {
         return setupOpen();
@@ -41109,7 +41119,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           }
         });
       }
-    }), _el$355);
+    }), _el$356);
     insert(_el$323, createComponent2(Show, {
       get when() {
         return pendingReviewUrl();
@@ -41123,32 +41133,32 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setPendingReviewUrl("")
         });
       }
-    }), _el$355);
-    insertNode(_el$355, _el$356);
-    insertNode(_el$355, _el$357);
-    setProp(_el$355, "width", "100%");
-    setProp(_el$355, "flexShrink", 0);
-    setProp(_el$355, "justifyContent", "space-between");
-    setProp(_el$355, "paddingLeft", 2);
-    setProp(_el$355, "paddingRight", 2);
-    setProp(_el$355, "paddingBottom", 1);
-    setProp(_el$356, "fg", "#808080");
-    insert(_el$356, workspaceRootLabel);
-    insertNode(_el$357, _el$358);
-    insertNode(_el$357, _el$359);
-    insertNode(_el$357, _el$360);
-    insertNode(_el$357, _el$361);
-    insertNode(_el$357, _el$362);
-    insert(_el$357, () => runtime().runtime_profile ?? "RUNTIME", _el$358);
-    insert(_el$357, () => statusLabels[backendStatus()], _el$359);
-    insert(_el$357, () => runtime().model ?? "model", _el$360);
-    insert(_el$357, (() => {
+    }), _el$356);
+    insertNode(_el$356, _el$357);
+    insertNode(_el$356, _el$358);
+    setProp(_el$356, "width", "100%");
+    setProp(_el$356, "flexShrink", 0);
+    setProp(_el$356, "justifyContent", "space-between");
+    setProp(_el$356, "paddingLeft", 2);
+    setProp(_el$356, "paddingRight", 2);
+    setProp(_el$356, "paddingBottom", 1);
+    setProp(_el$357, "fg", "#808080");
+    insert(_el$357, workspaceRootLabel);
+    insertNode(_el$358, _el$359);
+    insertNode(_el$358, _el$360);
+    insertNode(_el$358, _el$361);
+    insertNode(_el$358, _el$362);
+    insertNode(_el$358, _el$363);
+    insert(_el$358, () => runtime().runtime_profile ?? "RUNTIME", _el$359);
+    insert(_el$358, () => statusLabels[backendStatus()], _el$360);
+    insert(_el$358, () => runtime().model ?? "model", _el$361);
+    insert(_el$358, (() => {
       var _c$0 = memo2(() => runtime().available === false);
       return () => _c$0() ? "OFFLINE" : runtime().available === true ? "ONLINE" : "0.1.0";
-    })(), _el$361);
-    insert(_el$357, () => dimensions().width, _el$362);
-    insert(_el$357, () => dimensions().height, null);
-    effect((_$p) => setProp(_el$357, "fg", statusColors[backendStatus()], _$p));
+    })(), _el$362);
+    insert(_el$358, () => dimensions().width, _el$363);
+    insert(_el$358, () => dimensions().height, null);
+    effect((_$p) => setProp(_el$358, "fg", statusColors[backendStatus()], _$p));
     return _el$323;
   })();
 }

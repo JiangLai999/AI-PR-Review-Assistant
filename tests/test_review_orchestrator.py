@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -25,6 +27,7 @@ from ai_pr_review.services.hybrid_orchestrator import HybridReviewOrchestrator
 from ai_pr_review.services.post_processor import PostProcessor
 from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
 from ai_pr_review.services.review_orchestrator import (
+    ReviewCancelled,
     ReviewOrchestrator,
     file_result_payload,
 )
@@ -1150,3 +1153,229 @@ def test_post_processor_process_still_applies_threshold_dedup_and_severity_sort(
     }
     # 入参不被就地修改：调用方仍能看到后处理前的完整 finding 列表。
     assert len(result.findings) == 4
+
+
+# ---------------------------------------------------------------------------
+# 取消：逐文件审查阶段可中断（任务 claude-p6-cancel-interrupt）
+# ---------------------------------------------------------------------------
+
+
+def _sleeping_ai_client(
+    started: list[str],
+    cancelled: list[str],
+    *,
+    sleep_seconds: float = 30.0,
+) -> type:
+    """模型调用会一直睡的桩：只有取消能让这轮审查结束。
+
+    取消时在 `except asyncio.CancelledError` 里记账：真实客户端在这里断开
+    HTTP 连接，桩用记账证明"在飞的调用真的被中止了"，而不是被丢在后台。
+    """
+
+    class SleepingAIClient:
+        def __init__(self, *args, **kwargs):
+            self.total_run_cost = 0.0
+
+        async def review_code(self, system_prompt: str, user_prompt: str) -> ReviewResult:
+            started.append(user_prompt)
+            try:
+                await asyncio.sleep(sleep_seconds)
+            except asyncio.CancelledError:
+                cancelled.append(user_prompt)
+                raise
+            return ReviewResult(summary=f"reviewed {user_prompt}", findings=[])
+
+    return SleepingAIClient
+
+
+def _recording_result_store(saved: list[Any]) -> type:
+    """记录 save_result 调用的桩：用来断言"取消后没有落库"。"""
+
+    class RecordingResultStore:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def save_result(self, *args, **kwargs) -> str:
+            saved.append((args, kwargs))
+            return "run-should-not-exist"
+
+    return RecordingResultStore
+
+
+def test_cancel_interrupts_a_file_review_in_flight(monkeypatch, tmp_path):
+    """取消要打断在飞的模型调用：1 秒内抛 ReviewCancelled、不落库、不伪造回调。"""
+    started: list[str] = []
+    cancelled: list[str] = []
+    saved: list[Any] = []
+    results: list[dict[str, Any]] = []
+    done: list[str] = []
+
+    _patch_standard_orchestrator(
+        monkeypatch, ai_client=_sleeping_ai_client(started, cancelled)
+    )
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.ResultStore",
+        _recording_result_store(saved),
+    )
+
+    config = _standard_config(tmp_path)
+    config.ai_client = AIClientConfig(api_key="api-key", review_concurrency=3)
+    orchestrator = ReviewOrchestrator(config)
+    cancel_requested = threading.Event()
+
+    async def scenario() -> float:
+        async def request_cancel_later() -> None:
+            await asyncio.sleep(0.3)
+            cancel_requested.set()
+
+        cancel_task = asyncio.create_task(request_cancel_later())
+        started_at = time.perf_counter()
+        with pytest.raises(ReviewCancelled):
+            await orchestrator.review(
+                "https://github.com/owner/repo/pull/42",
+                cancel_check=cancel_requested.is_set,
+                file_result_callback=results.append,
+                file_done_callback=done.append,
+            )
+        elapsed = time.perf_counter() - started_at
+        await cancel_task
+        return elapsed
+
+    elapsed = asyncio.run(scenario())
+
+    # 模型调用睡 30s，能这么快返回只能是被取消打断的
+    assert elapsed < 1.0, f"取消用了 {elapsed:.2f}s，说明还在等模型调用返回"
+    assert started, "取消前的文件应当已经发起过模型调用"
+    # 每个已发起的调用都真的收到了取消，没有一个被遗弃在后台
+    assert sorted(cancelled) == sorted(started)
+    # 取消发生在写库之前：不能留下 run 记录
+    assert saved == []
+    # 没有结论的文件不报 reviewed/failed/skipped，也不触发 file_done
+    assert results == []
+    assert done == []
+
+
+def test_cancel_between_files_does_not_start_further_reviews(monkeypatch, tmp_path):
+    """文件之间取消：后续文件连模型调用都不该发起，已完成的结果照常上报。"""
+    calls: list[str] = []
+    saved: list[Any] = []
+    results: list[dict[str, Any]] = []
+    done: list[str] = []
+    cancel_requested = threading.Event()
+
+    class CancelAfterEachCallAIClient:
+        def __init__(self, *args, **kwargs):
+            self.total_run_cost = 0.0
+
+        async def review_code(self, system_prompt: str, user_prompt: str) -> ReviewResult:
+            calls.append(user_prompt)
+            # 第一个文件跑完之后才请求取消：下一个文件必须根本没被调用
+            cancel_requested.set()
+            return ReviewResult(summary=f"reviewed {user_prompt}", findings=[])
+
+    _patch_standard_orchestrator(monkeypatch, ai_client=CancelAfterEachCallAIClient)
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.ResultStore",
+        _recording_result_store(saved),
+    )
+
+    config = _standard_config(tmp_path)
+    # 并发 1：串行逐文件，取消一定落在两个文件之间
+    config.ai_client = AIClientConfig(api_key="api-key", review_concurrency=1)
+    orchestrator = ReviewOrchestrator(config)
+
+    with pytest.raises(ReviewCancelled):
+        asyncio.run(
+            orchestrator.review(
+                "https://github.com/owner/repo/pull/42",
+                cancel_check=cancel_requested.is_set,
+                file_result_callback=results.append,
+                file_done_callback=done.append,
+            )
+        )
+
+    assert calls == ["src/file_0.py"]
+    assert saved == []
+    # 取消不能把已经跑完的文件结论也吞掉
+    assert [payload["status"] for payload in results] == ["reviewed"]
+    assert done == ["src/file_0.py"]
+
+
+def test_hybrid_cancel_interrupts_a_file_review_in_flight(monkeypatch, tmp_path):
+    """混合编排器的在飞调用同样可被取消，且不把取消报成 failed。"""
+    started: list[str] = []
+    cancelled: list[str] = []
+    saved: list[Any] = []
+    results: list[dict[str, Any]] = []
+    done: list[str] = []
+
+    _patch_hybrid_orchestrator(monkeypatch, ai_client=_sleeping_ai_client(started, cancelled))
+    monkeypatch.setattr(
+        "ai_pr_review.services.hybrid_orchestrator.ResultStore",
+        _recording_result_store(saved),
+    )
+
+    orchestrator = HybridReviewOrchestrator(_standard_config(tmp_path))
+    cancel_requested = threading.Event()
+
+    async def scenario() -> float:
+        async def request_cancel_later() -> None:
+            await asyncio.sleep(0.3)
+            cancel_requested.set()
+
+        cancel_task = asyncio.create_task(request_cancel_later())
+        started_at = time.perf_counter()
+        with pytest.raises(ReviewCancelled):
+            await orchestrator.review(
+                "https://github.com/owner/repo/pull/42",
+                cancel_check=cancel_requested.is_set,
+                file_result_callback=results.append,
+                file_done_callback=done.append,
+            )
+        elapsed = time.perf_counter() - started_at
+        await cancel_task
+        return elapsed
+
+    elapsed = asyncio.run(scenario())
+
+    assert elapsed < 1.0, f"取消用了 {elapsed:.2f}s，说明还在等模型调用返回"
+    assert started == ["src/file_0.py"]
+    assert cancelled == started
+    assert saved == []
+    # 取消不是 failed：这个文件没有结论，不报任何状态
+    assert results == []
+    assert done == []
+
+
+def test_cancelled_review_releases_its_cost_reservation(monkeypatch) -> None:
+    """取消（含收尾期间被再取消一次）不能把额度预留漏在客户端上。"""
+    from ai_pr_review.services.ai_client import AIClient
+
+    class HangingProvider:
+        async def chat(self, messages, **kwargs):
+            await asyncio.sleep(30)
+
+        def estimate_cost(self, input_tokens, output_tokens, input_price, output_price) -> float:
+            return 0.01
+
+    monkeypatch.setattr(
+        "ai_pr_review.services.ai_client.create_model_provider",
+        lambda config, client_factory=None: HangingProvider(),
+    )
+    client = AIClient(AIClientConfig(api_key="api-key", model="stub-model"))
+
+    async def scenario() -> None:
+        task = asyncio.create_task(client.review_code("system", "user"))
+        await asyncio.sleep(0.05)
+        assert client.reserved_cost > 0
+        # 别的请求正持有额度锁：释放若去等锁，就会被下面的第二次取消打断
+        async with client._budget_lock:
+            task.cancel()
+            await asyncio.sleep(0.05)
+            task.cancel()
+            await asyncio.sleep(0.05)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert client.reserved_cost == 0

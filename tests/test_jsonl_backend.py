@@ -6,6 +6,7 @@ import json
 import re
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -1777,6 +1778,198 @@ def test_cancelled_review_marks_the_running_stage_skipped(monkeypatch, tmp_path:
     cancelled = next(event for event in published if event["event"] == "review.cancelled")
     assert cancelled["stage_id"] == "reviewing"
     assert "review.failed" not in [event["event"] for event in published]
+
+
+def test_cancel_command_interrupts_a_review_that_is_inside_a_model_call(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """`/cancel` 必须打断正在飞的模型调用，出来的是 `review.cancelled` 而不是 failed。
+
+    这里接的是**真实编排器** + 每个文件都睡 30s 的桩客户端：取消时文件已经进入
+    模型调用，只有逐文件阶段的取消检查 + 任务取消能让它在 1 秒内结束。
+    """
+    from ai_pr_review.models.pr_data import FileDiff, FileStatus, PRData
+    from ai_pr_review.services.context_builder import FileContext
+    from ai_pr_review.services.filter_pipeline import FilterPipelineResult
+    from ai_pr_review.services.prompt_assembler import ReviewResult
+    from ai_pr_review.services.review_orchestrator import ReviewOrchestrator
+
+    started: list[str] = []
+    cancelled: list[str] = []
+    saved: list[Any] = []
+
+    class StubPRFetcher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def fetch(self, pr_url: str) -> PRData:
+            return PRData(
+                pr_number=31,
+                title="Cancel in flight",
+                description="",
+                author="alice",
+                state="open",
+                head_sha="head123",
+                base_sha="base123",
+                head_ref="feature",
+                base_ref="main",
+                diff="diff",
+                files=[
+                    FileDiff(
+                        filename=f"src/file_{index}.py",
+                        status=FileStatus.MODIFIED,
+                        additions=1,
+                        deletions=0,
+                        changes=1,
+                        patch="@@ -1 +1 @@\n-old\n+new",
+                    )
+                    for index in range(4)
+                ],
+                url=pr_url,
+                merged=False,
+                owner="owner",
+                repo="repo",
+            )
+
+        def fetch_file_content(self, owner, repo, file_path, ref) -> str:
+            return "def run():\n    return True\n"
+
+    class StubFilterPipeline:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def filter_pr_data(self, pr_data: PRData):
+            result = FilterPipelineResult()
+            result.results = [
+                type("FilterResult", (), {"file": file_diff, "included": True})()
+                for file_diff in pr_data.files
+            ]
+            return pr_data, result
+
+    class StubContextBuilder:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def build_context(self, file_path: str, diff: str, full_content: str) -> FileContext:
+            return FileContext(
+                file_path=file_path,
+                language="python",
+                diff=diff,
+                diff_with_context=diff,
+                imports=[],
+                functions=[],
+                classes=[],
+                parse_mode="regex",
+            )
+
+    class StubPromptAssembler:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def build_system_prompt(self, language: str) -> str:
+            return "system"
+
+        def build_user_prompt(self, file_context: FileContext, review_plan=None) -> str:
+            return file_context.file_path
+
+    class SleepingAIClient:
+        def __init__(self, *args, **kwargs):
+            self.total_run_cost = 0.0
+
+        async def review_code(self, system_prompt: str, user_prompt: str) -> ReviewResult:
+            started.append(user_prompt)
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                # 底层调用真的被中止：真实 HTTP 客户端在这里断开连接。
+                cancelled.append(user_prompt)
+                raise
+            return ReviewResult(summary=f"reviewed {user_prompt}", findings=[])
+
+    class RecordingResultStore:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def save_result(self, *args, **kwargs) -> str:
+            saved.append((args, kwargs))
+            return "run-should-not-exist"
+
+    monkeypatch.setattr("ai_pr_review.services.review_orchestrator.PRFetcher", StubPRFetcher)
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.FilterPipeline", StubFilterPipeline
+    )
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.ContextBuilder", StubContextBuilder
+    )
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.PromptAssembler", StubPromptAssembler
+    )
+    monkeypatch.setattr("ai_pr_review.services.review_orchestrator.AIClient", SleepingAIClient)
+    monkeypatch.setattr(
+        "ai_pr_review.services.review_orchestrator.ResultStore", RecordingResultStore
+    )
+
+    async def fake_run_review(
+        pr_url,
+        *,
+        config,
+        progress_console,
+        stage_callback,
+        progress_callback,
+        file_done_callback,
+        cancel_check=None,
+        file_result_callback=None,
+    ):
+        """真实编排器，接后端透传下来的取消检查与回调（生产路径就是这样接的）。"""
+        return await ReviewOrchestrator(config).review(
+            pr_url,
+            stage_callback=stage_callback,
+            progress_callback=progress_callback,
+            file_done_callback=file_done_callback,
+            cancel_check=cancel_check,
+            file_result_callback=file_result_callback,
+        )
+
+    monkeypatch.setattr("ai_pr_review.cli.run_review", fake_run_review)
+
+    async def run() -> tuple[list[dict], list[dict], list[dict], float]:
+        published: list[dict] = []
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=published.append)
+        review_task = asyncio.create_task(backend.handle(_review_request()))
+        # 等真的有文件进入模型调用再取消
+        for _ in range(200):
+            if started:
+                break
+            await asyncio.sleep(0.01)
+        assert started, "取消前应当已经有文件在模型调用里"
+        started_at = time.perf_counter()
+        cancel_response = await backend.handle(
+            {
+                "id": "cancel",
+                "method": "command.execute",
+                "params": {"name": "cancel", "session_id": "session-1"},
+            }
+        )
+        responses = await asyncio.wait_for(review_task, 5)
+        return published, cancel_response, responses, time.perf_counter() - started_at
+
+    published, cancel_response, responses, elapsed = asyncio.run(run())
+
+    # 模型调用睡 30s：1 秒内结束只能是被取消打断的
+    assert elapsed < 1.0, f"取消用了 {elapsed:.2f}s，说明还在等模型调用返回"
+    # /cancel 命令本身如实报告"取消已生效"
+    assert cancel_response[0]["result"]["cancelled"] is True
+    # 审查命令返回取消语义，而不是失败
+    assert responses[0]["result"]["cancelled"] is True
+    events = [event["event"] for event in published]
+    assert "review.file_started" in events, "取消前应当已经上报过文件开始"
+    assert "review.cancelled" in events
+    assert "review.failed" not in events
+    assert "review.completed" not in events
+    # 在飞的调用真的被中止了；取消后不落库、不为没有结论的文件报结果
+    assert sorted(cancelled) == sorted(started)
+    assert saved == []
+    assert not [event for event in published if event["event"] == "review.file_done"]
 
 
 def test_review_event_stream_drops_events_after_the_run_finished() -> None:

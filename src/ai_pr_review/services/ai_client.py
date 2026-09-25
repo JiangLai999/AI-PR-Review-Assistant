@@ -126,6 +126,9 @@ class AIClient:
                 except AICostLimitError:
                     raise
                 except Exception as exc:
+                    # `asyncio.CancelledError` 是 BaseException，不会被这里接住：
+                    # 取消必须一路抛给编排器（转成 `ReviewCancelled`），既不能变成
+                    # `AIServiceError` 再重试，也不能被记成一次失败的模型调用。
                     last_error = self._map_service_error(exc)
 
                 if attempt == self._config.max_retries - 1:
@@ -145,8 +148,14 @@ class AIClient:
             self._reserved_cost += estimated_cost
 
     async def _release_cost(self, estimated_cost: float) -> None:
-        async with self._budget_lock:
-            self._reserved_cost = max(0.0, self._reserved_cost - estimated_cost)
+        """Release a reservation without ever blocking on the budget lock.
+
+        释放发生在取消路径的 `finally` 里：如果这里去等锁，取消（尤其是收尾期间
+        的第二次取消）会把这次释放打断，额度永远留在 `_reserved_cost` 上，之后
+        同一客户端的所有调用都会误以为预算已被占满。读改写过程没有 `await`，在
+        单线程事件循环里本身就是原子的，不会与 `_reserve_cost` 的临界区交错。
+        """
+        self._reserved_cost = max(0.0, self._reserved_cost - estimated_cost)
 
     def _budget_available(self, estimated_cost: float) -> bool:
         run_total = self._cost_controller.get_total_cost() + self._reserved_cost + estimated_cost

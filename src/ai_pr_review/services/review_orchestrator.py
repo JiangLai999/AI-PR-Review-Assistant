@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,7 +36,20 @@ from ai_pr_review.services.result_store import ResultStore
 
 
 class ReviewCancelled(Exception):
-    """审查被调用方取消。停止发生在文件之间，无法中断在飞的模型调用。"""
+    """审查被调用方取消。
+
+    既在文件之间生效，也能中断已经在飞的模型调用（见
+    `call_with_cancellation`）：抛出时，本次审查发起的模型调用都已收到取消。
+    """
+
+
+# 轮询取消标志的间隔：`asyncio.wait(timeout=...)` 到点就醒，所以取消请求最多
+# 迟这么久生效，而不是等到整个模型调用返回。
+CANCEL_POLL_INTERVAL_SECONDS = 0.25
+
+# 发出取消后等待在飞任务真正收尾的上限。底层客户端若无视取消（例如把请求丢给
+# 不响应取消的线程），也不能让用户一直等：到点就按已取消返回。
+CANCEL_SETTLE_TIMEOUT_SECONDS = 1.0
 
 
 FILTER_REASON_SUMMARY_LABELS = {
@@ -108,6 +121,72 @@ def emit_skipped_file_results(
             duration_ms=0,
             error=None,
         )
+
+
+async def call_with_cancellation(
+    call: Callable[[], Awaitable[Any]],
+    cancel_check: Callable[[], bool] | None,
+    *,
+    poll_interval: float = CANCEL_POLL_INTERVAL_SECONDS,
+    settle_timeout: float = CANCEL_SETTLE_TIMEOUT_SECONDS,
+) -> Any:
+    """Run one model call in its own task so a cancel request can stop it mid-flight.
+
+    只检查文件边界是不够的：一个 30 秒的模型调用会让按了 Esc 的用户继续等满
+    30 秒。这里把调用包成 `asyncio.Task`，每 `poll_interval` 秒（`asyncio.wait`
+    的 timeout 到点即醒）查一次 `cancel_check()`；一旦已请求取消就
+    `task.cancel()`，**等它收尾**（HTTP 请求/桩都看到取消）再抛
+    `ReviewCancelled`。
+
+    取消语义不吞：用户取消转成 `ReviewCancelled`；调用方自己被取消（超时、退出）
+    时先停掉在飞的调用，再把 `CancelledError` 原样抛出去。
+    """
+    task = asyncio.ensure_future(call())
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=poll_interval)
+            if done:
+                return task.result()
+            if cancel_check is not None and cancel_check():
+                task.cancel()
+                # 等任务真的结束再抛：这样 `ReviewCancelled` 的含义是"没有调用
+                # 还在跑"，而不是"我先走了，它自己慢慢跑"。
+                await asyncio.wait({task}, timeout=settle_timeout)
+                raise ReviewCancelled()
+    except asyncio.CancelledError:
+        # 调用方在取消我们：把在飞的模型调用一起停掉，别留下没人接的 HTTP 请求。
+        task.cancel()
+        try:
+            await asyncio.wait({task}, timeout=settle_timeout)
+        except asyncio.CancelledError:
+            # 收尾期间又被取消一次：任务已收到取消请求，让原始取消继续传播。
+            task.cancel()
+        raise
+
+
+async def _cancel_in_flight(tasks: list[asyncio.Task[Any]]) -> None:
+    """Stop every task still in flight and wait for it to actually end.
+
+    `asyncio.gather` 只把第一个异常抛出来，同批任务会继续跑：取消时若不显式
+    收尾，其余文件（以及它们的模型调用）会在 `ReviewCancelled` 之后继续存在。
+    """
+    pending = [task for task in tasks if not task.done()]
+    if not pending:
+        return
+    for task in pending:
+        task.cancel()
+    try:
+        done, _ = await asyncio.wait(pending, timeout=CANCEL_SETTLE_TIMEOUT_SECONDS)
+    except asyncio.CancelledError:
+        # 外层正在取消（超时/退出）：任务已收到取消请求，让原异常继续向上抛。
+        for task in pending:
+            task.cancel()
+        return
+    for task in done:
+        if not task.cancelled():
+            # 取出异常（即使不处理），否则事件循环会在回收时报
+            # "Task exception was never retrieved"。
+            task.exception()
 
 
 @dataclass(slots=True)
@@ -202,8 +281,12 @@ class ReviewOrchestrator:
         模型调用抛异常时先报 `failed` 再照旧抛出；`findings_count` 无法取得时为 None，
         且只统计该文件模型调用返回的 finding（确定性规则结论在运行级合并，不按文件归属）。
 
-        `cancel_check()` 在每个文件边界被调用；返回 True 时抛出 `ReviewCancelled`。
-        注意：无法中断已经在飞的模型调用，停止发生在文件之间。
+        `cancel_check()` 在每个文件边界被调用，并在模型调用进行中被轮询（见
+        `call_with_cancellation`）；返回 True 时抛出 `ReviewCancelled`，在飞的
+        调用已随取消中止，尚未开始的文件不会再调度。取消发生在任何写库之前，
+        因此被取消的审查不会留下 run 记录，也不会为没有结论的文件发
+        `reviewed`/`failed`/`skipped` 回调；`file_done_callback` 同理不触发
+        （reviewed / failed 两条正常路径的触发时机与顺序逐字未变）。
         """
         start_time = time.perf_counter()
         app_config = self._config
@@ -238,6 +321,7 @@ class ReviewOrchestrator:
             review_plan,
             file_done_callback=file_done_callback,
             file_result_callback=file_result_callback,
+            cancel_check=cancel_check,
         )
         stage("cross_file", "正在分析跨文件接口影响")
         cross_file_contexts = file_contexts[: max(1, app_config.ai_client.cross_file_max_files)]
@@ -284,6 +368,7 @@ class ReviewOrchestrator:
                 ai_client,
                 review_plan,
                 interface_impacts=interface_impacts,
+                cancel_check=cancel_check,
             )
             for finding in cross_file_result.findings:
                 evidence = self._finding_validator.validate_against_contexts(
@@ -475,20 +560,36 @@ class ReviewOrchestrator:
         review_plan: ReviewPlan | None = None,
         file_done_callback: Callable[[str], None] | None = None,
         file_result_callback: Callable[[dict[str, Any]], None] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> list[ReviewResult]:
         semaphore = asyncio.Semaphore(max(1, concurrency))
+
+        def cancel_requested() -> bool:
+            return cancel_check is not None and cancel_check()
 
         async def review_file(file_diff: FileDiff, file_context: FileContext) -> ReviewResult:
             system_prompt = self._prompt_assembler.build_system_prompt(file_context.language)
             user_prompt = self._build_file_prompt(file_context, review_plan)
             async with semaphore:
+                # 取消检查放在拿到并发额度之后：排队时被取消的文件不会再发起调用。
+                if cancel_requested():
+                    raise ReviewCancelled()
                 # 回调放在拿到并发额度之后：否则并发时会瞬间把全部文件报成
                 # "已开始"，之后长时间无动静，进度条反而更不可信。
                 if progress_callback is not None:
                     progress_callback(file_diff.filename, self._config.ai_client.model)
                 started_at = time.perf_counter()
+                cancelled = False
                 try:
-                    result = await ai_client.review_code(system_prompt, user_prompt)
+                    result = await call_with_cancellation(
+                        lambda: ai_client.review_code(system_prompt, user_prompt),
+                        cancel_check,
+                    )
+                except (ReviewCancelled, asyncio.CancelledError):
+                    # 取消不是这个文件的结论：不报 reviewed/failed/skipped，也不触发
+                    # file_done——那会让人以为它跑完并产生了结论。
+                    cancelled = True
+                    raise
                 except Exception as exc:
                     # 先如实上报失败，再保持原有的"异常向上抛、整轮审查终止"语义。
                     emit_file_result(
@@ -512,12 +613,21 @@ class ReviewOrchestrator:
                     )
                     return result
                 finally:
-                    if file_done_callback is not None:
+                    if file_done_callback is not None and not cancelled:
                         file_done_callback(file_diff.filename)
 
-        return await asyncio.gather(
-            *(review_file(file_diff, file_context) for file_diff, file_context in file_contexts)
-        )
+        tasks: list[asyncio.Task[ReviewResult]] = []
+        try:
+            for file_diff, file_context in file_contexts:
+                # 每个文件开始前检查：已请求取消时立即抛出，剩余文件不再调度。
+                if cancel_requested():
+                    raise ReviewCancelled()
+                tasks.append(asyncio.create_task(review_file(file_diff, file_context)))
+            return list(await asyncio.gather(*tasks))
+        except (ReviewCancelled, asyncio.CancelledError):
+            # gather 不会取消同批任务：取消必须把在飞的模型调用一起收掉。
+            await _cancel_in_flight(tasks)
+            raise
 
     def _build_file_prompt(self, file_context: FileContext, review_plan: ReviewPlan | None) -> str:
         """Keep custom PromptAssembler implementations source-compatible."""
@@ -535,6 +645,7 @@ class ReviewOrchestrator:
         ai_client: AIClient,
         review_plan: ReviewPlan,
         interface_impacts: list[InterfaceImpact] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> ReviewResult:
         system_prompt = self._prompt_assembler.build_cross_file_system_prompt()
         user_prompt = self._prompt_assembler.build_cross_file_user_prompt(
@@ -543,7 +654,10 @@ class ReviewOrchestrator:
             review_plan,
             interface_impacts=interface_impacts,
         )
-        return await ai_client.review_code(system_prompt, user_prompt)
+        # 跨文件审查也是整轮模型调用：同样要能被取消，而不是等它跑完。
+        return await call_with_cancellation(
+            lambda: ai_client.review_code(system_prompt, user_prompt), cancel_check
+        )
 
     def _build_empty_summary(self, filter_result: FilterPipelineResult) -> str:
         if filter_result.included_count == 0:
@@ -563,7 +677,9 @@ class ReviewOrchestrator:
 
 __all__ = [
     "ReviewArtifacts",
+    "ReviewCancelled",
     "ReviewOrchestrator",
+    "call_with_cancellation",
     "elapsed_ms",
     "emit_file_result",
     "emit_skipped_file_results",
