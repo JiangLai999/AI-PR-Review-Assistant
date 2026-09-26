@@ -57,7 +57,7 @@ POLL_SECONDS = 5
 # "the log has not grown for N seconds" — a real one was found this way at
 # 21:44-21:52 (0% CPU, no output, no file changes).
 # 这些 CLI 会持续往 stdout 打进度，因此"日志 N 秒没长"可以判为卡住
-VERBOSE_AGENTS = {"mimo", "codex"}
+VERBOSE_AGENTS = {"mimo", "codex", "opencode"}
 STALL_SECONDS = 600
 # 每 N 秒打印一次"日志多久没长"的心跳，便于事后判断卡住检测到底有没有跑
 HEARTBEAT_SECONDS = 120
@@ -75,6 +75,12 @@ CODEX_CANDIDATES = (
     pathlib.Path(os.environ.get("APPDATA", "")) / "npm/codex.cmd",
     pathlib.Path(os.environ.get("APPDATA", "")) / "npm/codex.exe",
 )
+OPENCODE_CANDIDATES = (
+    pathlib.Path(os.environ.get("APPDATA", ""))
+    / "npm/node_modules/opencode-ai/bin/opencode.exe",
+)
+# 用户指定的协作模型（provider/model 形式，opencode 必须显式给 -m，否则用默认模型）
+OPENCODE_MODEL = "opencode/mimo-v2.6-flash-free"
 
 DISPATCH_PROMPT = """你是 {root} 项目的协作 agent（{agent}）。任务 {task_id} 已经由调度器用你的名义认领。
 
@@ -169,6 +175,22 @@ def _agent_command(
             "--dangerously-bypass-approvals-and-sandbox",
             "--cd",
             str(ROOT),
+            prompt,
+        ], env
+    if agent == "opencode":
+        # `opencode run` 是非交互入口；--auto 自动批准未显式拒绝的权限（本地受控
+        # 环境 + 任务的 write_scope 约束）；-m 必须显式指定，否则会用它的默认模型。
+        exe = _find_exe(OPENCODE_CANDIDATES, "opencode")
+        if exe is None:
+            return None
+        return [
+            exe,
+            "run",
+            "--auto",
+            "--dir",
+            str(ROOT),
+            "-m",
+            OPENCODE_MODEL,
             prompt,
         ], env
     return None
