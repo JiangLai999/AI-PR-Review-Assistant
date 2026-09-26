@@ -66,8 +66,9 @@ async function settle(view: { renderOnce: () => Promise<void> }, times = 8) {
 
 /**
  * `config.options` 的形状照抄后端 `_setup_options()`（只看协议，不 import Python）。
+ * `extra` 用来叠加 B2/B3 的新块（`model` / `custom_endpoint` / `routing`）。
  */
-function setupOptions(language: string) {
+function setupOptions(language: string, extra: Record<string, unknown> = {}) {
   const localModels = ["qwen3.5:4b", "llama3.1:8b"]
   return {
     providers: [
@@ -136,7 +137,76 @@ function setupOptions(language: string) {
       chat: { slot: "remote", label: "云端", model: "deepseek-flash" },
       review: { slot: "remote", label: "云端", model: "deepseek-flash" },
     },
+    // B2/B3 的扩展块（§2.2/§2.6）：旧后端没有这两块，所以默认不塞；
+    // [F]/[G] 两节按需注入 fixture，既有的 [A]/[B]/[C]/[E] 仍走"旧后端"形状。
+    ...extra,
   }
+}
+
+/** custom 预设的 routing 快照：`presetIndexOf` 优先读 `routing.profile`（方案 §4.2）。 */
+const customRouting = {
+  profile: "custom",
+  chat: { slot: "remote", label: "云端", model: "deepseek-flash" },
+  review: { slot: "remote", label: "云端", model: "deepseek-flash" },
+}
+
+/**
+ * `config.options.model` 的完整形状（方案 §2.2）：顶层描述**活跃槽**，
+ * `slots.remote` / `slots.local` 给每槽明细（驱动规格屏的 4 行 + 边界提示）。
+ */
+function modelSpecFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    provider: "deepseek",
+    model: "deepseek-flash",
+    source: "models.dev",
+    context_window: 128000,
+    max_output: 8192,
+    reasoning: "档位 low/high/max · 开关",
+    needs_verification: true,
+    endpoint_matches_preset: true,
+    catalog: { context_window: 1000000, max_output: 393216, source: "models.dev" },
+    bounds: { context_window: [1024, 10000000], max_output: [1, 10000000] },
+    catalog_state: { enabled: true, source: "models.dev" },
+    slots: {
+      remote: {
+        provider: "deepseek",
+        model: "deepseek-flash",
+        context_window: 128000,
+        max_output: 8192,
+        bounds: { context_window: [1024, 10000000] },
+      },
+      local: { provider: "ollama", model: "qwen3.5:4b", context_window: 32768, max_output: 4096 },
+    },
+    ...overrides,
+  }
+}
+
+/**
+ * 远端槽改了规格的 fixture（R 重新获取用）：顶层与 `slots.remote` 必须一起改——
+ * 编辑框的初值读的是 `slots.remote`（`primeSpecFields`），顶层只喂头行与徽标。
+ */
+function modelSpecFixtureWithRemote(contextWindow: number, source: string) {
+  const base = modelSpecFixture()
+  return modelSpecFixture({
+    context_window: contextWindow,
+    source,
+    slots: { ...base.slots, remote: { ...base.slots.remote, context_window: contextWindow } },
+  })
+}
+
+/** `config.options.custom_endpoint` 的完整形状（方案 §2.6）。 */
+const customEndpointFixture = {
+  name: "custom",
+  display_name: "Custom Endpoint",
+  base_url: "https://relay.example.com/v1",
+  api_format: "openai",
+  default_model: "relay-model",
+  api_key_configured: true,
+  models: ["relay-model"],
+  context_window: 200000,
+  max_output: 16384,
+  source: "unknown",
+  needs_verification: false,
 }
 
 const snapshot = {
@@ -154,22 +224,39 @@ const snapshot = {
 }
 
 /** 记录 config.setup 载荷的假后端：不 spawn 进程、不碰磁盘。 */
-function stubBackend(language: string) {
-  const state = { setupPayload: undefined as Record<string, unknown> | undefined }
+function stubBackend(language: string, extraOptions: Record<string, unknown> = {}) {
+  const state = {
+    setupPayload: undefined as Record<string, unknown> | undefined,
+    /**
+     * B2 的 R 按钮（方案 §2.1）的假响应。undefined = 成功但没有新目录块
+     * （旧后端）；{ error } = 失败，文案原样进 "目录刷新失败，已保留旧值 · …"。
+     */
+    catalogRefresh: undefined as { model?: unknown; error?: string } | undefined,
+  }
   const client = {
     request: async (method: string, params: Record<string, unknown> = {}) => {
       if (method === "config.setup") {
         state.setupPayload = params
         return { ok: true, result: snapshot }
       }
-      return { ok: true, result: setupOptions(language) }
+      if (method === "config.catalog.refresh") {
+        if (state.catalogRefresh?.error) {
+          return { ok: false, error: { message: state.catalogRefresh.error } }
+        }
+        return { ok: true, result: { model: state.catalogRefresh?.model } }
+      }
+      return { ok: true, result: setupOptions(language, extraOptions) }
     },
   }
   return { client: client as unknown as BackendClient, state }
 }
 
-async function openWizard(language: string) {
-  const backend = stubBackend(language)
+async function openWizard(
+  language: string,
+  extraOptions: Record<string, unknown> = {},
+  size: { width: number; height: number } = { width: 120, height: 30 },
+) {
+  const backend = stubBackend(language, extraOptions)
   const view = await testRender(
     () => (
       <box width="100%" height="100%">
@@ -181,7 +268,7 @@ async function openWizard(language: string) {
         />
       </box>
     ),
-    { width: 120, height: 30, kittyKeyboard: true },
+    { width: size.width, height: size.height, kittyKeyboard: true },
   )
   await settle(view)
   return { view, state: backend.state }
@@ -482,11 +569,234 @@ async function statusLineCases() {
   }
 }
 
+/** 屏幕上的 `▸` 焦点行（去掉边框字符后按内容匹配）。 */
+function focusRows(frame: string, pattern: RegExp): string[] {
+  return frame
+    .split("\n")
+    .map((line) => line.replace(/[│┌┐└┘─]/g, "").trim())
+    .filter((line) => pattern.test(line))
+}
+
+/** 规格屏编辑框里的文本（整行只有数字的那些行；行摘要带标签，不会误命中）。 */
+function editBoxValues(frame: string): string[] {
+  return frame
+    .split("\n")
+    .map((line) => line.replace(/[│┌┐└┘─]/g, "").trim())
+    .filter((line) => /^\d+$/.test(line))
+}
+
+/**
+ * 用给定 source 打开「模型规格」屏（custom 预设顺序：runtime → route_chat →
+ * route_review → model_spec，3 次 Enter）并返回 120×30 帧。
+ */
+async function specFrameForSource(language: string, source?: string) {
+  const { view } = await openWizard(language, {
+    model: modelSpecFixture(source === undefined ? { source: undefined } : { source }),
+    routing: customRouting,
+  })
+  // 屏标题跟 ui_language 走（bilingualScreenTitle）：en-US 下是 "Model spec"。
+  const title = String(language).toLowerCase().startsWith("en") ? /Model spec/ : /模型规格/
+  try {
+    const frame = await advance(view, title, 5)
+    console.log(dumpFrame(frame, `spec-source-${String(source ?? "missing")}-${language}`))
+    return frame
+  } finally {
+    view.renderer.destroy()
+  }
+}
+
+/**
+ * B2 模型规格屏的帧证据（docs/mimo-config-wizard-ui.md）。
+ *
+ * 覆盖：120×30 与 209×51 两个尺寸、source 徽标三态 + unknown、
+ * `needs_verification` 的双数字提示、`bounds` 边界提示、本地槽行。
+ */
+async function specScreenFrames() {
+  console.log("\n[F] B2 模型规格屏：规格数据 / source 徽标 / needs_verification（zh-CN, custom 顺序）")
+  const options = { model: modelSpecFixture(), routing: customRouting }
+
+  const narrow = await openWizard("zh-CN", options)
+  try {
+    const frame = await advance(narrow.view, /模型规格/, 5)
+    console.log(dumpFrame(frame, "spec-120x30"))
+    check(/模型规格/.test(frame), "custom 顺序：route_review 之后进入模型规格屏")
+    check(/deepseek · deepseek-flash/.test(frame), "规格头行 = provider · model")
+    check(/models\.dev ✓/.test(frame), "source 徽标：models.dev ✓")
+    check(/上下文长度\s+128000\s+范围 1024–10000000/.test(frame), "远端上下文长度 + 编辑边界提示")
+    check(/最大输出\s+8192/.test(frame), "远端最大输出")
+    check(/本地上下文\s+32768/.test(frame), "本地槽上下文长度（slots.local 存在才显示）")
+    check(/本地最大输出\s+4096/.test(frame), "本地槽最大输出")
+    check(
+      /与官方数据不一致：当前 128000 \/ models\.dev 1000000/.test(frame),
+      "needs_verification 摆出两个数字（当前值 / 目录值）",
+    )
+    check(/推理能力\s+档位 low\/high\/max · 开关/.test(frame), "reasoning 摘要行")
+    check(/R 重新获取 · ↑↓ 编辑字段 · Enter 下一步 · Esc 返回/.test(frame), "页脚键盘说明")
+  } finally {
+    narrow.view.renderer.destroy()
+  }
+
+  const wide = await openWizard("zh-CN", options, { width: 209, height: 51 })
+  try {
+    const frame = await advance(wide.view, /模型规格/, 5)
+    console.log(dumpFrame(frame, "spec-209x51"))
+    check(/deepseek · deepseek-flash/.test(frame), "209×51 规格头行")
+    check(/models\.dev ✓/.test(frame), "209×51 source 徽标")
+    check(/上下文长度\s+128000/.test(frame), "209×51 远端上下文长度")
+    check(
+      /与官方数据不一致：当前 128000 \/ models\.dev 1000000/.test(frame),
+      "209×51 needs_verification 双数字",
+    )
+  } finally {
+    wide.view.renderer.destroy()
+  }
+
+  const cacheFrame = await specFrameForSource("zh-CN", "cache")
+  check(/deepseek · deepseek-flash\s+缓存/.test(cacheFrame), "source=cache → 徽标「缓存」")
+  // 反向：徽标位不能写 models.dev（needs_verification 那行的 "models.dev 1000000" 是数据来源说明，不算）。
+  check(!/deepseek · deepseek-flash\s+models\.dev/.test(cacheFrame), "cache 徽标不冒充 models.dev")
+
+  const builtinFrame = await specFrameForSource("zh-CN", "builtin")
+  check(/deepseek · deepseek-flash\s+内置/.test(builtinFrame), "source=builtin → 徽标「内置」")
+
+  const unknownFrame = await specFrameForSource("zh-CN", "unknown")
+  check(/deepseek · deepseek-flash\s+未知/.test(unknownFrame), "source=unknown → 徽标「未知」")
+
+  const missingFrame = await specFrameForSource("zh-CN")
+  check(/deepseek · deepseek-flash\s+未知/.test(missingFrame), "source 缺失（旧后端）→ 徽标「未知」")
+
+  const englishFrame = await specFrameForSource("en-US", "builtin")
+  check(/Model spec/.test(englishFrame), "en-US 屏标题 Model spec")
+  check(/deepseek · deepseek-flash\s+builtin/.test(englishFrame), "en-US source=builtin → 徽标 builtin")
+
+  // R 重新获取（§2.1/§6.6）：成功 → 编辑框改用新目录值 + 一行状态；失败 → 保留旧值 + 原因。
+  const refreshed = await openWizard("zh-CN", {
+    model: modelSpecFixture({ context_window: 128000, source: "builtin" }),
+    routing: customRouting,
+  })
+  try {
+    await advance(refreshed.view, /模型规格/, 5)
+    refreshed.state.catalogRefresh = { model: modelSpecFixtureWithRemote(1000000, "models.dev") }
+    refreshed.view.mockInput.pressKey("r")
+    await settle(refreshed.view)
+    const frame = refreshed.view.captureCharFrame()
+    console.log(dumpFrame(frame, "spec-refresh-ok-zh"))
+    check(/目录已刷新 · models\.dev ✓/.test(frame), "R 重新获取成功 → 状态行带新来源")
+    check(/上下文长度\s+1000000/.test(frame), "刷新成功后编辑框改用目录值")
+    check(/deepseek · deepseek-flash\s+models\.dev ✓/.test(frame), "刷新成功后 source 徽标更新")
+    check(editBoxValues(frame).includes("1000000"), "刷新后输入框本身也是新值（不只是行摘要）")
+    // 刷新会让本屏重绘：紧接着按 ↓（= 先回写当前字段再换行）必须仍然活着，
+    // 且回写的是刷新后的值（这条正是"输入框被重建后 ref 失效"的探针）。
+    refreshed.view.mockInput.pressArrow("down")
+    await settle(refreshed.view)
+    const afterDown = refreshed.view.captureCharFrame()
+    console.log(dumpFrame(afterDown, "spec-refresh-then-down-zh"))
+    check(/▸ 最大输出\s+8192/.test(afterDown), "刷新后 ↓ 仍能换字段（焦点到最大输出）")
+    check(/上下文长度\s+1000000/.test(afterDown), "刷新后 ↓ 回写的是新目录值")
+    check(editBoxValues(afterDown).join(",") === "8192", "换字段后输入框装的是新字段的值", editBoxValues(afterDown).join(","))
+  } finally {
+    refreshed.view.renderer.destroy()
+  }
+
+  const refreshFailed = await openWizard("zh-CN", { model: modelSpecFixture(), routing: customRouting })
+  try {
+    await advance(refreshFailed.view, /模型规格/, 5)
+    refreshFailed.state.catalogRefresh = { error: "models.dev 不可达" }
+    refreshFailed.view.mockInput.pressKey("r")
+    await settle(refreshFailed.view)
+    const frame = refreshFailed.view.captureCharFrame()
+    console.log(dumpFrame(frame, "spec-refresh-error-zh"))
+    check(
+      /目录刷新失败，已保留旧值 · Error: models\.dev 不可达/.test(frame),
+      "R 重新获取失败 → 保留旧值 + 原因",
+    )
+    check(/上下文长度\s+128000/.test(frame), "刷新失败后编辑框仍是旧值")
+  } finally {
+    refreshFailed.view.renderer.destroy()
+  }
+}
+
+/**
+ * B3 中转站五项表单的帧证据（docs/mimo-config-wizard-ui.md）。
+ *
+ * 这一屏只在 cloud/local 顺序里（custom 顺序没有它）：runtime → provider → base_url →
+ * api_format → api_key → model → model_spec → custom_endpoint，7 次 Enter。
+ */
+async function customEndpointForm() {
+  console.log("\n[G] B3 中转站五项表单（fixture: custom_endpoint 满值；120×30, zh-CN）")
+  const { view, state } = await openWizard("zh-CN", {
+    model: modelSpecFixture(),
+    custom_endpoint: customEndpointFixture,
+  })
+  const fieldRows = /^(▸\s+)?(Base URL|API Key|模型名|上下文长度|最大输出)\s/
+  try {
+    const frame = await advance(view, /中转站配置/, 10)
+    console.log(dumpFrame(frame, "custom-endpoint-zh"))
+    check(/中转站配置/.test(frame), "cloud 顺序：model_spec 之后进入中转站屏")
+    // 进度条不能倒退：上一屏 model_spec 是 3/6，这一屏也是第 3 阶段（凭据与模型）。
+    check(/3\/6 · 凭据与模型 · 中转站配置/.test(frame), "中转站屏与 model_spec 同属第 3 阶段")
+    check(/Custom Endpoint/.test(frame), "端点显示名（custom_endpoint.display_name）")
+    check(/Key 已配置/.test(frame), "api_key_configured=true → Key 已配置")
+    let rows = focusRows(frame, fieldRows)
+    check(/^▸ Base URL\s+https:\/\/relay\.example\.com\/v1/.test(rows[0] ?? ""), "五项之一 base_url 预填", rows.join(" | "))
+    check(/^API Key\s+••••/.test(rows[1] ?? ""), "五项之二 api_key 行（掩码回显，不打印密钥）", rows.join(" | "))
+    check(/^模型名\s+relay-model/.test(rows[2] ?? ""), "五项之三 模型名", rows.join(" | "))
+    check(/^上下文长度\s+200000/.test(rows[3] ?? ""), "五项之四 上下文长度", rows.join(" | "))
+    check(/^最大输出\s+16384/.test(rows[4] ?? ""), "五项之五 最大输出", rows.join(" | "))
+    check(/↑↓ 切换字段 · Enter 下一步 · Esc 返回/.test(frame), "页脚键盘说明")
+
+    // ↓ 把焦点移到下一项：焦点行跟随，行内容不变（回写的是同一份值）。
+    view.mockInput.pressArrow("down")
+    await settle(view)
+    const downFrame = view.captureCharFrame()
+    console.log(dumpFrame(downFrame, "custom-endpoint-down"))
+    rows = focusRows(downFrame, fieldRows)
+    check(/^▸ API Key/.test(rows[1] ?? ""), "↓ 焦点移到 API Key 行", rows.join(" | "))
+    check(/^Base URL\s+https:\/\/relay\.example\.com\/v1/.test(rows[0] ?? ""), "↓ 不改动上一行的值", rows.join(" | "))
+
+    // 继续 ↓ 到「上下文长度」：出现该槽的边界提示（来自 remoteSpec().bounds）。
+    for (let i = 0; i < 2; i += 1) view.mockInput.pressArrow("down")
+    await settle(view)
+    const boundsFrame = view.captureCharFrame()
+    console.log(dumpFrame(boundsFrame, "custom-endpoint-bounds"))
+    rows = focusRows(boundsFrame, fieldRows)
+    check(/^▸ 上下文长度/.test(rows[3] ?? ""), "↓↓ 焦点移到 上下文长度", rows.join(" | "))
+    check(/范围 1024–10000000/.test(boundsFrame), "焦点在规格字段时显示编辑边界")
+
+    // Esc 回上一屏：中转站屏的上一屏是模型规格屏。
+    view.mockInput.pressEscape()
+    await settle(view, 4)
+    check(/模型规格/.test(view.captureCharFrame()), "Esc 从中转站退回模型规格屏")
+
+    // 观测（不判定）：带 custom_endpoint 预填值时，云端流程保存的载荷长什么样。
+    // 它会带上 provider_name:"custom"（把远端槽切到中转站），而确认页仍显示预设的
+    // Provider——这个不对称是 docs/mimo-config-wizard-ui.md §6.1 的未决项，
+    // 由实现者/用户决定收口方式，这里只留证据、不锁死语义。
+    const githubFrame = await advance(view, /GitHub Token/, 4)
+    check(/GitHub Token/.test(githubFrame), "中转站屏之后进入 GitHub Token 屏")
+    await advance(view, /界面语言/)
+    await advance(view, /回复语言/)
+    await advance(view, /输出格式|Terminal/)
+    await advance(view, /自动发布|GitHub/)
+    await advance(view, /Chat 布局|紧凑/)
+    const summaryFrame = await advance(view, /确认并保存/)
+    console.log(dumpFrame(summaryFrame, "summary-custom-endpoint-zh"))
+    view.mockInput.pressEnter()
+    await settle(view)
+    console.log(`  观测 payload（不判定）: ${JSON.stringify(state.setupPayload ?? {})}`)
+    check(state.setupPayload !== undefined, "中转站流程同样能走到确认页并提交（载荷已记录）")
+  } finally {
+    view.renderer.destroy()
+  }
+}
+
 async function main() {
   await customRouteFlow()
   await presetFlow()
   await localPresetFlow()
   await englishCopy()
+  await specScreenFrames()
+  await customEndpointForm()
   await statusLineCases()
   console.log(`\n${failures.length === 0 ? "ALL PASS" : `${failures.length} FAIL`} · frames: ${outDir}`)
   if (failures.length > 0) {

@@ -247,3 +247,103 @@ export function routingStatusText(routing: RoutingSnapshot | undefined, language
   if (reviewText) parts.push(`REVIEW ${reviewText}`)
   return parts.join(" · ")
 }
+// ---------------------------------------------------------------------
+// B2/B3 模型规格与中转站的 config.setup 载荷（docs/b2b3-wiring-design.md §2.5/§2.6）
+// ---------------------------------------------------------------------
+
+/** 规格编辑值：undefined = 不提交（保持落盘值，后端 `_coerce_spec_int` 的 null 语义）。 */
+export type ModelSpecSetupValues = {
+  context_window?: number | undefined
+  max_output?: number | undefined
+  local_context_window?: number | undefined
+  local_max_output?: number | undefined
+}
+
+/**
+ * 把规格编辑值并进 `config.setup` 载荷（§2.5）。
+ *
+ * 只带**给了值**的字段：undefined/null 一律不发，后端"缺失 = 保持落盘值"。
+ * 远端槽用 `context_window`/`max_output`，本地槽用 `local_*`。
+ */
+export function setupModelSpecFields(values: ModelSpecSetupValues): Record<string, number> {
+  const payload: Record<string, number> = {}
+  if (typeof values.context_window === "number" && Number.isFinite(values.context_window)) {
+    payload.context_window = Math.trunc(values.context_window)
+  }
+  if (typeof values.max_output === "number" && Number.isFinite(values.max_output)) {
+    payload.max_output = Math.trunc(values.max_output)
+  }
+  if (
+    typeof values.local_context_window === "number" &&
+    Number.isFinite(values.local_context_window)
+  ) {
+    payload.local_context_window = Math.trunc(values.local_context_window)
+  }
+  if (typeof values.local_max_output === "number" && Number.isFinite(values.local_max_output)) {
+    payload.local_max_output = Math.trunc(values.local_max_output)
+  }
+  return payload
+}
+
+/** 中转站五项表单的编辑值（§2.6）：undefined = 不提交。 */
+export type CustomEndpointSetupValues = {
+  base_url?: string | undefined
+  api_key?: string | undefined
+  model_name?: string | undefined
+  context_window?: number | undefined
+  max_output?: number | undefined
+}
+
+/**
+ * 中转站（custom）逐项写入的载荷（§2.6）。
+ *
+ * 复用 `_apply_setup` 的既有字段：`provider_name:"custom"` + `api_key`/`model_name`/
+ * `base_url`/`api_format`；规格走 §2.5 的 `context_window`/`max_output`。
+ * **不套用官方预设**：base_url 为空时也发（后端允许 custom 无预设端点）。
+ */
+export function setupCustomEndpointFields(
+  values: CustomEndpointSetupValues,
+  apiFormat = "openai",
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = { provider_name: "custom", api_format: apiFormat }
+  const baseUrl = String(values.base_url ?? "").trim()
+  if (baseUrl) payload.base_url = baseUrl
+  const apiKey = String(values.api_key ?? "").trim()
+  if (apiKey) payload.api_key = apiKey
+  const modelName = String(values.model_name ?? "").trim()
+  if (modelName) payload.model_name = modelName
+  if (typeof values.context_window === "number" && Number.isFinite(values.context_window)) {
+    payload.context_window = Math.trunc(values.context_window)
+  }
+  if (typeof values.max_output === "number" && Number.isFinite(values.max_output)) {
+    payload.max_output = Math.trunc(values.max_output)
+  }
+  return payload
+}
+
+/**
+ * 规格输入的边界校验提示（前端先行提示，后端仍有最终校验）。
+ * 返回空串 = 合法；返回文案 = 越界/非整数。
+ */
+export function validateSpecInput(
+  raw: string,
+  bounds: [number, number] | undefined,
+  language?: string,
+): string {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  const trimmed = String(raw ?? "").trim()
+  if (!trimmed) return ""
+  if (!/^-?\d+$/.test(trimmed)) {
+    return en ? "must be an integer" : "需为整数"
+  }
+  const value = Number(trimmed)
+  if (!Number.isFinite(value)) {
+    return en ? "must be an integer" : "需为整数"
+  }
+  if (bounds && (value < bounds[0] || value > bounds[1])) {
+    return en
+      ? `must be between ${bounds[0]} and ${bounds[1]}`
+      : `需在 ${bounds[0]}–${bounds[1]} 之间`
+  }
+  return ""
+}

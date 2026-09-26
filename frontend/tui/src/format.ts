@@ -400,3 +400,118 @@ export function formatChatHistoryLines(
     return `${String(index + 1).padStart(2, " ")}  [${label(message.role)}] ${truncated}`
   })
 }
+// ---------------------------------------------------------------------
+// B2/B3 模型规格展示（docs/mimo-config-wizard-ui.md）
+// 纯函数，便于单测；app.tsx 只负责取数与排版。
+// ---------------------------------------------------------------------
+
+/**
+ * source 徽标（任务要求的三态 + unknown）：
+ *   models.dev → `models.dev ✓`；cache → `缓存`/`cache`；
+ *   builtin → `内置`/`builtin`；unknown/缺失 → `未知`/`unknown`。
+ */
+export function formatSourceBadge(source: string | undefined, language?: string): string {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  const value = String(source ?? "").trim().toLowerCase()
+  if (value === "models.dev") return "models.dev ✓"
+  if (value === "cache") return en ? "cache" : "缓存"
+  if (value === "builtin") return en ? "builtin" : "内置"
+  return en ? "unknown" : "未知"
+}
+
+/** `needs_verification` 提示：两个数字都摆出来，不覆盖用户值（§2.8 硬规则 1）。 */
+export function formatNeedsVerification(
+  block: { context_window?: number; catalog?: { context_window?: number; max_output?: number } | null; max_output?: number },
+  language?: string,
+): string {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  const current = block.context_window
+  const catalog = block.catalog?.context_window
+  if (typeof current !== "number" || typeof catalog !== "number") {
+    return en ? "Differs from models.dev (values unavailable)" : "与官方数据不一致（数值不可用）"
+  }
+  return en
+    ? `Differs from models.dev: current ${current} / models.dev ${catalog}`
+    : `与官方数据不一致：当前 ${current} / models.dev ${catalog}`
+}
+
+/** 编辑边界提示：`范围 1024–10000000`。缺边界返回空串。 */
+export function formatSpecBoundHint(
+  bounds: [number, number] | undefined,
+  language?: string,
+): string {
+  if (!bounds) return ""
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  return en ? `range ${bounds[0]}–${bounds[1]}` : `范围 ${bounds[0]}–${bounds[1]}`
+}
+
+/**
+ * 一行规格摘要：`provider · model`；缺字段时不显示（兼容旧后端）。
+ * `provider`/`model` 都缺失返回空串。
+ */
+export function formatModelHeadline(
+  block: { provider?: string; model?: string },
+  language?: string,
+): string {
+  const provider = String(block.provider ?? "").trim()
+  const model = String(block.model ?? "").trim()
+  if (!provider && !model) return ""
+  return [provider, model].filter(Boolean).join(" · ")
+}
+
+/** 数字行：`上下文长度  1000000`。值缺失返回空串（调用方整行不显示）。 */
+export function formatSpecValueLine(
+  label: string,
+  value: number | undefined,
+  hint?: string,
+): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return ""
+  return hint ? `${label}  ${value}  (${hint})` : `${label}  ${value}`
+}
+
+/** `config.catalog.refresh` 状态文案（刷新中/成功/失败）。 */
+export function formatCatalogRefreshStatus(
+  state: "idle" | "refreshing" | "success" | "error",
+  detail?: string,
+  language?: string,
+): string {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  if (state === "refreshing") return en ? "Refreshing catalog…" : "目录刷新中…"
+  if (state === "success") {
+    const badge = detail ? ` · ${detail}` : ""
+    return en ? `Catalog refreshed${badge}` : `目录已刷新${badge}`
+  }
+  if (state === "error") {
+    const reason = detail ? ` · ${detail}` : ""
+    return en
+      ? `Catalog refresh failed, previous values kept${reason}`
+      : `目录刷新失败，已保留旧值${reason}`
+  }
+  return ""
+}
+
+/**
+ * 中转站五项表单的行标签（双语）。
+ * 顺序固定：base_url / api_key / model / context_window / max_output。
+ */
+export function customEndpointFieldLabels(language?: string): Array<{
+  key: "base_url" | "api_key" | "model" | "context_window" | "max_output"
+  label: string
+}> {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  return en
+    ? [
+        { key: "base_url", label: "Base URL" },
+        { key: "api_key", label: "API Key" },
+        { key: "model", label: "Model" },
+        { key: "context_window", label: "Context window" },
+        { key: "max_output", label: "Max output" },
+      ]
+    : [
+        { key: "base_url", label: "Base URL" },
+        { key: "api_key", label: "API Key" },
+        { key: "model", label: "模型名" },
+        { key: "context_window", label: "上下文长度" },
+        { key: "max_output", label: "最大输出" },
+      ]
+}

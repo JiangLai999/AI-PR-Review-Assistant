@@ -211,3 +211,195 @@ export function isForeignSessionEvent(event: BackendEvent, sessionId: string | u
   const eventSession = typeof event.session_id === "string" ? event.session_id : ""
   return Boolean(eventSession && eventSession !== sessionId)
 }
+// ---------------------------------------------------------------------
+// B2/B3 模型规格契约（docs/b2b3-wiring-design.md §2.2/§2.6/§2.8）
+// 后端可能未落地或部分落地，所有字段允许缺失；解析器负责兜底，不抛错。
+// ---------------------------------------------------------------------
+
+/** `catalog` 命中块（§2.2）：目录原值 + 来源 + 抓取时间。 */
+export type ModelSpecCatalog = {
+  context_window?: number
+  max_output?: number
+  source?: string
+  fetched_at?: string
+}
+
+/** `bounds` 编辑边界（§2.2）：`[min, max]`。 */
+export type ModelSpecBounds = {
+  context_window?: [number, number]
+  max_output?: [number, number]
+}
+
+/** `catalog_state` 目录状态（§2.2）。 */
+export type CatalogState = {
+  enabled?: boolean
+  source?: string
+  reason?: string
+  fetched_at?: string
+}
+
+/**
+ * 一个槽位的模型规格块（§2.2/§2.8）：`config.options.model` / `config.snapshot.model_spec`
+ * / `model.status.model_spec` 三出口同键同形。
+ */
+export type ModelSpecBlock = {
+  provider?: string
+  model?: string
+  /** models.dev | cache | builtin | unknown */
+  source?: string
+  context_window?: number
+  max_output?: number
+  reasoning?: string | null
+  reasoning_controls?: Array<Record<string, unknown>>
+  needs_verification?: boolean
+  endpoint_matches_preset?: boolean
+  catalog?: ModelSpecCatalog | null
+  preset?: { context_window?: number; max_output?: number } | null
+  bounds?: ModelSpecBounds
+  catalog_state?: CatalogState
+  slots?: { remote?: ModelSpecBlock; local?: ModelSpecBlock }
+}
+
+/** `config.options.model`：顶层描述活跃槽，`slots` 给每槽明细（§2.2）。 */
+export type ModelSpecOptions = ModelSpecBlock
+
+/** `config.options.custom_endpoint`（§2.6）：中转站读出口。 */
+export type CustomEndpointOptions = {
+  name?: string
+  display_name?: string
+  base_url?: string
+  api_format?: string
+  default_model?: string
+  api_key_configured?: boolean
+  models?: string[]
+  context_window?: number
+  max_output?: number
+  source?: string
+  needs_verification?: boolean
+}
+
+const asOptionalNumber = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isFinite(value) ? value : undefined
+
+function parseCatalogView(raw: unknown): ModelSpecCatalog | null | undefined {
+  if (raw === null) return null
+  if (!raw || typeof raw !== "object") return undefined
+  const record = raw as Record<string, unknown>
+  return {
+    context_window: asOptionalNumber(record.context_window),
+    max_output: asOptionalNumber(record.max_output),
+    source: typeof record.source === "string" ? record.source : undefined,
+    fetched_at: typeof record.fetched_at === "string" ? record.fetched_at : undefined,
+  }
+}
+
+function parseBoundsPair(raw: unknown): [number, number] | undefined {
+  if (!Array.isArray(raw) || raw.length < 2) return undefined
+  const lo = asOptionalNumber(raw[0])
+  const hi = asOptionalNumber(raw[1])
+  return lo !== undefined && hi !== undefined ? [lo, hi] : undefined
+}
+
+function parseBounds(raw: unknown): ModelSpecBounds | undefined {
+  if (!raw || typeof raw !== "object") return undefined
+  const record = raw as Record<string, unknown>
+  const context = parseBoundsPair(record.context_window)
+  const output = parseBoundsPair(record.max_output)
+  if (!context && !output) return undefined
+  return { context_window: context, max_output: output }
+}
+
+function parseCatalogState(raw: unknown): CatalogState | undefined {
+  if (!raw || typeof raw !== "object") return undefined
+  const record = raw as Record<string, unknown>
+  return {
+    enabled: typeof record.enabled === "boolean" ? record.enabled : undefined,
+    source: typeof record.source === "string" ? record.source : undefined,
+    reason: typeof record.reason === "string" ? record.reason : undefined,
+    fetched_at: typeof record.fetched_at === "string" ? record.fetched_at : undefined,
+  }
+}
+
+function parsePresetPair(
+  raw: unknown,
+): { context_window?: number; max_output?: number } | null | undefined {
+  if (raw === null) return null
+  if (!raw || typeof raw !== "object") return undefined
+  const record = raw as Record<string, unknown>
+  return {
+    context_window: asOptionalNumber(record.context_window),
+    max_output: asOptionalNumber(record.max_output),
+  }
+}
+
+/**
+ * 解析一个规格块。字段缺失（旧后端）时对应键为 undefined，调用方直接不显示。
+ * `slots` 递归解析 remote/local 两个子块。
+ */
+export function parseModelSpecBlock(raw: unknown): ModelSpecBlock | undefined {
+  if (!raw || typeof raw !== "object") return undefined
+  const record = raw as Record<string, unknown>
+  const block: ModelSpecBlock = {
+    provider: asOptionalString(record.provider),
+    model: asOptionalString(record.model),
+    source: asOptionalString(record.source),
+    context_window: asOptionalNumber(record.context_window),
+    max_output: asOptionalNumber(record.max_output),
+    reasoning: typeof record.reasoning === "string" ? record.reasoning : undefined,
+    needs_verification:
+      typeof record.needs_verification === "boolean" ? record.needs_verification : undefined,
+    endpoint_matches_preset:
+      typeof record.endpoint_matches_preset === "boolean"
+        ? record.endpoint_matches_preset
+        : undefined,
+    catalog: parseCatalogView(record.catalog),
+    preset: parsePresetPair(record.preset),
+    bounds: parseBounds(record.bounds),
+    catalog_state: parseCatalogState(record.catalog_state),
+  }
+  if (Array.isArray(record.reasoning_controls)) {
+    block.reasoning_controls = record.reasoning_controls.filter(
+      (item): item is Record<string, unknown> => Boolean(item) && typeof item === "object",
+    )
+  }
+  if (record.slots && typeof record.slots === "object") {
+    const slots = record.slots as Record<string, unknown>
+    const remote = parseModelSpecBlock(slots.remote)
+    const local = parseModelSpecBlock(slots.local)
+    if (remote || local) block.slots = { remote, local }
+  }
+  return block
+}
+
+/** 解析 `config.options.custom_endpoint`（§2.6）。 */
+export function parseCustomEndpointOptions(raw: unknown): CustomEndpointOptions | undefined {
+  if (!raw || typeof raw !== "object") return undefined
+  const record = raw as Record<string, unknown>
+  return {
+    name: asOptionalString(record.name),
+    display_name: asOptionalString(record.display_name),
+    base_url: typeof record.base_url === "string" ? record.base_url : undefined,
+    api_format: asOptionalString(record.api_format),
+    default_model: asOptionalString(record.default_model),
+    api_key_configured:
+      typeof record.api_key_configured === "boolean" ? record.api_key_configured : undefined,
+    models: Array.isArray(record.models)
+      ? record.models.filter((item): item is string => typeof item === "string")
+      : undefined,
+    context_window: asOptionalNumber(record.context_window),
+    max_output: asOptionalNumber(record.max_output),
+    source: asOptionalString(record.source),
+    needs_verification:
+      typeof record.needs_verification === "boolean" ? record.needs_verification : undefined,
+  }
+}
+
+/**
+ * `config.catalog.refresh` 返回 `{model: ModelSpecOptions}`（§2.1）。
+ * 解析失败返回 undefined，调用方保留旧值。
+ */
+export function parseCatalogRefreshResult(raw: unknown): ModelSpecOptions | undefined {
+  if (!raw || typeof raw !== "object") return undefined
+  const record = raw as Record<string, unknown>
+  return parseModelSpecBlock(record.model)
+}

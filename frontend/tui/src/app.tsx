@@ -6,9 +6,15 @@ import {
   isCurrentAssistantEvent,
   isForeignSessionEvent,
   parseAssistantFinishMeta,
+  parseCatalogRefreshResult,
   parseCompactCommandResult,
+  parseCustomEndpointOptions,
+  parseModelSpecBlock,
   parseReasoningDelta,
   parseThinkCommandResult,
+  type CustomEndpointOptions,
+  type ModelSpecBlock,
+  type ModelSpecOptions,
 } from "./protocol"
 import { sendWithSessionRecovery } from "./session-recovery"
 import { commandArgumentLabel, commandCompletion, commandDescription, commandEnterAction, commandMatches } from "./command-menu"
@@ -16,14 +22,20 @@ import {
   codeFoldBadge,
   codeFoldStateKey,
   CODE_FOLD_LINE_THRESHOLD,
+  customEndpointFieldLabels,
   cursorFrame,
   foldableCodeBlocks,
   foldMarkdownCodeBlocks,
+  formatCatalogRefreshStatus,
   formatChatHistoryLines,
   formatCompactFailure,
   formatCompactSummary,
   formatContextUsage,
   formatDurationSeconds,
+  formatModelHeadline,
+  formatNeedsVerification,
+  formatSourceBadge,
+  formatSpecBoundHint,
   formatThinkLevel,
   formatThinkUnsupported,
   type MarkdownSegment,
@@ -86,8 +98,11 @@ import {
   routeBoxes,
   routeSummary,
   routingStatusText,
+  setupCustomEndpointFields,
+  setupModelSpecFields,
   setupSlotFields,
   slotIndexOf,
+  validateSpecInput,
   type RouteBox,
   type RouteSlotValue,
   type RoutingSnapshot,
@@ -245,6 +260,11 @@ type RuntimeSnapshot = {
    * `config.options.repo_context.value`，这里只是快照侧的兜底。
    */
   repo_context?: string | RepoContextOptions
+  /** B2 模型规格块（config.snapshot / model.status 同键同形）。 */
+  model_spec?: ModelSpecBlock
+  /** model.status 顶层 source 角标（= model_spec.source，状态栏一行读取）。 */
+  source?: string
+  needs_verification?: boolean
 }
 
 const BRAND_PIXEL = [
@@ -1175,6 +1195,10 @@ type SetupOptions = {
   }
   /** 与 `config.snapshot` 同形的槽位快照（方案 §5.4）。 */
   routing?: RoutingSnapshot
+  /** B2 模型规格（§2.2）：顶层描述活跃槽，`slots` 给每槽明细。缺字段时不显示。 */
+  model?: ModelSpecOptions
+  /** B3 中转站读出口（§2.6）。 */
+  custom_endpoint?: CustomEndpointOptions
 }
 
 type SetupStep = "runtime" | "provider" | "model" | "key" | "local" | "summary"
@@ -1510,6 +1534,8 @@ type SetupScreen =
   | "api_format"
   | "api_key"
   | "model"
+  | "model_spec"
+  | "custom_endpoint"
   | "local_base_url"
   | "local_model"
   | "github"
@@ -1532,6 +1558,11 @@ const screenStages: Record<SetupScreen, number> = {
   api_format: 2,
   api_key: 3,
   model: 3,
+  model_spec: 3,
+  // 中转站与 api_key/model/model_spec 同属第 3 阶段"凭据与模型"：它在 cloud/local
+  // 顺序里紧跟 model_spec，标成 2 会让进度条从 3/6 倒退到 2/6（实测帧见
+  // .pytest_claude/ai-pr-review-route-check/frame-custom-endpoint-zh.txt）。
+  custom_endpoint: 3,
   local_base_url: 2,
   local_model: 3,
   github: 4,
@@ -1564,6 +1595,8 @@ const screenTitles: Record<SetupScreen, string> = {
   api_format: "选择 API 协议格式",
   api_key: "配置 API Key",
   model: "选择模型",
+  model_spec: "模型规格",
+  custom_endpoint: "中转站配置",
   local_base_url: "配置本地 Ollama Endpoint",
   local_model: "选择本地模型",
   github: "配置 GitHub Token",
@@ -1590,6 +1623,8 @@ const bilingualScreenTitle = (value: SetupScreen, en: boolean, fallback: string)
   if (value === "repo_context") {
     return en ? "Repository context · review prefetch" : "仓库上下文 · 审查预取"
   }
+  if (value === "model_spec") return en ? "Model spec" : "模型规格"
+  if (value === "custom_endpoint") return en ? "Custom endpoint" : "中转站配置"
   return fallback
 }
 
@@ -1651,6 +1686,23 @@ export function SetupWizardDialog(props: SetupDialogProps) {
   const [apiKey, setApiKey] = createSignal("")
   const [localBaseUrl, setLocalBaseUrl] = createSignal("")
   const [githubToken, setGithubToken] = createSignal("")
+  // B2/B3 模型规格与中转站（docs/mimo-config-wizard-ui.md）
+  const [specRemoteContext, setSpecRemoteContext] = createSignal("")
+  const [specRemoteOutput, setSpecRemoteOutput] = createSignal("")
+  const [specLocalContext, setSpecLocalContext] = createSignal("")
+  const [specLocalOutput, setSpecLocalOutput] = createSignal("")
+  const [customBaseUrl, setCustomBaseUrl] = createSignal("")
+  const [customApiKey, setCustomApiKey] = createSignal("")
+  const [customModelName, setCustomModelName] = createSignal("")
+  const [customContextWindow, setCustomContextWindow] = createSignal("")
+  const [customMaxOutput, setCustomMaxOutput] = createSignal("")
+  /** 中转站表单焦点行（0..4：base_url/api_key/model/context_window/max_output）。 */
+  const [customFieldIndex, setCustomFieldIndex] = createSignal(0)
+  /** catalog.refresh 状态：idle | refreshing | success | error。 */
+  const [catalogRefresh, setCatalogRefresh] = createSignal<"idle" | "refreshing" | "success" | "error">("idle")
+  const [catalogRefreshDetail, setCatalogRefreshDetail] = createSignal("")
+  /** model_spec 可编辑字段焦点行（0..3：remote_ctx/remote_out/local_ctx/local_out）。 */
+  const [specFieldIndex, setSpecFieldIndex] = createSignal(0)
 
   const providers = () => options()?.providers ?? []
   const apiFormats = () => options()?.api_formats ?? [{ value: "openai", label: "OpenAI 兼容" }]
@@ -1702,6 +1754,73 @@ export function SetupWizardDialog(props: SetupDialogProps) {
   const remoteKeyConfigured = () =>
     options()?.current.remote_api_key_configured ?? options()?.current.api_key_configured ?? false
   const githubConfigured = () => options()?.current.github_token_configured ?? false
+
+  /** B2 模型规格块：`config.options.model` 经协议解析器兜底（旧后端缺键 → undefined）。 */
+  const modelSpec = (): ModelSpecOptions | undefined => parseModelSpecBlock(options()?.model)
+  /** 活跃槽规格（顶层即活跃槽，§2.2）。 */
+  const activeSpec = (): ModelSpecBlock | undefined => modelSpec()
+  /** 远端槽规格。 */
+  const remoteSpec = (): ModelSpecBlock | undefined => modelSpec()?.slots?.remote ?? modelSpec()
+  /** 本地槽规格。 */
+  const localSpec = (): ModelSpecBlock | undefined => modelSpec()?.slots?.local
+  /** B3 中转站读出口。 */
+  const customEndpoint = (): CustomEndpointOptions | undefined =>
+    parseCustomEndpointOptions(options()?.custom_endpoint)
+  /** 预填规格编辑框：onMount 与刷新后各一次。 */
+  const primeSpecFields = (spec: ModelSpecOptions | undefined) => {
+    const remote = spec?.slots?.remote ?? spec
+    const local = spec?.slots?.local
+    setSpecRemoteContext(
+      typeof remote?.context_window === "number" ? String(remote.context_window) : "",
+    )
+    setSpecRemoteOutput(typeof remote?.max_output === "number" ? String(remote.max_output) : "")
+    setSpecLocalContext(
+      typeof local?.context_window === "number" ? String(local.context_window) : "",
+    )
+    setSpecLocalOutput(typeof local?.max_output === "number" ? String(local.max_output) : "")
+  }
+  /** 预填中转站五项表单。 */
+  const primeCustomFields = (endpoint: CustomEndpointOptions | undefined) => {
+    setCustomBaseUrl(String(endpoint?.base_url ?? ""))
+    setCustomApiKey("")
+    setCustomModelName(String(endpoint?.default_model ?? ""))
+    setCustomContextWindow(
+      typeof endpoint?.context_window === "number" ? String(endpoint.context_window) : "",
+    )
+    setCustomMaxOutput(typeof endpoint?.max_output === "number" ? String(endpoint.max_output) : "")
+  }
+  /**
+   * 重新获取按钮：调 `config.catalog.refresh`，不阻塞 UI（§2.1）。
+   * 成功 → 用返回的 model 块更新 options 并重填编辑框；失败 → 保留旧值 + 原因。
+   */
+  const refreshCatalog = async () => {
+    if (catalogRefresh() === "refreshing") return
+    setCatalogRefresh("refreshing")
+    setCatalogRefreshDetail("")
+    try {
+      const response = await props.backend.request("config.catalog.refresh", {}, { timeoutMs: PROBE_TIMEOUT_MS })
+      if (!response.ok) throw new Error(response.error?.message ?? "refresh failed")
+      const nextModel = parseCatalogRefreshResult(response.result)
+      if (nextModel) {
+        setOptions((current) => (current ? { ...current, model: nextModel } : current))
+        primeSpecFields(nextModel)
+        // 编辑框本身也要重填（docstring 说的"重填编辑框"）：只改 signal 的话，输入框里
+        // 还是刷新前的文本，下一次 ↑↓/Enter 会把它写回 signal，把刚刷新到的目录值静默盖回
+        // 旧值（manual [F] 的 "刷新后 ↓ 回写的是新目录值" 就是这条的探针）。
+        const field = Math.min(specFieldIndex(), Math.max(0, specFieldCount() - 1))
+        setSpecFieldIndex(field)
+        setInputValue(specFieldValue(field))
+        const source = nextModel.catalog_state?.source ?? nextModel.source ?? ""
+        setCatalogRefresh("success")
+        setCatalogRefreshDetail(source ? formatSourceBadge(source, uiLanguage()) : "")
+      } else {
+        setCatalogRefresh("success")
+      }
+    } catch (cause) {
+      setCatalogRefresh("error")
+      setCatalogRefreshDetail(String(cause))
+    }
+  }
 
   /** 助手当前选中的界面语言：新增文案跟着它实时切换（保存前就能看到效果）。 */
   const uiLanguage = () => selectedUiLanguage()
@@ -1772,6 +1891,8 @@ export function SetupWizardDialog(props: SetupDialogProps) {
     "api_format",
     "api_key",
     "model",
+    "model_spec",
+    "custom_endpoint",
     "github",
     "ui_language",
     "response_language",
@@ -1786,6 +1907,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
     "runtime",
     "local_base_url",
     "local_model",
+    "model_spec",
     "github",
     "ui_language",
     "response_language",
@@ -1807,6 +1929,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
     "runtime",
     "route_chat",
     "route_review",
+    "model_spec",
     "github",
     "ui_language",
     "response_language",
@@ -1830,12 +1953,87 @@ export function SetupWizardDialog(props: SetupDialogProps) {
     setTimeout(() => setInputFocused(true), 50)
   }
 
+  /**
+   * 读当前输入框的文本，但**只认本屏的输入框**（`owner` 必须是正在显示的屏幕）。
+   *
+   * opentui-solid 的 reconciler 只在挂载时回调 ref（`createRenderEffect(() =>
+   * props.ref && props.ref(node))`，没有卸载回调）：切屏后旧的 `Input` 已被销毁，而
+   * `inputRef` 仍指着它，读 `.value` 会抛 "EditBuffer is destroyed"。这个异常在全局
+   * keypress handler 里被吞掉，表现为**按键没反应**——点一次 Enter 就卡在上一屏。
+   *
+   * 跨屏时返回 undefined（调用方直接跳过回写）：此时输入框里的文本属于**别的**屏幕，
+   * 写进本屏的 signal 是串值（例如把 API Key 输入框的内容写进规格字段）。
+   */
+  const liveInputText = (owner: SetupScreen): string | undefined => {
+    if (screen() !== owner) return undefined
+    return (inputRef?.value ?? inputValue()).trim()
+  }
+
+  /** custom_endpoint 五项表单：把当前输入框的值写回对应 signal。 */
+  const commitCustomField = () => {
+    const value = liveInputText("custom_endpoint")
+    if (value === undefined) return
+    const index = customFieldIndex()
+    if (index === 0) setCustomBaseUrl(value)
+    else if (index === 1) setCustomApiKey(value)
+    else if (index === 2) setCustomModelName(value)
+    else if (index === 3) setCustomContextWindow(value)
+    else if (index === 4) setCustomMaxOutput(value)
+  }
+
+  /** custom_endpoint 五项表单：读出对应 signal 作为输入框初值。 */
+  const customFieldValue = (index: number): string => {
+    if (index === 0) return customBaseUrl()
+    if (index === 1) return customApiKey()
+    if (index === 2) return customModelName()
+    if (index === 3) return customContextWindow()
+    return customMaxOutput()
+  }
+
+  /** model_spec 可编辑字段：把当前输入框的值写回对应 signal（同上，只认本屏输入框）。 */
+  const commitSpecField = () => {
+    const value = liveInputText("model_spec")
+    if (value === undefined) return
+    const index = specFieldIndex()
+    if (index === 0) setSpecRemoteContext(value)
+    else if (index === 1) setSpecRemoteOutput(value)
+    else if (index === 2) setSpecLocalContext(value)
+    else if (index === 3) setSpecLocalOutput(value)
+  }
+
+  /** model_spec 可编辑字段：读出对应 signal 作为输入框初值。 */
+  const specFieldValue = (index: number): string => {
+    if (index === 0) return specRemoteContext()
+    if (index === 1) return specRemoteOutput()
+    if (index === 2) return specLocalContext()
+    return specLocalOutput()
+  }
+
+  /** model_spec 可编辑字段行数：有本地槽时 4 行，否则 2 行。 */
+  const specFieldCount = () => (localSpec() ? 4 : 2)
+
   const goTo = (target: SetupScreen) => {
     setError("")
     setInputFocused(false)
     // 进入细化页时焦点落在本屏主方框上（route_chat 选对话、route_review 选审查）。
     if (target === "route_chat") setRouteFocus("chat")
     else if (target === "route_review") setRouteFocus("review")
+    // 进屏只做"复位焦点字段 + 预填初值"，**不回写**：此刻的输入框属于上一屏
+    // （或已随上一屏销毁），回写等于把上一屏的文本写进本屏的 signal。
+    if (target === "custom_endpoint") {
+      setCustomFieldIndex(0)
+      setInputValue(customFieldValue(0))
+      setScreen(target)
+      focusInputSoon()
+      return
+    }
+    if (target === "model_spec") {
+      setSpecFieldIndex(0)
+      setInputValue(specFieldValue(0))
+      setScreen(target)
+      focusInputSoon()
+      return
+    }
     if (isInputScreen(target)) {
       setInputValue(inputDefault(target))
       setScreen(target)
@@ -1851,6 +2049,8 @@ export function SetupWizardDialog(props: SetupDialogProps) {
     else if (screen() === "api_key") setApiKey(value)
     else if (screen() === "local_base_url") setLocalBaseUrl(value)
     else if (screen() === "github") setGithubToken(value)
+    else if (screen() === "custom_endpoint") commitCustomField()
+    else if (screen() === "model_spec") commitSpecField()
   }
 
   const apply = async () => {
@@ -1892,6 +2092,41 @@ export function SetupWizardDialog(props: SetupDialogProps) {
         payload.local_base_url = localBaseUrl().trim() || localConfig.base_url
         payload.local_api_format = localConfig.api_format
       }
+      // B2 模型规格（§2.5）：只带用户改动过的字段，undefined 不发（后端 = 保持落盘值）。
+      const remoteCtx = specRemoteContext().trim()
+      const remoteOut = specRemoteOutput().trim()
+      const localCtx = specLocalContext().trim()
+      const localOut = specLocalOutput().trim()
+      Object.assign(
+        payload,
+        setupModelSpecFields({
+          context_window: remoteCtx ? Number(remoteCtx) : undefined,
+          max_output: remoteOut ? Number(remoteOut) : undefined,
+          local_context_window: localCtx ? Number(localCtx) : undefined,
+          local_max_output: localOut ? Number(localOut) : undefined,
+        }),
+      )
+      // B3 中转站逐项写入（§2.6）：任一项有值就发送（不套用官方预设）；全空则不发。
+      const customBase = customBaseUrl().trim()
+      const customKey = customApiKey().trim()
+      const customModel = customModelName().trim()
+      const customCtx = customContextWindow().trim()
+      const customOut = customMaxOutput().trim()
+      if (customBase || customKey || customModel || customCtx || customOut) {
+        Object.assign(
+          payload,
+          setupCustomEndpointFields(
+            {
+              base_url: customBaseUrl(),
+              api_key: customApiKey(),
+              model_name: customModelName(),
+              context_window: customCtx ? Number(customCtx) : undefined,
+              max_output: customOut ? Number(customOut) : undefined,
+            },
+            selectedApiFormat(),
+          ),
+        )
+      }
       const response = await props.backend.request("config.setup", payload)
       if (!response.ok) throw new Error(response.error?.message ?? "配置保存失败")
       props.onApplied(response.result as RuntimeSnapshot)
@@ -1903,6 +2138,10 @@ export function SetupWizardDialog(props: SetupDialogProps) {
       // 屏幕，落到那里会让用户卡在一个不在流程里的页面。
       if (isCustom() && message.includes("槽位")) {
         goTo(message.includes("对话模型") ? "route_chat" : "route_review")
+      } else if (message.includes("模型规格")) {
+        // 后端规格错误文案统一含「模型规格」（§3.6.4）；必须排在泛化的
+        // `message.includes("模型")` 之前，否则永远不可达。
+        goTo("model_spec")
       } else if (needsCloud() && message.includes("API Key")) goTo("api_key")
       else if (message.includes("GitHub Token")) goTo("github")
       else if (!isCustom() && message.includes("模型")) goTo("model")
@@ -1912,7 +2151,9 @@ export function SetupWizardDialog(props: SetupDialogProps) {
   }
 
   const next = () => {
-    if (isInputScreen(screen())) commitInput()
+    if (isInputScreen(screen()) || screen() === "model_spec" || screen() === "custom_endpoint") {
+      commitInput()
+    }
     const current = screen()
     if (current === "summary") {
       void apply()
@@ -1989,6 +2230,9 @@ export function SetupWizardDialog(props: SetupDialogProps) {
         ),
       )
       setAutoPublishIndex(payload.current.auto_publish_comment ? 0 : 1)
+      // B2/B3：预填规格编辑框与中转站五项表单。
+      primeSpecFields(parseModelSpecBlock(payload.model))
+      primeCustomFields(parseCustomEndpointOptions(payload.custom_endpoint))
     } catch (cause) {
       setError(String(cause))
       // `config.options` 读取失败也要给这一屏定预选：custom 分支只依赖固定的槽位取值，
@@ -2029,7 +2273,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
     if (key.name === "escape" && !busy()) {
       // 细化页的 Esc 是"返回上一屏"（方案 §4.2 的键盘矩阵）：先退回运行模式页，
       // 再按一次才是改造前的"Esc 取消助手"。其余屏幕语义不变。
-      if (isRouteScreen(screen())) {
+      if (isRouteScreen(screen()) || screen() === "model_spec" || screen() === "custom_endpoint") {
         previous()
         return
       }
@@ -2063,6 +2307,39 @@ export function SetupWizardDialog(props: SetupDialogProps) {
         return
       }
     }
+    // B3 中转站五项表单：↑↓ 换字段（先提交当前输入框），Enter 前进/保存。
+    if (screen() === "custom_endpoint" && !busy()) {
+      if (key.name === "up" || key.name === "down") {
+        commitCustomField()
+        const nextIndex = Math.min(4, Math.max(0, customFieldIndex() + (key.name === "down" ? 1 : -1)))
+        setCustomFieldIndex(nextIndex)
+        setInputValue(customFieldValue(nextIndex))
+        focusInputSoon()
+        key.preventDefault?.()
+        key.stopPropagation?.()
+        return
+      }
+    }
+    // B2 模型规格屏：R 重新获取目录；↑↓ 切换可编辑字段。
+    if (screen() === "model_spec" && !busy()) {
+      if (key.name === "r" || key.name === "R") {
+        void refreshCatalog()
+        key.preventDefault?.()
+        key.stopPropagation?.()
+        return
+      }
+      if (key.name === "up" || key.name === "down") {
+        commitSpecField()
+        const maxIndex = specFieldCount() - 1
+        const nextIndex = Math.min(maxIndex, Math.max(0, specFieldIndex() + (key.name === "down" ? 1 : -1)))
+        setSpecFieldIndex(nextIndex)
+        setInputValue(specFieldValue(nextIndex))
+        focusInputSoon()
+        key.preventDefault?.()
+        key.stopPropagation?.()
+        return
+      }
+    }
     if (key.name === "left" && (key.ctrl === true || key.meta === true) && !busy()) {
       previous()
       return
@@ -2072,7 +2349,8 @@ export function SetupWizardDialog(props: SetupDialogProps) {
       return
     }
     if (isEnterKey(key) && !busy()) {
-      if (isInputScreen(screen())) return
+      // model_spec / custom_endpoint 的 Enter 由输入框 onSubmit 处理（先提交焦点字段）。
+      if (isInputScreen(screen()) || screen() === "model_spec" || screen() === "custom_endpoint") return
       if (screen() === "summary") void apply()
       else next()
     }
@@ -2100,7 +2378,9 @@ export function SetupWizardDialog(props: SetupDialogProps) {
       ? 28
       : screen() === "provider" || isRouteScreen(screen())
         ? 24
-        : 22
+        : screen() === "model_spec" || screen() === "custom_endpoint"
+          ? 24
+          : 22
   const left = () => Math.max(2, Math.floor((dimensions().width - dialogWidth) / 2))
   const top = () => Math.max(0, Math.floor((dimensions().height - dialogHeight()) / 2))
 
@@ -2440,6 +2720,198 @@ export function SetupWizardDialog(props: SetupDialogProps) {
           <text fg={muted}>{repoContextCopy(isEn(uiLanguage())).hint}</text>
         </box>
       </Show>
+      {/*
+        B2 模型规格屏（docs/mimo-config-wizard-ui.md）。数据来自 config.options.model，
+        缺字段不显示（兼容旧后端）。context_window / max_output 可编辑；needs_verification
+        时两个数字都摆出来，不覆盖用户值。source 徽标 + R 重新获取按钮。
+      */}
+      <Show when={!loading() && screen() === "model_spec"}>
+        {(() => {
+          const spec = activeSpec()
+          const badge = formatSourceBadge(spec?.source, uiLanguage())
+          const headline = formatModelHeadline(spec ?? {}, uiLanguage())
+          const reasoning = spec?.reasoning ?? ""
+          const verifyText = spec?.needs_verification
+            ? formatNeedsVerification(spec, uiLanguage())
+            : ""
+          const remoteBounds = remoteSpec()?.bounds?.context_window
+          const remoteOutBounds = remoteSpec()?.bounds?.max_output
+          const localBounds = localSpec()?.bounds?.context_window
+          const localOutBounds = localSpec()?.bounds?.max_output
+          const refreshText = formatCatalogRefreshStatus(
+            catalogRefresh(),
+            catalogRefreshDetail(),
+            uiLanguage(),
+          )
+          const en = isEn(uiLanguage())
+          const rows = [
+            {
+              label: en ? "Context window" : "上下文长度",
+              value: specRemoteContext(),
+              bounds: remoteBounds,
+              index: 0,
+            },
+            {
+              label: en ? "Max output" : "最大输出",
+              value: specRemoteOutput(),
+              bounds: remoteOutBounds,
+              index: 1,
+            },
+            ...(localSpec()
+              ? [
+                  {
+                    label: en ? "Local context" : "本地上下文",
+                    value: specLocalContext(),
+                    bounds: localBounds,
+                    index: 2,
+                  },
+                  {
+                    label: en ? "Local max output" : "本地最大输出",
+                    value: specLocalOutput(),
+                    bounds: localOutBounds,
+                    index: 3,
+                  },
+                ]
+              : []),
+          ]
+          return (
+            <box marginTop={1} flexDirection="column">
+              <Show when={headline}>
+                <text>
+                  <span style={{ fg: "#eeeeee" }}>{headline}</span>
+                  <span style={{ fg: orange }}>{`  ${badge}`}</span>
+                </text>
+              </Show>
+              <Show when={!headline}>
+                <text fg={muted}>
+                  {en ? "No model spec available" : "暂无模型规格数据"}
+                </text>
+              </Show>
+              <For each={rows}>{(row) => {
+                const focused = () => specFieldIndex() === row.index
+                const hint = formatSpecBoundHint(row.bounds, uiLanguage())
+                return (
+                  <text bg={focused() ? "#202020" : undefined}>
+                    <span style={{ fg: focused() ? orange : muted }}>
+                      {focused() ? "▸ " : "  "}
+                    </span>
+                    <span style={{ fg: muted }}>{row.label}</span>
+                    <span style={{ fg: "#eeeeee" }}>{`  ${row.value || "—"}`}</span>
+                    <Show when={hint}>
+                      <span style={{ fg: muted }}>{`  ${hint}`}</span>
+                    </Show>
+                  </text>
+                )
+              }}</For>
+              {/* 当前焦点字段的编辑框：与 isInputScreen 的 renderInput 同一套 inputRef。 */}
+              <box marginTop={1} backgroundColor="#202020" paddingLeft={1} paddingRight={1}>
+                <input
+                  ref={(node) => {
+                    inputRef = node
+                  }}
+                  value={inputValue()}
+                  placeholder={rows[specFieldIndex()]?.label ?? ""}
+                  focused={inputFocused()}
+                  onContentChange={() => setInputValue(inputRef?.value ?? "")}
+                  onSubmit={() => {
+                    commitSpecField()
+                    next()
+                  }}
+                  flexGrow={1}
+                />
+              </box>
+              <Show when={reasoning}>
+                <text fg={muted}>
+                  {en ? "Reasoning" : "推理能力"}{" "}
+                  <span style={{ fg: "#eeeeee" }}>{reasoning}</span>
+                </text>
+              </Show>
+              <Show when={verifyText}>
+                <text fg="#ffd0bb">{`⚠ ${verifyText}`}</text>
+              </Show>
+              <Show when={refreshText}>
+                <text fg={catalogRefresh() === "error" ? "#ff6b6b" : muted}>
+                  {refreshText}
+                </text>
+              </Show>
+              <text fg={muted}>
+                {en
+                  ? "R refresh catalog · ↑↓ edit fields · Enter next · Esc back"
+                  : "R 重新获取 · ↑↓ 编辑字段 · Enter 下一步 · Esc 返回"}
+              </text>
+            </box>
+          )
+        })()}
+      </Show>
+      {/*
+        B3 中转站五项表单（docs/mimo-config-wizard-ui.md）。base_url / api_key / 模型名 /
+        context_window / max_output 逐项填写，不套用官方预设；保存后回显。
+      */}
+      <Show when={!loading() && screen() === "custom_endpoint"}>
+        {(() => {
+          const endpoint = customEndpoint()
+          const fields = customEndpointFieldLabels(uiLanguage())
+          const values = [
+            customBaseUrl(),
+            customApiKey(),
+            customModelName(),
+            customContextWindow(),
+            customMaxOutput(),
+          ]
+          return (
+            <box marginTop={1} flexDirection="column">
+              <Show when={endpoint?.display_name || endpoint?.name}>
+                <text fg={muted}>
+                  {endpoint?.display_name ?? endpoint?.name}
+                  {endpoint?.api_key_configured ? (
+                    <span style={{ fg: orange }}>{`  ${isEn(uiLanguage()) ? "key configured" : "Key 已配置"}`}</span>
+                  ) : null}
+                </text>
+              </Show>
+              <For each={fields}>{(field, index) => {
+                const focused = () => customFieldIndex() === index()
+                return (
+                  <text bg={focused() ? "#202020" : undefined}>
+                    <span style={{ fg: focused() ? orange : muted }}>{focused() ? "▸ " : "  "}</span>
+                    <span style={{ fg: muted }}>{field.label}</span>
+                    <span style={{ fg: "#eeeeee" }}>{`  ${values[index()] || (field.key === "api_key" ? "••••" : "—")}`}</span>
+                  </text>
+                )
+              }}</For>
+              {/* 当前焦点字段的编辑框：与 isInputScreen 的 renderInput 同一套 inputRef。 */}
+              <box marginTop={1} backgroundColor="#202020" paddingLeft={1} paddingRight={1}>
+                <input
+                  ref={(node) => { inputRef = node }}
+                  value={inputValue()}
+                  placeholder={fields[customFieldIndex()]?.label ?? ""}
+                  focused={inputFocused()}
+                  onContentChange={() => setInputValue(inputRef?.value ?? "")}
+                  onSubmit={() => {
+                    commitCustomField()
+                    next()
+                  }}
+                  flexGrow={1}
+                />
+              </box>
+              <Show when={customFieldIndex() === 3 || customFieldIndex() === 4}>
+                <text fg={muted}>
+                  {formatSpecBoundHint(
+                    customFieldIndex() === 3
+                      ? remoteSpec()?.bounds?.context_window
+                      : remoteSpec()?.bounds?.max_output,
+                    uiLanguage(),
+                  )}
+                </text>
+              </Show>
+              <text fg={muted}>
+                {isEn(uiLanguage())
+                  ? "↑↓ switch field · Enter next · Esc back"
+                  : "↑↓ 切换字段 · Enter 下一步 · Esc 返回"}
+              </text>
+            </box>
+          )
+        })()}
+      </Show>
       <Show when={!loading() && screen() === "summary"}>
         <box marginTop={1} flexDirection="column">
           {/* 三行摘要（方案 §4.3 第 6 阶段）：运行模式 + 对话模型 + 审查模型。 */}
@@ -2475,6 +2947,29 @@ export function SetupWizardDialog(props: SetupDialogProps) {
           <text><span style={{ fg: orange }}>{isEn(uiLanguage()) ? "Repo ctx  " : "仓库上下文 "}</span><span style={{ fg: "#eeeeee" }}>{repoContextPreview()}</span></text>
           {/* 一行写完：这行原本会长到换行，多出的一行会把确认页挤出高度预算。 */}
           <text fg={muted}>Enter 保存到私有配置；高级项用 pr-review config --advanced。</text>
+          {/* B2 模型规格摘要：只在有值时显示，缺字段整行不出现。 */}
+          <Show when={specRemoteContext() || specRemoteOutput()}>
+            <text fg={muted}>
+              {isEn(uiLanguage()) ? "Spec       " : "模型规格  "}
+              <span style={{ fg: "#eeeeee" }}>
+                {[
+                  specRemoteContext() ? `ctx ${specRemoteContext()}` : "",
+                  specRemoteOutput() ? `out ${specRemoteOutput()}` : "",
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </span>
+            </text>
+          </Show>
+          {/* B3 中转站摘要：只在有值时显示。 */}
+          <Show when={customBaseUrl() || customModelName()}>
+            <text fg={muted}>
+              {isEn(uiLanguage()) ? "Custom ep  " : "中转站    "}
+              <span style={{ fg: "#eeeeee" }}>
+                {[customBaseUrl(), customModelName()].filter(Boolean).join(" · ")}
+              </span>
+            </text>
+          </Show>
         </box>
       </Show>
       <box flexGrow={1} />
