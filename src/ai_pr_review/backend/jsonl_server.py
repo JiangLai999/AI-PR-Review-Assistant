@@ -178,6 +178,13 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+# "把代码给我看"的常见说法（未点名文件时用它兜底到本次审查点名的文件）。
+# 注意：**显式路径**仍只认源码扩展名（见 _mentioned_repo_paths 的文档），
+# 而兜底路径不受此限——findings 点名的文件即使是 .html 也应该能读
+# （实测：用户说"对应的仓库代码"，要找的正是 website/index.html）。
+CHAT_REPO_CODE_INTENT = ("代码", "源码", "原始内容", "code", "source")
+
+
 # "PR #31" / "pull/31" / "pr 31" —— 用户最常用的指代方式。
 _PR_NUMBER_PATTERN = re.compile(r"(?:pull/|pr\s*#?\s*|#)\s*(\d+)", re.IGNORECASE)
 # "第 2 个" / "选 2" / "2 号" —— 候选清单的序号选择（复制 run id 很不方便）。
@@ -228,6 +235,8 @@ def _mentioned_repo_paths(text: str) -> list[str]:
 
     只认 ``services/repo_context.SOURCE_EXTENSIONS`` 里的源码扩展名——与 L1 预取同一套
     口径，`.md` / `.html` 这类文件仍会被忽略（模型可以照旧回答"需要查看源码"）。
+    用户若只说"把对应的代码给我"（没点文件名），走 `_findings_file_paths` 的兜底，
+    那条路径不看扩展名。
 
     两种形态都接受：`path/to/name.ext` 与裸文件名 `name.ext`。实测里用户会直接说
     "main.js 里的 tab.html 从哪来"，只认带目录的形态会漏掉最常见的问法；裸名若在
@@ -1549,6 +1558,11 @@ class JsonlBackend:
         if not run_id:
             return ""
         paths = _mentioned_repo_paths(text)
+        if not paths and any(token in (text or "").lower() for token in CHAT_REPO_CODE_INTENT):
+            # 实测反馈：用户只说"对应的仓库代码"（没点文件名）时，上一轮直接回
+            # "我无法读取仓库"。这里兜底到**这次审查点名的文件**——那正是他说的
+            # "对应"的含义，而且仍然只读、只注入本轮。
+            paths = self._findings_file_paths(run_id)
         if not paths:
             return ""
         try:
@@ -1561,6 +1575,25 @@ class JsonlBackend:
                 flush=True,
             )
             return ""
+
+    def _findings_file_paths(self, run_id: str, limit: int = 2) -> list[str]:
+        """这次审查点名的文件（按出现顺序去重，最多 ``limit`` 条）。"""
+        try:
+            from ai_pr_review.services.result_store import ResultStore
+
+            result = ResultStore(self.config.result_store).get_result(run_id)
+        except Exception:
+            return []
+        if result is None:
+            return []
+        paths: list[str] = []
+        for finding in result.findings:
+            path = str(getattr(finding, "file", "") or "").strip()
+            if path and path not in paths:
+                paths.append(path)
+            if len(paths) >= limit:
+                break
+        return paths
 
     def _collect_repo_files(self, run_id: str, paths: list[str]) -> str:
         """`_repo_files_for_chat` 的同步主体（在线程里跑，见上）。"""

@@ -5120,3 +5120,60 @@ def test_chat_reports_a_run_without_a_head_sha_instead_of_guessing(
         assert fetcher.calls == []
 
     asyncio.run(run())
+
+
+def test_chat_falls_back_to_the_findings_files_when_the_user_just_asks_for_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """实测反馈：绑定 #31 之后说"对应的仓库代码"，chat 回了"我无法读取仓库"。
+
+    消息里没有文件名，但"对应"指的就是这次审查点名的文件——此时应当拿
+    findings 的 file 兜底（findings 指名 website/index.html 这类 .html 也要能读）。
+    """
+
+    async def run() -> None:
+        from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
+        from ai_pr_review.services.result_store import ResultStore
+
+        backend = _chat_ready_backend(tmp_path)
+        run_id = ResultStore(backend.config.result_store).save_result(
+            "https://github.com/example/repo/pull/31",
+            ReviewResult(
+                summary="审查完成",
+                findings=[
+                    Finding(
+                        severity="critical",
+                        category="security",
+                        title="硬编码凭据",
+                        file="website/index.html",
+                        line_start=237,
+                        line_end=237,
+                        problem="疑似硬编码",
+                        suggestion="移入环境变量",
+                        confidence=0.91,
+                        code_snippet='export GITHUB_TOKEN="your_github_token"',
+                    )
+                ],
+            ),
+            head_sha="b" * 40,
+        )
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = run_id
+        fetcher = _StubRepoFetcher(
+            {"website/index.html": '<pre><code>export GITHUB_TOKEN="your_github_token"'}
+        )
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(_chat_send(session_id, "对应的仓库代码"))
+
+        assert response[0]["ok"] is True
+        assert fetcher.calls == [("example", "repo", "website/index.html", "b" * 40)]
+        prompt = captured["options"]["system_prompt"]
+        assert "### website/index.html" in prompt, "应兜底到 findings 点名的文件"
+        assert "your_github_token" in prompt, "注入的应是真实读取到的内容"
+
+    asyncio.run(run())
