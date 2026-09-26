@@ -1,8 +1,36 @@
 # Chat 体验升级统一方案（v2）
 
-日期：2026-09-26 · 状态：**待确认** · 协作：claude + mimo + Codex（三方并行）
+日期：2026-09-26 · 状态：**实施中** · 协作：claude + mimo + Codex + opencode（四方队列）
 
 来源：用户两轮真实会话反馈，全部经代码核实。
+
+---
+
+## 0.1 进度台账（按提交核对）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| A1 仓库文件按 finding 行号取窗口 | ✅ 完成 | `a26e88f`（claude，全量测试通过） |
+| A2 会话落盘（重启可续） | ✅ 完成 | `a26e88f`；`chat_session.json` 往返测试 |
+| A3 历史窗口与预算（80 条 + 告知 + 可配） | ✅ 完成 | `a26e88f`；`preferences.chat_context_budget` |
+| A4 上下文超额 tips（结构化 warning） | ✅ 完成 | 后端 `fa04897`（`warning:"over_budget"`）+ 前端 `1c1a829`（zh/en 文案与帧） |
+| A5 上下文长度提示（优先 usage） | ✅ 完成 | 后端 `fa04897`（usage/context 字段）+ 前端 `1c1a829`（`上下文 12% · 2.4k/20k`） |
+| A6 `/compact`（保留 10 轮 + 摘要替换） | ✅ 完成 | `fa04897`：成功替换 2 条 → 21 条；失败原历史不动（两条用例） |
+| A7 `/history` 对话历史 + `--runs` 兼容 + `<run_id>` 绑定 | ✅ 完成 | `fa04897`：三分支重排（主控修复分支顺序缺陷） |
+| B1 规格字段与服务层 | ✅ 完成 | `3a0a694`（`services/model_catalog.py`） |
+| B2 目录接进配置助手（source/规格三出口） | 🔄 实施中 | 设计 `92d8d1e`；实施任务 `claude-b2b3-impl` |
+| B3 中转站逐项自定义 | 🔄 实施中 | 同上 |
+| C1 表格按渲染宽度分档 | ✅ 完成 | `357e10f`（120×30→content/36 列；209×51→full/132 列） |
+| C2 长代码块折叠（15 行 + 角标） | ✅ 完成 | `357e10f`；角标鼠标点击在 `mimo-chat-render-c3` 收尾 |
+| C3 流式动画（光标/spinner） | ✅ 完成 | `1c1a829` |
+| C4 回复耗时 | ✅ 完成 | 后端 `fa04897` + 前端 `1c1a829`（`· 3.2s`） |
+| C5 思考内容独立展示 | ✅ 完成 | 后端 `fa04897`（`assistant.reasoning_delta`）+ 前端 `1c1a829`（独立折叠思考区） |
+| C6 思考强度可选 | ✅ 完成 | `fa04897`（`/think` + 档位预算 + 本地置灰，依据 `docs/model-reasoning-probe.md`） |
+| D 思考档位探测工具（opencode） | ✅ 完成 | `85d5552`（脚本 + `docs/model-reasoning-probe.md`，本机 Ollama 16/16 实测） |
+
+> 验收口径：每组由调度方独立复跑（Python 全量 `1057 passed / 1 skipped`；前端
+> `bun test src` 156 通过 + 两个 manual 帧检查全 PASS）。codex 后端组的 4 处缺陷
+> 由主控修复并记录在 `docs/codex-chat-backend-c1.md` §0。
 
 ---
 
