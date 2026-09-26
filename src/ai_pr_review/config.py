@@ -631,6 +631,9 @@ DEFAULT_REPO_CONTEXT = "tests+imports"
 DEFAULT_REPO_CONTEXT_MAX_FILES = 3
 DEFAULT_REPO_CONTEXT_BUDGET_TOKENS = 4000
 DEFAULT_REPO_CACHE_MAX_MB = 200
+# L2 符号级定位开关（docs/mimo-l2-symbol-locator.md）：默认开启，
+# 仅在签名变化时触发 trees+grep，异常一律降级。
+DEFAULT_SYMBOL_LOCATE = True
 # 合法闭区间（含端点）；越界一律回退默认值。
 REPO_CONTEXT_MAX_FILES_RANGE: tuple[int, int] = (1, 10)
 REPO_CONTEXT_BUDGET_TOKENS_RANGE: tuple[int, int] = (500, 32000)
@@ -750,6 +753,27 @@ def normalize_repo_cache_max_mb(value: object) -> int:
     )
 
 
+def normalize_symbol_locate(value: object) -> bool:
+    """把任意输入归一化为合法的 ``symbol_locate`` 开关。
+
+    旧配置没有这个字段时保持默认开启；手改配置可能写成字符串或数字，
+    非法值只回退到 ``True`` 并记录一次 warning，不抛异常（与
+    ``normalize_workbench_mode`` 同风格）。提示里不回显原值。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    _warn_invalid_preference("symbol_locate", "已回退为 true（可选值：true、false）")
+    return DEFAULT_SYMBOL_LOCATE
+
+
 @dataclass
 class PreferencesConfig:
     """User-facing CLI preferences."""
@@ -770,6 +794,8 @@ class PreferencesConfig:
     repo_context_max_files: int = DEFAULT_REPO_CONTEXT_MAX_FILES
     repo_context_budget_tokens: int = DEFAULT_REPO_CONTEXT_BUDGET_TOKENS
     repo_cache_max_mb: int = DEFAULT_REPO_CACHE_MAX_MB
+    # L2 符号定位：签名变化时在仓库内定位外部引用点（trees+grep）。
+    symbol_locate: bool = DEFAULT_SYMBOL_LOCATE
 
     def __post_init__(self) -> None:
         # 属性一旦构造出来就保证合法，加载/导入/向导三条路径因此共用同一套回退规则。
@@ -785,6 +811,7 @@ class PreferencesConfig:
             self.repo_context_budget_tokens
         )
         self.repo_cache_max_mb = normalize_repo_cache_max_mb(self.repo_cache_max_mb)
+        self.symbol_locate = normalize_symbol_locate(self.symbol_locate)
 
 
 def _preferences_of(config: object) -> object:

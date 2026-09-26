@@ -10,7 +10,7 @@ from typing import Any
 
 from ai_pr_review.config import AIClientConfig, AppConfig
 from ai_pr_review.models.pr_data import FileDiff, FileStatus, PRData
-from ai_pr_review.models.review_plan import CrossFileImpact, ReviewPlan
+from ai_pr_review.models.review_plan import CrossFileImpact, CrossFileReference, ReviewPlan
 from ai_pr_review.services.agent.planner import ReviewPlanner
 from ai_pr_review.services.ai_client import AIClient
 from ai_pr_review.services.analyzers.cross_file_interface import (
@@ -32,7 +32,13 @@ from ai_pr_review.services.model_capabilities import (
 from ai_pr_review.services.post_processor import PostProcessor
 from ai_pr_review.services.pr_fetcher import PRFetcher
 from ai_pr_review.services.prompt_assembler import PromptAssembler, ReviewResult
+from ai_pr_review.services.repo_context import FileSystemRepoCache
 from ai_pr_review.services.result_store import ResultStore
+from ai_pr_review.services.symbol_locator import (
+    RepoSymbolLocator,
+    SymbolLocation,
+    changed_symbols_from_impacts,
+)
 
 
 class ReviewCancelled(Exception):
@@ -332,6 +338,12 @@ class ReviewOrchestrator:
         interface_impacts = self._cross_file_interface.analyze(
             cross_file_contexts, base_signatures=base_signatures
         )
+        # L2：仅在签名真实变化时定位外部引用；无变化零请求，异常降级为空。
+        symbols_located = self._locate_changed_symbols(
+            pr_data,
+            interface_impacts,
+            exclude_paths={file_diff.filename for file_diff, _ in file_contexts},
+        )
 
         summaries: list[str] = []
         findings = []
@@ -454,6 +466,8 @@ class ReviewOrchestrator:
                     impact.model_dump(mode="json") for impact in cross_file_impacts
                 ],
                 "interface_impacts": [impact.to_dict() for impact in interface_impacts],
+                # L2 符号定位：仅签名变化符号；定位为空时该符号如实缺席。
+                "symbols_located": symbols_located,
             },
         )
 
@@ -525,6 +539,103 @@ class ReviewOrchestrator:
         if not base_contexts:
             return {}
         return SymbolIndex(base_contexts).signature_map()
+
+    def _symbol_locate_enabled(self) -> bool:
+        return bool(getattr(self._config.preferences, "symbol_locate", True))
+
+    def _list_repo_tree_paths(self, owner: str, repo: str, ref: str) -> list[str]:
+        """列出 ref 下全部 blob 路径；任何失败返回空列表（定位自然降级为空）。
+
+        ``PRFetcher`` 未暴露 trees API（且不在本次 write_scope），这里经其内部
+        ``_get_repo`` 走 PyGithub ``get_git_tree(recursive=True)``。测试用 stub
+        覆写本方法即可，无需真实网络。
+        """
+        try:
+            get_repo = getattr(self._pr_fetcher, "_get_repo", None)
+            if get_repo is None:
+                return []
+            repo_obj = get_repo(owner, repo)
+            tree = repo_obj.get_git_tree(ref, recursive=True)
+            paths: list[str] = []
+            for entry in getattr(tree, "tree", None) or []:
+                if getattr(entry, "type", "") != "blob":
+                    continue
+                path = getattr(entry, "path", "")
+                if path:
+                    paths.append(path)
+            return paths
+        except Exception:
+            return []
+
+    def _locate_changed_symbols(
+        self,
+        pr_data: PRData,
+        interface_impacts: list[InterfaceImpact],
+        *,
+        exclude_paths: set[str],
+    ) -> dict[str, list[str]]:
+        """对签名变化符号做仓库级定位，返回 ``{symbol: ["path:line", ...]}``。
+
+        - 无签名变化（``interface_impacts`` 为空）或开关关闭时不触发任何请求。
+        - 只保留**未被 PR 修改**的文件里的引用点（``exclude_paths`` 传变更文件）。
+        - 某符号定位为空时如实省略，不写占位。
+        - 任何异常降级为空字典，绝不中断审查。
+        """
+        if not self._symbol_locate_enabled():
+            return {}
+        symbols = changed_symbols_from_impacts(interface_impacts)
+        if not symbols:
+            return {}
+        try:
+            locator = RepoSymbolLocator(
+                read_tree=lambda: self._list_repo_tree_paths(
+                    pr_data.owner, pr_data.repo, pr_data.head_sha
+                ),
+                read_file=lambda path: self._pr_fetcher.fetch_file_content(
+                    pr_data.owner, pr_data.repo, path, pr_data.head_sha
+                ),
+                cache=FileSystemRepoCache(pr_data.owner, pr_data.repo, pr_data.head_sha),
+            )
+        except Exception:
+            return {}
+
+        changed_files = {item.filename for item in pr_data.files}
+        changed_files.update(exclude_paths or set())
+        located: dict[str, list[str]] = {}
+        for symbol in symbols:
+            try:
+                hits = locator.locate(symbol, exclude_paths=changed_files)
+            except Exception:
+                hits = []
+            if not hits:
+                continue
+            located[symbol] = [f"{hit.path}:{hit.line}" for hit in hits]
+            self._merge_located_references(interface_impacts, symbol, hits)
+        return located
+
+    @staticmethod
+    def _merge_located_references(
+        interface_impacts: list[InterfaceImpact],
+        symbol: str,
+        hits: list[SymbolLocation],
+    ) -> None:
+        """把定位到的外部引用并入对应 ``InterfaceImpact``（CrossFileReference 模型）。"""
+        for impact in interface_impacts:
+            change = getattr(impact, "change", None)
+            if change is None or getattr(change, "symbol", "") != symbol:
+                continue
+            owner = getattr(change, "file", "")
+            for hit in hits:
+                impact.references.append(
+                    CrossFileReference(
+                        symbol=symbol,
+                        file=owner,
+                        line=hit.line,
+                        referencing_file=hit.path,
+                    )
+                )
+                if hit.path not in impact.affected_files:
+                    impact.affected_files.append(hit.path)
 
     async def _build_file_contexts(
         self,
