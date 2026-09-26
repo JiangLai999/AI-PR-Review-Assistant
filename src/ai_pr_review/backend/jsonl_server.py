@@ -2192,11 +2192,14 @@ class JsonlBackend:
                         detail = self._history_detail(args[0])
                         # 载入历史报告即绑定该 Run（§9.2 A）：屏幕上正在看的这次审查
                         # 就是接下来对话要解读的对象。
+                        # 返回 `bound` 让调用方知道绑定是否真的发生：实测 TUI 漏传
+                        # session_id 时绑定静默失败，而界面仍然宣称"已绑定"。
+                        bound = False
                         if detail.get("run") is not None:
-                            self._bind_session_run(
+                            bound = self._bind_session_run(
                                 str(params.get("session_id", "")), args[0]
                             )
-                        result(detail)
+                        result({**detail, "bound": bound})
                     else:
                         limit = int(args[0]) if args and args[0].isdigit() else 10
                         store = ResultStore(self.config.result_store)

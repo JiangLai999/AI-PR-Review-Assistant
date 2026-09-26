@@ -3085,18 +3085,26 @@ export function App() {
 
   const openHistoryRun = async (run: HistoryRun) => {
     if (!run.id) return
-    const response = await backend.request("command.execute", { name: "history", args: [run.id] })
+    // session_id 必须带上：后端靠它把"当前正在看的审查"绑定到会话。
+    // 漏传时绑定静默失败，而界面仍会宣称已绑定（实测踩过）。
+    const response = await backend.request("command.execute", {
+      name: "history",
+      args: [run.id],
+      session_id: sessionId(),
+    })
     if (response.ok && response.result?.report) {
       applyReviewReport(response.result.report as ReviewReport)
       setHistoryOpen(false)
       setReviewStage("历史报告")
       const label = typeof run.pr_number === "number" ? `PR #${run.pr_number}` : `Run ${run.id}`
       setReviewDetail(`${label} · ${run.created_at ?? ""}`)
-      // 绑定确实发生了（后端 history 命令会 _bind_session_run），但用户看不到，
-      // 于是总在问"从历史打开之后 chat 会自动绑定吗"。把这件事说出来。
+      // 提示必须反映真实结果：后端返回 bound=true 才算绑定成功。
+      const bound = response.result?.bound === true
       appendMessage({
         role: "assistant",
-        content: `已载入 ${label} 的审查报告，并绑定为接下来的对话上下文——可以直接提问（例如"第 1 条为什么判中风险"）。用 /context 可查看或解绑。`,
+        content: bound
+          ? `已载入 ${label} 的审查报告，并绑定为接下来的对话上下文——可以直接提问（例如"第 1 条为什么判中风险"）。用 /context 可查看或解绑。`
+          : `已载入 ${label} 的审查报告，但**未能绑定对话上下文**（会话状态缺失）。可以按 /new 重开会话后再从历史打开，或直接说"PR #31"。`,
       })
     }
   }

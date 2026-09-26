@@ -4488,3 +4488,45 @@ def test_chat_lists_other_runs_even_when_one_is_already_bound(
         assert backend.sessions[session_id].context_candidates
 
     asyncio.run(run())
+
+
+def test_history_command_reports_whether_the_session_was_really_bound(
+    tmp_path: Path,
+) -> None:
+    """`bound` 必须反映真实结果。
+
+    实测 bug：TUI 打开历史 run 时漏传 session_id → `_bind_session_run` 静默
+    返回 False，而界面照样显示"已绑定"。现在返回 bound，前端据此提示。
+    """
+
+    async def run() -> None:
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=lambda event: None)
+        run_id = _seed_run(backend, 31, "供绑定用")
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+
+        bound_response = await backend.handle(
+            {
+                "id": "h1",
+                "method": "command.execute",
+                "params": {"name": "history", "args": [run_id], "session_id": session_id},
+            }
+        )
+        assert bound_response[0]["ok"] is True
+        assert bound_response[0]["result"]["bound"] is True
+        assert backend.sessions[session_id].current_run_id == run_id
+
+        # 不带 session_id：绑定不会发生，且必须如实回报 false
+        backend.sessions[session_id].current_run_id = None
+        unbound_response = await backend.handle(
+            {
+                "id": "h2",
+                "method": "command.execute",
+                "params": {"name": "history", "args": [run_id]},
+            }
+        )
+        assert unbound_response[0]["ok"] is True
+        assert unbound_response[0]["result"]["bound"] is False
+        assert backend.sessions[session_id].current_run_id is None
+
+    asyncio.run(run())
