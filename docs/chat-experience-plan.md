@@ -229,11 +229,13 @@ OpenAI 无 `max` → 就近用 `high`；Anthropic 用 `budget_tokens`（2k/16k/6
 
 ---
 
-## 5. 需要确认的点
+## 5. 已确认口径（定稿）
 
-1. **A4 tip 呈现**：建议**状态栏常驻 + 回复只在裁剪时提一句**。
-2. **A6 `/compact` 保留轮数**：建议保留最近 10 轮原文。
-3. **A5 长度口径**：建议**优先 usage，缺失时估算并标注**。
-4. **B2 刷新时机**：建议配置助手手动刷新 + 后台 1 小时 TTL。
-5. **C2 折叠阈值/按键**：建议 15 行 + `Alt+L`。
-6. **C6 档位**：`off/low/medium/high/max` 是否够（按供应商能力降级）。
+| # | 决定 | 依据 / 实现 |
+|---|---|---|
+| 1 | A4 tip：上下文占用在头部行常驻（`上下文 12% · 2.4k/20k`）；超额或裁剪时回答尾部追加 tips（zh/en，muted 色不用报警红） | 用户确认；`1c1a829`（渲染）+ `fa04897`（`warning:"over_budget"`） |
+| 2 | A6 `/compact`：保留最近 **10 轮**原文，更早消息压缩为摘要并**替换**原文；失败保留原历史 | 用户确认；`fa04897`，两条用例覆盖成功/失败 |
+| 3 | A5 长度口径：**优先模型返回的真实 usage**，缺失才估算；`context.budget_tokens` 取 `preferences.chat_context_budget` | 用户确认；`fa04897` |
+| 4 | B2 刷新时机：**打开配置助手时自动拉一次**（`asyncio.to_thread` + 进程内定档，失败静默回退 builtin）。**早期"手动刷新 + 1 小时 TTL"设计已作废** | 用户确认（`8f19247` 修订）；实现 `6a87fad` |
+| 5 | C2 折叠：**15 行阈值**；块尾**小角标**为主交互（可鼠标点击展开/收起），`Alt+L` 仅作为键盘快捷方式保留 | 用户明确纠正"不是 Alt+L 快捷键，是角标"；`bd1d358` |
+| 6 | C6 档位：**off/low/high/max/auto**。DeepSeek 有效值仅 `low/high/max`（`minimal→low`、`medium/xhigh→high`、`ultra→max` 兼容映射）；**本地 Ollama 置灰**并说明原因，同时自动预留思考预算 | `docs/reasoning-effort-probe.md` + `docs/model-reasoning-probe.md` 实测；`fa04897` |
