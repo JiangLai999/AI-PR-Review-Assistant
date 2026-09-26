@@ -88,14 +88,21 @@
   - **交叉源 OpenRouter**（`supported_parameters`）用于 OpenAI 兼容生态的参数名校验。
   - **官方文档**用于关键供应商的语义校验（如 DeepSeek 的 effort 兼容映射表）。
   - 合并策略：只覆盖"来源确认存在"的字段，其余保持预设并标注
-    `source: modelsdev|openrouter|official|presets`；按 provider + 小时级 TTL 缓存；
-    失败静默降级 + warning；配置助手提供"刷新规格"。
+    `source: modelsdev|openrouter|official|presets`。
+  - **缓存与刷新**（修正：先前写的"1 小时 TTL"没有依据——models.dev 是静态元数据
+    文件，只在模型发布/调整时变化，几 MB 一个文件，频繁拉纯属浪费）：
+    · 本地**文件缓存**，有效期 **7 天**；
+    · **惰性刷新**：缓存过期后，**下次真正需要时**才在后台拉一次（不搞定时轮询）；
+    · **手动刷新**：配置助手里一个「刷新模型规格」按钮，随时可用（用户主动时立即拉）；
+    · **拉取失败 → 用旧缓存**，界面标注「数据可能过期（最后更新 X）」；
+    · 完全离线时用内置预设，不阻塞配置流程。
   - **冲突不自动二选一**：标记 `needs_verification`，UI 提示并给出一键实测入口
     （`_p5_verify/p6proto/probe_*` 脚本可直接复用）。
 - **边界**：拿不到就**如实标注 unknown**，绝不套用别家取值；models.dev 不区分端点
   （Ollama 的 `think` 原生有效、兼容端点失效），这类差异仍需抽验。
 - **验收**：DeepSeek 条目能自动带出 `context=1,000,000` / `output=393,216` /
-  `effort∈{low,high,max}` + `toggle`；来源字段出现在快照里；冲突时标记而非猜测。
+  `effort∈{low,high,max}` + `toggle`；来源字段出现在快照里；冲突时标记而非猜测；
+  **7 天内不重复下载**（缓存命中）；手动刷新能立即拉取；断网时回退到预设/旧缓存且不报错。
 
 ### B3 · 第三方中转站的自定义参数
 
