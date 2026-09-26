@@ -65,7 +65,7 @@
 | Live-Ollama | 本机 Ollama 链路（事件顺序/隔离/耗时/非空答案） | `scripts/verify_chat_live.py` + `JsonlBackend` + `OllamaProvider` | 真机脚本两轮 | `7a5acae`；`docs/chat-live-verification.md`（0.7s/46.3s，答案 61/4361 字符） | ⚠️ 部分验证 |
 | Live-Ollama-usage | 本机 usage 真实性 | 同上 | 真机脚本 | `docs/chat-live-verification.md` §3 差异①：usage 三键**全 0**，只能走 `estimate_tokens` 估算 | ⚠️ 部分验证 |
 | Live-DeepSeek | 云端四档思考强度端到端（`/think` 真实切换） | `scripts/verify_deepseek_live.py` + `JsonlBackend` + DeepSeek provider | 真机脚本 5 次调用 | `c398808`；`docs/chat-deepseek-live-verification.md`（off=0；2669<2891<11736；6/6 断言） | ✅ 已验证 |
-| Live-review-think | **review 链路**的思考档位是否单独真机验证 | 代码侧：`reasoning_effort` 仅在 `_chat`（`jsonl_server.py:2660-2681`）注入；review 分支不传该参数 | — | 无任何真机记录；`docs/*live*` 只覆盖 chat 链路 | ❌ 未验证 |
+| Live-review-think | **review 链路**的思考档位（现状语义 + 开启代价） | 代码侧：`review_code` 不传 `reasoning_effort`（`ai_client.py:86-92`），但 `structured_output=True` 会经 `structured_review_params`（`review_policy.py:16` ← `model_capabilities.py:32`）追加 `thinking: {"type": "disabled"}`——即"显式关闭"而非"未碰参数"；**随供应商而异**：显式关闭只对 `deepseek`，`ollama/local` 走 `think=False`（`ollama.py:26`），`anthropic` 与多数兼容供应商不发思考参数（= 供应商默认） | **DeepSeek 真机脚本**：`scripts/verify_review_reasoning.py`（4 场景 × 1 次调用，wire 级断言，7/7 通过） | 任务 `claude-review-reasoning-assess`（未提交，工作区交付）；`docs/review-reasoning-assessment.md` §2/§3：现状 reasoning 0 字符、answer 1150、421 completion tokens、2.2s；`thinking=enabled` + max → 3688 字符/1519 tokens/6.4s；只加 `reasoning_effort` 无效（reasoning 仍 0）；日志 `.pytest_claude/review-reasoning-run2.utf8.log` | ⚠️ 部分验证 |
 
 ### 契约验收（stub，离线可复跑）
 
@@ -81,7 +81,7 @@
 
 | # | 项 | 现状 | 需补什么才能验证 |
 |---|---|---|---|
-| 1 | **review 链路思考档位** | 代码只在 chat 路径注入 `reasoning_effort`；review 从未单独真机验证 | 明确产品语义（review 是否要档位）→ 若要，先在 review 分支接参数并跑 `verify_deepseek_live.py` 同口径脚本；若不要，在文档写明"review 不消费档位"并加静态断言 |
+| 1 | **review 链路思考档位** | 真机已验证**现状与代价**（`docs/review-reasoning-assessment.md`：deepseek 现状 = 显式 `thinking: disabled`，开 max 档 ≈3.6× completion tokens、2.9× 耗时；只加 `reasoning_effort` 无效；其它供应商行为随能力档案而异，见该文档 §1.1 末表）；**待产品拍板**：要不要给 review 单独档位（建议 (c) 两步走，默认 `off`；否决 (b) 跨槽串味） | 产品决策 → 若选 (c)：按该文档 §4.3 落点实现（覆盖 policy 的 `disabled` + 预算预留 + 词表 pinning）；若选 (a)：在文档写死"review 不消费档位"并加 wire 级静态断言（含 `patch_generator` 路径的思考行为澄清）。未决 #4/#3 见该文档 §6（单模型单样本、大 prompt × max 的预算边界未测） |
 | 2 | **组 B 的 TUI 侧合并** | `mimo-config-wizard-ui` = blocked（11 条 manual 回归）；`claude-config-wizard-fix` = claimed/**进行中** | 11 条断言全绿 + 补规格屏/source 徽标/中转站五项 manual 帧 + `docs/mimo-config-wizard-ui.md` 交付 |
 | 3 | **`/context` 的 `budget_source` TUI 展示** | 后端已输出（`/context` 与 `config.snapshot`），前端**无消费方** | TUI 状态栏或 `/context` 回显加上 `budget_source`；补 manual 帧断言 |
 | 4 | **Ollama usage 全 0** | 行为链路正常，但数值不可用于精确预算；本地占比提示是估算 | 改走 Ollama 原生 `/api/chat` 的 `prompt_eval_count`（另开任务），或接受"本地估算"并在 UI 标注 |
