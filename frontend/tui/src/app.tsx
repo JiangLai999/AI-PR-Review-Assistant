@@ -3090,7 +3090,14 @@ export function App() {
       applyReviewReport(response.result.report as ReviewReport)
       setHistoryOpen(false)
       setReviewStage("历史报告")
-      setReviewDetail(`Run ${run.id} · ${run.created_at ?? ""}`)
+      const label = typeof run.pr_number === "number" ? `PR #${run.pr_number}` : `Run ${run.id}`
+      setReviewDetail(`${label} · ${run.created_at ?? ""}`)
+      // 绑定确实发生了（后端 history 命令会 _bind_session_run），但用户看不到，
+      // 于是总在问"从历史打开之后 chat 会自动绑定吗"。把这件事说出来。
+      appendMessage({
+        role: "assistant",
+        content: `已载入 ${label} 的审查报告，并绑定为接下来的对话上下文——可以直接提问（例如"第 1 条为什么判中风险"）。用 /context 可查看或解绑。`,
+      })
     }
   }
 
