@@ -61,6 +61,8 @@ assistant.finished: {
   usage: {prompt_tokens, completion_tokens, total_tokens} | null,   # 优先真实 usage
   context: {used_tokens, budget_tokens, used_percent, trimmed_messages, compacted,
             budget_source} | null,   # budget_source: config|model_spec|fallback（2026-09-26 扩键）
+  model: string,                     # 本轮实际模型名（2026-09-26 扩键；按轮下发，
+                                     # 用户中途 /model 切换后历史消息各归各）
   reasoning: string | null,
   warning: "over_budget" | null
 }

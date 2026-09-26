@@ -2942,6 +2942,10 @@ class JsonlBackend:
                 "warning": warning,
                 "reasoning": "".join(reasoning_parts) or None,
                 "duration_seconds": round(time.perf_counter() - started, 3),
+                # 本轮实际使用的模型名（chat 槽）：TUI 的消息指标行要用它显示
+                # "这条回复是哪个模型答的"——用户中途 /model 切换后，历史消息
+                # 必须保留各自当时的模型，所以按轮下发而不是让前端读当前 runtime。
+                "model": str(provider_config.model_name or provider_config.name),
             },
         )
 
@@ -3764,6 +3768,7 @@ class JsonlBackend:
                                 "usage": chat_meta["usage"],
                                 "context": chat_meta["context"],
                                 "warning": chat_meta["warning"],
+                                "model": chat_meta["model"],
                             },
                             events,
                         )

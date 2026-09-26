@@ -220,6 +220,10 @@ def test_contract_event_sequence_is_legal_and_reasoning_is_isolated(
         assert finished["reasoning"] == "思考第一步。思考第二步。"
         assert finished["session_id"] == session_id
         assert finished["request_id"] == "turn"
+        # 2026-09-26 扩展：本轮实际模型名（TUI 的"消息指标行"显示"谁答的"）。
+        # 按轮下发而不是让前端读当前 runtime——用户中途 /model 切换后历史必须各归各。
+        # fixture 用默认配置（anthropic 预设）——断言它随槽位走，而不是硬编码某个供应商。
+        assert finished["model"] == "claude-sonnet-4-20250514"
 
         # —— 真实 dump（供报告摘录）——
         print("=== CONTRACT EVENT DUMP (test_contract_event_sequence) ===")
