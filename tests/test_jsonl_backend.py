@@ -4778,3 +4778,345 @@ def test_history_command_reports_whether_the_session_was_really_bound(
         assert backend.sessions[session_id].current_run_id is None
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# 按需读仓库文件（docs/claude-chat-repo-files.md）
+# ---------------------------------------------------------------------------
+
+
+def _seed_run_with_head(
+    backend: JsonlBackend,
+    *,
+    pr_number: int = 31,
+    head_sha: str = "b" * 40,
+    owner: str = "example",
+    repo: str = "repo",
+) -> str:
+    """落库一条带 head_sha 的 run（读源码要靠它定位文件版本）。"""
+    from ai_pr_review.services.prompt_assembler import ReviewResult
+    from ai_pr_review.services.result_store import ResultStore
+
+    return ResultStore(backend.config.result_store).save_result(
+        f"https://github.com/{owner}/{repo}/pull/{pr_number}",
+        ReviewResult(summary="审查完成", findings=[]),
+        head_sha=head_sha,
+    )
+
+
+class _StubRepoFetcher:
+    """`PRFetcher` 替身：记录 (owner, repo, path, ref) 并按路径返回内容。"""
+
+    def __init__(
+        self,
+        contents: dict[str, str | None] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.contents = contents or {}
+        self.error = error
+        self.calls: list[tuple[str, str, str, str]] = []
+
+    def fetch_file_content(
+        self, owner: str, repo: str, file_path: str, ref: str
+    ) -> str | None:
+        self.calls.append((owner, repo, file_path, ref))
+        if self.error is not None:
+            raise self.error
+        return self.contents.get(file_path)
+
+
+def _point_repo_cache_at(
+    monkeypatch: pytest.MonkeyPatch, backend: JsonlBackend, root: Path
+) -> None:
+    """把聊天读源码的缓存钉到 tmp_path，别写进用户真实的 %LOCALAPPDATA%。"""
+    from ai_pr_review.services.repo_context import FileSystemRepoCache
+
+    monkeypatch.setattr(
+        backend,
+        "_chat_repo_cache",
+        lambda owner, repo, sha: FileSystemRepoCache(owner, repo, sha, root=root),
+    )
+
+
+def test_mentioned_repo_paths_hits_common_forms_and_ignores_the_rest() -> None:
+    """只认源码扩展名；URL 与 PR 链接不得被当成文件路径。"""
+    from ai_pr_review.backend.jsonl_server import _mentioned_repo_paths
+
+    # 实测里最常见的问法：带目录的路径、反引号包裹、Windows 分隔符
+    assert _mentioned_repo_paths("website/js/main.js 里的 tab.html 从哪来") == [
+        "website/js/main.js"
+    ]
+    assert _mentioned_repo_paths("看下 `src/a.py` 和 src/b.ts") == ["src/a.py", "src/b.ts"]
+    assert _mentioned_repo_paths(r"frontend\tui\src\main.tsx 做了什么") == [
+        "frontend/tui/src/main.tsx"
+    ]
+    assert _mentioned_repo_paths("see src/main.js:120 for details") == ["src/main.js"]
+    # 裸文件名也认（实测："main.js 里的 tab.html 从哪来"）
+    assert _mentioned_repo_paths("main.js 是干嘛的") == ["main.js"]
+
+    # GitHub PR URL / 普通网址：都不是文件路径
+    assert _mentioned_repo_paths("https://github.com/example/repo/pull/31") == []
+    assert _mentioned_repo_paths("github.com/o/r/pull/31") == []
+    assert _mentioned_repo_paths("看看 https://cdn.example.com/vendor/app.js 的写法") == []
+    assert _mentioned_repo_paths("https://github.com/o/r/blob/main/src/app.js#L10") == []
+    # 非源码扩展名（.md/.html/.txt）与版本号、缩写
+    assert _mentioned_repo_paths("docs/design.md 说了什么") == []
+    assert _mentioned_repo_paths("index.html 是入口吗") == []
+    assert _mentioned_repo_paths("版本 1.2.3 和 e.g. 这类写法") == []
+    assert _mentioned_repo_paths("") == []
+
+    # 去重（大小写不敏感）+ 最多 2 条
+    assert _mentioned_repo_paths("src/x.py 与 src/x.py") == ["src/x.py"]
+    assert _mentioned_repo_paths("a.py b.py c.py d.py") == ["a.py", "b.py"]
+
+
+def test_chat_injects_the_mentioned_repo_file_from_the_run_head(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """实测反馈：绑定 run 后问 "website/js/main.js 里的 tab.html 从哪来"，
+    模型只能答"需要查看源码"——它手上只有 findings。现在按 head 提交取回文件原文。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        run_id = _seed_run_with_head(backend)
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = run_id
+        fetcher = _StubRepoFetcher(
+            {"website/js/main.js": "const host = document.getElementById('tabs');\n"}
+        )
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(
+            _chat_send(session_id, "website/js/main.js 里的 tab.html 从哪来？")
+        )
+
+        assert response[0]["ok"] is True
+        # (owner, repo, path, ref) 全部来自这条 run 的元数据与 head 提交
+        assert fetcher.calls == [("example", "repo", "website/js/main.js", "b" * 40)]
+        prompt = captured["options"]["system_prompt"]
+        assert "## 用户提到的仓库文件（来自本次 PR 的 head 提交）" in prompt
+        assert f"（run {run_id[:8]} · example/repo @ {'b' * 8}）" in prompt
+        assert "### website/js/main.js" in prompt
+        assert "document.getElementById('tabs')" in prompt
+        assert "3. 引用代码时必须给出「文件:行」" in prompt
+        # 只进本轮 system prompt：对话历史里不得出现源码，否则每轮都在重复计费
+        messages = backend.sessions[session_id].messages
+        assert [message["role"] for message in messages] == ["user", "assistant"]
+        assert all(
+            "document.getElementById" not in message["content"] for message in messages
+        )
+
+    asyncio.run(run())
+
+
+def test_chat_without_a_mentioned_path_never_asks_github(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """没点名文件就不该有额外请求（未绑定同理）：普通聊天零成本。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        run_id = _seed_run_with_head(backend)
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        fetcher = _StubRepoFetcher(error=AssertionError("不该被调用"))
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        # (1) 已绑定但消息里没有路径
+        backend.sessions[session_id].current_run_id = run_id
+        assert (
+            await backend.handle(_chat_send(session_id, "这次审查结论是什么"))
+        )[0]["ok"] is True
+        # (2) 有路径但没绑定 run
+        backend.sessions[session_id].current_run_id = None
+        assert (
+            await backend.handle(_chat_send(session_id, "src/a.py 是干嘛的"))
+        )[0]["ok"] is True
+
+        assert fetcher.calls == []
+        assert "## 用户提到的仓库文件" not in captured["options"]["system_prompt"]
+
+    asyncio.run(run())
+
+
+def test_chat_says_it_could_not_read_a_file_instead_of_inventing_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """文件不存在：明写 "(未能读取 …)"，绝不编造内容，对话照常。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        run_id = _seed_run_with_head(backend)
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = run_id
+        fetcher = _StubRepoFetcher({"src/real.py": "print('hi')\n"})
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(
+            _chat_send(session_id, "src/missing.py 和 src/real.py 分别是什么？")
+        )
+
+        assert response[0]["ok"] is True
+        assert response[0]["result"]["text"] == "stub"
+        prompt = captured["options"]["system_prompt"]
+        assert "(未能读取 src/missing.py：该提交的仓库里不存在，或当前 Token 无权访问)" in prompt
+        # 读到的那个照常注入
+        assert "### src/real.py" in prompt
+        assert "print('hi')" in prompt
+
+    asyncio.run(run())
+
+
+def test_chat_survives_a_failing_repo_file_fetch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """拉取抛异常：写明简短原因，绝不中断对话（读源码是增益）。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        run_id = _seed_run_with_head(backend)
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = run_id
+        fetcher = _StubRepoFetcher(error=RuntimeError("token=ghp_should_not_leak"))
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(_chat_send(session_id, "src/fail.py 怎么回事"))
+
+        assert response[0]["ok"] is True
+        assert response[0]["result"]["text"] == "stub"
+        prompt = captured["options"]["system_prompt"]
+        assert "(未能读取 src/fail.py：拉取失败（RuntimeError）)" in prompt
+        # 异常文案里不得夹带 token / URL 之类的细节（这里只报异常类名）
+        assert "ghp_should_not_leak" not in prompt
+
+        # 整个收集过程炸掉（例如历史库读不了）：降级为空串，仍是普通聊天
+        def exploding(run_id: str, paths: list[str]) -> str:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(backend, "_collect_repo_files", exploding)
+        response = await backend.handle(_chat_send(session_id, "src/fail.py 再看一次"))
+        assert response[0]["ok"] is True
+        assert "## 用户提到的仓库文件" not in captured["options"]["system_prompt"]
+
+    asyncio.run(run())
+
+
+def test_chat_reuses_the_l1_prefetch_cache_for_mentioned_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """同一个 head 提交下重复问同一个文件：第二轮命中缓存，不再打 GitHub。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        run_id = _seed_run_with_head(backend)
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = run_id
+        fetcher = _StubRepoFetcher({"src/cached.py": "VALUE = 1\n"})
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        for _ in range(2):
+            response = await backend.handle(
+                _chat_send(session_id, "src/cached.py 里的 VALUE 是多少")
+            )
+            assert response[0]["ok"] is True
+
+        assert fetcher.calls == [("example", "repo", "src/cached.py", "b" * 40)]
+        assert captured["options"]["system_prompt"].count("### src/cached.py") == 1
+
+    asyncio.run(run())
+
+
+def test_chat_truncates_mentioned_files_per_file_and_in_total(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """单文件 8000 字符、多文件合计 12000 字符：超限处必须明说截断了。"""
+    from ai_pr_review.backend.jsonl_server import (
+        CHAT_REPO_FILE_MAX_CHARS,
+        CHAT_REPO_FILES_TOTAL_CHARS,
+    )
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        run_id = _seed_run_with_head(backend)
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = run_id
+        first = "A" * (CHAT_REPO_FILE_MAX_CHARS + 500)
+        second = "B" * CHAT_REPO_FILES_TOTAL_CHARS
+        fetcher = _StubRepoFetcher({"src/big.py": first, "src/second.py": second})
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(
+            _chat_send(session_id, "src/big.py 和 src/second.py 讲了什么")
+        )
+
+        assert response[0]["ok"] is True
+        prompt = captured["options"]["system_prompt"]
+        assert f"… [内容已截断，仅显示前 {CHAT_REPO_FILE_MAX_CHARS} 个字符]" in prompt
+        # 第一个文件占满单文件上限后，第二个文件只能拿到剩下的总量预算
+        injected = prompt.split("### src/second.py", 1)[1]
+        assert len(injected.split("\n\n", 1)[0]) < CHAT_REPO_FILES_TOTAL_CHARS
+        assert "B" in injected
+        # 两个文件都在，且没有出现"超总量"的失败文案
+        assert (
+            f"(未能读取 src/second.py：本轮注入已达 {CHAT_REPO_FILES_TOTAL_CHARS} 字符上限)"
+            not in prompt
+        )
+
+    asyncio.run(run())
+
+
+def test_chat_reports_a_run_without_a_head_sha_instead_of_guessing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """老 run 没存 head_sha：写明原因（无法定位版本），且不去打 GitHub。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        run_id = _seed_run(backend, 31, "没有 head_sha 的旧审查")
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = run_id
+        fetcher = _StubRepoFetcher(error=AssertionError("不该被调用"))
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(_chat_send(session_id, "src/a.py 是什么"))
+
+        assert response[0]["ok"] is True
+        prompt = captured["options"]["system_prompt"]
+        assert "(未能读取 src/a.py：该 Run 未记录仓库 / head 提交，无法定位文件)" in prompt
+        assert fetcher.calls == []
+
+        # Run 被清理：原因文案不同（不是"仓库里没有"，而是"读不到这次运行"）
+        backend.sessions[session_id].current_run_id = "no-such-run"
+        response = await backend.handle(_chat_send(session_id, "src/a.py 是什么"))
+        assert response[0]["ok"] is True
+        prompt = captured["options"]["system_prompt"]
+        assert "(未能读取 src/a.py：该 Run 不存在或已被清理，无法定位文件)" in prompt
+        assert fetcher.calls == []
+
+    asyncio.run(run())

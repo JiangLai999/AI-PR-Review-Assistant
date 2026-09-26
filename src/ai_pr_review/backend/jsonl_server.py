@@ -36,6 +36,7 @@ from ai_pr_review.config import (
     sync_review_slot_to_strategy,
 )
 from ai_pr_review.services.model_providers.factory import create_model_provider
+from ai_pr_review.services.repo_context import SOURCE_EXTENSIONS
 from ai_pr_review.services.review_context import (
     DEFAULT_TOKEN_BUDGET,
     build_review_context,
@@ -204,6 +205,54 @@ def _extract_ordinal(text: str) -> int | None:
         return int(raw) if raw else None
     except (TypeError, ValueError):
         return None
+
+
+# 用户消息里提到的仓库文件（Review-Aware Chat 的按需读源码，docs/claude-chat-repo-files.md）。
+# 上限按**字符**计：8000 字符 ≈ 2k token，够放下一个中等规模的源文件；总量 12000 保证
+# 两个文件也不会挤爆聊天上下文预算。识别出的路径最多 2 条——再多就不是"问某个文件"了。
+CHAT_REPO_FILE_MAX_CHARS = 8000
+CHAT_REPO_FILES_TOTAL_CHARS = 12000
+CHAT_REPO_FILES_LIMIT = 2
+# 先剔除 URL：`…/pull/31` 不是文件路径，`https://host/app.js` 里的 `app.js` 也不是
+# 用户要问的仓库文件（那是一个网址）。宁可漏掉 blob URL，也不要把网址当路径去拉。
+_URL_PATTERN = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+# 路径 token：点分末段必须是**字母开头**的扩展名，因此 `1.2.3`（版本号）、`e.g.`
+# 这类写法不会命中；`[A-Za-z0-9_.\-/\\]` 覆盖 `path/to/name.ext` 与 `name.ext`。
+_PATH_TOKEN_PATTERN = re.compile(
+    r"(?<![\w./\\-])([A-Za-z0-9_][A-Za-z0-9_.\-/\\]*\.[A-Za-z][A-Za-z0-9]*)"
+)
+
+
+def _mentioned_repo_paths(text: str) -> list[str]:
+    """从用户消息里识别"用户提到的仓库文件"（去重、最多 ``CHAT_REPO_FILES_LIMIT`` 条）。
+
+    只认 ``services/repo_context.SOURCE_EXTENSIONS`` 里的源码扩展名——与 L1 预取同一套
+    口径，`.md` / `.html` 这类文件仍会被忽略（模型可以照旧回答"需要查看源码"）。
+
+    两种形态都接受：`path/to/name.ext` 与裸文件名 `name.ext`。实测里用户会直接说
+    "main.js 里的 tab.html 从哪来"，只认带目录的形态会漏掉最常见的问法；裸名若在
+    仓库根不存在，会如实渲染成"(未能读取 main.js：…)"，不会拿同名文件顶替
+    （取舍与理由见 docs/claude-chat-repo-files.md）。
+    """
+    if not text:
+        return []
+    paths: list[str] = []
+    seen: set[str] = set()
+    for match in _PATH_TOKEN_PATTERN.finditer(_URL_PATTERN.sub(" ", text)):
+        candidate = match.group(1).replace("\\", "/").strip("/").rstrip(".")
+        name = candidate.rsplit("/", 1)[-1]
+        if "." not in name:
+            continue
+        if ("." + name.rsplit(".", 1)[-1].lower()) not in SOURCE_EXTENSIONS:
+            continue
+        key = candidate.lower()
+        if not candidate or key in seen:
+            continue
+        seen.add(key)
+        paths.append(candidate)
+        if len(paths) >= CHAT_REPO_FILES_LIMIT:
+            break
+    return paths
 
 
 def _failed_run_suffix(store: Any, run_id: str) -> str:
@@ -1344,12 +1393,13 @@ class JsonlBackend:
             return DEFAULT_TOKEN_BUDGET
         return budget if budget > 0 else DEFAULT_TOKEN_BUDGET
 
-    def _chat_system_prompt(self, session: Session) -> str:
-        """语言指令 + （绑定了 Run 时的）审查上下文（§9.2 C）。
+    def _chat_system_prompt(self, session: Session, repo_files: str = "") -> str:
+        """语言指令 + （绑定了 Run 时的）审查上下文（§9.2 C）+ 本轮提到的仓库文件。
 
-        上下文只进 system prompt，不写 `session.messages`：否则历史会随每一轮
-        对话重复膨胀并重复计费。构建失败/run 读不到时降级为普通聊天并记 warning，
-        绝不因为"解读不了这次审查"而让对话失败。
+        `repo_files` 由 `_repo_files_for_chat` 现算，**只进本轮 system prompt**，
+        不写 `session.messages`：否则历史会随每一轮对话重复膨胀并重复计费。
+        构建失败/run 读不到时降级为普通聊天并记 warning，绝不因为"解读不了这次
+        审查"而让对话失败。
         """
         language_instruction = (
             "Respond in English unless the user explicitly asks for another language."
@@ -1373,15 +1423,28 @@ class JsonlBackend:
             return f"{language_instruction}\n\n{capability_note}"
         context = self._review_context_for_chat(run_id)
         if context is None:
-            return f"{language_instruction}\n\n{capability_note}"
-        sections = [language_instruction, capability_note, wrap_review_context(run_id, context)]
+            return self._join_prompt_sections(
+                language_instruction, capability_note, repo_files
+            )
+        sections = [
+            language_instruction,
+            capability_note,
+            wrap_review_context(run_id, context),
+            # 审查上下文之后才是源码：后者直接回答"这个文件是干嘛的"，
+            # 放在最后也能让"其它可切换的审查"这类元信息保持在最外层。
+            repo_files,
+        ]
         # 已绑定也要让模型知道"历史里还有别的审查可选"：用户续问
         # "那 PR29 呢"时，模型才能切过去，而不是回答"我看不到 #29"
         # （实测反馈：绑定 #31 后问 #29，模型只能说自己拿不到）。
         others = self._other_runs_note(session, run_id)
         if others:
             sections.append(others)
-        return "\n\n".join(sections)
+        return self._join_prompt_sections(*sections)
+
+    @staticmethod
+    def _join_prompt_sections(*sections: str) -> str:
+        return "\n\n".join(section for section in sections if section)
 
     def _other_runs_note(self, session: Session, run_id: str, limit: int = 3) -> str:
         """已绑定时列出"其它可切换的审查"（含失败标注），供模型识别用户改问别的 PR。"""
@@ -1434,6 +1497,132 @@ class JsonlBackend:
             "falling back to plain chat",
             file=sys.stderr,
             flush=True,
+        )
+
+    def _chat_pr_fetcher(self) -> Any:
+        """聊天读源码用的 `PRFetcher`（延迟导入，缺 token 时抛异常由调用方降级）。"""
+        from ai_pr_review.services.pr_fetcher import PRFetcher
+
+        token = self.config.github_token or self.config.pr_fetcher.github_token
+        return PRFetcher(github_token=token, config=self.config.pr_fetcher)
+
+    def _chat_repo_cache(self, owner: str, repo: str, sha: str) -> Any:
+        """聊天读源码用的磁盘缓存。
+
+        直接复用 L1 预取的 `FileSystemRepoCache`：同一个 `<owner>__<repo>/<sha>` 布局、
+        同一套"任何 I/O 失败都当缓存未命中"的容错。因此审查阶段已经预取过的文件，
+        聊天里再问起时不会重复拉取（实测反馈里的 `website/js/main.js` 正是这种情形）。
+        """
+        from ai_pr_review.services.repo_context import FileSystemRepoCache
+
+        return FileSystemRepoCache(owner, repo, sha)
+
+    @staticmethod
+    def _load_repo_file(
+        fetcher: Any, cache: Any, owner: str, repo: str, sha: str, path: str
+    ) -> str | None:
+        """缓存优先；未命中才按该 run 的 head 提交拉取，成功即回填缓存。
+
+        `None` 表示"仓库里没有这个文件"（`fetch_file_content` 的既有语义），
+        与"拉取抛异常"分开处理：调用方对两者的说明文案不同。
+        """
+        cached = cache.get(path)
+        if cached is not None:
+            return cached
+        content = fetcher.fetch_file_content(owner, repo, path, sha)
+        if content is not None:
+            cache.put(path, content)
+        return content
+
+    async def _repo_files_for_chat(self, session: Session, text: str) -> str:
+        """把用户提到的仓库文件渲染成**本轮**可注入的 system prompt 段落。
+
+        前提：会话已绑定 run，且消息里识别出仓库文件路径；否则返回 `""`
+        （普通聊天不该为一句话多付一次网络请求）。文件内容取自该 run 的 head 提交，
+        因此与这次审查看到的是同一份代码。
+
+        诚实优先：拉不到就明写"(未能读取 <path>：<原因>)"，**绝不编造内容**；
+        任何意外异常都降级为空串并记 warning——读源码是增益，不能让整轮对话失败。
+        网络 I/O 走线程，避免阻塞 TUI 的事件循环。
+        """
+        run_id = session.current_run_id
+        if not run_id:
+            return ""
+        paths = _mentioned_repo_paths(text)
+        if not paths:
+            return ""
+        try:
+            return await asyncio.to_thread(self._collect_repo_files, run_id, paths)
+        except Exception as exc:
+            print(
+                f"repo file context unavailable for run {run_id} "
+                f"({exc.__class__.__name__}: {exc}); continuing without it",
+                file=sys.stderr,
+                flush=True,
+            )
+            return ""
+
+    def _collect_repo_files(self, run_id: str, paths: list[str]) -> str:
+        """`_repo_files_for_chat` 的同步主体（在线程里跑，见上）。"""
+        from ai_pr_review.services.result_store import ResultStore
+
+        run = ResultStore(self.config.result_store).get_run_summary(run_id)
+        owner = str((run or {}).get("repo_owner") or "").strip()
+        repo = str((run or {}).get("repo_name") or "").strip()
+        sha = str((run or {}).get("head_sha") or "").strip()
+        lines = [
+            "## 用户提到的仓库文件（来自本次 PR 的 head 提交）",
+            f"（run {run_id[:8]} · {owner}/{repo} @ {sha[:8] or '未知提交'}）",
+        ]
+        if not (owner and repo and sha):
+            # 读不到文件有两种原因，说清楚是哪一种，而不是让模型以为仓库里没有这个文件：
+            # 老记录可能没存 head_sha，Run 也可能已被清理。
+            reason = "该 Run 未记录仓库 / head 提交" if run else "该 Run 不存在或已被清理"
+            lines.extend(
+                f"(未能读取 {path}：{reason}，无法定位文件)" for path in paths
+            )
+            lines.append(self._repo_files_rules())
+            return "\n\n".join(lines)
+
+        fetcher = self._chat_pr_fetcher()
+        cache = self._chat_repo_cache(owner, repo, sha)
+        budget = CHAT_REPO_FILES_TOTAL_CHARS
+        for path in paths:
+            try:
+                content = self._load_repo_file(fetcher, cache, owner, repo, sha, path)
+            except Exception as exc:
+                lines.append(f"(未能读取 {path}：拉取失败（{exc.__class__.__name__}）)")
+                continue
+            if content is None:
+                lines.append(f"(未能读取 {path}：该提交的仓库里不存在，或当前 Token 无权访问)")
+                continue
+            if budget <= 0:
+                lines.append(f"(未能读取 {path}：本轮注入已达 {CHAT_REPO_FILES_TOTAL_CHARS} 字符上限)")
+                continue
+            body, budget = self._truncate_repo_file(
+                content, min(CHAT_REPO_FILE_MAX_CHARS, budget), budget
+            )
+            lines.append(f"### {path}\n```\n{body}\n```")
+        lines.append(self._repo_files_rules())
+        return "\n\n".join(lines)
+
+    @staticmethod
+    def _truncate_repo_file(content: str, limit: int, budget: int) -> tuple[str, int]:
+        """按 `limit` 截断单文件并扣减本轮总量预算，返回 `(正文, 剩余预算)`。"""
+        if len(content) > limit:
+            marker = f"\n… [内容已截断，仅显示前 {limit} 个字符]"
+            content = content[: max(0, limit - len(marker))] + marker
+        return content, budget - len(content)
+
+    @staticmethod
+    def _repo_files_rules() -> str:
+        """注入段自带的诚实约束：有内容才敢让模型"照着回答"。"""
+        return (
+            "规则：\n"
+            "1. 上面的文件内容取自本次审查的 head 提交，只依据它回答这个文件的问题；\n"
+            '2. 上面没有给出内容的文件（包括以"(未能读取 …)"标注的）不得臆测，'
+            '也不要用你记忆里的同名文件替代，请明说"没读到"；\n'
+            "3. 引用代码时必须给出「文件:行」。"
         )
 
     def _bind_session_run(self, session_id: str | None, run_id: str) -> bool:
@@ -1550,9 +1739,14 @@ class JsonlBackend:
             raise RuntimeError(f"Missing API key for provider: {provider_config.name}")
         provider = create_model_provider(provider_config)
         text = self._truncate(text, 12000)
+        # 用户点名了某个仓库文件时，按需把该 run 的 head 提交里的那份内容拉进本轮
+        # system prompt（实测：绑定 run 后问"website/js/main.js 里的 tab.html
+        # 从哪来"，模型只答得出"需要查看源码"，因为它手上只有 findings 记录）。
+        # 必须在 `_resolve_context` 之后算：这一轮刚切换的绑定就是要去读的那个 run。
+        repo_files = await self._repo_files_for_chat(session, text)
         history = [*session.messages, {"role": "user", "content": text}]
         chat_options: dict[str, Any] = {
-            "system_prompt": self._chat_system_prompt(session),
+            "system_prompt": self._chat_system_prompt(session, repo_files),
             "max_tokens": self.config.ai_client.max_tokens,
             "timeout_seconds": self.config.ai_client.timeout_seconds,
         }
