@@ -46,6 +46,7 @@ from ai_pr_review.config import (
     PROJECT_CONFIG_FILENAME,
     PROJECT_LOCAL_CONFIG_FILENAME,
     PROVIDER_MODEL_PRESETS,
+    REPO_CONTEXT_MODES,
     WORKBENCH_MODES,
     AIClientConfig,
     AppConfig,
@@ -3469,6 +3470,13 @@ def history_command(
     default=None,
     help="Set workbench display: auto expands on review, always keeps it open, off is manual.",
 )
+@click.option(
+    "--repo-context",
+    type=click.Choice(list(REPO_CONTEXT_MODES)),
+    default=None,
+    help="Set repo context prefetch: off skips it, tests adds matching tests, "
+    "tests+imports also adds imported files.",
+)
 @click.pass_context
 def preferences_command(
     ctx: click.Context,
@@ -3477,6 +3485,7 @@ def preferences_command(
     chat_layout: str | None,
     output_format: str | None,
     workbench: str | None,
+    repo_context: str | None,
 ) -> None:
     """Show or update CLI preferences."""
     config_path = _config_path_from_context(ctx)
@@ -3496,6 +3505,12 @@ def preferences_command(
         config.preferences.workbench_mode = workbench
         config.save(config_path, save_key=_active_config_has_saved_api_key(config_path))
     payload["workbench_mode"] = config.preferences.workbench_mode
+    # 仓库上下文同理（docs/repo-aware-review-plan.md §4.6）：`--repo-context` 一条命令
+    # 即可脚本化，取值由 config.REPO_CONTEXT_MODES 校验，非法值由 click 直接拒绝。
+    if repo_context is not None:
+        config.preferences.repo_context = repo_context
+        config.save(config_path, save_key=_active_config_has_saved_api_key(config_path))
+    payload["repo_context"] = config.preferences.repo_context
     click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 

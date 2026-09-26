@@ -24,6 +24,7 @@ from ai_pr_review.config import (
     CHAT_SLOT_VALUES,
     MODEL_PROVIDER_PRESETS,
     PROVIDER_MODEL_PRESETS,
+    REPO_CONTEXT_MODES,
     REVIEW_SLOT_VALUES,
     AppConfig,
     ConfigValidationError,
@@ -121,6 +122,13 @@ RUNTIME_PROFILES: tuple[tuple[str, str], ...] = (
     ("hybrid", "混合"),
     ("custom", "自定义"),
 )
+# 仓库上下文预取范围（config.REPO_CONTEXT_MODES）的展示文案。取值本身由 config 拥有，
+# 这里只补 label——与 runtime_profiles / chat_layouts 一样，TUI 不硬编码中文。
+REPO_CONTEXT_LABELS: dict[str, str] = {
+    "off": "关闭 / Off",
+    "tests": "仅测试文件 / Tests only",
+    "tests+imports": "测试与依赖 / Tests + imports",
+}
 
 
 def _utc_now() -> str:
@@ -562,6 +570,9 @@ class JsonlBackend:
             # Workbench Phase 1: the TUI needs this to decide whether a review
             # opens the side panels automatically (auto | always | off).
             "workbench_mode": getattr(self.config.preferences, "workbench_mode", "auto"),
+            # 仓库上下文（docs/repo-aware-review-plan.md §4.6）：与 workbench_mode 一样
+            # 是"当前档位"，配置助手提交后要能在同一个快照里回显（§5.4 的三个出口同源）。
+            "repo_context": self.config.preferences.repo_context,
             "api_format": provider.api_format,
             "api_key_configured": bool(provider.api_key or local),
             "github_token_configured": bool(
@@ -582,6 +593,21 @@ class JsonlBackend:
         if default_model and default_model not in models:
             models.insert(0, default_model)
         return models
+
+    def _repo_context_options(self) -> dict[str, Any]:
+        """仓库上下文的当前值与可选值（`config.options` 与 `model.status` 同键同形）。
+
+        `value` 是落盘值（config 层已保证合法：非法值在加载时回退 `tests+imports`），
+        `options[].value` 是 `config.setup` 接受的取值，`label` 供 TUI 直接渲染。
+        取值清单来自 `config.REPO_CONTEXT_MODES`，后端与前端都不再各存一份。
+        """
+        return {
+            "value": self.config.preferences.repo_context,
+            "options": [
+                {"value": mode, "label": REPO_CONTEXT_LABELS.get(mode, mode)}
+                for mode in REPO_CONTEXT_MODES
+            ],
+        }
 
     def _setup_options(self) -> dict[str, Any]:
         """Return provider/model choices for the TUI setup wizard.
@@ -693,6 +719,9 @@ class JsonlBackend:
             },
             # 确认页/状态栏显示"用户选的是哪一档预设"以及两个槽各用什么模型（方案 §4.1/§5.4）。
             "routing": self._routing_snapshot(),
+            # 仓库上下文（docs/repo-aware-review-plan.md §4.6）：配置助手第 5 阶段的三选一，
+            # 与 routing 同级，供前端预选并回填到 config.setup。
+            "repo_context": self._repo_context_options(),
         }
 
     @staticmethod
@@ -861,6 +890,16 @@ class JsonlBackend:
             if workbench_mode not in WORKBENCH_MODES:
                 raise ConfigValidationError("审查工作台仅支持 auto、always 或 off。")
             preferences.workbench_mode = workbench_mode
+        repo_context = str(params.get("repo_context") or "").strip().lower()
+        if repo_context:
+            # 取值由 config.REPO_CONTEXT_MODES 定义。非法值必须整单失败：这是用户在
+            # 向导里刚刚做出的选择，像加载配置那样静默回退比报错更糟（同 `_setup_slot`）。
+            if repo_context not in REPO_CONTEXT_MODES:
+                raise ConfigValidationError(
+                    "仓库上下文仅支持 off、tests 或 tests+imports。"
+                    "（repo_context accepts off, tests or tests+imports.）"
+                )
+            preferences.repo_context = repo_context
         if "auto_publish_comment" in params:
             auto_publish = params["auto_publish_comment"]
             if not isinstance(auto_publish, bool):
@@ -884,21 +923,117 @@ class JsonlBackend:
         if len(token) < 40:
             raise ConfigValidationError("GitHub Token 长度过短，请确认输入是否完整。")
 
-    async def _apply_model(self, model_name: str) -> dict[str, Any]:
+    def _apply_slot_model(self, target: ProviderConfig, model_name: str) -> dict[str, Any]:
+        """把模型写到某个槽位的 Provider 上并落盘（`model.apply` 的槽位版）。
+
+        模型名原样落盘（不折叠大小写）：`ModelProviderConfig.validate` 与
+        `_model_provider_hint` 都按原名匹配，`/MODEL DeepSeek-V3` 曾会被悄悄改成
+        小写名再写进配置，用户下次看到的就是另一个 ID。
+        """
         model_name = model_name.strip()
         if not model_name:
             raise ValueError("模型名称不能为空。")
-        active = self.config._active_provider_config()
-        active.default_model = model_name
-        active.ensure_default_model_present()
+        target.default_model = model_name
+        target.ensure_default_model_present()
         self.config._sync_runtime_sections()
         self.config.save(self.config_path, save_key=True)
         return self._config_snapshot()
 
+    async def _apply_model(self, model_name: str) -> dict[str, Any]:
+        """`model.apply`：改**活跃槽**的模型（既有语义不变）。"""
+        return self._apply_slot_model(self.config._active_provider_config(), model_name)
+
+    def _local_slot_config(self) -> ProviderConfig:
+        """本地槽位真正承载配置的 Provider（与 `ModelSelector.__init__` 的本地槽一致）。
+
+        主 Provider 自己就是 Ollama/Local 时以它为准：用户自定义的端点与模型列表
+        就在主槽里，改用持久化的 `local_provider` 会把人换到默认 Ollama 上。
+        """
+        if self.config.provider.name.lower() in {"ollama", "local"}:
+            return self.config.provider
+        return self.config.local_provider
+
+    def _chat_slot_config(self) -> ProviderConfig:
+        """聊天槽位真正承载配置的 Provider（`_chat_slot_provider` 的可写版本）。
+
+        判定与 `_chat_slot_provider` 逐条一致；两者共用本函数，避免"读的槽"和
+        "/model chat 写的槽"各算一次、越走越远。
+        """
+        if resolve_chat_slot(self.config) == "remote":
+            return self.config.provider
+        if self._has_explicit_value(self.config.preferences, "chat_slot", CHAT_SLOT_VALUES):
+            return self.config.local_provider
+        if getattr(self.config, "_env_provider_override", False):
+            return self.config.provider
+        return self._local_slot_config()
+
+    def _review_slot_config(self) -> ProviderConfig:
+        """审查槽位真正承载配置的 Provider（与 `ModelSelector` 的槽位判定一致）。
+
+        `local` 槽见 `_local_slot_config`；`remote` 与 `hybrid` 都是主 Provider——
+        hybrid 没有单一模型，可写的那个是"能覆盖全部文件"的远端/升级模型，与
+        `_slot_model("hybrid")` 对外披露的模型一致。
+        """
+        if resolve_review_slot(self.config) == "local":
+            return self._local_slot_config()
+        return self.config.provider
+
+    async def _switch_slot_model(self, slot: str, tokens: list[str]) -> dict[str, Any]:
+        """`/model chat|review <name>`：把模型写到该槽位实际会用的 Provider（方案 §5.3）。
+
+        写"实际会用的 Provider"而不是"槽位名字对应的 Provider"：否则在
+        `local_only` + 主 Provider 就是 Ollama 这类配置里，命令会宣称成功却改不到
+        聊天/审查真正使用的那个 provider。
+        """
+        usage = (
+            f"用法：/model {slot} <模型名>。可用写法：/model（查看当前模型）"
+            " · /model status · /model chat <模型名> · /model review <模型名>"
+            " · /model <模型名>（等同 /model chat）"
+            " · /model local|cloud|hybrid|offline（切换运行模式）"
+        )
+        if not tokens or not tokens[0]:
+            raise ValueError(usage)
+        if len(tokens) > 1:
+            raise ValueError(f"模型名不能包含空格。{usage}")
+        model_name = tokens[0]
+        # 两个槽的归属都要在写入前算好：`save()` 会把活跃槽重建一个新对象，
+        # 写之后再做 `is` 比较必然为假（同一个 provider 会被看成两个）。
+        if slot == "chat":
+            target = self._chat_slot_config()
+            other_target = self._review_slot_config()
+            resolved = resolve_chat_slot(self.config)
+            heading = "对话模型已切换为"
+        else:
+            target = self._review_slot_config()
+            other_target = self._chat_slot_config()
+            resolved = resolve_review_slot(self.config)
+            heading = "审查模型已切换为"
+        shares_provider = other_target is target
+        snapshot = self._apply_slot_model(target, model_name)
+        status = await self._model_status()
+        label = ROUTE_SLOT_LABELS.get(resolved, resolved)
+        lines = [
+            f"{heading} {model_name}（{label}槽 · {target.display_name or target.name}）"
+        ]
+        # 两个槽指向同一个 Provider 时，它们共用一份 default_model：改一个槽必然会
+        # 改到另一个槽用的模型。明说比让用户自己发现"聊天模型怎么变了"要好。
+        if shares_provider:
+            other_label = "审查" if slot == "chat" else "对话"
+            lines.append(
+                f"注意：{other_label}槽用的是同一个 Provider"
+                f"（{target.display_name or target.name}），该槽的模型也会变为 {model_name}。"
+            )
+        if slot == "review" and resolved == "hybrid":
+            local_model = str(self._local_slot_config().default_model or "")
+            if local_model:
+                lines.append(f"混合策略：低风险文件仍由本地模型 {local_model} 审查。")
+        return {"text": "\n".join(lines), "config": snapshot, "status": status}
+
     async def _model_status(self) -> dict[str, Any]:
-        # 顶层字段仍描述"活跃槽"：`/model <name>`（model.apply）改的也是活跃槽，
-        # 两者必须指向同一个 provider，否则状态与随后的写入会互相矛盾。
-        # 两个槽各自的模型在下面的 `routing` 里（方案 §5.1 #10 / §5.4）。
+        # 顶层字段仍描述"活跃槽"（= `ai_client` 跟随的那个槽）：`model.apply` 协议方法
+        # 改的也是活跃槽，两者必须指向同一个 provider，否则状态与随后的写入会互相矛盾。
+        # 两个槽各自的模型在下面的 `routing` 里（方案 §5.1 #10 / §5.4）；
+        # `/model chat|review <name>` 写的是槽位自己的 provider，不再由顶层字段代言。
         provider_config = self.config.ai_client.model_provider
         local = provider_config.name.lower() in {"ollama", "local"}
         status: dict[str, Any] = {
@@ -912,6 +1047,8 @@ class JsonlBackend:
             "models": [],
             "message": "",
             "routing": self._routing_snapshot(),
+            # 供状态栏显示仓库上下文的当前档位（与 config.options 同键同形）。
+            "repo_context": self._repo_context_options(),
         }
         try:
             provider = create_model_provider(provider_config)
@@ -1067,15 +1204,11 @@ class JsonlBackend:
         2. 主 Provider 自己就是 Ollama/Local（用户自定义的端点/模型就在主槽里）。
         两者如果照旧按 `local_provider` 走，`local_only` 的老用户会从自己配的端点悄悄
         换到默认 Ollama，或者"本进程用云端"的覆盖只对审查生效、对聊天失效。
+
+        槽位判定只有一份，见 `_chat_slot_config`：`/model chat <name>` 必须写到同一个
+        provider 上，否则命令改了 A、聊天读的是 B。
         """
-        if resolve_chat_slot(self.config) == "remote":
-            return self.config.provider.to_model_provider()
-        if self._has_explicit_value(self.config.preferences, "chat_slot", CHAT_SLOT_VALUES):
-            return self.config.local_provider.to_model_provider()
-        primary_is_local = self.config.provider.name.lower() in {"ollama", "local"}
-        if getattr(self.config, "_env_provider_override", False) or primary_is_local:
-            return self.config.provider.to_model_provider()
-        return self.config.local_provider.to_model_provider()
+        return self._chat_slot_config().to_model_provider()
 
     def _chat_context_budget(self) -> int:
         """聊天上下文的 token 预算（§9.D；配置缺省时用构建器的默认值）。"""
@@ -1767,7 +1900,7 @@ class JsonlBackend:
                 elif command == "help":
                     result(
                         {
-                            "text": "/setup  配置助手\n/status 查看运行状态\n/model  查看当前模型\n/review 开始 PR 审查\n/cancel 取消当前审查\n/retry 重试上一次操作\n/report 查看当前报告\n/export json|markdown 导出当前报告\n/history 查看历史记录\n/explain <run_id> 解释 Finding 与证据\n/context [run_id|off] 查看/切换/解除审查上下文绑定\n/feedback <run_id> <finding_id> <status> [note] 记录 Finding 反馈\n/publish [run_id] [--confirm] 预览并发布审查评论到 GitHub\n/demo [case_key|list] 运行离线 Demo\n/showcase 查看参赛演示路径\n/exit   退出 Chat"
+                            "text": "/setup  配置助手\n/status 查看运行状态\n/model [chat|review <模型名>] 查看/切换模型\n/review 开始 PR 审查\n/cancel 取消当前审查\n/retry 重试上一次操作\n/report 查看当前报告\n/export json|markdown 导出当前报告\n/history 查看历史记录\n/explain <run_id> 解释 Finding 与证据\n/context [run_id|off] 查看/切换/解除审查上下文绑定\n/feedback <run_id> <finding_id> <status> [note] 记录 Finding 反馈\n/publish [run_id] [--confirm] 预览并发布审查评论到 GitHub\n/demo [case_key|list] 运行离线 Demo\n/showcase 查看参赛演示路径\n/exit   退出 Chat"
                         }
                     )
                 elif command == "setup":
@@ -1775,35 +1908,38 @@ class JsonlBackend:
                 elif command == "model":
                     raw_args = params.get("args", [])
                     args = (
-                        [str(item).lower() for item in raw_args]
+                        [str(item).strip() for item in raw_args]
                         if isinstance(raw_args, list)
                         else []
                     )
-                    if args and args[0] == "status":
+                    # 子命令与运行模式 token 大小写不敏感（旧行为），但模型名保持原样：
+                    # 模型 ID 可以含大写，旧代码的 `item.lower()` 会把它们写坏。
+                    head = args[0].lower() if args else ""
+                    if head == "status":
                         status = await self._model_status()
                         result({"text": self._model_status_text(status), "status": status})
-                    elif args and args[0] in {"local", "cloud", "hybrid", "offline"}:
-                        snapshot = self._apply_runtime_profile(args[0])
+                    elif head in {"local", "cloud", "hybrid", "offline"}:
+                        snapshot = self._apply_runtime_profile(head)
                         status = await self._model_status()
                         result(
                             {
-                                "text": f"运行时已切换为 {args[0]}\n"
+                                "text": f"运行时已切换为 {head}\n"
                                 + self._model_status_text(status),
                                 "config": snapshot,
                                 "status": status,
                             }
                         )
+                    elif head in {"chat", "review"}:
+                        try:
+                            result(await self._switch_slot_model(head, args[1:]))
+                        except ValueError as exc:
+                            error(str(exc), "invalid_request")
                     elif args:
-                        snapshot = await self._apply_model(args[0])
-                        status = await self._model_status()
-                        result(
-                            {
-                                "text": f"模型已切换为 {args[0]}\n"
-                                + self._model_status_text(status),
-                                "config": snapshot,
-                                "status": status,
-                            }
-                        )
+                        # 兼容旧行为（方案 §5.3）：裸模型名 = `/model chat <name>`。
+                        try:
+                            result(await self._switch_slot_model("chat", args))
+                        except ValueError as exc:
+                            error(str(exc), "invalid_request")
                     else:
                         status = await self._model_status()
                         result({"text": self._model_status_text(status), "status": status})

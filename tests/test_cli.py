@@ -1141,6 +1141,62 @@ def test_cli_preferences_command_rejects_invalid_workbench_mode(monkeypatch, tmp
     assert not config_path.exists()
 
 
+def test_cli_preferences_command_sets_repo_context(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+    config = config_module.AppConfig.from_env()
+    config.ai_client = config_module.AIClientConfig(
+        provider="deepseek",
+        api_key="deepseek-key",
+        model="deepseek-chat",
+        base_url="https://api.deepseek.com/v1",
+        api_format="openai",
+    )
+    config.save(config_path, save_key=True)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["preferences", "--repo-context", "off"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["repo_context"] == "off"
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["preferences"]["repo_context"] == "off"
+    # --repo-context 不该碰其他偏好，也不该把已保存的 Key 丢掉。
+    assert persisted["preferences"]["workbench_mode"] == "auto"
+    assert persisted["preferences"]["chat_layout"] == "compact"
+    assert persisted["ai_client"]["api_key"] == "deepseek-key"
+    assert config_module.AppConfig.load(config_path).preferences.repo_context == "off"
+
+
+def test_cli_config_preferences_alias_sets_repo_context(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["config", "preferences", "--repo-context", "tests+imports"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)["repo_context"] == "tests+imports"
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["preferences"]["repo_context"] == "tests+imports"
+
+
+def test_cli_preferences_command_rejects_invalid_repo_context(monkeypatch, tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["preferences", "--repo-context", "imports"])
+
+    assert result.exit_code == 2
+    assert "Invalid value" in result.output
+    assert not config_path.exists()
+
+
 def test_cli_config_export_snapshot_carries_workbench_mode(monkeypatch, tmp_path: Path):
     config_path = tmp_path / "config.json"
     export_path = tmp_path / "export.json"

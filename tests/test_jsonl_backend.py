@@ -2300,6 +2300,18 @@ def _new_session(backend: JsonlBackend) -> str:
     return str(_reply(events)["result"]["session_id"])
 
 
+def _offline_model_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`model.status` 不许联网：换成没有 health_check / list_models 的桩。"""
+
+    class OfflineProvider:
+        """No health_check / list_models: model.status must not touch the network."""
+
+    monkeypatch.setattr(
+        "ai_pr_review.backend.jsonl_server.create_model_provider",
+        lambda config: OfflineProvider(),
+    )
+
+
 def _save_publishable_run(
     backend: JsonlBackend,
     *,
@@ -3424,6 +3436,326 @@ def test_runtime_switch_clears_the_slot_overrides(tmp_path: Path) -> None:
     # 否则 routing.review 会宣称"本地"，而实际生效的审查策略是 remote_only。
     assert snapshot["routing"]["profile"] == "cloud"
     assert snapshot["routing"]["review"]["slot"] == "remote"
+
+
+# ---------------------------------------------------------------------------
+# 仓库上下文配置助手（docs/repo-aware-review-plan.md §4.6）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["off", "tests", "tests+imports"])
+def test_config_setup_persists_each_repo_context_mode(mode: str, tmp_path: Path) -> None:
+    """三态都要能写进配置并落盘；配置助手不再需要手工改配置文件。"""
+    from ai_pr_review.config import AppConfig
+
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+
+    snapshot = backend._apply_setup({"runtime_profile": "local", "repo_context": mode})
+
+    assert backend.config.preferences.repo_context == mode
+    # config.snapshot 里是纯值（与 workbench_mode 等偏好一致）；
+    # `{"value", "options"}` 那种带可选值的形状只在 config.options / model.status。
+    assert snapshot["repo_context"] == mode
+    assert backend._setup_options()["repo_context"]["value"] == mode
+    assert AppConfig.load(config_path).preferences.repo_context == mode
+
+
+def test_config_setup_rejects_an_invalid_repo_context_and_writes_nothing(tmp_path: Path) -> None:
+    """向导里的选择非法必须报错整单失败，而不是像加载配置那样静默回退。"""
+    from ai_pr_review.config import AppConfig, ConfigValidationError
+
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+    backend._apply_setup({"runtime_profile": "local", "repo_context": "tests"})
+
+    with pytest.raises(ConfigValidationError) as excinfo:
+        backend._apply_setup({"runtime_profile": "local", "repo_context": "everything"})
+
+    message = str(excinfo.value)
+    assert "仓库上下文仅支持" in message
+    assert "repo_context accepts off, tests or tests+imports" in message
+    # 内存与磁盘都保持上一次的合法值。
+    assert backend.config.preferences.repo_context == "tests"
+    assert AppConfig.load(config_path).preferences.repo_context == "tests"
+
+
+def test_config_setup_without_repo_context_keeps_the_stored_value(tmp_path: Path) -> None:
+    """部分更新：载荷不带该字段（旧 TUI 载荷）时保持已落盘的值，不重置成默认。"""
+    from ai_pr_review.config import AppConfig
+
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+    backend._apply_setup({"runtime_profile": "local", "repo_context": "off"})
+
+    backend._apply_setup({"runtime_profile": "local", "local_model": "qwen3.5:4b"})
+
+    assert backend.config.preferences.repo_context == "off"
+    assert AppConfig.load(config_path).preferences.repo_context == "off"
+
+
+def test_config_options_and_model_status_expose_repo_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`config.options` 与 `model.status` 同键同形，取值清单来自 config.REPO_CONTEXT_MODES。"""
+    from ai_pr_review.config import REPO_CONTEXT_MODES
+
+    _offline_model_provider(monkeypatch)
+    backend = JsonlBackend(tmp_path / "config.json")
+
+    options = backend._setup_options()["repo_context"]
+    assert options["value"] == "tests+imports"  # 默认档位
+    assert [item["value"] for item in options["options"]] == list(REPO_CONTEXT_MODES)
+    assert all(item["label"] for item in options["options"])
+
+    backend._apply_setup({"runtime_profile": "local", "repo_context": "tests"})
+
+    assert backend._setup_options()["repo_context"]["value"] == "tests"
+    status = _execute(backend, "model", ["status"])["result"]["status"]
+    assert status["repo_context"] == backend._setup_options()["repo_context"]
+    assert status["repo_context"]["value"] == "tests"
+
+
+# ---------------------------------------------------------------------------
+# `/model` 子命令（docs/dual-model-roles-plan.md §5.3）
+# ---------------------------------------------------------------------------
+
+
+def test_model_command_without_arguments_keeps_reporting_the_current_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """无参 `/model` 与 `/model status` 保持现状，不被新子命令挤掉。"""
+    _offline_model_provider(monkeypatch)
+    backend = JsonlBackend(tmp_path / "config.json")
+
+    reply = _execute(backend, "model", [])
+
+    assert reply["ok"] is True
+    assert reply["result"]["text"]
+    assert reply["result"]["status"]["routing"] == backend._routing_snapshot()
+
+    status_reply = _execute(backend, "model", ["status"])
+    assert status_reply["ok"] is True
+    assert status_reply["result"]["text"] == reply["result"]["text"]
+
+
+def test_model_command_chat_writes_the_provider_chat_actually_uses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`/model chat <name>` 改的就是聊天真正会用的 provider（显式本地槽）。"""
+    from ai_pr_review.config import AppConfig
+
+    _offline_model_provider(monkeypatch)
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+    backend.config.provider.default_model = "remote-model"
+    backend.config.local_provider.default_model = "local-model"
+    backend._apply_setup(
+        {"runtime_profile": "custom", "chat_slot": "local", "review_slot": "remote"}
+    )
+
+    reply = _execute(backend, "model", ["chat", "chat-model"])
+
+    assert reply["ok"] is True
+    assert backend.config.local_provider.default_model == "chat-model"
+    # 审查槽指向另一个 provider：不能被顺手改掉。
+    assert backend.config.provider.default_model == "remote-model"
+    assert reply["result"]["config"]["routing"]["chat"]["model"] == "chat-model"
+    assert reply["result"]["config"]["routing"]["review"]["model"] == "remote-model"
+    assert AppConfig.load(config_path).preferences.chat_slot == "local"
+    assert AppConfig.load(config_path).local_provider.default_model == "chat-model"
+
+
+def test_model_command_review_writes_the_provider_review_actually_uses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`/model review <name>` 改的是审查槽的 provider，本地槽原样保留。"""
+    from ai_pr_review.config import AppConfig
+
+    _offline_model_provider(monkeypatch)
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+    backend.config.provider.default_model = "remote-model"
+    backend.config.local_provider.default_model = "local-model"
+    backend._apply_setup(
+        {"runtime_profile": "custom", "chat_slot": "local", "review_slot": "remote"}
+    )
+
+    reply = _execute(backend, "model", ["review", "review-model"])
+
+    assert reply["ok"] is True
+    assert backend.config.provider.default_model == "review-model"
+    assert backend.config.local_provider.default_model == "local-model"
+    assert reply["result"]["config"]["routing"]["review"]["model"] == "review-model"
+    assert reply["result"]["config"]["routing"]["chat"]["model"] == "local-model"
+    assert AppConfig.load(config_path).provider.default_model == "review-model"
+
+
+def test_protocol_config_options_and_setup_carry_repo_context(tmp_path: Path) -> None:
+    """协议层（不只是私有方法）：config.options 暴露可选值，config.setup 接受该字段。"""
+    from ai_pr_review.config import REPO_CONTEXT_MODES
+
+    backend = JsonlBackend(tmp_path / "config.json")
+
+    options = asyncio.run(
+        backend.handle({"id": "1", "method": "config.options", "params": {}})
+    )[0]
+    assert options["ok"] is True
+    assert options["result"]["repo_context"]["value"] == "tests+imports"
+    assert [item["value"] for item in options["result"]["repo_context"]["options"]] == list(
+        REPO_CONTEXT_MODES
+    )
+
+    applied = asyncio.run(
+        backend.handle(
+            {
+                "id": "2",
+                "method": "config.setup",
+                "params": {"runtime_profile": "local", "repo_context": "off"},
+            }
+        )
+    )[0]
+    assert applied["ok"] is True
+    assert applied["result"]["repo_context"] == "off"
+
+    # 非法值经协议边界返回错误事件而不是抛穿（沿用既有错误映射）。
+    rejected = asyncio.run(
+        backend.handle(
+            {
+                "id": "3",
+                "method": "config.setup",
+                "params": {"runtime_profile": "local", "repo_context": "everything"},
+            }
+        )
+    )[0]
+    assert rejected["ok"] is False
+    assert "仓库上下文仅支持" in rejected["error"]["message"]
+
+
+def test_model_command_review_local_slot_writes_the_local_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`_review_slot_config` 的本地分支：review 槽解析为 local 时写 `local_provider`。"""
+    _offline_model_provider(monkeypatch)
+    backend = JsonlBackend(tmp_path / "config.json")
+    backend.config.provider.default_model = "remote-model"
+    backend.config.local_provider.default_model = "local-model"
+    backend._apply_setup(
+        {"runtime_profile": "custom", "chat_slot": "remote", "review_slot": "local"}
+    )
+
+    reply = _execute(backend, "model", ["review", "local-review-model"])
+
+    assert reply["ok"] is True
+    assert backend.config.local_provider.default_model == "local-review-model"
+    assert backend.config.provider.default_model == "remote-model"
+    assert reply["result"]["config"]["routing"]["review"] == {
+        "slot": "local",
+        "label": "本地",
+        "model": "local-review-model",
+    }
+    # 两个槽用的不是同一个 Provider：不出现"连带改到另一个槽"的提示。
+    assert "注意" not in reply["result"]["text"]
+
+
+def test_model_command_chat_with_a_primary_ollama_writes_the_primary_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """主 Provider 自己就是 Ollama 时聊天槽就是主槽：`/model chat` 必须改到它。
+
+    这条正是 `_local_slot_config` 存在的理由——用户自定义的端点与模型列表在主槽里，
+    写到预设的 `local_provider` 上等于"命令说成功、聊天没变化"。
+    """
+    _offline_model_provider(monkeypatch)
+    backend = JsonlBackend(tmp_path / "config.json")
+    backend.config.provider.name = "ollama"
+    backend.config.provider.display_name = "Ollama (Local)"
+    backend.config.provider.base_url = "http://127.0.0.1:9999/v1"
+    backend.config.provider.default_model = "primary-ollama-model"
+    backend.config.local_provider.default_model = "preset-local-model"
+    backend.config.preferences.hybrid_strategy = "local_only"
+    backend.config._sync_runtime_sections()
+
+    reply = _execute(backend, "model", ["chat", "custom-endpoint-model"])
+
+    assert reply["ok"] is True
+    assert backend.config.provider.default_model == "custom-endpoint-model"
+    assert backend.config.provider.base_url == "http://127.0.0.1:9999/v1"
+    assert backend.config.local_provider.default_model == "preset-local-model"
+    assert "对话模型已切换为 custom-endpoint-model" in reply["result"]["text"]
+    # 已知边界（docs/claude-repo-config.md §6.4）：`routing.chat.model` 仍按槽位名报
+    # `local_provider` 的模型，与实际被写入的主槽不一致——`_slot_model` 的既有行为，
+    # 本任务刻意没改（改它会影响状态栏对既有配置的显示）。此断言把该差异钉住。
+    assert reply["result"]["config"]["routing"]["chat"]["model"] == "preset-local-model"
+
+
+def test_model_command_review_in_hybrid_writes_the_upgrade_model_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """hybrid 没有单一模型：写"能覆盖全部文件"的升级模型，并说明本地模型不变。"""
+    _offline_model_provider(monkeypatch)
+    backend = JsonlBackend(tmp_path / "config.json")
+    backend.config.local_provider.default_model = "local-model"
+    backend._apply_setup({"runtime_profile": "custom", "review_slot": "hybrid"})
+
+    reply = _execute(backend, "model", ["review", "deep-model"])
+
+    assert reply["ok"] is True
+    assert backend.config.provider.default_model == "deep-model"
+    assert backend.config.local_provider.default_model == "local-model"
+    assert reply["result"]["config"]["routing"]["review"]["slot"] == "hybrid"
+    assert reply["result"]["config"]["routing"]["review"]["model"] == "deep-model"
+    assert "混合策略：低风险文件仍由本地模型 local-model 审查" in reply["result"]["text"]
+
+
+def test_model_command_warns_when_both_slots_share_one_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """两个槽指向同一个 Provider 时共用一个 default_model，必须明说会连带改到另一个槽。"""
+    _offline_model_provider(monkeypatch)
+    backend = JsonlBackend(tmp_path / "config.json")
+
+    reply = _execute(backend, "model", ["chat", "shared-model"])
+
+    assert reply["ok"] is True
+    assert "注意：审查槽用的是同一个 Provider" in reply["result"]["text"]
+    assert reply["result"]["config"]["routing"]["review"]["model"] == "shared-model"
+
+
+def test_model_command_bare_name_keeps_switching_the_chat_slot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """兼容旧行为：裸模型名等同 `/model chat <name>`，且模型名不再被折叠成小写。"""
+    _offline_model_provider(monkeypatch)
+    backend = JsonlBackend(tmp_path / "config.json")
+    backend.config.local_provider.default_model = "local-model"
+    backend._apply_setup(
+        {"runtime_profile": "custom", "chat_slot": "local", "review_slot": "remote"}
+    )
+
+    reply = _execute(backend, "model", ["Qwen3.5:4B-Instruct"])
+
+    assert reply["ok"] is True
+    assert backend.config.local_provider.default_model == "Qwen3.5:4B-Instruct"
+    assert reply["result"]["config"]["routing"]["chat"]["model"] == "Qwen3.5:4B-Instruct"
+    assert "对话模型已切换为 Qwen3.5:4B-Instruct" in reply["result"]["text"]
+
+
+def test_model_command_rejects_incomplete_or_overspecified_subcommands(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """缺模型名 / 多写参数都要 actionable：说清可用写法，且不写任何配置。"""
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+
+    for args in (["chat"], ["review"], ["chat", "a", "b"], ["chat", ""]):
+        reply = _execute(backend, "model", args)
+        assert reply["ok"] is False, args
+        assert reply["error"]["code"] == "invalid_request", args
+        assert "/model chat <模型名>" in reply["error"]["message"], args
+        assert "/model review <模型名>" in reply["error"]["message"], args
+
+    assert config_path.exists() is False
 
 
 # ---------------------------------------------------------------------------
