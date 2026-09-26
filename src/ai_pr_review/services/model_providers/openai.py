@@ -89,6 +89,9 @@ class OpenAICompatibleProvider(BaseModelProvider):
         loop = asyncio.get_running_loop()
         cancel_event: threading.Event = kwargs.pop("cancel_event", threading.Event())
         active_response = _ResponseSlot()
+        on_reasoning: Callable[[str], Awaitable[None]] | None = kwargs.pop(
+            "on_reasoning", None
+        )
 
         def emit(delta: str) -> None:
             if cancel_event.is_set():
@@ -109,9 +112,27 @@ class OpenAICompatibleProvider(BaseModelProvider):
             except TimeoutError:
                 future.cancel()
 
+        def emit_reasoning(delta: str) -> None:
+            if on_reasoning is None or cancel_event.is_set() or loop.is_closed():
+                return
+            try:
+                future = asyncio.run_coroutine_threadsafe(on_reasoning(delta), loop)
+            except RuntimeError:
+                return
+            try:
+                future.result(timeout=self.EMIT_TIMEOUT_SECONDS)
+            except TimeoutError:
+                future.cancel()
+
         try:
             return await asyncio.to_thread(
-                self._stream_chat_sync, messages, emit, cancel_event, active_response, **kwargs
+                self._stream_chat_sync,
+                messages,
+                emit,
+                cancel_event,
+                active_response,
+                on_reasoning=emit_reasoning,
+                **kwargs,
             )
         except asyncio.CancelledError:
             cancel_event.set()
@@ -130,6 +151,7 @@ class OpenAICompatibleProvider(BaseModelProvider):
         emit: Callable[[str], None],
         cancel_event: threading.Event,
         active_response: _ResponseSlot,
+        on_reasoning: Callable[[str], None] | None = None,
         **kwargs: Any,
     ) -> ProviderResponse:
         payload: dict[str, Any] = {
@@ -214,6 +236,8 @@ class OpenAICompatibleProvider(BaseModelProvider):
                             )
                         if isinstance(reasoning, str) and reasoning:
                             reasoning_parts.append(reasoning)
+                            if on_reasoning is not None:
+                                on_reasoning(reasoning)
         except error.HTTPError as exc:
             if exc.code == 401:
                 raise AIAuthenticationError(
@@ -245,6 +269,8 @@ class OpenAICompatibleProvider(BaseModelProvider):
             text=text,
             input_tokens=int(usage.get("prompt_tokens", 0) or 0),
             output_tokens=int(usage.get("completion_tokens", 0) or 0),
+            usage=self._normalize_usage(usage),
+            reasoning="".join(reasoning_parts) or None,
         )
 
     def _open_stream(

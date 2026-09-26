@@ -5498,3 +5498,232 @@ def test_chat_context_budget_can_be_set_in_the_config_file(tmp_path: Path) -> No
 
     # 配置文件不存在/读不动：默认值，不抛
     assert JsonlBackend(tmp_path / "missing.json")._chat_context_budget() == 8000
+
+
+def test_chat_reasoning_stream_is_separated_from_answer_and_history(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """C5/C4：思考只走独立事件，绝不进入正文或 session.messages。"""
+    from ai_pr_review.services.model_providers.base import ProviderResponse
+
+    async def run() -> None:
+        published: list[dict[str, Any]] = []
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=published.append)
+        backend.config.provider.api_key = "test-key"
+        backend.config._sync_runtime_sections()
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+
+        class ThinkingProvider:
+            async def stream_chat(self, messages, on_delta, **kwargs):
+                await kwargs["on_reasoning"]("internal thought")
+                await on_delta("visible answer")
+                return ProviderResponse(
+                    text="visible answer",
+                    usage={
+                        "prompt_tokens": 20,
+                        "completion_tokens": 10,
+                        "total_tokens": 30,
+                    },
+                    reasoning="internal thought",
+                )
+
+        monkeypatch.setattr(
+            "ai_pr_review.backend.jsonl_server.create_model_provider",
+            lambda config: ThinkingProvider(),
+        )
+        response = await backend.handle(
+            {
+                "id": "turn",
+                "method": "chat.send",
+                "params": {"session_id": session["session_id"], "text": "hello"},
+            }
+        )
+        by_event: dict[str, Any] = {item["event"]: item for item in published}
+        reasoning_event = published[1]
+        assert reasoning_event["event"] == "assistant.reasoning_delta"
+        assert reasoning_event["request_id"] == "turn"
+        assert reasoning_event["text"] == "internal thought"
+        assert by_event["assistant.delta"]["text"] == "visible answer"
+        finished = by_event["assistant.finished"]
+        assert finished["reasoning"] == "internal thought"
+        assert isinstance(finished["duration_seconds"], float)
+        assert finished["usage"] == {
+            "prompt_tokens": 20,
+            "completion_tokens": 10,
+            "total_tokens": 30,
+        }
+        assert finished["context"]["used_tokens"] == 20
+        assert finished["context"]["budget_tokens"] == 8000
+        assert finished["warning"] is None
+        assert response[0]["result"]["text"] == "visible answer"
+        assert backend.sessions[session["session_id"]].messages[-1]["content"] == "visible answer"
+
+    asyncio.run(run())
+
+
+def test_think_persists_for_a_supported_provider(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """C6：`/think` 写入偏好并落盘。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        reply = await _execute_async(backend, "think", ["low"])
+        assert reply["ok"] is True
+        assert reply["result"]["kind"] == "think"
+        assert reply["result"]["state"] == "set"
+        assert reply["result"]["effort"] == "low"
+        payload = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+        assert payload["preferences"]["chat_reasoning_effort"] == "low"
+
+    asyncio.run(run())
+
+
+def test_think_is_unsupported_for_ollama(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """C6：本地 OpenAI 兼容端点置灰，不写偏好。"""
+
+    async def run() -> None:
+        backend = JsonlBackend(tmp_path / "config.json")
+        backend._apply_setup({"runtime_profile": "local", "local_model": "qwen3.5:4b"})
+        reply = await _execute_async(backend, "think", ["max"])
+        assert reply["ok"] is True
+        assert reply["result"]["state"] == "unsupported"
+        assert "OpenAI 兼容端点会忽略 reasoning_effort" in reply["result"]["reason"]
+        payload = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+        assert payload["preferences"]["chat_reasoning_effort"] == "auto"
+
+    asyncio.run(run())
+
+
+def test_chat_reasoning_effort_is_passed_with_extra_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """C6：off 关思考；low/high/max 直传并预留思考 token；auto 不传。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+        base_budget = backend.config.ai_client.max_tokens
+
+        await _execute_async(backend, "think", ["off"])
+        await backend.handle(_chat_send(session["session_id"]))
+        assert captured["options"]["reasoning_effort"] == "none"
+
+        await _execute_async(backend, "think", ["max"])
+        await backend.handle(_chat_send(session["session_id"], "again"))
+        assert captured["options"]["reasoning_effort"] == "max"
+        assert captured["options"]["max_tokens"] == base_budget + 12000
+
+    asyncio.run(run())
+
+
+def test_chat_usage_falls_back_to_estimated_context() -> None:
+    """A5：provider 没给 usage 时用确定性估算，warning 仍只看预算/裁剪。"""
+    from ai_pr_review.services.model_providers.base import ProviderResponse
+
+    backend = JsonlBackend(Path("does-not-matter.json"))
+    usage = backend._chat_usage_payload(ProviderResponse(text="stub"))
+    assert usage is None
+    context = backend._chat_context_payload(
+        wire_history=[{"role": "user", "content": "abcd"}],
+        answer="",
+        usage=usage,
+        trimmed_messages=2,
+        compacted=False,
+    )
+    assert context["used_tokens"] == 10
+    assert context["budget_tokens"] == 8000
+    assert context["trimmed_messages"] == 2
+
+
+def test_history_defaults_to_chat_and_runs_stay_available(tmp_path: Path) -> None:
+    """A7：默认 `/history` 列对话；`--runs` 保留旧审查列表。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        session_id = await _new_session_async(backend)
+        from ai_pr_review.services.model_providers.base import ProviderResponse
+        backend.sessions[session_id].messages = [
+            {"role": "user", "content": "x" * 80, "timestamp": "2026-01-01T00:00:00+00:00"},
+            {"role": "assistant", "content": "answer", "timestamp": "2026-01-01T00:00:01+00:00"},
+        ]
+        chat_history = await _execute_async(backend, "history", [], session_id)
+        assert chat_history["result"]["kind"] == "history"
+        assert chat_history["result"]["items"][0]["excerpt"].endswith("…")
+        assert chat_history["result"]["items"][0]["in_window"] is True
+
+        runs_history = await _execute_async(backend, "history", ["--runs"])
+        assert "runs" in runs_history["result"]
+        assert "kind" not in runs_history["result"]
+
+    asyncio.run(run())
+
+
+def test_compact_replaces_old_messages_with_a_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A6：成功压缩只保留最近 10 轮原文；摘要进历史并落盘。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        session_id = await _new_session_async(backend)
+        backend.sessions[session_id].messages = [
+            {"role": role, "content": f"old {index}", "timestamp": "2026-01-01"}
+            for index in range(22)
+            for role in ("user", "assistant")
+        ][:22]
+
+        class SummaryProvider:
+            async def chat(self, messages, **kwargs):
+                from ai_pr_review.services.model_providers.base import ProviderResponse
+
+                return ProviderResponse(text="earlier facts")
+
+        monkeypatch.setattr(
+            "ai_pr_review.backend.jsonl_server.create_model_provider",
+            lambda config: SummaryProvider(),
+        )
+        reply = await _execute_async(backend, "compact", ["保留 API 细节"], session_id)
+        assert reply["result"]["replaced_messages"] == 2
+        assert reply["result"]["kept_turns"] == 10
+        assert reply["result"]["summary_chars"] > 0
+        messages = backend.sessions[session_id].messages
+        assert len(messages) == 21
+        assert messages[0]["content"] == "（历史摘要）earlier facts"
+        assert messages[1]["content"] == "old 1"
+        payload = json.loads((tmp_path / "chat_session.json").read_text(encoding="utf-8"))
+        assert len(payload) == 21
+
+    asyncio.run(run())
+
+
+def test_compact_failure_preserves_history(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A6：摘要失败时原历史一字不动。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        session_id = await _new_session_async(backend)
+        from ai_pr_review.services.model_providers.base import ProviderResponse
+        original = [
+            {"role": role, "content": f"old {index}", "timestamp": "2026-01-01"}
+            for index in range(22)
+            for role in ("user", "assistant")
+        ][:22]
+        backend.sessions[session_id].messages = original
+
+        class FailingProvider:
+            async def chat(self, messages, **kwargs):
+                raise RuntimeError("summary failed")
+
+        monkeypatch.setattr(
+            "ai_pr_review.backend.jsonl_server.create_model_provider",
+            lambda config: FailingProvider(),
+        )
+        reply = await _execute_async(backend, "compact", [], session_id)
+        assert reply["ok"] is False
+        assert "summary failed" in reply["error"]["message"]
+        assert backend.sessions[session_id].messages == original
+
+    asyncio.run(run())

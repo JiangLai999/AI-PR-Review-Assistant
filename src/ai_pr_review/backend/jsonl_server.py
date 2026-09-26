@@ -29,6 +29,8 @@ from ai_pr_review.chat_session import (
 )
 from ai_pr_review.config import (
     CHAT_SLOT_VALUES,
+    CHAT_REASONING_EFFORTS,
+    DEFAULT_CHAT_REASONING_EFFORT,
     MODEL_PROVIDER_PRESETS,
     PROVIDER_MODEL_PRESETS,
     REPO_CONTEXT_MODES,
@@ -51,6 +53,7 @@ from ai_pr_review.services.review_context import (
     describe_run,
     wrap_review_context,
 )
+from ai_pr_review.services.review_context import estimate_tokens
 
 # Use the orchestrator's exception class itself. A *subclass* here would NOT
 # catch a plain `ReviewCancelled` raised inside `run_review` — `except SubClass`
@@ -233,6 +236,8 @@ CHAT_REPO_FILES_LIMIT = 2
 CHAT_REPO_FINDING_WINDOW_LINES = 80
 # A3：对话历史窗口（原为硬编码的 40 条）。裁剪时必须明确告知用户，不再静默丢弃。
 CHAT_HISTORY_MESSAGE_LIMIT = 80
+CHAT_COMPACT_KEPT_TURNS = 10
+CHAT_REASONING_TOKEN_BUDGETS: dict[str, int] = {"low": 4000, "high": 8000, "max": 12000}
 # 先剔除 URL：`…/pull/31` 不是文件路径，`https://host/app.js` 里的 `app.js` 也不是
 # 用户要问的仓库文件（那是一个网址）。宁可漏掉 blob URL，也不要把网址当路径去拉。
 _URL_PATTERN = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
@@ -741,6 +746,12 @@ class JsonlBackend:
             "output_format": self.config.preferences.output_format,
             "auto_publish_comment": self.config.preferences.auto_publish_comment,
             "chat_layout": getattr(self.config.preferences, "chat_layout", "compact"),
+            "chat_reasoning_effort": getattr(
+                self.config.preferences,
+                "chat_reasoning_effort",
+                DEFAULT_CHAT_REASONING_EFFORT,
+            ),
+            "chat_context_budget": self._chat_context_budget(),
             # Workbench Phase 1: the TUI needs this to decide whether a review
             # opens the side panels automatically (auto | always | off).
             "workbench_mode": getattr(self.config.preferences, "workbench_mode", "auto"),
@@ -1436,18 +1447,7 @@ class JsonlBackend:
         return self._chat_slot_config().to_model_provider()
 
     def _chat_context_budget(self) -> int:
-        """聊天上下文的 token 预算（§9.D；A3 起可配置，默认 8000）。
-
-        读取顺序：
-        1. `preferences.chat_context_budget`——config 层加了这个字段之后就是它；
-        2. 配置文件里的 `preferences.chat_context_budget` **字面量**——该字段目前还没进
-           `PreferencesConfig`，`AppConfig.load` 会按 dataclass 字段过滤掉未知键，所以
-           "文件里写了、属性上读不到"的值只可能回到原始 JSON 里找。这是本任务 write_scope
-           内能给到的"可配"：用户在配置文件里写就生效，字段进配置层后自动走第 1 条；
-        3. 构建器的默认值（8000）。
-
-        非法值（非数字、≤0）一律回退默认值——坏配置不该让聊天预算变成 0 或负数。
-        """
+        """聊天上下文的 token 预算（§9.D；A3/A5 起可配置，默认 8000）。"""
         raw = getattr(self.config.preferences, "chat_context_budget", None)
         if raw is None:
             raw = self._config_preference_literal("chat_context_budget")
@@ -1456,6 +1456,12 @@ class JsonlBackend:
         except (TypeError, ValueError):
             return DEFAULT_TOKEN_BUDGET
         return budget if budget > 0 else DEFAULT_TOKEN_BUDGET
+
+    def _chat_reasoning_effort(self) -> str:
+        """当前 Chat 思考档位；旧配置由 `PreferencesConfig` 在加载时补默认值。"""
+        effort = getattr(self.config.preferences, "chat_reasoning_effort", None)
+        normalized = str(effort or DEFAULT_CHAT_REASONING_EFFORT).strip().lower()
+        return normalized if normalized in CHAT_REASONING_EFFORTS else DEFAULT_CHAT_REASONING_EFFORT
 
     def _config_preference_literal(self, field: str) -> Any:
         """从生效的配置文件里取 `preferences.<field>` 的字面量（读不到返回 None）。
@@ -1981,7 +1987,9 @@ class JsonlBackend:
         text: str,
         on_delta: Callable[[str], Awaitable[None]],
         cancel_event: threading.Event,
-    ) -> str:
+        request_id: str | None = None,
+        on_reasoning: Callable[[str], Awaitable[None]] | None = None,
+    ) -> tuple[str, dict[str, Any]]:
         # 用户实测两点：(1) 新会话问"看看这次审查结果"时 chat 只能回
         # "我无法访问"；(2) 工作台里复制 run id 很不方便。于是按消息里的
         # PR 号 / 候选序号解析绑定（见 `_resolve_context`）——既不静默绑定
@@ -2007,6 +2015,7 @@ class JsonlBackend:
             *session.messages,
             {"role": "user", "content": text, "timestamp": _chat_timestamp()},
         ]
+        chat_stop_event = cancel_event
         wire_history = [
             {"role": message["role"], "content": message["content"]} for message in transcript
         ]
@@ -2015,16 +2024,40 @@ class JsonlBackend:
             "max_tokens": self.config.ai_client.max_tokens,
             "timeout_seconds": self.config.ai_client.timeout_seconds,
         }
-        if is_local:
+        reasoning_effort = self._chat_reasoning_effort()
+        if reasoning_effort == "auto" and is_local:
+            # 本地思考型模型（Qwen3.5 / DeepSeek-R1 系）默认会自动思考：
+            # Ollama 的 OpenAI 兼容端点会忽略 thinking/reasoning_effort
+            # （docs/model-reasoning-probe.md 的 R1/R2 实测），传参只是"尽力而为"；
+            # 真正的兜底是预留预算——实测 12/16 次思考吃满 max_tokens 导致答案为空（R3）。
+            chat_options["reasoning_effort"] = "none"
+            chat_options["max_tokens"] += CHAT_REASONING_TOKEN_BUDGETS["high"]
+        elif reasoning_effort == "off":
             # Qwen3.5 / DeepSeek-R1 style locally hosted models otherwise spend
             # the whole answer budget in the reasoning channel and return an
             # empty `content`, which Chat surfaces as a connection failure.
             chat_options["reasoning_effort"] = "none"
+        elif reasoning_effort != "auto":
+            # Thinking consumes the same completion budget as the answer
+            # (docs/reasoning-effort-probe.md); reserve enough room or the
+            # answer can arrive empty.
+            chat_options["reasoning_effort"] = reasoning_effort
+            chat_options["max_tokens"] += CHAT_REASONING_TOKEN_BUDGETS[reasoning_effort]
+        reasoning_parts: list[str] = []
+
+        async def capture_reasoning(delta: str) -> None:
+            if chat_stop_event.is_set():
+                return
+            reasoning_parts.append(delta)
+            if on_reasoning is not None:
+                await on_reasoning(delta)
+
         started = time.perf_counter()
         response = await provider.stream_chat(
             wire_history,
             on_delta,
             cancel_event=cancel_event,
+            on_reasoning=capture_reasoning,
             **chat_options,
         )
         if cancel_event.is_set():
@@ -2068,7 +2101,25 @@ class JsonlBackend:
                 f"\n\n（对话历史超过 {CHAT_HISTORY_MESSAGE_LIMIT} 条，"
                 f"最旧的 {dropped} 条已不进入本轮上下文；/new 可开始新会话）"
             )
-        return f"{prefix}{response_text}{suffix}"
+        usage = self._chat_usage_payload(response)
+        context = self._chat_context_payload(
+            wire_history=wire_history,
+            answer=response_text,
+            usage=usage,
+            trimmed_messages=dropped,
+            compacted=False,
+        )
+        warning = "over_budget" if dropped or context["used_percent"] >= 100 else None
+        return (
+            f"{prefix}{response_text}{suffix}",
+            {
+                "usage": usage,
+                "context": context,
+                "warning": warning,
+                "reasoning": "".join(reasoning_parts) or None,
+                "duration_seconds": round(time.perf_counter() - started, 3),
+            },
+        )
 
     @staticmethod
     def _trim_history(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
@@ -2080,6 +2131,68 @@ class JsonlBackend:
             return messages, 0
         kept = messages[-CHAT_HISTORY_MESSAGE_LIMIT:]
         return kept, len(messages) - len(kept)
+
+    @staticmethod
+    def _chat_usage_payload(response: Any) -> dict[str, int] | None:
+        """Prefer provider-reported token usage; never invent a fake total."""
+        raw_usage = getattr(response, "usage", None)
+        if isinstance(raw_usage, dict):
+            try:
+                prompt_tokens = int(raw_usage.get("prompt_tokens") or 0)
+                completion_tokens = int(raw_usage.get("completion_tokens") or 0)
+                total_tokens = int(
+                    raw_usage.get("total_tokens") or (prompt_tokens + completion_tokens) or 0
+                )
+                return {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens,
+                }
+            except (TypeError, ValueError):
+                return None
+        input_tokens = getattr(response, "input_tokens", 0)
+        output_tokens = getattr(response, "output_tokens", 0)
+        try:
+            prompt_tokens, completion_tokens = int(input_tokens), int(output_tokens)
+        except (TypeError, ValueError):
+            return None
+        if prompt_tokens <= 0 and completion_tokens <= 0:
+            return None
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+
+    def _chat_context_payload(
+        self,
+        *,
+        wire_history: list[dict[str, str]],
+        answer: str,
+        usage: dict[str, int] | None,
+        trimmed_messages: int,
+        compacted: bool,
+    ) -> dict[str, Any]:
+        """A5/A4 payload: real prompt usage wins, deterministic estimation follows."""
+        prompt_tokens = usage.get("prompt_tokens") if usage else None
+        used_tokens = (
+            prompt_tokens
+            if isinstance(prompt_tokens, int) and prompt_tokens > 0
+            else estimate_tokens(
+                json.dumps(
+                    [{"role": item["role"], "content": item["content"]} for item in wire_history],
+                    ensure_ascii=False,
+                )
+            )
+        )
+        budget = self._chat_context_budget()
+        return {
+            "used_tokens": used_tokens,
+            "budget_tokens": budget,
+            "used_percent": round((used_tokens / budget) * 100, 1),
+            "trimmed_messages": trimmed_messages,
+            "compacted": compacted,
+        }
 
     def _restore_session_messages(self) -> list[dict[str, Any]]:
         """新建会话时恢复落盘的对话历史（A2：backend 重启后接着聊）。
@@ -2104,9 +2217,107 @@ class JsonlBackend:
         except Exception as exc:
             print(
                 f"chat session save failed ({exc.__class__.__name__}: {exc})",
-                file=sys.stderr,
-                flush=True,
+            file=sys.stderr,
+            flush=True,
+        )
+
+    def _chat_history_payload(self, session: Session, *, limit: int | None = None) -> dict[str, Any]:
+        """A7: default `/history` lists the chat transcript; `--runs` stays review-only."""
+        shown = session.messages if limit is None else session.messages[-limit:]
+        start_index = len(session.messages) - len(shown)
+        window_start = max(0, len(session.messages) - CHAT_HISTORY_MESSAGE_LIMIT)
+        items: list[dict[str, Any]] = []
+        lines: list[str] = []
+        for offset, message in enumerate(shown):
+            index = start_index + offset
+            content = str(message.get("content", ""))
+            excerpt = content[:60] + ("…" if len(content) > 60 else "")
+            timestamp = str(message.get("timestamp", ""))
+            in_window = index >= window_start
+            items.append(
+                {
+                    "index": index,
+                    "role": str(message.get("role", "")),
+                    "excerpt": excerpt,
+                    "timestamp": timestamp,
+                    "in_window": in_window,
+                }
             )
+            timestamp_part = f" · {timestamp}" if timestamp else ""
+            lines.append(
+                f"{index}. [{str(message.get('role', ''))}] {excerpt}"
+                f"{timestamp_part}{'' if in_window else ' · 已在窗口外'}"
+            )
+        return {
+            "kind": "history",
+            "items": items,
+            "text": "\n".join(lines) if lines else "当前会话还没有对话消息。",
+        }
+
+    async def _compact_chat_history(
+        self, session: Session, instruction: str = ""
+    ) -> dict[str, Any]:
+        """A6: replace old turns with one summary, keeping the newest ten turns raw."""
+        kept_messages = min(CHAT_COMPACT_KEPT_TURNS * 2, len(session.messages))
+        old_messages = session.messages[:-kept_messages]
+        kept = session.messages[-kept_messages:]
+
+        def transcript_tokens(messages: list[dict[str, Any]]) -> int:
+            return estimate_tokens(
+                json.dumps(
+                    [
+                        {"role": item.get("role", ""), "content": item.get("content", "")}
+                        for item in messages
+                    ],
+                    ensure_ascii=False,
+                )
+            )
+
+        if not old_messages:
+            return {
+                "kind": "compact",
+                "kept_turns": len(kept) // 2,
+                "replaced_messages": 0,
+                "before_tokens": transcript_tokens(session.messages),
+                "after_tokens": transcript_tokens(session.messages),
+                "summary_chars": 0,
+            }
+        provider = create_model_provider(self._chat_slot_provider())
+        transcript = "\n".join(
+            f"{message.get('role', '')}: {message.get('content', '')}"
+            for message in old_messages
+        )
+        user_prompt = (
+            "请把以下对话历史压缩为一段中文摘要，保留事实、约束、结论和尚未完成的行动。"
+            "不要添加新信息。输出摘要本身。"
+        )
+        if instruction:
+            user_prompt += f"\n\n压缩时必须保留：{instruction}"
+        response = await provider.chat(
+            [{"role": "user", "content": transcript}],
+            system_prompt=user_prompt,
+            max_tokens=self.config.ai_client.max_tokens,
+            timeout_seconds=self.config.ai_client.timeout_seconds,
+        )
+        summary = self._truncate(str(getattr(response, "text", "")).strip(), 20000)
+        if not summary:
+            raise RuntimeError("摘要模型没有返回内容。")
+        before_tokens = transcript_tokens(session.messages)
+        summary_message = {
+            "role": "system",
+            "content": f"（历史摘要）{summary}",
+            "timestamp": _chat_timestamp(),
+        }
+        session.messages = [summary_message, *kept]
+        self._persist_session(session)
+        return {
+            "kind": "compact",
+            "kept_turns": len(kept) // 2,
+            "replaced_messages": len(old_messages),
+            "before_tokens": before_tokens,
+            "after_tokens": transcript_tokens(session.messages),
+            "summary_chars": len(summary),
+        }
 
     def _resolve_context(self, session: Session, text: str) -> str | None:
         """按消息内容决定这一轮绑定的审查 run；返回"本轮新绑定"的 run_id。
@@ -2659,8 +2870,28 @@ class JsonlBackend:
                             events,
                         )
 
+                    async def on_reasoning(delta: str) -> None:
+                        if chat_stop_event.is_set():
+                            return
+                        self._publish(
+                            {
+                                "event": "assistant.reasoning_delta",
+                                "session_id": session_id,
+                                "request_id": request_id,
+                                "text": delta,
+                            },
+                            events,
+                        )
+
                     try:
-                        answer = await self._chat(existing_session, text, on_delta, chat_stop_event)
+                        answer, chat_meta = await self._chat(
+                            existing_session,
+                            text,
+                            on_delta,
+                            chat_stop_event,
+                            request_id=request_id,
+                            on_reasoning=on_reasoning,
+                        )
                     except asyncio.CancelledError:
                         chat_stop_event.set()
                         self._publish(
@@ -2690,6 +2921,11 @@ class JsonlBackend:
                                 "session_id": session_id,
                                 "request_id": request_id,
                                 "text": answer,
+                                "duration_seconds": chat_meta["duration_seconds"],
+                                "reasoning": chat_meta["reasoning"],
+                                "usage": chat_meta["usage"],
+                                "context": chat_meta["context"],
+                                "warning": chat_meta["warning"],
                             },
                             events,
                         )
@@ -2705,7 +2941,7 @@ class JsonlBackend:
                 elif command == "help":
                     result(
                         {
-                            "text": "/setup  配置助手\n/status 查看运行状态\n/model [chat|review <模型名>] 查看/切换模型\n/review 开始 PR 审查\n/cancel 取消当前审查\n/retry 重试上一次操作\n/report 查看当前报告\n/export json|markdown 导出当前报告\n/history 查看历史记录\n/explain <run_id> 解释 Finding 与证据\n/context [run_id|off] 查看/切换/解除审查上下文绑定\n/feedback <run_id> <finding_id> <status> [note] 记录 Finding 反馈\n/publish [run_id] [--confirm] 预览并发布审查评论到 GitHub\n/demo [case_key|list] 运行离线 Demo\n/showcase 查看参赛演示路径\n/exit   退出 Chat"
+                            "text": "/setup  配置助手\n/status 查看运行状态\n/model [chat|review <模型名>] 查看/切换模型\n/think off|low|high|max|auto 设置思考档位\n/review 开始 PR 审查\n/cancel 取消当前审查\n/retry 重试上一次操作\n/report 查看当前报告\n/export json|markdown 导出当前报告\n/history 查看对话历史\n/history --runs 查看审查历史\n/explain <run_id> 解释 Finding 与证据\n/context [run_id|off] 查看/切换/解除审查上下文绑定\n/feedback <run_id> <finding_id> <status> [note] 记录 Finding 反馈\n/publish [run_id] [--confirm] 预览并发布审查评论到 GitHub\n/compact [指令] 压缩会话历史\n/demo [case_key|list] 运行离线 Demo\n/showcase 查看参赛演示路径\n/exit   退出 Chat"
                         }
                     )
                 elif command == "setup":
@@ -2780,6 +3016,10 @@ class JsonlBackend:
 
                     raw_args = params.get("args", [])
                     args = [str(item) for item in raw_args] if isinstance(raw_args, list) else []
+                    session_id = str(params.get("session_id", ""))
+                    runs_only = bool(args) and args[0] == "--runs"
+                    if runs_only:
+                        args = args[1:]
                     if args and not args[0].isdigit():
                         detail = self._history_detail(args[0])
                         # 载入历史报告即绑定该 Run（§9.2 A）：屏幕上正在看的这次审查
@@ -2788,26 +3028,35 @@ class JsonlBackend:
                         # session_id 时绑定静默失败，而界面仍然宣称"已绑定"。
                         bound = False
                         if detail.get("run") is not None:
-                            bound = self._bind_session_run(
-                                str(params.get("session_id", "")), args[0]
-                            )
+                            bound = self._bind_session_run(session_id, args[0])
                         result({**detail, "bound": bound})
                     else:
                         limit = int(args[0]) if args and args[0].isdigit() else 10
-                        store = ResultStore(self.config.result_store)
-                        runs = store.list_runs(limit=max(1, min(limit, 50)))
-                        result(
-                            {
-                                "text": self._history_text(limit),
-                                "runs": runs,
-                                "statistics": store.get_statistics(),
-                                "fallback_note": (
-                                    f"历史库已回退至：{store.db_path}"
-                                    if store.using_fallback_path
-                                    else ""
-                                ),
-                            }
-                        )
+                        history_session = self.sessions.get(session_id)
+                        # A7：默认列对话消息；`--runs` 明确要审查历史；无会话直调
+                        # （CLI/测试）时降级为审查历史，避免 "Session not found" 死路。
+                        if not runs_only and history_session is not None:
+                            result(
+                                self._chat_history_payload(
+                                    history_session,
+                                    limit=int(args[0]) if args and args[0].isdigit() else None,
+                                )
+                            )
+                        else:
+                            store = ResultStore(self.config.result_store)
+                            runs = store.list_runs(limit=max(1, min(limit, 50)))
+                            result(
+                                {
+                                    "text": self._history_text(limit),
+                                    "runs": runs,
+                                    "statistics": store.get_statistics(),
+                                    "fallback_note": (
+                                        f"历史库已回退至：{store.db_path}"
+                                        if store.using_fallback_path
+                                        else ""
+                                    ),
+                                }
+                            )
                 elif command == "explain":
                     raw_args = params.get("args", [])
                     args = (
@@ -3090,6 +3339,57 @@ class JsonlBackend:
                     session = Session(session_id=uuid.uuid4().hex)
                     self.sessions[session.session_id] = session
                     result(self._session_snapshot(session))
+                elif command == "compact":
+                    compact_session = self.sessions.get(str(params.get("session_id", "")))
+                    if compact_session is None:
+                        error("Session not found", "not_found")
+                    else:
+                        raw_args = params.get("args", [])
+                        instruction = " ".join(
+                            [str(item).strip() for item in raw_args if isinstance(item, str)]
+                        ).strip()
+                        result(await self._compact_chat_history(compact_session, instruction))
+                elif command == "think":
+                    raw_args = params.get("args", [])
+                    args = (
+                        [str(item).strip().lower() for item in raw_args]
+                        if isinstance(raw_args, list)
+                        else []
+                    )
+                    if not args:
+                        effort = self._chat_reasoning_effort()
+                        result(
+                            {
+                                "kind": "think",
+                                "state": "set",
+                                "effort": effort,
+                                "text": f"当前思考档位：{effort}。\n用法：/think off|low|high|max|auto",
+                            }
+                        )
+                    else:
+                        provider_config = self._chat_slot_provider()
+                        if provider_config.name.lower() in {"ollama", "local"}:
+                            result(
+                                {
+                                    "kind": "think",
+                                    "state": "unsupported",
+                                    "reason": "OpenAI 兼容端点会忽略 reasoning_effort，档位已置灰",
+                                }
+                            )
+                        else:
+                            effort = args[0]
+                            if effort not in CHAT_REASONING_EFFORTS:
+                                error("思考档位仅支持 off、low、high、max 或 auto。", "invalid_request")
+                            self.config.preferences.chat_reasoning_effort = effort
+                            self.config.save(self.config_path, save_key=True)
+                            result(
+                                {
+                                    "kind": "think",
+                                    "state": "set",
+                                    "effort": effort,
+                                    "text": f"思考档位已设置为 {effort}。",
+                                }
+                            )
                 else:
                     error(f"Unsupported command: {command}", "unsupported_command")
             else:

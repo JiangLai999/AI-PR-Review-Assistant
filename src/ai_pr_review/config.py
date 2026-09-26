@@ -585,6 +585,10 @@ class ProviderConfig:
 WORKBENCH_MODES: tuple[str, ...] = ("auto", "always", "off")
 DEFAULT_WORKBENCH_MODE = "auto"
 
+CHAT_REASONING_EFFORTS: tuple[str, ...] = ("off", "low", "high", "max", "auto")
+DEFAULT_CHAT_REASONING_EFFORT = "auto"
+DEFAULT_CHAT_CONTEXT_BUDGET = 8000
+
 
 def normalize_workbench_mode(value: object) -> str:
     """把任意输入归一化为合法的 ``workbench_mode``。
@@ -791,6 +795,18 @@ def normalize_model_catalog_fetch(value: object) -> bool:
     )
 
 
+def normalize_chat_reasoning_effort(value: object) -> str:
+    """把任意输入归一化为合法的 ``chat_reasoning_effort``，否则回退 auto。"""
+    normalized = str(value or "").strip().lower()
+    if normalized in CHAT_REASONING_EFFORTS:
+        return normalized
+    _warn_invalid_preference(
+        "chat_reasoning_effort",
+        "已回退为 auto（可选值：off、low、high、max、auto）",
+    )
+    return DEFAULT_CHAT_REASONING_EFFORT
+
+
 def _normalize_bool_preference(value: object, *, field: str, default: bool) -> bool:
     """布尔偏好项的统一归一化：bool / 0-1 / "true|yes|on" 等字面量，其余回退。"""
     if isinstance(value, bool):
@@ -836,6 +852,9 @@ class PreferencesConfig:
     suggested_patch: bool = DEFAULT_SUGGESTED_PATCH
     # 模型目录：配置助手打开时可同步一次 models.dev；断网/关闭时回退内置预设。
     model_catalog_fetch: bool = DEFAULT_MODEL_CATALOG_FETCH
+    # Chat 思考档位与上下文预算（docs/chat-experience-plan.md §A5/§C6）。
+    chat_reasoning_effort: str = DEFAULT_CHAT_REASONING_EFFORT
+    chat_context_budget: int = DEFAULT_CHAT_CONTEXT_BUDGET
 
     def __post_init__(self) -> None:
         # 属性一旦构造出来就保证合法，加载/导入/向导三条路径因此共用同一套回退规则。
@@ -854,6 +873,15 @@ class PreferencesConfig:
         self.symbol_locate = normalize_symbol_locate(self.symbol_locate)
         self.suggested_patch = normalize_suggested_patch(self.suggested_patch)
         self.model_catalog_fetch = normalize_model_catalog_fetch(self.model_catalog_fetch)
+        self.chat_reasoning_effort = normalize_chat_reasoning_effort(
+            self.chat_reasoning_effort
+        )
+        self.chat_context_budget = _normalize_bounded_int(
+            self.chat_context_budget,
+            field="chat_context_budget",
+            default=DEFAULT_CHAT_CONTEXT_BUDGET,
+            bounds=(1, 200_000),
+        )
 
 
 def _preferences_of(config: object) -> object:

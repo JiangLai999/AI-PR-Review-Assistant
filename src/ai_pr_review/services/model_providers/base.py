@@ -17,6 +17,8 @@ class ProviderResponse:
     text: str
     input_tokens: int = 0
     output_tokens: int = 0
+    usage: dict[str, int] | None = None
+    reasoning: str | None = None
     raw_response: Any = None
 
 
@@ -52,6 +54,22 @@ class BaseModelProvider(ABC):
         if response.text:
             await on_delta(response.text)
         return response
+
+    @staticmethod
+    def _normalize_usage(usage: Any) -> dict[str, int] | None:
+        """Coerce provider usage into the stable JSONL contract, or omit it."""
+        if not isinstance(usage, dict):
+            return None
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        total_tokens = int(
+            usage.get("total_tokens") or (prompt_tokens + completion_tokens) or 0
+        )
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
 
     async def list_models(self, **kwargs: Any) -> list[str]:
         """Return remotely available model IDs when the provider supports discovery."""
