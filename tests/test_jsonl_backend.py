@@ -4338,3 +4338,122 @@ def test_help_lists_the_context_command(tmp_path: Path) -> None:
     backend = JsonlBackend(tmp_path / "config.json")
     help_text = _execute(backend, "help", [])["result"]["text"]
     assert "/context [run_id|off] 查看/切换/解除审查上下文绑定" in help_text
+
+
+def _seed_run(backend: JsonlBackend, pr_number: int, summary: str) -> str:
+    """存一条历史 run（pr_number 由 pr_url 解析），返回 run_id。"""
+    from ai_pr_review.services.prompt_assembler import ReviewResult
+    from ai_pr_review.services.result_store import ResultStore
+
+    store = ResultStore(backend.config.result_store)
+    return store.save_result(
+        f"https://github.com/o/r/pull/{pr_number}",
+        ReviewResult(summary=summary, findings=[]),
+    )
+
+
+def _chat_ready_backend(tmp_path: Path) -> JsonlBackend:
+    """既有 stub provider、又通过 `_chat` 的 Key 校验的后端。"""
+    backend = JsonlBackend(tmp_path / "config.json", event_sink=lambda event: None)
+    # `_stub_provider` 不会真的发请求，但 `_chat` 仍要求非本地槽有 Key。
+    backend.config.provider.api_key = "test-key"
+    backend.config.ai_client.api_key = "test-key"
+    return backend
+
+
+def test_chat_binds_context_from_a_pr_number_in_the_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """实测反馈：工作台里复制 run id 很不方便——用户只要说「PR #31」就够了。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        old_run = _seed_run(backend, 29, "旧审查")
+        new_run = _seed_run(backend, 31, "新审查")
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(_chat_send(session["session_id"], "看看 PR #31 的审查结果"))
+
+        assert response[0]["ok"] is True
+        bound = backend.sessions[session["session_id"]].current_run_id
+        assert bound == new_run, f"应绑定 #31 的 run，实际 {bound}（#29 的 run 是 {old_run}）"
+        assert new_run[:8] in str(response[0]["result"].get("text", ""))
+        # 该 run 的上下文确实进了 system prompt
+        assert "新审查" in captured["options"]["system_prompt"]
+
+    asyncio.run(run())
+
+
+def test_chat_binds_context_from_the_candidate_ordinal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """候选清单说「第 2 个」也能选中，同样不需要复制 run id。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        _seed_run(backend, 27, "最早")
+        _seed_run(backend, 29, "居中")
+        _seed_run(backend, 31, "最新")
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+        session_id = session["session_id"]
+
+        # 第一轮：未绑定 → system prompt 携带候选清单，并记下顺序
+        await backend.handle(_chat_send(session_id, "帮我看看审查"))
+        candidates = backend.sessions[session_id].context_candidates
+        assert len(candidates) >= 2
+        assert backend.sessions[session_id].current_run_id is None  # 不静默绑定
+        assert "PR #" in captured["options"]["system_prompt"]
+
+        # 第二轮：说「第 2 个」→ 绑定候选里的第 2 个
+        await backend.handle(_chat_send(session_id, "第 2 个"))
+        assert backend.sessions[session_id].current_run_id == candidates[1]
+
+    asyncio.run(run())
+
+
+def test_chat_without_a_reference_never_silently_binds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """没有指代就不绑定：带着错的上下文回答比「我无法访问」更糟。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        _seed_run(backend, 31, "最新审查")
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(_chat_send(session["session_id"], "今天天气怎么样"))
+
+        assert backend.sessions[session["session_id"]].current_run_id is None
+        assert "已按你的指代绑定" not in str(response[0]["result"].get("text", ""))
+        # 但候选清单仍注入，模型可以主动问"你指哪一次"
+        assert "最近几次审查" in captured["options"]["system_prompt"]
+
+    asyncio.run(run())
+
+
+def test_chat_keeps_an_existing_binding_when_a_new_pr_is_mentioned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """已绑定的会话不被后续消息悄悄改写（要换必须显式 /context <run_id>）。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        first = _seed_run(backend, 27, "第一次")
+        _seed_run(backend, 31, "第二次")
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = first
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        await backend.handle(_chat_send(session_id, "换个话题，PR #31 那个呢"))
+
+        assert backend.sessions[session_id].current_run_id == first
+
+    asyncio.run(run())

@@ -165,6 +165,35 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+# "PR #31" / "pull/31" / "pr 31" —— 用户最常用的指代方式。
+_PR_NUMBER_PATTERN = re.compile(r"(?:pull/|pr\s*#?\s*|#)\s*(\d+)", re.IGNORECASE)
+# "第 2 个" / "选 2" / "2 号" —— 候选清单的序号选择（复制 run id 很不方便）。
+_ORDINAL_PATTERN = re.compile(r"第\s*(\d+)\s*个|选\s*(\d+)|(\d+)\s*号")
+
+
+def _extract_pr_number(text: str) -> int | None:
+    """从用户消息里取 PR 编号；取不到返回 None（绝不猜）。"""
+    match = _PR_NUMBER_PATTERN.search(text or "")
+    if match is None:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_ordinal(text: str) -> int | None:
+    """从用户消息里取候选序号；取不到返回 None。"""
+    match = _ORDINAL_PATTERN.search(text or "")
+    if match is None:
+        return None
+    raw = next((group for group in match.groups() if group), None)
+    try:
+        return int(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _review_completed_fields(report: dict[str, Any]) -> dict[str, Any]:
     """Summary fields for `review.completed`, read from the report payload.
 
@@ -416,6 +445,10 @@ class Session:
     # matching review context into its system prompt; in-memory only, so a
     # restart (or `/context off`) cleanly returns to plain chat.
     current_run_id: str | None = None
+    # Runs most recently offered to the user, in display order. Lets the next
+    # turn resolve "第 2 个" / "第二个" without asking anyone to copy a UUID.
+    # Only ids are kept; nothing here indexes the result store.
+    context_candidates: list[str] = field(default_factory=list)
 
 
 class JsonlBackend:
@@ -1246,7 +1279,10 @@ class JsonlBackend:
         )
         run_id = session.current_run_id
         if not run_id:
-            return language_instruction
+            # 未绑定：给出候选清单，让模型引导用户用「第 N 个」或「PR #N」
+            # 选择。实测：工作台里的 run id 复制很不方便，不该让用户去抄。
+            note = self._recent_runs_note(session)
+            return f"{language_instruction}\n\n{note}" if note else language_instruction
         context = self._review_context_for_chat(run_id)
         if context is None:
             return language_instruction
@@ -1377,6 +1413,11 @@ class JsonlBackend:
         on_delta: Callable[[str], Awaitable[None]],
         cancel_event: threading.Event,
     ) -> str:
+        # 用户实测两点：(1) 新会话问"看看这次审查结果"时 chat 只能回
+        # "我无法访问"；(2) 工作台里复制 run id 很不方便。于是按消息里的
+        # PR 号 / 候选序号解析绑定（见 `_resolve_context`）——既不静默绑定
+        # "最近一次"（会张冠李戴），也不要求用户复制 UUID。
+        auto_bound_run = self._resolve_context(session, text)
         provider_config = self._chat_slot_provider()
         # 本地豁免按"选中的 provider 名"判断，而不是按槽位：`remote` 槽也可能是 Ollama
         # 主 Provider（本地模型），而 `local` 槽在环境覆盖下实际指向云端主槽。按槽位判断
@@ -1406,8 +1447,89 @@ class JsonlBackend:
         if cancel_event.is_set():
             raise asyncio.CancelledError
         response_text = self._truncate(response.text, 20000)
+        # The binding notice is UI-only: the transcript keeps the clean answer
+        # so later turns are not fed a machine-generated prefix.
         session.messages = [*history, {"role": "assistant", "content": response_text}][-40:]
+        if auto_bound_run:
+            return (
+                f"（已按你的指代绑定审查 run {auto_bound_run[:8]}；"
+                f"用 /context 查看详情，或 /context off 解绑）\n\n{response_text}"
+            )
         return response_text
+
+    def _resolve_context(self, session: Session, text: str) -> str | None:
+        """按消息内容决定这一轮绑定的审查 run；返回"本轮新绑定"的 run_id。
+
+        解析顺序（**永不静默绑定"最近一次"**：用户问别的 PR 时会张冠李戴，
+        而带着错上下文回答比"我无法访问"更糟）：
+          ① 已绑定 → 沿用（返回 None，不重复提示）
+          ② 消息里出现 PR 号 / PR URL → 匹配该 PR 的最新 run
+          ③ 消息形如「第 N 个 / 选 N」→ 从上一轮给出的候选清单里取
+          ④ 都不命中 → 不绑定；调用方改用候选清单引导用户选
+
+        全程不需要用户复制 run id（工作台里选中复制并不方便）。
+        """
+        if session.current_run_id:
+            return None
+        try:
+            from ai_pr_review.services.result_store import ResultStore
+
+            runs = ResultStore(self.config.result_store).list_runs(limit=50)
+        except Exception:
+            return None
+        if not runs:
+            return None
+
+        pr_number = _extract_pr_number(text)
+        if pr_number is not None:
+            for run in runs:
+                try:
+                    run_pr = int(run.get("pr_number") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if run_pr == pr_number:
+                    run_id = str(run.get("id") or "").strip()
+                    if run_id:
+                        session.current_run_id = run_id
+                        return run_id
+
+        ordinal = _extract_ordinal(text)
+        if ordinal is not None and session.context_candidates:
+            if 1 <= ordinal <= len(session.context_candidates):
+                run_id = session.context_candidates[ordinal - 1]
+                if run_id:
+                    session.current_run_id = run_id
+                    return run_id
+        return None
+
+    def _recent_runs_note(self, session: Session, limit: int = 3) -> str:
+        """未绑定时的候选清单：让用户用序号或 PR 号选，不用复制 run id。"""
+        try:
+            from ai_pr_review.services.result_store import ResultStore
+
+            runs = ResultStore(self.config.result_store).list_runs(limit=limit)
+        except Exception:
+            return ""
+        if not runs:
+            return ""
+        session.context_candidates = [
+            str(run.get("id") or "").strip()
+            for run in runs
+            if str(run.get("id") or "").strip()
+        ]
+        note_lines = [
+            "（当前还没有绑定审查上下文。以下是最近几次审查，"
+            "用户可以直接说「第 N 个」或「PR #N」来选择，不需要提供 run id：）"
+        ]
+        for index, run in enumerate(runs, 1):
+            note_lines.append(
+                f"{index}. PR #{run.get('pr_number')} · {run.get('created_at')} · "
+                f"{run.get('total_findings')} 条 findings"
+            )
+        note_lines.append(
+            "如果用户问的是别的审查，请让他说明 PR 编号；不要替他猜是哪一次。"
+        )
+        return "\n".join(note_lines)
 
     def _publish(self, event: dict[str, Any], events: list[dict[str, Any]]) -> None:
         session_id = str(event.get("session_id", ""))
