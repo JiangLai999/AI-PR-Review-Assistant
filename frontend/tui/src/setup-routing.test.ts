@@ -2,16 +2,20 @@ import { expect, test } from "bun:test"
 import {
   CHAT_SLOT_VALUES,
   REVIEW_SLOT_VALUES,
+  interpretApiKeyInput,
   presetDescription,
   presetIndexOf,
   presetLabel,
   routeBoxes,
   routeSummary,
   routingStatusText,
+  setupCustomEndpointFields,
+  setupModelSpecFields,
   setupSlotFields,
   slotDetail,
   slotIndexOf,
   slotLabel,
+  validateSpecInput,
 } from "./setup-routing"
 
 // 与 `config.options.current` 同形：两个槽各自能用的模型名都来自后端。
@@ -140,4 +144,102 @@ test("slot aliases and preset copy are bilingual", () => {
   expect(presetDescription("custom", "zh-CN")).toContain("对话模型")
   expect(presetDescription("custom", "en-US")).toContain("chat model")
   expect(presetDescription("future", "zh-CN")).toBe("")
+})
+
+// ---------------------------------------------------------------------
+// B3 中转站载荷三态 + api_key 清空语义（docs/mimo-config-wizard-fix2.md §1/§2）
+// ---------------------------------------------------------------------
+
+test("setupCustomEndpointFields api_key three states: omit / clear / write", () => {
+  // 未填写（undefined）→ 不发 api_key 键
+  const omit = setupCustomEndpointFields({ base_url: "https://r.example.com" })
+  expect(omit.api_key).toBeUndefined()
+  expect("api_key" in omit).toBe(false)
+  // 显式清空（""）→ 发空串
+  const clear = setupCustomEndpointFields({ base_url: "https://r.example.com", api_key: "" })
+  expect(clear.api_key).toBe("")
+  expect("api_key" in clear).toBe(true)
+  // 写入（非空）→ 发值
+  const write = setupCustomEndpointFields({ api_key: "sk-test-123" })
+  expect(write.api_key).toBe("sk-test-123")
+})
+
+test("setupCustomEndpointFields sends only filled fields and always provider_name=custom", () => {
+  const empty = setupCustomEndpointFields({})
+  expect(empty.provider_name).toBe("custom")
+  expect(empty.api_format).toBe("openai")
+  expect(empty.base_url).toBeUndefined()
+  expect(empty.model_name).toBeUndefined()
+  expect(empty.context_window).toBeUndefined()
+  expect(empty.max_output).toBeUndefined()
+
+  const full = setupCustomEndpointFields(
+    {
+      base_url: "https://relay.example.com/v1",
+      api_key: "sk-abc",
+      model_name: "relay-model",
+      context_window: 200000.7,
+      max_output: 16384,
+    },
+    "anthropic",
+  )
+  expect(full.provider_name).toBe("custom")
+  expect(full.api_format).toBe("anthropic")
+  expect(full.base_url).toBe("https://relay.example.com/v1")
+  expect(full.api_key).toBe("sk-abc")
+  expect(full.model_name).toBe("relay-model")
+  expect(full.context_window).toBe(200000) // truncated
+  expect(full.max_output).toBe(16384)
+})
+
+test("interpretApiKeyInput maps dash / blank / value to clear / omit / write", () => {
+  expect(interpretApiKeyInput("-")).toBe("") // 显式清空
+  expect(interpretApiKeyInput("  -  ")).toBe("") // trim 后仍是 -
+  expect(interpretApiKeyInput("")).toBeUndefined() // 未填写
+  expect(interpretApiKeyInput("   ")).toBeUndefined()
+  expect(interpretApiKeyInput(undefined)).toBeUndefined()
+  expect(interpretApiKeyInput("sk-real-key")).toBe("sk-real-key")
+})
+
+// ---------------------------------------------------------------------
+// 规格输入边界校验（§6.3）
+// ---------------------------------------------------------------------
+
+test("validateSpecInput accepts integers and rejects out-of-range / non-integer", () => {
+  const bounds: [number, number] = [1024, 10000000]
+  expect(validateSpecInput("128000", bounds)).toBe("")
+  expect(validateSpecInput("", bounds)).toBe("") // 空 = 合法
+  expect(validateSpecInput("  ", bounds)).toBe("")
+  expect(validateSpecInput("abc", bounds)).toContain("整数")
+  expect(validateSpecInput("12.5", bounds)).toContain("整数")
+  expect(validateSpecInput("512", bounds)).toContain("1024") // 越界
+  expect(validateSpecInput("99999999", bounds)).toContain("1024") // 越界
+  // 无边界时只验整数
+  expect(validateSpecInput("42", undefined)).toBe("")
+  expect(validateSpecInput("x", undefined)).toContain("整数")
+  // en-US 文案
+  expect(validateSpecInput("abc", bounds, "en-US")).toContain("integer")
+  expect(validateSpecInput("1", bounds, "en-US")).toContain("between")
+})
+
+// ---------------------------------------------------------------------
+// 规格载荷（§2.5）
+// ---------------------------------------------------------------------
+
+test("setupModelSpecFields only sends provided numeric fields", () => {
+  const empty = setupModelSpecFields({})
+  expect(Object.keys(empty)).toHaveLength(0)
+  const partial = setupModelSpecFields({ context_window: 128000 })
+  expect(partial).toEqual({ context_window: 128000 })
+  expect(partial.max_output).toBeUndefined()
+  const full = setupModelSpecFields({
+    context_window: 100000.9,
+    max_output: 8192,
+    local_context_window: 32768,
+    local_max_output: 4096,
+  })
+  expect(full.context_window).toBe(100000) // truncated
+  expect(full.max_output).toBe(8192)
+  expect(full.local_context_window).toBe(32768)
+  expect(full.local_max_output).toBe(4096)
 })

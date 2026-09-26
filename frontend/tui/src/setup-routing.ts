@@ -285,9 +285,15 @@ export function setupModelSpecFields(values: ModelSpecSetupValues): Record<strin
   return payload
 }
 
-/** 中转站五项表单的编辑值（§2.6）：undefined = 不提交。 */
+/**
+ * 中转站五项表单的编辑值（§2.6）。
+ *
+ * `api_key` 三态（§6.2）：`undefined` = 不填写（不发，后端保持落盘 Key）；
+ * `""` = 显式清空（发空串）；非空 = 写入。其余字段 `undefined` = 不提交。
+ */
 export type CustomEndpointSetupValues = {
   base_url?: string | undefined
+  /** 三态：undefined 不发 / "" 清空 / 非空写入。 */
   api_key?: string | undefined
   model_name?: string | undefined
   context_window?: number | undefined
@@ -300,6 +306,11 @@ export type CustomEndpointSetupValues = {
  * 复用 `_apply_setup` 的既有字段：`provider_name:"custom"` + `api_key`/`model_name`/
  * `base_url`/`api_format`；规格走 §2.5 的 `context_window`/`max_output`。
  * **不套用官方预设**：base_url 为空时也发（后端允许 custom 无预设端点）。
+ *
+ * `api_key` 三态语义（docs/mimo-config-wizard-fix2.md §2）：
+ *   undefined → 不发（"未填写"，后端缺失 = 不动）；
+ *   ""        → 发空串（"显式清空"，与未填写区分）；
+ *   非空      → 发该值（写入）。
  */
 export function setupCustomEndpointFields(
   values: CustomEndpointSetupValues,
@@ -308,8 +319,9 @@ export function setupCustomEndpointFields(
   const payload: Record<string, unknown> = { provider_name: "custom", api_format: apiFormat }
   const baseUrl = String(values.base_url ?? "").trim()
   if (baseUrl) payload.base_url = baseUrl
-  const apiKey = String(values.api_key ?? "").trim()
-  if (apiKey) payload.api_key = apiKey
+  if (values.api_key !== undefined) {
+    payload.api_key = String(values.api_key).trim()
+  }
   const modelName = String(values.model_name ?? "").trim()
   if (modelName) payload.model_name = modelName
   if (typeof values.context_window === "number" && Number.isFinite(values.context_window)) {
@@ -319,6 +331,20 @@ export function setupCustomEndpointFields(
     payload.max_output = Math.trunc(values.max_output)
   }
   return payload
+}
+
+/**
+ * 解释中转站 api_key 输入框的文本为三态值（§6.2）。
+ *
+ * - 输入 `-`（单个减号）= 显式清空 → 返回 `""`
+ * - 空串 / 空白 = 未填写 → 返回 `undefined`（不发）
+ * - 其余 = 写入 → 返回 trim 后的值
+ */
+export function interpretApiKeyInput(raw: string | undefined): string | undefined {
+  const trimmed = String(raw ?? "").trim()
+  if (!trimmed) return undefined
+  if (trimmed === "-") return ""
+  return trimmed
 }
 
 /**

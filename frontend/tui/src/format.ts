@@ -490,6 +490,37 @@ export function formatCatalogRefreshStatus(
   return ""
 }
 
+// ---------------------------------------------------------------------
+// chat 上下文预算来源展示（docs/mimo-config-wizard-fix2.md §4）
+// ---------------------------------------------------------------------
+
+/** 预算来源标签（config / model_spec / fallback 三态）。 */
+const BUDGET_SOURCE_LABELS: Record<string, [string, string]> = {
+  config: ["配置", "config"],
+  model_spec: ["模型规格", "model spec"],
+  fallback: ["兜底", "fallback"],
+}
+
+/**
+ * 「上下文预算 N（来源：…）」一行；缺字段时返回空串（兼容旧后端）。
+ *
+ * `/context` 结果与配置助手规格屏共用同一条格式化规则。
+ */
+export function formatBudgetSource(
+  budget: number | undefined,
+  source: string | undefined,
+  language?: string,
+): string {
+  if (typeof budget !== "number" || !Number.isFinite(budget) || budget < 0) return ""
+  const key = String(source ?? "").trim()
+  if (!key) return ""
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  const label = BUDGET_SOURCE_LABELS[key]?.[en ? 1 : 0] ?? key
+  return en
+    ? `Context budget ${budget} (source: ${label})`
+    : `上下文预算 ${budget}（来源：${label}）`
+}
+
 /**
  * 中转站五项表单的行标签（双语）。
  * 顺序固定：base_url / api_key / model / context_window / max_output。

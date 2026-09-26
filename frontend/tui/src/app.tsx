@@ -8,6 +8,7 @@ import {
   parseAssistantFinishMeta,
   parseCatalogRefreshResult,
   parseCompactCommandResult,
+  parseContextBudgetInfo,
   parseCustomEndpointOptions,
   parseModelSpecBlock,
   parseReasoningDelta,
@@ -26,6 +27,7 @@ import {
   cursorFrame,
   foldableCodeBlocks,
   foldMarkdownCodeBlocks,
+  formatBudgetSource,
   formatCatalogRefreshStatus,
   formatChatHistoryLines,
   formatCompactFailure,
@@ -92,6 +94,7 @@ import { emptyFindingsMessage } from "./empty-findings"
 import {
   CHAT_SLOT_VALUES,
   REVIEW_SLOT_VALUES,
+  interpretApiKeyInput,
   presetDescription,
   presetIndexOf,
   presetLabel,
@@ -265,6 +268,10 @@ type RuntimeSnapshot = {
   /** model.status 顶层 source 角标（= model_spec.source，状态栏一行读取）。 */
   source?: string
   needs_verification?: boolean
+  /** chat 上下文预算（config.snapshot，§4）。缺字段 = 旧后端，不显示。 */
+  chat_context_budget?: number
+  /** 预算来源：config | model_spec | fallback（同上）。 */
+  chat_context_budget_source?: string
 }
 
 const BRAND_PIXEL = [
@@ -860,7 +867,17 @@ function Composer(props: {
         props.onStatus("ERROR")
       } else {
         if (text.startsWith("/") && response.result?.text) {
-          props.onMessage({ role: "assistant", content: String(response.result.text) })
+          // §4：/context 结果追加预算来源一行（缺字段时不显示）。
+          const budgetInfo = parseContextBudgetInfo(response.result)
+          const budgetLine = formatBudgetSource(
+            budgetInfo.budget_tokens,
+            budgetInfo.budget_source,
+            props.runtime.ui_language,
+          )
+          const content = budgetLine
+            ? `${String(response.result.text)}\n${budgetLine}`
+            : String(response.result.text)
+          props.onMessage({ role: "assistant", content })
         }
         // 契约 v1 · /think → kind:"think"：回显档位；unsupported 给置灰说明。
         const thinkResult = parseThinkCommandResult(response.result)
@@ -1696,6 +1713,8 @@ export function SetupWizardDialog(props: SetupDialogProps) {
   const [customModelName, setCustomModelName] = createSignal("")
   const [customContextWindow, setCustomContextWindow] = createSignal("")
   const [customMaxOutput, setCustomMaxOutput] = createSignal("")
+  /** 中转站表单是否被用户改动过（§6.1 dirty 标记：预填值不主动提交）。 */
+  const [customDirty, setCustomDirty] = createSignal(false)
   /** 中转站表单焦点行（0..4：base_url/api_key/model/context_window/max_output）。 */
   const [customFieldIndex, setCustomFieldIndex] = createSignal(0)
   /** catalog.refresh 状态：idle | refreshing | success | error。 */
@@ -1779,8 +1798,9 @@ export function SetupWizardDialog(props: SetupDialogProps) {
     )
     setSpecLocalOutput(typeof local?.max_output === "number" ? String(local.max_output) : "")
   }
-  /** 预填中转站五项表单。 */
+  /** 预填中转站五项表单（同时复位 dirty 标记）。 */
   const primeCustomFields = (endpoint: CustomEndpointOptions | undefined) => {
+    setCustomDirty(false)
     setCustomBaseUrl(String(endpoint?.base_url ?? ""))
     setCustomApiKey("")
     setCustomModelName(String(endpoint?.default_model ?? ""))
@@ -1969,16 +1989,18 @@ export function SetupWizardDialog(props: SetupDialogProps) {
     return (inputRef?.value ?? inputValue()).trim()
   }
 
-  /** custom_endpoint 五项表单：把当前输入框的值写回对应 signal。 */
+  /** custom_endpoint 五项表单：把当前输入框的值写回对应 signal（值变化时标记 dirty）。 */
   const commitCustomField = () => {
     const value = liveInputText("custom_endpoint")
     if (value === undefined) return
     const index = customFieldIndex()
+    const prev = customFieldValue(index)
     if (index === 0) setCustomBaseUrl(value)
     else if (index === 1) setCustomApiKey(value)
     else if (index === 2) setCustomModelName(value)
     else if (index === 3) setCustomContextWindow(value)
     else if (index === 4) setCustomMaxOutput(value)
+    if (value !== prev) setCustomDirty(true)
   }
 
   /** custom_endpoint 五项表单：读出对应 signal 作为输入框初值。 */
@@ -2011,6 +2033,37 @@ export function SetupWizardDialog(props: SetupDialogProps) {
 
   /** model_spec 可编辑字段行数：有本地槽时 4 行，否则 2 行。 */
   const specFieldCount = () => (localSpec() ? 4 : 2)
+
+  /** api_key 输入三态（§6.2）：undefined 未填写 / "" 显式清空 / 非空写入。 */
+  const customApiKeyState = () => interpretApiKeyInput(customApiKey())
+
+  /** 当前焦点规格字段的边界校验提示（§6.3）：空串 = 合法。 */
+  const specFieldError = (): string => {
+    const index = specFieldIndex()
+    const bounds =
+      index === 0
+        ? remoteSpec()?.bounds?.context_window
+        : index === 1
+          ? remoteSpec()?.bounds?.max_output
+          : index === 2
+            ? localSpec()?.bounds?.context_window
+            : localSpec()?.bounds?.max_output
+    return validateSpecInput(inputValue(), bounds, uiLanguage())
+  }
+
+  /**
+   * 中转站字段是否会进载荷（§6.1）：只有用户主动改动过表单（dirty）且至少
+   * 一项有值（含显式清空）才提交。确认页与载荷共用这一个判据，保证一致。
+   */
+  const willSubmitCustomEndpoint = () => {
+    if (!customDirty()) return false
+    const hasField =
+      customBaseUrl().trim() ||
+      customModelName().trim() ||
+      customContextWindow().trim() ||
+      customMaxOutput().trim()
+    return Boolean(hasField || customApiKeyState() !== undefined)
+  }
 
   const goTo = (target: SetupScreen) => {
     setError("")
@@ -2106,19 +2159,17 @@ export function SetupWizardDialog(props: SetupDialogProps) {
           local_max_output: localOut ? Number(localOut) : undefined,
         }),
       )
-      // B3 中转站逐项写入（§2.6）：任一项有值就发送（不套用官方预设）；全空则不发。
-      const customBase = customBaseUrl().trim()
-      const customKey = customApiKey().trim()
-      const customModel = customModelName().trim()
-      const customCtx = customContextWindow().trim()
-      const customOut = customMaxOutput().trim()
-      if (customBase || customKey || customModel || customCtx || customOut) {
+      // B3 中转站逐项写入（§2.6/§6.1）：仅当用户改动过表单且至少一项有值才提交，
+      // 预填值不会被动提交（dirty 标记）。api_key 走三态语义（§6.2）。
+      if (willSubmitCustomEndpoint()) {
+        const customCtx = customContextWindow().trim()
+        const customOut = customMaxOutput().trim()
         Object.assign(
           payload,
           setupCustomEndpointFields(
             {
               base_url: customBaseUrl(),
-              api_key: customApiKey(),
+              api_key: customApiKeyState(),
               model_name: customModelName(),
               context_window: customCtx ? Number(customCtx) : undefined,
               max_output: customOut ? Number(customOut) : undefined,
@@ -2309,6 +2360,15 @@ export function SetupWizardDialog(props: SetupDialogProps) {
     }
     // B3 中转站五项表单：↑↓ 换字段（先提交当前输入框），Enter 前进/保存。
     if (screen() === "custom_endpoint" && !busy()) {
+      // Ctrl+D 在 api_key 行 = 清空（§6.2）。
+      if ((key.name === "d" || key.name === "D") && key.ctrl === true && customFieldIndex() === 1) {
+        setCustomApiKey("-")
+        setInputValue("-")
+        setCustomDirty(true)
+        key.preventDefault?.()
+        key.stopPropagation?.()
+        return
+      }
       if (key.name === "up" || key.name === "down") {
         commitCustomField()
         const nextIndex = Math.min(4, Math.max(0, customFieldIndex() + (key.name === "down" ? 1 : -1)))
@@ -2815,11 +2875,17 @@ export function SetupWizardDialog(props: SetupDialogProps) {
                   onContentChange={() => setInputValue(inputRef?.value ?? "")}
                   onSubmit={() => {
                     commitSpecField()
+                    // §6.3：越界/非整数阻止 Enter 前进（保持 Enter 语义不变，只是先校验）。
+                    if (specFieldError()) return
                     next()
                   }}
                   flexGrow={1}
                 />
               </box>
+              {/* §6.3 内联校验提示：越界/非整数时显示并阻止 Enter。 */}
+              <Show when={specFieldError()}>
+                <text fg="#ff6b6b">{specFieldError()}</text>
+              </Show>
               <Show when={reasoning}>
                 <text fg={muted}>
                   {en ? "Reasoning" : "推理能力"}{" "}
@@ -2832,6 +2898,12 @@ export function SetupWizardDialog(props: SetupDialogProps) {
               <Show when={refreshText}>
                 <text fg={catalogRefresh() === "error" ? "#ff6b6b" : muted}>
                   {refreshText}
+                </text>
+              </Show>
+              {/* §4 budget_source 展示：缺字段时不显示（兼容旧后端）。 */}
+              <Show when={formatBudgetSource(props.runtime.chat_context_budget, props.runtime.chat_context_budget_source, uiLanguage())}>
+                <text fg={muted}>
+                  {formatBudgetSource(props.runtime.chat_context_budget, props.runtime.chat_context_budget_source, uiLanguage())}
                 </text>
               </Show>
               <text fg={muted}>
@@ -2858,6 +2930,12 @@ export function SetupWizardDialog(props: SetupDialogProps) {
             customContextWindow(),
             customMaxOutput(),
           ]
+          /** api_key 行显示文本：`-` = 将清空；空 = 掩码；其余 = 原文。 */
+          const apiKeyDisplay = () => {
+            const raw = customApiKey().trim()
+            if (raw === "-") return isEn(uiLanguage()) ? "(will clear)" : "（将清空）"
+            return raw || "••••"
+          }
           return (
             <box marginTop={1} flexDirection="column">
               <Show when={endpoint?.display_name || endpoint?.name}>
@@ -2874,7 +2952,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
                   <text bg={focused() ? "#202020" : undefined}>
                     <span style={{ fg: focused() ? orange : muted }}>{focused() ? "▸ " : "  "}</span>
                     <span style={{ fg: muted }}>{field.label}</span>
-                    <span style={{ fg: "#eeeeee" }}>{`  ${values[index()] || (field.key === "api_key" ? "••••" : "—")}`}</span>
+                    <span style={{ fg: "#eeeeee" }}>{`  ${field.key === "api_key" ? apiKeyDisplay() : values[index()] || "—"}`}</span>
                   </text>
                 )
               }}</For>
@@ -2885,7 +2963,10 @@ export function SetupWizardDialog(props: SetupDialogProps) {
                   value={inputValue()}
                   placeholder={fields[customFieldIndex()]?.label ?? ""}
                   focused={inputFocused()}
-                  onContentChange={() => setInputValue(inputRef?.value ?? "")}
+                  onContentChange={() => {
+                    setInputValue(inputRef?.value ?? "")
+                    setCustomDirty(true)
+                  }}
                   onSubmit={() => {
                     commitCustomField()
                     next()
@@ -2905,8 +2986,8 @@ export function SetupWizardDialog(props: SetupDialogProps) {
               </Show>
               <text fg={muted}>
                 {isEn(uiLanguage())
-                  ? "↑↓ switch field · Enter next · Esc back"
-                  : "↑↓ 切换字段 · Enter 下一步 · Esc 返回"}
+                  ? "↑↓ switch field · Enter next · Esc back · type - in API Key to clear"
+                  : "↑↓ 切换字段 · Enter 下一步 · Esc 返回 · API Key 输入 - 清空"}
               </text>
             </box>
           )
@@ -2919,11 +3000,12 @@ export function SetupWizardDialog(props: SetupDialogProps) {
           <text><span style={{ fg: orange }}>{isEn(uiLanguage()) ? "Chat      " : "对话模型  "}</span><span style={{ fg: "#eeeeee" }}>{routePreview().chat}</span></text>
           <text><span style={{ fg: orange }}>{isEn(uiLanguage()) ? "Review    " : "审查模型  "}</span><span style={{ fg: "#eeeeee" }}>{routePreview().review}</span></text>
           <Show when={needsCloud()}>
-            <text><span style={{ fg: orange }}>Provider  </span><span style={{ fg: "#eeeeee" }}>{selectedProvider()?.display_name}</span></text>
-            <text><span style={{ fg: orange }}>Endpoint  </span><span style={{ fg: "#eeeeee" }}>{baseUrl() || selectedProvider()?.base_url}</span></text>
+            {/* Provider/Endpoint/模型行随中转站提交状态切换（§6.1：确认页 = 载荷）。 */}
+            <text><span style={{ fg: orange }}>Provider  </span><span style={{ fg: "#eeeeee" }}>{willSubmitCustomEndpoint() ? (customEndpoint()?.display_name ?? (isEn(uiLanguage()) ? "Custom Endpoint" : "中转站")) : selectedProvider()?.display_name}</span></text>
+            <text><span style={{ fg: orange }}>Endpoint  </span><span style={{ fg: "#eeeeee" }}>{willSubmitCustomEndpoint() ? (customBaseUrl() || "—") : (baseUrl() || selectedProvider()?.base_url)}</span></text>
             <text><span style={{ fg: orange }}>API 格式  </span><span style={{ fg: "#eeeeee" }}>{selectedApiFormat()}</span></text>
-            <text><span style={{ fg: orange }}>模型       </span><span style={{ fg: "#eeeeee" }}>{selectedModel()}</span></text>
-            <text><span style={{ fg: orange }}>API Key    </span><span style={{ fg: "#eeeeee" }}>{apiKey().trim() ? "将更新" : remoteKeyConfigured() ? "保留现有" : "未配置"}</span></text>
+            <text><span style={{ fg: orange }}>模型       </span><span style={{ fg: "#eeeeee" }}>{willSubmitCustomEndpoint() ? (customModelName() || "—") : selectedModel()}</span></text>
+            <text><span style={{ fg: orange }}>API Key    </span><span style={{ fg: "#eeeeee" }}>{willSubmitCustomEndpoint() ? (customApiKeyState() === "" ? "将清空" : customApiKeyState() ? "将更新" : customEndpoint()?.api_key_configured ? "保留现有" : "未配置") : (apiKey().trim() ? "将更新" : remoteKeyConfigured() ? "保留现有" : "未配置")}</span></text>
           </Show>
           <Show when={!needsCloud() && !isCustom()}>
             <text><span style={{ fg: orange }}>本地引擎  </span><span style={{ fg: "#eeeeee" }}>{local()?.display_name}</span></text>
@@ -2961,12 +3043,17 @@ export function SetupWizardDialog(props: SetupDialogProps) {
               </span>
             </text>
           </Show>
-          {/* B3 中转站摘要：只在有值时显示。 */}
-          <Show when={customBaseUrl() || customModelName()}>
+          {/* B3 中转站摘要：只在会提交时显示（§6.1 确认页 = 载荷）。 */}
+          <Show when={willSubmitCustomEndpoint()}>
             <text fg={muted}>
               {isEn(uiLanguage()) ? "Custom ep  " : "中转站    "}
               <span style={{ fg: "#eeeeee" }}>
-                {[customBaseUrl(), customModelName()].filter(Boolean).join(" · ")}
+                {[
+                  customBaseUrl(),
+                  customModelName(),
+                  customContextWindow() ? `ctx ${customContextWindow()}` : "",
+                  customMaxOutput() ? `out ${customMaxOutput()}` : "",
+                ].filter(Boolean).join(" · ")}
               </span>
             </text>
           </Show>

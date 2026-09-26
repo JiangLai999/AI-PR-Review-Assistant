@@ -185,6 +185,25 @@ export function parseCompactCommandResult(result: unknown): CompactCommandResult
   }
 }
 
+/**
+ * `/context` 与 `config.snapshot` 的预算字段（docs/claude-backend-followup.md §4）。
+ * 缺字段时对应键为 undefined（兼容旧后端），调用方直接不显示。
+ */
+export type ContextBudgetInfo = {
+  budget_tokens?: number
+  budget_source?: string
+}
+
+/** 从任意结果对象提取预算字段（/context 的 `token_budget`/`budget_source` 等）。 */
+export function parseContextBudgetInfo(raw: unknown): ContextBudgetInfo {
+  if (!raw || typeof raw !== "object") return {}
+  const record = raw as Record<string, unknown>
+  return {
+    budget_tokens: asFiniteNumber(record.token_budget) ?? asFiniteNumber(record.budget_tokens),
+    budget_source: asOptionalString(record.budget_source),
+  }
+}
+
 /** Drop late deltas from a cancelled turn, a previous session, or a restarted backend. */
 export function isCurrentAssistantEvent(
   event: BackendEvent,
