@@ -741,6 +741,12 @@ DEFAULT_WORKBENCH_MODE = "auto"
 
 CHAT_REASONING_EFFORTS: tuple[str, ...] = ("off", "low", "high", "max", "auto")
 DEFAULT_CHAT_REASONING_EFFORT = "auto"
+# review 思考档位（preferences.review_reasoning_effort，docs/review-reasoning-assessment.md §4.3
+# 第二步）：**词表与 chat 同一份**（顺序也一致，入口/文档直接引用），只有默认值不同——
+# review 的默认是 `off`（= 现状：对 deepseek 仍由 policy 显式 `thinking: disabled`），
+# 因为审查是"成本/质量取舍"而不是聊天那种体验旋钮（该文档 §5）。
+REVIEW_REASONING_EFFORTS: tuple[str, ...] = CHAT_REASONING_EFFORTS
+DEFAULT_REVIEW_REASONING_EFFORT = "off"
 # 档位 → 思考 token 预算（low/high/max；off/auto 不预留）。两个消费方共用这一份数字，
 # 各写一套迟早漂移：`jsonl_server._chat` 用它预留 `max_tokens`，`services.reasoning_specs`
 # 用它填预算型供应商（anthropic/qwen/siliconflow）的 `budget_tokens`/`thinking_budget`。
@@ -975,6 +981,23 @@ def normalize_chat_reasoning_effort(value: object) -> str:
     return DEFAULT_CHAT_REASONING_EFFORT
 
 
+def normalize_review_reasoning_effort(value: object) -> str:
+    """把任意输入归一化为合法的 ``review_reasoning_effort``，否则回退 off。
+
+    与 ``normalize_chat_reasoning_effort`` 同一套规则（大小写/空白归一、非法值只告警
+    回退、不抛异常），只有默认值不同：review 的 ``off`` 就是今天的现状，因此手改坏的
+    配置最多是"审查不思考"，不会静默把审查成本翻倍。
+    """
+    normalized = str(value or "").strip().lower()
+    if normalized in REVIEW_REASONING_EFFORTS:
+        return normalized
+    _warn_invalid_preference(
+        "review_reasoning_effort",
+        "已回退为 off（可选值：off、low、high、max、auto）",
+    )
+    return DEFAULT_REVIEW_REASONING_EFFORT
+
+
 def _normalize_bool_preference(value: object, *, field: str, default: bool) -> bool:
     """布尔偏好项的统一归一化：bool / 0-1 / "true|yes|on" 等字面量，其余回退。"""
     if isinstance(value, bool):
@@ -1023,6 +1046,9 @@ class PreferencesConfig:
     # Chat 思考档位与上下文预算（docs/chat-experience-plan.md §A5/§C6）。
     chat_reasoning_effort: str = DEFAULT_CHAT_REASONING_EFFORT
     chat_context_budget: int = DEFAULT_CHAT_CONTEXT_BUDGET
+    # Review 思考档位（docs/review-reasoning-assessment.md §4.3 第二步）：与 chat 分开，
+    # 默认 off = 现状；`auto` 表示"不干预，由 policy / 供应商默认决定"。
+    review_reasoning_effort: str = DEFAULT_REVIEW_REASONING_EFFORT
 
     def __post_init__(self) -> None:
         # 属性一旦构造出来就保证合法，加载/导入/向导三条路径因此共用同一套回退规则。
@@ -1043,6 +1069,9 @@ class PreferencesConfig:
         self.model_catalog_fetch = normalize_model_catalog_fetch(self.model_catalog_fetch)
         self.chat_reasoning_effort = normalize_chat_reasoning_effort(
             self.chat_reasoning_effort
+        )
+        self.review_reasoning_effort = normalize_review_reasoning_effort(
+            self.review_reasoning_effort
         )
         self.chat_context_budget = _normalize_bounded_int(
             self.chat_context_budget,
@@ -1189,6 +1218,13 @@ class AIClientConfig:
 
     max_retries: int = 3
     retry_base_delay: float = 1.0
+
+    # Review 思考档位（`preferences.review_reasoning_effort` 的运行时副本，由
+    # `AppConfig._sync_runtime_sections` 同步）。放这里而不是每次现读 preferences：
+    # 审查链路的调用方（`hybrid_orchestrator._client_config_for`）本来就用
+    # `**self.config.ai_client.__dict__` 重建每个文件的客户端配置，字段跟着走才
+    # 不会被混合编排丢在半路。默认 off = 现状。
+    review_reasoning_effort: str = DEFAULT_REVIEW_REASONING_EFFORT
 
     input_cost_per_million: float = 3.0
     output_cost_per_million: float = 15.0
@@ -1404,6 +1440,15 @@ class AppConfig:
                 "model": provider.model_name,
                 "base_url": provider.base_url,
                 "api_format": provider.api_format,
+                # review 档位以 preferences 为准（用户可见的唯一入口是 preferences /
+                # 配置助手 / CLI），落盘 ai_client 段里的旧值不得覆盖它。
+                "review_reasoning_effort": normalize_review_reasoning_effort(
+                    getattr(
+                        self.preferences,
+                        "review_reasoning_effort",
+                        DEFAULT_REVIEW_REASONING_EFFORT,
+                    )
+                ),
             }
         )
 

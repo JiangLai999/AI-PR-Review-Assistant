@@ -38,8 +38,10 @@ from ai_pr_review.chat_session import (
     save_chat_session,
 )
 from ai_pr_review.config import (
+    CHAT_REASONING_TOKEN_BUDGETS,
     CONFIG_PATH_ENV_VAR,
     DEFAULT_CONFIG_PATH,
+    DEFAULT_REVIEW_REASONING_EFFORT,
     DEFAULT_WORKBENCH_MODE,
     MODEL_PROVIDER_PRESETS,
     PROJECT_CONFIG_DIRNAME,
@@ -47,6 +49,7 @@ from ai_pr_review.config import (
     PROJECT_LOCAL_CONFIG_FILENAME,
     PROVIDER_MODEL_PRESETS,
     REPO_CONTEXT_MODES,
+    REVIEW_REASONING_EFFORTS,
     WORKBENCH_MODES,
     AIClientConfig,
     AppConfig,
@@ -1126,6 +1129,11 @@ def _prompt_interface_preferences(
         # 本阶段不提问，但必须原样带回：PreferencesConfig 是整体重建的，
         # 漏掉一个字段就等于每次跑向导都把它悄悄重置成默认值。
         workbench_mode=getattr(current, "workbench_mode", DEFAULT_WORKBENCH_MODE),
+        # review 思考档位同理（docs/review-reasoning-assessment.md §4.3 第二步）：向导
+        # 不提问，但跑一次向导不得把用户设过的档位打回 off。
+        review_reasoning_effort=getattr(
+            current, "review_reasoning_effort", DEFAULT_REVIEW_REASONING_EFFORT
+        ),
     )
 
 
@@ -1214,6 +1222,10 @@ def _prompt_preferences(console: Console, current: PreferencesConfig) -> Prefere
         hybrid_strategy=getattr(current, "hybrid_strategy", "balanced"),
         max_cost_per_review=getattr(current, "max_cost_per_review", 0.50),
         workbench_mode=workbench_mode,
+        # 同上：这次重建同样要原样带回 review 档位（否则跑一次向导静默重置为 off）。
+        review_reasoning_effort=getattr(
+            current, "review_reasoning_effort", DEFAULT_REVIEW_REASONING_EFFORT
+        ),
     )
 
 
@@ -3439,6 +3451,59 @@ def history_command(
     )
 
 
+def _review_reasoning_note(config: AppConfig) -> str:
+    """review 档位的出口说明：档位设了但当前审查供应商不会注入时返回一句话。
+
+    `off` / `auto` 是"不干预"档，本来就不注入任何参数（`auto` 的语义就是由 policy /
+    供应商默认决定），因此不提示。其余档位按 `services.reasoning_specs` 的三态判定：
+    本地置灰、官方无该参数、未收录（unknown）三种情况都会返回原因，用的是规格表里
+    那一份 `reason` 文案，不在这里另编一套。
+    """
+    from ai_pr_review.config import normalize_review_reasoning_effort, resolve_review_slot
+    from ai_pr_review.services.reasoning_specs import (
+        reasoning_delivery_blocked_reason,
+        reasoning_support,
+    )
+
+    def inert_reason(provider: ProviderConfig) -> str | None:
+        """该槽位为什么送不出思考参数（能送返回 None）。
+
+        两种形态：供应商本身不吃参数（本地置灰 / 官方无该参数 / 未收录），或规格表判为
+        透传但请求走 Anthropic 协议——后者由 `reasoning_specs` 的同一判据给出，
+        与注入点、配置助手出口共用一份口径。
+        """
+        support = reasoning_support(provider.name)
+        if not support.injects:
+            return support.reason or "该供应商未提供思考参数"
+        return reasoning_delivery_blocked_reason(provider.name, provider.api_format)
+
+    effort = normalize_review_reasoning_effort(
+        getattr(
+            config.preferences,
+            "review_reasoning_effort",
+            DEFAULT_REVIEW_REASONING_EFFORT,
+        )
+    )
+    if effort in {"off", "auto"}:
+        return ""
+    slot = resolve_review_slot(config)
+    # hybrid 有两个真实消费方：低复杂度文件走本地槽（`hybrid_orchestrator` 按文件路由），
+    # 因此"档位是否生效"要把两个槽都算进来，不能只看远端。
+    providers = [config.provider]
+    if slot == "local":
+        providers = [config.local_provider]
+    elif slot == "hybrid":
+        providers = [config.provider, config.local_provider]
+    inert = [(item, reason) for item in providers if (reason := inert_reason(item))]
+    if not inert:
+        return ""
+    details = "；".join(f"{item.name}：{reason}" for item, reason in inert)
+    return (
+        f"当前设置 review 思考档位为 {effort}，但以下审查供应商不会注入思考参数：{details}。"
+        "在这些供应商上该档位不会改变请求体（混合策略下本地槽始终为快速模式）。"
+    )
+
+
 @main.command("preferences")
 @click.option(
     "--ui-language",
@@ -3484,6 +3549,16 @@ def history_command(
     help="Toggle L2 symbol location: when a changed signature has call sites elsewhere "
     "in the repo, locate them (default: on).",
 )
+@click.option(
+    "--review-reasoning-effort",
+    type=click.Choice(list(REVIEW_REASONING_EFFORTS)),
+    default=None,
+    help="Set the reasoning level used by PR reviews: off (default), low, high, max or "
+    "auto. low/high/max add a thinking budget ("
+    f"+{CHAT_REASONING_TOKEN_BUDGETS['low']}/+{CHAT_REASONING_TOKEN_BUDGETS['high']}"
+    f"/+{CHAT_REASONING_TOKEN_BUDGETS['max']} tokens) and raise the output budget; "
+    "measured cost at max is about 3.6x output tokens and 2.9x wall clock.",
+)
 @click.pass_context
 def preferences_command(
     ctx: click.Context,
@@ -3494,6 +3569,7 @@ def preferences_command(
     workbench: str | None,
     repo_context: str | None,
     symbol_locate: bool | None,
+    review_reasoning_effort: str | None,
 ) -> None:
     """Show or update CLI preferences."""
     config_path = _config_path_from_context(ctx)
@@ -3525,6 +3601,19 @@ def preferences_command(
         config.preferences.symbol_locate = symbol_locate
         config.save(config_path, save_key=_active_config_has_saved_api_key(config_path))
     payload["symbol_locate"] = config.preferences.symbol_locate
+    # review 思考档位（docs/review-reasoning-assessment.md §4.3 第二步）同理：一条命令即可
+    # 脚本化，取值由 config.REVIEW_REASONING_EFFORTS 校验，非法值由 click 直接拒绝。
+    # 档位落在 `preferences`（用户可见的唯一入口），`config.save` 会把它同步进
+    # `ai_client.review_reasoning_effort`，审查请求读的是后者。
+    if review_reasoning_effort is not None:
+        config.preferences.review_reasoning_effort = review_reasoning_effort
+        config.save(config_path, save_key=_active_config_has_saved_api_key(config_path))
+    payload["review_reasoning_effort"] = config.preferences.review_reasoning_effort
+    # 出口说明：档位不是 off/auto、而审查槽的供应商又根本不吃思考参数时，明说这一档
+    # 现在是个"死档位"（本地置灰 / 官方无该参数 / 未收录），而不是让用户以为设了没生效。
+    review_note = _review_reasoning_note(config)
+    if review_note:
+        payload["review_reasoning_note"] = review_note
     click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 

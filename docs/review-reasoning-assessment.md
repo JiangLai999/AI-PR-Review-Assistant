@@ -153,6 +153,9 @@
 **第二步（产品要"可调审查深度"时）**：新增 `preferences.review_reasoning_effort`，词表复用 chat 的
 `off|low|high|max|auto`（**默认 `off` = 现状**，`auto` = 不干预、由 policy 决定），实现要点：
 
+> **状态：已落地**（任务 `claude-review-effort-step2`，2026-09-26）。下表的每个落点都已实现，
+> 实际文件:行号、wire 断言与测试数字见本文 **§9**；下表保留为设计原稿（行号是设计时的，已过时）。
+
 | 落点 | 位置 | 要点 |
 |---|---|---|
 | 偏好字段 + 归一化 | `config.py`（`normalize_chat_reasoning_effort` 同款，`:962`） | 非法值告警回退，保持"加载坏文件也要能起"的口径 |
@@ -237,3 +240,116 @@ python scripts/verify_review_reasoning.py --model deepseek-chat   # 换模型
 **触发第二步的信号**：产品要"可调审查深度"时按 §4.3 实现（`preferences.review_reasoning_effort`
 默认 off），届时本文件的断言按新语义更新（off 档保持不变，low/high/max 出现
 `thinking: enabled` + `reasoning_effort` 且预算随档位增加）。
+
+---
+
+## 9. 第二步已落地（任务 `claude-review-effort-step2`，2026-09-26）
+
+第二步按 §4.3 实现：**review 独立档位、默认 `off`**（= 现状逐字不变），入口是 preferences /
+CLI `config preferences` / 配置助手后端字段。本任务约束**不发真实网络请求**，因此下面是
+offline wire 证据（monkeypatch `urllib.request.urlopen` 读真实请求体）+ 静态核对，
+真机结论仍以上文 §2 为准。
+
+### 9.1 落点（工作区 HEAD，行号以本次改动后的文件为准）
+
+| 层 | 位置 | 要点 |
+|---|---|---|
+| 词表 + 默认值 | `config.py:748`（`REVIEW_REASONING_EFFORTS = CHAT_REASONING_EFFORTS`）、`:749`（`DEFAULT_REVIEW_REASONING_EFFORT = "off"`） | 复用 chat 那一份元组（同序、同一个对象），只有默认值不同 |
+| 归一化 | `config.py:984`（`normalize_review_reasoning_effort`） | 与 `normalize_chat_reasoning_effort` 同款：大小写/空白归一、非法值告警回退 `off`、绝不抛异常、不回显原值 |
+| 偏好字段 | `config.py:1051`（`PreferencesConfig.review_reasoning_effort`），在 `__post_init__` 归一化 | 加载/导入/向导三条路径共用同一套回退规则 |
+| 运行时副本 | `config.py:1227`（`AIClientConfig.review_reasoning_effort`）；同步点 `config.py:1445`（`_sync_runtime_sections`） | preferences 是唯一入口；落盘 `ai_client` 段的旧值不得盖过它。放 `ai_client` 上是因为混合编排按文件重建配置用的是 `**self.config.ai_client.__dict__`（`hybrid_orchestrator.py:142-154`） |
+| 请求注入 | `ai_client.py:102`（`review_code` 里按请求计算）、`:177`（读档位）、`:192`（`_review_reasoning_plan`）、`:249`（`_review_tokens_with_budget`）、`:259`（`_review_max_output` 封顶来源）、`:280`（`_review_request_provider`） | 参数分两路，拆分由 `reasoning_specs.split_reasoning_params` 唯一决定：`think`/`reasoning_effort` 走 `chat(**kwargs)` 白名单（Anthropic 协议下该通道失效，参数直接丢弃）；`thinking`/`enable_thinking`/`thinking_budget`/`reasoning` 走**本次请求新建的** provider 配置副本（`dataclasses.replace`）——落盘配置与共享 provider 一个字节都不写 |
+| 通道判据 | `reasoning_specs.py:616`（`reasoning_kwargs_consumed`）、`:631`（`reasoning_delivery_blocked_reason`）、`:650`（`split_reasoning_params`） | 注入点与出口共用一份判据，避免"代码不注入、出口宣称已生效" |
+| 快照出口 | `jsonl_server.py:912`（`config.snapshot.review_reasoning_effort`） | 与 `chat_reasoning_effort` 同样式；前端接入另行排期（本任务不改 TUI） |
+| 配置助手出口 | `jsonl_server.py:982`（`_review_reasoning_options`）、`:1337`（`config.options`）、`:1694`（`config.setup` 写入）、`:1866`（`model.status`） | `{value, options[5], label}`；不支持注入的供应商附 `state`/`reason`（本地置灰 / 未收录 / Anthropic 协议端点丢弃参数）；三个出口同键同形（与 repo_context/symbol_locate 同一约定） |
+| CLI 出口 | `cli.py:3454`（`_review_reasoning_note`，内部 `inert_reason` `:3468`）、`:3553`（`--review-reasoning-effort`，`click.Choice` 用 config 词表）、`:3608`（写入 + 回显 + 追加说明） | 一条命令脚本化；档位非 off/auto 而审查槽供应商送不出参数时，payload 追加 `review_reasoning_note`（hybrid 会把本地槽一并说明） |
+| 向导回归 | `cli.py:1134`、`:1226` | 两个 `PreferencesConfig` 重建点原样带回档位（否则跑一次向导会静默重置为 off） |
+
+### 9.2 wire 证据（deepseek，monkeypatch `urlopen` 读请求体；`tests/test_review_wire.py`）
+
+| 档位 | 请求体 `thinking` | `reasoning_effort` | `max_tokens` | 说明 |
+|---|---|---|---|---|
+| 未设置 / `off`（默认） | `{"type": "disabled"}` | 缺省 | 6144 | **与改造前逐字相同**（第一步断言原样保留） |
+| `low` | `{"type": "enabled"}` | `low` | 10144 | 6144 + 4000 |
+| `high` | `{"type": "enabled"}` | `high` | 14144 | 6144 + 8000 |
+| `max` | `{"type": "enabled"}` | `max` | 18144 | 6144 + 12000 |
+| `auto` | `{"type": "disabled"}` | 缺省 | 6144 | "不干预" ⇒ 与 off 同形（由 policy 决定） |
+| 非法值（构造后赋 `"extreme"`） | `{"type": "disabled"}` | 缺省 | 6144 | 静默回退 off（配置层已告警过） |
+
+预算封顶与其它供应商（同文件）：anthropic `max` → `max_tokens=8192`（= 规格 `max_output`，
+请求值 16096 被截）、`thinking.budget_tokens=4096`（官方约束 `budget_tokens < max_tokens`
+且给回答留出基础额度）；qwen `high` → `enable_thinking=true` + `thinking_budget=4096`
+（cap 后 `8192-4096`）；api2d（transparent）`high` → 透传 `reasoning_effort` +
+`max_tokens=12096`（`min(4096+8000, 预设 gpt-4o-mini 16384)`）；
+baichuan / 未收录供应商 → **不注入、不预留**（`max_tokens` 仍是 4096）；
+ollama/local → 仍是 `think: false`、无 `thinking`/`reasoning_effort`、不预留。
+
+**封顶来源 = 内置预设优先**（`_review_max_output`，与 chat `_chat_max_output` 的取舍一致）：
+`PROVIDER_MODEL_PRESETS` 是仓库里唯一可引用的厂商数值，没有该模型时才退回能力档案
+（deepseek 32_768 / anthropic 8_192 / 其余 8_192）。这条修正了一个真实缺陷：能力档案对
+未收录供应商一律给 8192（比预设的 4096 **大**），只按它封顶会让 stepfun/hunyuan/custom-model
+这类模型的请求额度被档位顶到 8096——超过模型输出上限，云端直接 400
+（`tests/test_review_wire.py::test_review_budget_is_capped_by_the_preset_not_the_profile_default`
+钉住 4096）。
+
+**Anthropic 协议的中转端点整档不生效**：`factory` 按 `api_format == "anthropic"` 选 provider，
+`AnthropicProvider.chat()` 只读 `max_tokens`/`system_prompt`/`extra_params`——kwargs 里的
+`reasoning_effort` 会被丢弃。判据收在 `reasoning_specs.split_reasoning_params`
+（+`reasoning_kwargs_consumed`）：这类端点两路皆空 ⇒ **不注入、不预留**，
+且 `config.options` 与 CLI 说明会把它的 `state` 标成 `unsupported` 并给出原因
+（`ANTHROPIC_PROTOCOL_REASON`），不再宣称"已透传"。
+
+**不落盘**：跑完 `max` 档后 `client._config.extra_params == {}` 且
+`client._provider.config.extra_params == {}`（另有"同一客户端先 max 再 off"的用例断言第二次
+请求回到 `disabled`）——这正是 §4.3 提醒的混合编排陷阱（按文件重建配置会用
+`dict(selected_config.extra_params)` 覆盖）。
+
+**`off` = 维持现状，不是"对所有供应商强发 disabled"**：`off`/`auto` 一律不注入任何参数，
+deepseek 的 `disabled` 来自 policy（`supports_thinking_disable` 只对 deepseek 为真），
+其余供应商维持各自默认。规格表里 zhipu/moonshot 等家的 off 档虽然写着
+`{"thinking": {"type": "disabled"}}`，review 侧**不会**下发它——强发一个从未真机验证过的
+关闭参数属于行为变更（`tests/test_review_wire.py` 的
+`test_off_and_auto_never_inject_for_non_deepseek_providers` 钉住这一点）。
+
+### 9.3 测试与出口核对
+
+| 文件 | 新增用例 | 覆盖 |
+|---|---|---|
+| `tests/test_config.py:791-910` | 22 条 | 词表 pinning（`REVIEW_REASONING_EFFORTS == ("off","low","high","max","auto")` 且 `is CHAT_REASONING_EFFORTS`）、默认 off（preferences + AIClientConfig + from_env）、合法值不告警、大小写归一、非法值回退 + 不回显原值、旧配置静默加载、坏值加载保住其它设置、落盘往返 + `__dict__`/`asdict` 视图、preferences → `ai_client` 同步（含落盘旧值不得覆盖） |
+| `tests/test_review_wire.py:200-568` | 17 条 | 四档 × deepseek 的 wire 断言（含 `auto`、非法值、跨请求不残留，两条"不注入"用例带**正对照**）、`off`/`auto` 对非 deepseek 供应商**不注入**（zhipu）、本地置灰、置灰/未收录不注入、transparent 透传 + 预设封顶（stepfun/hunyuan 不被顶到 8192）、Anthropic 协议中转端点整档不生效、qwen 预算通道、anthropic 封顶 |
+| `tests/test_jsonl_backend.py:6822-6981` | 6 条 | snapshot 默认 off、`config.options` 词表与 label、`config.setup` 写入 → 落盘 → 重载 → `ai_client` 档位、非法值整单失败且不写、置灰供应商（本地/未收录/Anthropic 协议中转）的出口说明、三出口同键同形 |
+| `tests/test_reasoning_specs.py:372-431` | 4 条 | `split_reasoning_params` 两路拆分、Anthropic 协议丢 kwargs 但保留预算参数、`reasoning_kwargs_consumed` 与 factory 分支一致、`reasoning_delivery_blocked_reason` 与注入点判据同源 |
+
+命令与数字（`TEMP/TMP=.pytest_claude`）：
+
+```
+python -m pytest -q --no-cov            → 1299 passed, 1 skipped, 1 warning in 85.18s
+python -m pytest -q --no-cov tests/test_config.py          → 171 passed（含 22 条新增）
+python -m pytest -q --no-cov tests/test_review_wire.py     → 18 passed（4 条第一步 + 14 条新增）
+python -m pytest -q --no-cov tests/test_jsonl_backend.py   → 234 passed（含 5 条新增）
+```
+
+条数对照：改动前同一条全量命令的最近一次记录是 1258 passed + 1 skipped
+（`docs/verification-matrix.md` §1 的 C6b 行，reasoning-specs 任务，2026-09-26），
+本次新增条数全部来自上表三个文件（另有 4 条落在 `tests/test_reasoning_specs.py`：
+`split_reasoning_params` / Anthropic 协议的通道判据）。
+
+CLI 出口实测（临时配置目录，`AI_PR_REVIEW_CONFIG` 指向它；无网络调用）：
+`pr-review config preferences --review-reasoning-effort high` → 退出码 0、payload
+`"review_reasoning_effort": "high"`、落盘 `preferences.review_reasoning_effort == "high"`；
+`--review-reasoning-effort turbo` → 退出码 2（click 词表拒绝）。向导两个重建点的回带由
+`cli._prompt_interface_preferences` / `cli._prompt_preferences` 直调核对（返回对象仍是 `max`）。
+
+### 9.4 本次未做 / 未决
+
+| # | 项 | 说明 |
+|---|---|---|
+| 1 | 真机（联网）验证 | 本任务约束禁止真实网络请求；上线前建议按 §7 的复跑指引用 `--model deepseek-flash` 在 `low/high/max` 各跑一次（wire 形态与 §2 场景 `think_low`/`think_max` 完全一致，但那是改前用 `extra_params` 夹具测的） |
+| 2 | 低成本/长 diff 的预算边界 | §6 #3 仍在：`max` 档在长 prompt 上可能把额度大量吃在 reasoning 上（cap 只保证不超 `max_output`，不自动降档） |
+| 3 | 前端接入 | TUI 尚未渲染 `config.options.review_reasoning_effort`（本任务明确不改前端）；状态栏也没有该字段（只进了 `config.options` 与 `config.snapshot`） |
+| 4 | 向导丢字段（**既有问题，非本任务引入**） | `cli._prompt_interface_preferences` / `cli._prompt_preferences` 整体重建 `PreferencesConfig`，字段清单里没有 `repo_context`（4 项）、`symbol_locate`、`chat_slot`/`review_slot`、`chat_reasoning_effort`、`chat_context_budget` —— 跑一次 CLI 向导会把它们静默重置为默认值。本任务只把自己的字段加进清单（否则新档位有同样问题），其余字段的取舍（哪些该在向导里提问）建议另开任务处理 |
+| 5 | review 侧看不到思考文本 | §6 #2 仍在：非流式 `_chat_sync` 不回填 `ProviderResponse.reasoning`，开了档位也只有 token 计数 |
+| 6 | 用户逐模型规格不影响封顶 | `_review_max_output` 只读得到 `PROVIDER_MODEL_PRESETS`（`AIClientConfig` 不带 provider 的逐模型表）。配置助手里手写的 `provider.models[...].max_output` 比预设小（如 2048）时，档位仍按预设封顶；比预设大时也不会放宽。off 档的基础额度（`calculate_review_output_budget`）本来就是这个口径，不是本次引入的差异 |
+| 7 | 每次请求新建 provider 的 SDK 客户端不复用 | 走 `extra_params` 通道的供应商（anthropic/zhipu/qwen/siliconflow…）在开启档位时**每个请求**新建一份 provider 配置副本 + provider；anthropic 会在 `_default_client_factory` 里新建一个 `AsyncAnthropic`（未显式 `aclose()`，随 GC 回收）。100 文件 × `high` ≈ 100 个客户端实例（并发上限 2）。chat 侧本来就是每轮新建 provider，口径一致；若后续要优化，可给 provider 加"按参数复用"的缓存 |
+| 8 | `config import` 对旧导出会把档位打回 off | `config_entry.run_config_import` 整体替换 `preferences`（与其它偏好一致）：旧的导出文件里没有这个键，导入后按默认 `off` 处理。文档已在这里点名，避免下一次"导入后档位怎么没了"的困惑 |
+| 9 | Anthropic 协议的中转端点只能"置灰" | 见 §9.2 末段：这类端点的 effort 透传会被 SDK 丢弃，因此整档不生效（有出口说明）。若将来要支持，需要按 Anthropic 的 `thinking.budget_tokens` 参数形态另开一条规格（当前按供应商名查表，`custom` 拿到的是 transparent 那条） |

@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from ai_pr_review.config import (
+    CHAT_REASONING_EFFORTS,
     CHAT_SLOT_VALUES,
     CONTEXT_WINDOW_RANGE,
     DEFAULT_MODEL_CONTEXT_WINDOW,
@@ -30,10 +31,12 @@ from ai_pr_review.config import (
     DEFAULT_REPO_CONTEXT_BUDGET_TOKENS,
     DEFAULT_REPO_CONTEXT_MAX_FILES,
     DEFAULT_REPO_CACHE_MAX_MB,
+    DEFAULT_REVIEW_REASONING_EFFORT,
     DEFAULT_WORKBENCH_MODE,
     MAX_OUTPUT_RANGE,
     MODEL_SPEC_SOURCES,
     REPO_CONTEXT_MODES,
+    REVIEW_REASONING_EFFORTS,
     REVIEW_SLOT_VALUES,
     WORKBENCH_MODES,
     AIClientConfig,
@@ -48,6 +51,7 @@ from ai_pr_review.config import (
     normalize_repo_context,
     normalize_repo_context_budget_tokens,
     normalize_repo_context_max_files,
+    normalize_review_reasoning_effort,
     normalize_review_slot,
     normalize_workbench_mode,
     resolve_chat_slot,
@@ -776,3 +780,131 @@ def test_filter_dataclass_payload_is_shared_by_load_and_import(tmp_path: Path) -
     )
     loaded = AppConfig.load(config_path)
     assert loaded.preferences.output_format == "json"
+
+
+# ---------------------------------------------------------------------------
+# review 思考档位（preferences.review_reasoning_effort，
+# docs/review-reasoning-assessment.md §4.3 第二步）
+# ---------------------------------------------------------------------------
+
+
+def test_review_reasoning_effort_vocabulary_and_default():
+    """词表 pinning + 默认 off：词表与 chat 共用一份，只有默认值不同。"""
+    assert REVIEW_REASONING_EFFORTS == ("off", "low", "high", "max", "auto")
+    assert REVIEW_REASONING_EFFORTS is CHAT_REASONING_EFFORTS  # 复用同一份，不各写一套
+    assert DEFAULT_REVIEW_REASONING_EFFORT == "off"
+    assert PreferencesConfig().review_reasoning_effort == "off"
+    # 运行时副本（审查请求真正读的那个字段）默认同样是 off = 现状。
+    assert AIClientConfig().review_reasoning_effort == "off"
+    assert AppConfig.from_env().preferences.review_reasoning_effort == "off"
+
+
+@pytest.mark.parametrize("value", ["off", "low", "high", "max", "auto"])
+def test_review_reasoning_effort_accepts_supported_values_without_warning(value: str):
+    with warnings.catch_warnings(record=True) as recorded:
+        warnings.simplefilter("always")
+        preferences = PreferencesConfig(review_reasoning_effort=value)
+    assert preferences.review_reasoning_effort == value
+    assert [item for item in recorded if "review_reasoning_effort" in str(item.message)] == []
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(" Max ", "max"), ("OFF", "off"), ("Auto", "auto"), ("  high  ", "high")],
+)
+def test_review_reasoning_effort_normalizes_case_and_whitespace(raw: str, expected: str):
+    assert normalize_review_reasoning_effort(raw) == expected
+    assert PreferencesConfig(review_reasoning_effort=raw).review_reasoning_effort == expected
+
+
+@pytest.mark.parametrize("raw", ["turbo", "", None, 7, True, ["max"], {"level": "low"}])
+def test_review_reasoning_effort_falls_back_to_off_with_warning(raw):
+    """非法值只回退 + 告警（绝不抛异常）：坏配置最多"审查不思考"，不会静默放大成本。"""
+    with pytest.warns(RuntimeWarning, match="review_reasoning_effort"):
+        preferences = PreferencesConfig(review_reasoning_effort=raw)
+    assert preferences.review_reasoning_effort == "off"
+
+
+def test_review_reasoning_effort_warning_does_not_echo_the_raw_value():
+    """告警不回显原值：配置里可能是终端控制字符或误粘贴的密钥（同 slot 的规则）。"""
+    with warnings.catch_warnings(record=True) as recorded:
+        warnings.simplefilter("always")
+        normalize_review_reasoning_effort("not-a-level")
+    assert recorded
+    assert "not-a-level" not in str(recorded[0].message)
+
+
+def test_load_legacy_config_without_review_reasoning_effort_is_silent(tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    _saved_config(config_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["preferences"].pop("review_reasoning_effort")
+    config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    with warnings.catch_warnings(record=True) as recorded:
+        warnings.simplefilter("always")
+        loaded = AppConfig.load(config_path)
+
+    assert loaded.preferences.review_reasoning_effort == "off"
+    assert loaded.ai_client.review_reasoning_effort == "off"
+    assert [item for item in recorded if "review_reasoning_effort" in str(item.message)] == []
+
+
+def test_load_invalid_review_reasoning_effort_falls_back_and_keeps_other_settings(
+    tmp_path: Path,
+):
+    config_path = tmp_path / "config.json"
+    _saved_config(config_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["preferences"]["review_reasoning_effort"] = "extreme"
+    payload["preferences"]["chat_reasoning_effort"] = "low"
+    config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    with pytest.warns(RuntimeWarning, match="review_reasoning_effort"):
+        loaded = AppConfig.load(config_path)
+
+    assert loaded.preferences.review_reasoning_effort == "off"
+    assert loaded.ai_client.review_reasoning_effort == "off"
+    # chat 侧档位与 provider 不受影响（两个档位是两件事）。
+    assert loaded.preferences.chat_reasoning_effort == "low"
+    assert loaded.provider.name == "deepseek"
+
+
+def test_review_reasoning_effort_survives_save_load_roundtrip_and_reaches_the_views(
+    tmp_path: Path,
+):
+    """落盘、重载、`__dict__`/`asdict` 视图（CLI `config export` 与后端快照都读它）。"""
+    config_path = tmp_path / "config.json"
+    config = _saved_config(config_path)
+    config.preferences.review_reasoning_effort = "max"
+    config.save(config_path, save_key=True)
+
+    assert _preferences_of(config_path)["review_reasoning_effort"] == "max"
+    assert config.preferences.__dict__["review_reasoning_effort"] == "max"
+    assert asdict(PreferencesConfig(review_reasoning_effort="max"))[
+        "review_reasoning_effort"
+    ] == "max"
+
+    reloaded = AppConfig.load(config_path)
+    assert reloaded.preferences.review_reasoning_effort == "max"
+
+
+def test_preferences_review_effort_is_synced_into_the_client_config(tmp_path: Path):
+    """`preferences` 是唯一入口，审查请求读的是 `ai_client.review_reasoning_effort`。
+
+    `_sync_runtime_sections` 在加载/保存时同步两者；混合编排按文件重建客户端配置时用的是
+    `**self.config.ai_client.__dict__`，因此这个字段必须落在 `ai_client` 上才带得进审查请求。
+    """
+    config_path = tmp_path / "config.json"
+    config = _saved_config(config_path)
+    config.preferences.review_reasoning_effort = "high"
+    config.save(config_path, save_key=True)
+
+    assert config.ai_client.review_reasoning_effort == "high"
+    assert AppConfig.load(config_path).ai_client.review_reasoning_effort == "high"
+
+    # 落盘 ai_client 段里的旧值不得盖过 preferences（用户可见入口只有 preferences）。
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["ai_client"]["review_reasoning_effort"] = "max"
+    config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    assert AppConfig.load(config_path).ai_client.review_reasoning_effort == "high"

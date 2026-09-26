@@ -28,6 +28,10 @@ from typing import Any, Mapping
 
 from ai_pr_review.config import CHAT_REASONING_TOKEN_BUDGETS
 
+# `split_reasoning_params` 的白名单：能经 `chat(**kwargs)` 直达请求体的键
+# （OpenAI 兼容 provider 的透传白名单，见 openai.py 的 `for passthrough_key in ...`）。
+_KWARG_REASONING_KEYS: frozenset[str] = frozenset({"think", "reasoning_effort"})
+
 # 参数形态（调研 §1 判定口径）。
 FORM_EFFORT = "effort"
 FORM_BUDGET = "budget"
@@ -59,6 +63,12 @@ LOCAL_PRODUCT_REASON = (
 )
 # C 组（中转/自定义端点）的提示语：参数确实发了，但生效与否取决于上游。
 TRANSPARENT_REASON = "已按 OpenAI 兼容透传 reasoning_effort；是否生效取决于上游服务"
+# 中转/自定义端点配成 Anthropic 协议（`api_format="anthropic"`）时的提示语：这类端点的
+# 规格表条目是 transparent（只透传 reasoning_effort），但 Anthropic 形态的 provider 不读
+# 那两个 kwargs，参数一个都到不了线上——如实说明，不假装生效。
+ANTHROPIC_PROTOCOL_REASON = (
+    "该端点走 Anthropic 协议（api_format=anthropic）：思考参数只会被丢弃，档位不会生效"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -603,6 +613,69 @@ def build_reasoning_params(
     return params
 
 
+def reasoning_kwargs_consumed(provider_name: object, api_format: object = "openai") -> bool:
+    """该 provider 的 `chat()` 是否会消费 `think` / `reasoning_effort` 这两个 kwargs。
+
+    只有 OpenAI 兼容实现会（`openai.py` 的透传白名单）。**Anthropic 协议**不走这条路：
+    `factory.create_model_provider` 按 `api_format == "anthropic"`（或名字就是 anthropic）
+    选中 `AnthropicProvider`，它的 `chat()` 只读 `max_tokens`/`system_prompt` 与
+    `config.extra_params`，其余 kwargs 一律丢弃。中转/自定义端点可以配成
+    `api_format="anthropic"`（配置助手与 `AI_PR_REVIEW_API_FORMAT` 都能走到），
+    此时"effort 透传"形态的参数一个都到不了线上——调用方据此判定"整档不生效"。
+    """
+    if str(provider_name or "").strip().lower() == "anthropic":
+        return False
+    return str(api_format or "openai").strip().lower() != "anthropic"
+
+
+def reasoning_delivery_blocked_reason(
+    provider_name: object, api_format: object = "openai"
+) -> str | None:
+    """该 provider 上"档位设了也一个参数都送不出去"的原因；能送出去则返回 `None`。
+
+    出口（`config.options` / CLI 的说明文案）与注入点共用这一条判据，避免"代码不注入、
+    出口却宣称已生效"这种自相矛盾。目前只有一种形态命中：规格表判为 transparent
+    （只透传 `reasoning_effort`）而请求走 Anthropic 协议——那一路的 kwargs 会被丢弃
+    （见 `reasoning_kwargs_consumed`）。预算型（anthropic/qwen/siliconflow）与
+    switch/variant 形态走 `extra_params`，不受影响。
+    """
+    if reasoning_kwargs_consumed(provider_name, api_format):
+        return None
+    spec = get_reasoning_spec(provider_name)
+    if spec is None or spec.form != FORM_TRANSPARENT:
+        return None
+    return ANTHROPIC_PROTOCOL_REASON
+
+
+def split_reasoning_params(
+    params: Mapping[str, Any],
+    *,
+    provider_name: object,
+    api_format: object = "openai",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """把规格表算出的参数拆成 `(直传 kwargs, provider extra_params)` 两路。
+
+    - `think` / `reasoning_effort` ∈ kwargs 白名单，但**仅当该 provider 会消费它们**
+      （见 `reasoning_kwargs_consumed`）；Anthropic 协议下这些键会被丢弃；
+    - 其余顶层参数（`thinking` / `enable_thinking` / `thinking_budget` / `reasoning`）
+      只能进 provider 配置的 `extra_params`（OpenAI 兼容与 Anthropic 都会原样并进请求体）。
+
+    返回的 dict 是新的（不修改入参）。调用方拿到两个空 dict 时，语义是"这一档在本次
+    请求里一个参数都送不出去"——应当既不注入也不预留额度。
+    """
+    kwargs: dict[str, Any] = {}
+    extra_params: dict[str, Any] = {}
+    consumed = reasoning_kwargs_consumed(provider_name, api_format)
+    for key, value in params.items():
+        if key in _KWARG_REASONING_KEYS and consumed:
+            kwargs[key] = value
+        elif key in _KWARG_REASONING_KEYS:
+            continue  # 该通道被协议丢弃：不要塞进 extra_params（会被 SDK 拒收）
+        else:
+            extra_params[key] = value
+    return kwargs, extra_params
+
+
 def describe_support(provider_name: object) -> dict[str, Any]:
     """`/think` 结果里随供应商变化的字段（不含档位本身，档位由调用方填）。"""
     support = reasoning_support(provider_name)
@@ -622,6 +695,7 @@ def covered_providers() -> tuple[str, ...]:
 
 
 __all__ = [
+    "ANTHROPIC_PROTOCOL_REASON",
     "CONFIDENCE_DOCUMENTED",
     "CONFIDENCE_PRODUCT_DECISION",
     "CONFIDENCE_TRANSPARENT",
@@ -646,5 +720,8 @@ __all__ = [
     "covered_providers",
     "describe_support",
     "get_reasoning_spec",
+    "reasoning_delivery_blocked_reason",
+    "reasoning_kwargs_consumed",
     "reasoning_support",
+    "split_reasoning_params",
 ]

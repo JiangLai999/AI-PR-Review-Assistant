@@ -5,11 +5,19 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 from pydantic import ValidationError
 
-from ai_pr_review.config import AIClientConfig, CostControllerConfig
+from ai_pr_review.config import (
+    CHAT_REASONING_TOKEN_BUDGETS,
+    DEFAULT_REVIEW_REASONING_EFFORT,
+    PROVIDER_MODEL_PRESETS,
+    REVIEW_REASONING_EFFORTS,
+    AIClientConfig,
+    CostControllerConfig,
+)
 from ai_pr_review.services.cost_controller import CostController, UsageRecord
 from ai_pr_review.services.exceptions import (
     AIAuthenticationError,
@@ -18,9 +26,22 @@ from ai_pr_review.services.exceptions import (
     AIResponseFormatError,
     AIServiceError,
 )
-from ai_pr_review.services.model_capabilities import calculate_review_output_budget
+from ai_pr_review.services.model_capabilities import (
+    calculate_review_output_budget,
+    get_model_capabilities,
+)
 from ai_pr_review.services.model_providers.factory import create_model_provider
 from ai_pr_review.services.prompt_assembler import ReviewResult
+from ai_pr_review.services.reasoning_specs import (
+    build_reasoning_params,
+    reasoning_support,
+    split_reasoning_params,
+)
+
+# 本地端点不开放 review 档位（产品决策，与 chat 同口径：`reasoning_specs` 里
+# ollama/local 的 confidence = product-decision）。OllamaProvider 自己会发
+# `think: false` 走快速模式（ollama.py:24），这里不再叠加任何注入。
+LOCAL_REVIEW_PROVIDER_NAMES: frozenset[str] = frozenset({"ollama", "local"})
 
 
 class AIClient:
@@ -40,6 +61,9 @@ class AIClient:
                 "模型供应商 API Key 未提供。请设置对应环境变量或直接传入配置。"
             )
 
+        # 保留工厂：review 请求需要"本次请求专用"的 provider 副本时要用同一个工厂重建
+        # （anthropic 走 SDK，副本必须沿用调用方注入的 client_factory，测试才打得住）。
+        self._client_factory = client_factory
         self._provider = create_model_provider(self._provider_config, client_factory=client_factory)
         self._client = getattr(self._provider, "_client", self._provider)
         self._cost_controller = CostController(
@@ -63,7 +87,7 @@ class AIClient:
         ) + self._estimate_text_tokens(user_prompt)
         # Keep an explicit user override (including advanced configs), but
         # replace the legacy 4096 default with a task-aware review budget.
-        effective_max_tokens = (
+        base_max_tokens = (
             self._config.max_tokens
             if self._config.max_tokens != 4096
             else calculate_review_output_budget(
@@ -71,6 +95,15 @@ class AIClient:
                 self._config.model,
                 input_chars=len(system_prompt) + len(user_prompt),
             )
+        )
+        # 思考档位按**本次请求**计算（不落盘、不进 `AIClientConfig.extra_params`）：
+        # 混合编排会按文件重建 provider 配置并用 `dict(selected_config.extra_params)`
+        # 覆盖（hybrid_orchestrator.py:151），写进落盘字段的档位下一个文件就没了。
+        effective_max_tokens, reasoning_kwargs, reasoning_extra = self._review_reasoning_plan(
+            base_max_tokens
+        )
+        request_provider, reasoning_kwargs = self._review_request_provider(
+            reasoning_kwargs, reasoning_extra
         )
         estimated_max_cost = self.estimate_cost(estimated_input_tokens, effective_max_tokens)
         await self._reserve_cost(estimated_max_cost)
@@ -83,12 +116,13 @@ class AIClient:
             for attempt in range(self._config.max_retries):
                 try:
                     response = await asyncio.wait_for(
-                        self._provider.chat(
+                        request_provider.chat(
                             [{"role": "user", "content": request_user_prompt}],
                             system_prompt=request_system_prompt,
                             max_tokens=effective_max_tokens,
                             timeout_seconds=self._config.timeout_seconds,
                             structured_output=True,
+                            **reasoning_kwargs,
                         ),
                         timeout=self._config.timeout_seconds,
                     )
@@ -139,6 +173,134 @@ class AIClient:
             raise last_error
         finally:
             await self._release_cost(estimated_max_cost)
+
+    def _review_reasoning_effort(self) -> str:
+        """当前 review 思考档位（默认 ``off`` = 现状）。
+
+        与 `jsonl_server._chat_reasoning_effort` 同一读法：非法值静默回退默认档，
+        不在这里告警——配置层（`PreferencesConfig.__post_init__`）加载时已经告警过一次，
+        每次审查再喊一遍只会刷屏。构造之后直接赋坏值也必须能跑（同 resolve_* 的口径）。
+        """
+        effort = getattr(self._config, "review_reasoning_effort", None)
+        normalized = str(effort or DEFAULT_REVIEW_REASONING_EFFORT).strip().lower()
+        return (
+            normalized
+            if normalized in REVIEW_REASONING_EFFORTS
+            else DEFAULT_REVIEW_REASONING_EFFORT
+        )
+
+    def _review_reasoning_plan(
+        self, base_max_tokens: int
+    ) -> tuple[int, dict[str, Any], dict[str, Any]]:
+        """按档位算出 (本轮 max_tokens, 直传 kwargs, extra_params)。
+
+        规则（docs/review-reasoning-assessment.md §4.3 第二步）：
+
+        - ``off``（默认）/ ``auto`` → 不注入、不预留：**完全维持现状**——deepseek 仍由
+          policy 追加显式 `thinking: {"type": "disabled"}`（`review_policy.py`），
+          anthropic / 多数兼容供应商依旧不发思考参数。`auto` 的语义就是"不干预，
+          由 policy / 供应商默认决定"，因此与 `off` 在 wire 上同形。
+        - 本地 ``ollama`` / ``local`` → 置灰（产品决策，与 chat 同口径），档位不生效。
+        - unsupported / 未收录供应商 → 不注入、也不预留（不编造参数，同规格表口径）。
+        - ``low`` / ``high`` / ``max`` → 查 `reasoning_specs` 规格表注入，并按 chat 口径
+          （`CHAT_REASONING_TOKEN_BUDGETS`：+4000/+8000/+12000）给 `max_tokens` 预留思考
+          额度，仍受模型规格 `max_output` 封顶（`_review_tokens_with_budget`）。
+
+        真机依据：**只补 `reasoning_effort` 不开 `thinking` 是无效的**（reasoning 仍 0 字符），
+        所以 low/high/max 必须同时覆盖 policy 的 `disabled`——规格表里 deepseek 那一条
+        正是 `{"thinking": {"type": "enabled"}, "reasoning_effort": ...}`。
+
+        **整档送不出去就不预留**：无论是因为官方区间放不下（`_clamp_budget` 返回空），
+        还是因为协议不消费 kwargs（`api_format="anthropic"` 的中转端点，见
+        `split_reasoning_params`），只要两路都是空的，就退回基础额度——预留一份送不出去的
+        思考额度只会把额度白白丢给答案。
+        """
+        level = self._review_reasoning_effort()
+        if level == "off" or level == "auto":
+            return base_max_tokens, {}, {}
+        provider_name = str(self._config.provider or "").strip()
+        if provider_name.lower() in LOCAL_REVIEW_PROVIDER_NAMES:
+            return base_max_tokens, {}, {}
+        support = reasoning_support(provider_name)
+        if not support.injects:
+            return base_max_tokens, {}, {}
+
+        reasoning_budget = CHAT_REASONING_TOKEN_BUDGETS.get(level, 0)
+        max_tokens = self._review_tokens_with_budget(base_max_tokens, reasoning_budget)
+        # 预算型供应商（anthropic/qwen/siliconflow）的预算字段要按官方约束收敛进
+        # 最终额度，所以先定 max_tokens 再建参数；`answer_tokens` 用 review 自己的
+        # 基础额度（= 答案应该占的份额），不是 `AIClientConfig.max_tokens` 那个
+        # 兼容旧默认值的 4096。
+        params = build_reasoning_params(
+            provider_name,
+            level,
+            max_tokens=max_tokens,
+            answer_tokens=base_max_tokens,
+        )
+        kwargs, extra_params = split_reasoning_params(
+            params,
+            provider_name=provider_name,
+            api_format=self._config.api_format,
+        )
+        if not kwargs and not extra_params:
+            return base_max_tokens, {}, {}
+        return max_tokens, kwargs, extra_params
+
+    def _review_tokens_with_budget(self, base_max_tokens: int, reasoning_budget: int) -> int:
+        """把思考预留加进 review 的输出额度，并受模型规格 `max_output` 封顶。
+
+        与 chat 的 `_chat_max_tokens` 同一思路：回答与思考**共用同一份 completion 额度**
+        （docs/reasoning-effort-probe.md 的教训是预算是真的会顶满），因此总额度取
+        `min(基础额度 + 预留, max_output)`；`max_output` 的来源见 `_review_max_output`。
+        """
+        requested = base_max_tokens + max(0, reasoning_budget)
+        return max(1, min(requested, self._review_max_output()))
+
+    def _review_max_output(self) -> int:
+        """review 模型的输出上限（思考预留的封顶来源）。
+
+        取舍与 chat 的 `_chat_max_output` 一致（"谁背书用谁的数字"）：**优先内置预设**
+        `PROVIDER_MODEL_PRESETS`——仓库里唯一可引用的厂商数值，封顶只会降低请求额度、
+        防的是云端按模型输出上限直接 400（`jsonl_server._chat_max_tokens` 的注释记录了
+        同一个坑）。预设里没有这个模型时退回能力档案（deepseek 32_768 / anthropic
+        8_192 / Ollama 1_024 / 其余 8_192）——那是我们自己的保守估计，至少不会比
+        改动前的行为更激进。
+
+        用户逐模型规格（配置助手写进 `provider.models[...]` 的值）**到不了这里**：
+        `AIClientConfig` 只带 provider 名与模型名，这也正是 off 档基础额度一贯的口径
+        （`calculate_review_output_budget` 同样按能力档案，不读用户规格）。
+        """
+        provider_key = str(self._config.provider or "").strip().lower()
+        model_name = str(self._config.model or "").strip()
+        preset = PROVIDER_MODEL_PRESETS.get(provider_key, {}).get(model_name)
+        if preset is not None:
+            return int(preset["max_output"])
+        return get_model_capabilities(self._config.provider, self._config.model).max_output_tokens
+
+    def _review_request_provider(
+        self, kwargs: dict[str, Any], extra_params: dict[str, Any]
+    ) -> tuple[Any, dict[str, Any]]:
+        """返回 (本次请求用的 provider, 直传 kwargs)。
+
+        - 两路拆分由 `reasoning_specs.split_reasoning_params` 唯一决定
+          （`think`/`reasoning_effort` → OpenAI 兼容 provider 的 kwargs 白名单，
+          `openai.py:386-388`；其余顶层参数 → `extra_params`，`openai.py:384` 与
+          anthropic 的 `messages.create(**extra_params)` 都会原样并进请求体）。
+        - `extra_params` **必须**落到配置对象上，但绝不能写进落盘配置、也不能改动
+          `self._provider` 共享的那一份：同一个 `AIClient` 会被并发复用来审多个文件
+          （`review_orchestrator` 只建一个客户端 + 并发 2），而混合编排还会按文件重建
+          配置。因此这里按请求新建一份配置副本 + provider，请求结束即丢弃。
+        """
+        if not extra_params:
+            return self._provider, kwargs
+        provider_config = replace(
+            self._provider_config,
+            extra_params={**self._provider_config.extra_params, **extra_params},
+        )
+        return (
+            create_model_provider(provider_config, client_factory=self._client_factory),
+            kwargs,
+        )
 
     async def _reserve_cost(self, estimated_cost: float) -> None:
         """Atomically reserve budget for a concurrent request."""

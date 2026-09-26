@@ -37,11 +37,13 @@ from ai_pr_review.config import (
     DEFAULT_CHAT_REASONING_EFFORT,
     DEFAULT_MODEL_CONTEXT_WINDOW,
     DEFAULT_MODEL_MAX_OUTPUT,
+    DEFAULT_REVIEW_REASONING_EFFORT,
     MAX_OUTPUT_RANGE,
     MODEL_PROVIDER_PRESETS,
     MODEL_SPEC_SOURCES,
     PROVIDER_MODEL_PRESETS,
     REPO_CONTEXT_MODES,
+    REVIEW_REASONING_EFFORTS,
     REVIEW_SLOT_VALUES,
     AppConfig,
     ConfigValidationError,
@@ -69,6 +71,7 @@ from ai_pr_review.services.reasoning_specs import (
     ReasoningSupport,
     build_reasoning_params,
     describe_support,
+    reasoning_delivery_blocked_reason,
     reasoning_support,
 )
 from ai_pr_review.services.repo_context import SOURCE_EXTENSIONS
@@ -172,6 +175,18 @@ SYMBOL_LOCATE_CHOICES: tuple[tuple[bool, str], ...] = (
     (True, "开启 / On"),
     (False, "关闭 / Off"),
 )
+# review 思考档位（preferences.review_reasoning_effort，docs/review-reasoning-assessment.md
+# §4.3 第二步）的展示文案。取值本身由 config.REVIEW_REASONING_EFFORTS 拥有（= chat 词表，
+# 默认 off），这里只补 label + 成本提示——同 repo_context，TUI 不硬编码中文。
+# `usage` 那一句是**真机实测**的代价（该文档 §0.3）：max 档约 3.6× completion tokens、
+# 2.9× 单文件耗时，档位直接乘在审查成本上。
+REVIEW_REASONING_LABELS: dict[str, str] = {
+    "off": "关闭 / Off（不思考，默认）",
+    "low": "低 / Low（预留 4000 思考 tokens）",
+    "high": "高 / High（预留 8000 思考 tokens）",
+    "max": "最高 / Max（预留 12000；实测约 3.6× 输出 tokens、2.9× 耗时）",
+    "auto": "自动 / Auto（不干预，由供应商默认决定）",
+}
 # `config.setup` 载荷里 symbol_locate 接受的非布尔写法，与 `config.normalize_symbol_locate`
 # （config.py:756-774）同一套口径。这里刻意重列而不是复用那个函数：它对非法值只告警回退，
 # 而向导要的是"非法就整单报错"，两者语义相反。口径一致性由
@@ -892,6 +907,13 @@ class JsonlBackend:
                 "chat_reasoning_effort",
                 DEFAULT_CHAT_REASONING_EFFORT,
             ),
+            # review 档位（§4.3 第二步）：与 chat_reasoning_effort 同样式——同一层级的
+            # 标量键，前端/CLI 只读值，取值表在 `config.options.review_reasoning_effort`。
+            "review_reasoning_effort": getattr(
+                self.config.preferences,
+                "review_reasoning_effort",
+                DEFAULT_REVIEW_REASONING_EFFORT,
+            ),
             "chat_context_budget": self._chat_context_budget(),
             # 预算从哪来：显式配置 / 模型规格推算 / 兜底默认（§4）。键名与 `model` 不冲突，
             # 是**新**键：TUI 把快照整份 spread 进 runtime，不能占用既有标量名。
@@ -956,6 +978,44 @@ class JsonlBackend:
                 {"value": value, "label": label} for value, label in SYMBOL_LOCATE_CHOICES
             ],
         }
+
+    def _review_reasoning_options(self) -> dict[str, Any]:
+        """review 思考档位的当前值与可选值（与 `_repo_context_options` 同键同形）。
+
+        `value` 是落盘值（config 层已保证合法：非法值加载时回退 `off`），
+        `options[].value` 是 `config.setup` 接受的取值，`label` 供 TUI 直接渲染。
+        取值清单来自 `config.REVIEW_REASONING_EFFORTS`（= chat 词表），默认 `off`。
+
+        供应商不支持时追加 `state` / `reason`（`reasoning_specs` 的三态与原因，与
+        `/think` 的 `unsupported` 同源）：**不编造参数**，出口明说这一档在当前供应商上
+        不会注入任何东西（本地置灰 / 官方无该参数 / 未收录 / Anthropic 协议的中转端点
+        会丢弃参数）。判定按审查槽真正会用的 provider（`_review_slot_config`），
+        不是聊天槽。
+        """
+        slot_provider = self._review_slot_config()
+        support = reasoning_support(slot_provider.name)
+        blocked_reason = reasoning_delivery_blocked_reason(
+            slot_provider.name, slot_provider.api_format
+        )
+        payload: dict[str, Any] = {
+            "value": getattr(
+                self.config.preferences,
+                "review_reasoning_effort",
+                DEFAULT_REVIEW_REASONING_EFFORT,
+            ),
+            "options": [
+                {"value": level, "label": REVIEW_REASONING_LABELS.get(level, level)}
+                for level in REVIEW_REASONING_EFFORTS
+            ],
+        }
+        if not support.injects or blocked_reason:
+            payload["state"] = STATE_UNSUPPORTED if blocked_reason else support.state
+            payload["reason"] = (
+                blocked_reason
+                or support.reason
+                or "该供应商未提供思考参数，review 档位不会注入"
+            )
+        return payload
 
     def _slot_provider(self, slot: str) -> ProviderConfig:
         """槽位真正承载配置的 Provider（与 `_local_slot_config` 同一判定）。"""
@@ -1271,6 +1331,10 @@ class JsonlBackend:
             # L2 符号定位开关（docs/mimo-l2-symbol-locator.md）：同样与 routing 同级，
             # 供前端预选并回填到 config.setup。
             "symbol_locate": self._symbol_locate_options(),
+            # review 思考档位（docs/review-reasoning-assessment.md §4.3 第二步）：与
+            # repo_context / symbol_locate 同级，供配置助手读写（前端接入另行排期，
+            # 这里只保证后端字段可读可写）。
+            "review_reasoning_effort": self._review_reasoning_options(),
             # 模型规格（B1/B2/B3）：与 routing 同级；三出口共用同一个 builder，
             # 保证 config.options / config.snapshot / model.status 三份同键同形。
             # 注意键名是 model（这里是 config.options 里的新块），快照/状态里则必须叫
@@ -1627,6 +1691,17 @@ class JsonlBackend:
             # L2 符号定位开关（docs/mimo-l2-symbol-locator.md §2）：`null`/缺失与其它偏好
             # 一样是"保持不变"（部分更新），给了值就必须能解析成布尔，否则整单失败。
             preferences.symbol_locate = self._coerce_symbol_locate(params["symbol_locate"])
+        review_effort = str(params.get("review_reasoning_effort") or "").strip().lower()
+        if review_effort:
+            # review 思考档位（docs/review-reasoning-assessment.md §4.3 第二步）：取值由
+            # config.REVIEW_REASONING_EFFORTS 定义（= chat 词表）。非法值必须整单失败，
+            # 与 repo_context 同理由：这是向导里刚做出的选择，静默回退比报错更糟。
+            if review_effort not in REVIEW_REASONING_EFFORTS:
+                raise ConfigValidationError(
+                    "review 思考档位仅支持 off、low、high、max 或 auto。"
+                    "（review_reasoning_effort accepts off, low, high, max or auto.）"
+                )
+            preferences.review_reasoning_effort = review_effort
         if "auto_publish_comment" in params:
             auto_publish = params["auto_publish_comment"]
             if not isinstance(auto_publish, bool):
@@ -1785,6 +1860,10 @@ class JsonlBackend:
             "repo_context": self._repo_context_options(),
             # L2 符号定位开关同理（与 config.options 同键同形），状态栏/TUI 读同一份。
             "symbol_locate": self._symbol_locate_options(),
+            # review 思考档位同理（docs/review-reasoning-assessment.md §4.3 第二步）：
+            # 三个出口同键同形是既有约定（repo_context/symbol_locate 都这么做的），
+            # 否则前端接完 `config.options` 仍无法从状态出口读到当前档位。
+            "review_reasoning_effort": self._review_reasoning_options(),
             # 模型规格（B2）。键名必须是 `model_spec`：`model` 已被上面的模型名占用，
             # 而 TUI 会把本结果整体 spread 进 runtime（§2.3）。
             "model_spec": spec,

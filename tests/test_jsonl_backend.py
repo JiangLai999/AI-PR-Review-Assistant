@@ -6790,6 +6790,7 @@ def test_protocol_config_options_and_setup_carry_model_specs(
         "routing",
         "repo_context",
         "symbol_locate",
+        "review_reasoning_effort",
     ):
         assert key in options
     assert setup["model_spec"]["context_window"] == 1_000_000
@@ -6813,3 +6814,168 @@ def test_config_catalog_refresh_bypasses_the_process_memo(
     assert refreshed["result"]["model"]["catalog_state"]["source"] == "models.dev"
     # refresh 走的是 `ModelCatalog.refresh`（无视缓存），所以这里数的是 HTTP 层。
     assert calls["urlopen"] == 2
+
+
+# ---------------------------------------------------------------------------
+# review 思考档位的出口（config.snapshot / config.options / config.setup）
+# 背景：docs/review-reasoning-assessment.md §4.3 第二步
+# ---------------------------------------------------------------------------
+
+
+def test_review_reasoning_effort_defaults_to_off_in_the_snapshot(tmp_path: Path) -> None:
+    """默认档 `off` = 现状，snapshot 与 chat 档位同样式暴露（前端只读值）。"""
+    backend = JsonlBackend(tmp_path / "config.json")
+
+    snapshot = backend._config_snapshot()
+
+    assert snapshot["review_reasoning_effort"] == "off"
+    # 与 chat 档位是两个独立的键，默认值不同（chat 默认 auto）。
+    assert snapshot["chat_reasoning_effort"] == "auto"
+
+
+def test_config_options_expose_the_review_reasoning_vocabulary(tmp_path: Path) -> None:
+    """`config.options.review_reasoning_effort`：当前值 + 五个可选值（词表来自 config）。"""
+    from ai_pr_review.config import REVIEW_REASONING_EFFORTS
+
+    backend = JsonlBackend(tmp_path / "config.json")
+    block = backend._setup_options()["review_reasoning_effort"]
+
+    assert block["value"] == "off"
+    assert [item["value"] for item in block["options"]] == list(REVIEW_REASONING_EFFORTS)
+    assert [item["value"] for item in block["options"]] == [
+        "off",
+        "low",
+        "high",
+        "max",
+        "auto",
+    ]
+    # 每个档位都要有可渲染的文案（TUI 不硬编码中文）。
+    assert all(item["label"] for item in block["options"])
+    # deepseek 是受支持的供应商（默认预设 anthropic 也是）——没有置灰说明。
+    assert "state" not in block
+    assert "reason" not in block
+
+
+def test_config_setup_writes_review_reasoning_effort_end_to_end(tmp_path: Path) -> None:
+    """`config.setup` 写入 → 落盘 → 重载 → snapshot 与审查请求配置都拿到新档位。"""
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+
+    snapshot = backend._apply_setup(
+        {
+            "runtime_profile": "cloud",
+            "provider_name": "deepseek",
+            "api_key": "test-key",
+            "model_name": "deepseek-flash",
+            "review_reasoning_effort": "high",
+        }
+    )
+
+    assert snapshot["review_reasoning_effort"] == "high"
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))["preferences"]
+    assert persisted["review_reasoning_effort"] == "high"
+    reloaded = AppConfig.load(config_path)
+    assert reloaded.preferences.review_reasoning_effort == "high"
+    # 审查请求读的是 ai_client 上那一份（混合编排按文件重建客户端配置时靠它带过去）。
+    assert reloaded.ai_client.review_reasoning_effort == "high"
+    assert backend.config.ai_client.review_reasoning_effort == "high"
+
+    # 不传该键 = 保持不变（部分更新），不影响别的偏好。
+    backend._apply_setup({"runtime_profile": "cloud", "review_reasoning_effort": ""})
+    assert backend.config.preferences.review_reasoning_effort == "high"
+
+
+def test_config_setup_rejects_an_unknown_review_reasoning_effort(tmp_path: Path) -> None:
+    """向导里刚做出的选择非法必须整单失败（同 repo_context），不能静默回退。"""
+    from ai_pr_review.config import ConfigValidationError
+
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+
+    with pytest.raises(ConfigValidationError, match="review 思考档位"):
+        backend._apply_setup(
+            {
+                "runtime_profile": "cloud",
+                "provider_name": "deepseek",
+                "api_key": "test-key",
+                "model_name": "deepseek-flash",
+                "review_reasoning_effort": "extreme",
+            }
+        )
+
+    assert backend.config.preferences.review_reasoning_effort == "off"
+
+
+def test_review_reasoning_options_explain_greyed_out_providers(tmp_path: Path) -> None:
+    """不支持注入的供应商必须给出口说明（本地置灰 / 未收录），而不是假装可调。"""
+    from ai_pr_review.config import AIClientConfig, ModelProviderConfig, ProviderConfig
+
+    local_backend = JsonlBackend(tmp_path / "local.json")
+    local_backend._apply_setup({"runtime_profile": "local"})
+    local_block = local_backend._setup_options()["review_reasoning_effort"]
+
+    assert local_block["state"] == "unsupported"
+    assert "本地" in local_block["reason"]
+
+    unknown_backend = JsonlBackend(tmp_path / "unknown.json")
+    unknown_backend.config.ai_client = AIClientConfig(
+        provider="mystery-llm",
+        api_key="relay-key",
+        model="mystery-1",
+        base_url="https://mystery.example.com/v1",
+        api_format="openai",
+    )
+    unknown_backend.config.provider = ProviderConfig.from_model_provider(
+        unknown_backend.config.ai_client.model_provider
+    )
+    unknown_backend.config._sync_runtime_sections()
+    unknown_block = unknown_backend._setup_options()["review_reasoning_effort"]
+
+    assert unknown_block["state"] == "unsupported"
+    assert unknown_block["reason"]
+
+    # 第三种：中转/自定义端点配成 Anthropic 协议——规格表判它透明（只透传 effort），
+    # 但 Anthropic 形态的 provider 不读 kwargs，参数一个都到不了线上。
+    relay_backend = JsonlBackend(tmp_path / "relay.json")
+    relay_backend.config.provider = ProviderConfig.from_model_provider(
+        ModelProviderConfig(
+            name="custom",
+            display_name="Custom",
+            api_key="relay-key",
+            base_url="https://relay.example.com",
+            model_name="relay-claude",
+            api_format="anthropic",
+        )
+    )
+    relay_backend.config._sync_runtime_sections()
+    relay_block = relay_backend._setup_options()["review_reasoning_effort"]
+
+    assert relay_block["state"] == "unsupported"
+    assert "Anthropic" in relay_block["reason"]
+
+
+def test_review_reasoning_options_agree_across_the_three_exits(tmp_path: Path) -> None:
+    """`config.options` / `model.status` 同键同形（与 repo_context/symbol_locate 同一约定）。"""
+    backend = JsonlBackend(tmp_path / "config.json", event_sink=lambda event: None)
+
+    options_block = backend._setup_options()["review_reasoning_effort"]
+    status = asyncio.run(backend._model_status())
+
+    assert status["review_reasoning_effort"] == options_block
+    # 写一次档位之后三个出口仍然一致（status 也要跟得上，前端才不用另开请求）。
+    backend._apply_setup(
+        {
+            "runtime_profile": "cloud",
+            "provider_name": "deepseek",
+            "api_key": "test-key",
+            "model_name": "deepseek-flash",
+            "review_reasoning_effort": "low",
+        }
+    )
+
+    assert backend._config_snapshot()["review_reasoning_effort"] == "low"
+    assert backend._setup_options()["review_reasoning_effort"]["value"] == "low"
+    refreshed = asyncio.run(backend._model_status())
+    assert refreshed["review_reasoning_effort"] == backend._setup_options()[
+        "review_reasoning_effort"
+    ]

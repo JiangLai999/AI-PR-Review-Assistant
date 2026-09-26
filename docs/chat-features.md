@@ -152,6 +152,65 @@ model for reasoning levels.”) instead of pretending the switch works.
 | `/think <档位>` | 设置思考档位 / Set the level | `/think off\|low\|high\|max\|auto` | `/think high` | 仅 5 个合法值，其他值报错；**仅 TUI** / Only these five values; TUI only |
 | （本地端点 local endpoint） | 档位置灰 / Levels greyed out | `/think high`（在 `ollama`/`local` provider 下） | `/think max` | 返回 `state="unsupported"`，**不改配置** / Returns `unsupported`; the config is not changed |
 
+### 3.1 审查（review）的思考档位 / Reasoning level for reviews
+
+**中文**
+
+review 与 chat 是**两个独立的档位**（`preferences.review_reasoning_effort`，**默认 `off`**）：
+审查是"成本/质量取舍"，默认沿用今天的快速模式，不会因为你在聊天里选了 `max` 就悄悄变贵。
+
+| 值 | 含义 | 请求体（以 deepseek 为例） |
+|---|---|---|
+| `off`（默认） | 不思考（现状） | `thinking: {"type": "disabled"}`，无 `reasoning_effort` |
+| `low` / `high` / `max` | 思考，按档位给预算 | `thinking: {"type": "enabled"}` + `reasoning_effort: "low\|high\|max"` |
+| `auto` | 不干预：由供应商默认 / policy 决定 | 与 `off` 相同（deepseek 的 policy 就是显式关闭） |
+
+- **怎么设**：`pr-review config preferences --review-reasoning-effort high`（`pr-review preferences ...`
+  等价；词表 `off|low|high|max|auto`，非法值由命令行直接拒绝）。也可以直接改配置文件的
+  `preferences.review_reasoning_effort`，或走配置助手的后端字段
+  （`config.options.review_reasoning_effort` / `config.setup`；**TUI 界面尚未接入**，另行排期）。
+- **成本**：开启档位会给审查的输出额度加思考预留（`low/high/max` → **+4000/+8000/+12000**
+  tokens，仍受模型规格的 `max_output` 封顶）。真机实测（`docs/review-reasoning-assessment.md` §2）：
+  `max` 档约 **3.6× 输出 tokens、2.9× 单文件耗时**；按逐文件 × 并发 × 文件数放大，请按需选择。
+- **本地与不支持思考参数的供应商**：本地 `ollama`/`local` 固定快速模式，档位**不生效**；
+  官方文档没有思考参数的供应商（如 baichuan）、未收录的供应商，以及**配成 Anthropic 协议
+  （`api_format=anthropic`）的中转端点**（这类端点会丢弃透传参数）**都不注入任何参数**——
+  这几种情况会在出口给出说明（配置助手的 `state`/`reason`、CLI 的 `review_reasoning_note`），
+  不会假装生效。
+- `off` 是**维持现状**而不是"对所有供应商强制关闭思考"：它不注入任何参数（表里 deepseek 的
+  `disabled` 来自审查策略本身），其它供应商维持各自的默认行为。混合策略下档位只作用于远端
+  文件，低复杂度文件仍由本地模型以快速模式审查。
+
+**English**
+
+Reviews have their **own level** (`preferences.review_reasoning_effort`, **default `off`**) — the
+chat level never leaks into reviews, so picking `max` for chat does not silently make reviews
+expensive.
+
+| Value | Meaning | Wire body (deepseek example) |
+|---|---|---|
+| `off` (default) | No thinking (today's behaviour) | `thinking: {"type": "disabled"}`, no `reasoning_effort` |
+| `low` / `high` / `max` | Think, with a per-level budget | `thinking: {"type": "enabled"}` + `reasoning_effort: "low\|high\|max"` |
+| `auto` | Don't touch anything: leave it to the vendor/policy | Same as `off` for deepseek (its policy disables thinking) |
+
+- **How to set it**: `pr-review config preferences --review-reasoning-effort high` (the same
+  command is also reachable as `pr-review preferences …`). The value can also be edited directly in
+  the config file, or through the setup wizard's backend fields (`config.options` / `config.setup`);
+  the TUI does not render it yet.
+- **Cost**: enabling a level adds a thinking reservation to the review output budget
+  (low/high/max → **+4000/+8000/+12000** tokens, still capped by the model spec's `max_output`).
+  Measured on the live DeepSeek endpoint: `max` costs about **3.6× output tokens and 2.9× wall
+  clock per file**.
+- **Local and non-thinking providers**: local `ollama`/`local` stays in fast mode (the level has no
+  effect); providers without official thinking parameters, unknown providers, and **relays
+  configured for the Anthropic protocol (`api_format=anthropic`, which drops passthrough params)**
+  get **no injected parameters at all** — the exits say so (`state`/`reason` in the wizard,
+  `review_reasoning_note` in the CLI) instead of pretending the level works.
+- `off` means **keep today's behaviour**, not "force thinking off everywhere": nothing is injected
+  (the deepseek `disabled` above comes from the review policy itself) and other providers keep their
+  own defaults. Under the hybrid strategy the level applies to remote files only; low-complexity
+  files are still reviewed locally in fast mode.
+
 ---
 
 ## 4. 审查命令 / Review commands

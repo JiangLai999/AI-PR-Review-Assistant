@@ -15,6 +15,7 @@ import pytest
 
 from ai_pr_review.config import CHAT_REASONING_TOKEN_BUDGETS, PROVIDER_MODEL_PRESETS
 from ai_pr_review.services.reasoning_specs import (
+    ANTHROPIC_PROTOCOL_REASON,
     CONFIDENCE_DOCUMENTED,
     CONFIDENCE_PRODUCT_DECISION,
     CONFIDENCE_TRANSPARENT,
@@ -36,7 +37,10 @@ from ai_pr_review.services.reasoning_specs import (
     covered_providers,
     describe_support,
     get_reasoning_spec,
+    reasoning_delivery_blocked_reason,
+    reasoning_kwargs_consumed,
     reasoning_support,
+    split_reasoning_params,
 )
 
 # 四档 → 期望注入的参数（调研 §2 总表逐行；`None` 表示"该档不注入"）。
@@ -358,3 +362,70 @@ def test_state_constants_match_the_frontend_contract() -> None:
     assert reasoning_support("deepseek").state == STATE_SET
     assert reasoning_support("api2d").state == STATE_TRANSPARENT
     assert reasoning_support("ollama").state == STATE_UNSUPPORTED
+
+
+# ---------------------------------------------------------------------------
+# 参数落地通道（`split_reasoning_params`）与"送不出去"的判据
+# ---------------------------------------------------------------------------
+
+
+def test_split_reasoning_params_routes_by_channel() -> None:
+    """kwargs 白名单进 kwargs，其余顶层参数进 extra_params；入参不被修改。"""
+    params = {"thinking": {"type": "enabled"}, "reasoning_effort": "high", "thinking_budget": 8000}
+    kwargs, extra = split_reasoning_params(params, provider_name="zhipu", api_format="openai")
+
+    assert kwargs == {"reasoning_effort": "high"}
+    assert extra == {"thinking": {"type": "enabled"}, "thinking_budget": 8000}
+    assert params == {  # 深拷贝语义：调用方给的 dict 原样不动
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "high",
+        "thinking_budget": 8000,
+    }
+
+
+def test_anthropic_protocol_drops_effort_but_keeps_budget_params() -> None:
+    """Anthropic 形态（按 `api_format` 选 provider，与供应商名无关）：kwargs 通道失效。
+
+    - 透传型（api2d/custom/...）只有 `reasoning_effort` → 两路皆空 = 整档送不出去；
+    - 预算型（anthropic 自己）走 `extra_params` → 照旧能落地。
+    """
+    kwargs, extra = split_reasoning_params(
+        {"reasoning_effort": "high"}, provider_name="api2d", api_format="anthropic"
+    )
+    assert (kwargs, extra) == ({}, {})
+
+    kwargs, extra = split_reasoning_params(
+        {"thinking": {"type": "enabled", "budget_tokens": 8000}},
+        provider_name="anthropic",
+        api_format="anthropic",
+    )
+    assert kwargs == {}
+    assert extra == {"thinking": {"type": "enabled", "budget_tokens": 8000}}
+
+
+def test_reasoning_kwargs_consumed_follows_the_factory_branch() -> None:
+    """与 `factory.create_model_provider` 的分支一致：名字是 anthropic 或格式是 anthropic。"""
+    assert reasoning_kwargs_consumed("deepseek", "openai") is True
+    assert reasoning_kwargs_consumed("api2d", "custom") is True
+    # 名字不是 anthropic，但协议是 → AnthropicProvider
+    assert reasoning_kwargs_consumed("custom", "anthropic") is False
+    # 格式不是 anthropic，但名字是 → 同样走 AnthropicProvider
+    assert reasoning_kwargs_consumed("anthropic", "openai") is False
+
+
+def test_delivery_blocked_reason_matches_the_injection_decision() -> None:
+    """出口文案与注入点判据同源：判为 blocked 的组合，注入点确实两路皆空。"""
+    blocked = reasoning_delivery_blocked_reason("custom", "anthropic")
+    assert blocked == ANTHROPIC_PROTOCOL_REASON
+    kwargs, extra = split_reasoning_params(
+        build_reasoning_params("custom", "high"),
+        provider_name="custom",
+        api_format="anthropic",
+    )
+    assert (kwargs, extra) == ({}, {})
+
+    # 能送出去的组合一律不给原因（出口据此判定"没有置灰说明"）。
+    assert reasoning_delivery_blocked_reason("api2d", "openai") is None
+    assert reasoning_delivery_blocked_reason("anthropic", "anthropic") is None
+    assert reasoning_delivery_blocked_reason("deepseek", "openai") is None
+    assert reasoning_delivery_blocked_reason("mystery-llm", "anthropic") is None
