@@ -100,6 +100,18 @@ test("think command result exposes level and unsupported reason", () => {
   expect(parseThinkCommandResult(undefined)).toBeUndefined()
 })
 
+test("think command result reads the backend's `effort` field (contract mismatch fix)", () => {
+  // 后端 jsonl_server 实际返回 {state:"set", effort:"high"}；曾因只读 level 导致回显为空。
+  const applied = parseThinkCommandResult({ kind: "think", state: "set", effort: "high" })
+  expect(applied?.level).toBe("high")
+  expect(applied?.state).toBe("set")
+  // level 仍然兼容（旧契约），且 effort 优先。
+  const legacy = parseThinkCommandResult({ kind: "think", level: "low" })
+  expect(legacy?.level).toBe("low")
+  const both = parseThinkCommandResult({ kind: "think", effort: "max", level: "low" })
+  expect(both?.level).toBe("max")
+})
+
 test("compact command result keeps token counts and failure emphasis fields", () => {
   const ok = parseCompactCommandResult({
     kind: "compact",

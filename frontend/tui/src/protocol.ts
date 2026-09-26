@@ -123,7 +123,10 @@ export type ThinkLevel = "off" | "low" | "high" | "max" | "auto"
 
 export type ThinkCommandResult = {
   kind: "think"
-  /** applied = 已切换；unsupported = 后端不支持，reason 给出置灰说明。 */
+  /**
+   * set / applied = 已切换（后端现用 `set`，历史契约写作 `applied`，两者都放行）；
+   * unsupported = 后端不支持，reason 给出置灰说明。
+   */
   state?: "applied" | "unsupported" | string
   level?: ThinkLevel | string
   reason?: string
@@ -135,6 +138,8 @@ export type CompactCommandResult = {
   before_tokens?: number
   after_tokens?: number
   kept_turns?: number
+  replaced_messages?: number
+  summary_chars?: number
   error?: string
   message?: string
 }
@@ -146,7 +151,14 @@ export function parseThinkCommandResult(result: unknown): ThinkCommandResult | u
   if (!result || typeof result !== "object") return undefined
   const record = result as Record<string, unknown>
   if (record.kind !== "think") return undefined
-  const levelRaw = typeof record.level === "string" ? record.level : undefined
+  // 后端返回 `effort`（jsonl_server /think）；旧契约写作 `level`。
+  // 先读 effort，再回退 level，避免档位回显为空。
+  const levelRaw =
+    typeof record.effort === "string"
+      ? record.effort
+      : typeof record.level === "string"
+        ? record.level
+        : undefined
   return {
     kind: "think",
     state: typeof record.state === "string" ? record.state : undefined,
@@ -166,6 +178,8 @@ export function parseCompactCommandResult(result: unknown): CompactCommandResult
     before_tokens: asFiniteNumber(record.before_tokens),
     after_tokens: asFiniteNumber(record.after_tokens),
     kept_turns: asFiniteNumber(record.kept_turns),
+    replaced_messages: asFiniteNumber(record.replaced_messages),
+    summary_chars: asFiniteNumber(record.summary_chars),
     error: asOptionalString(record.error),
     message: asOptionalString(record.message),
   }

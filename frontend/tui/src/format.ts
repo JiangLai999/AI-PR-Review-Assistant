@@ -173,6 +173,7 @@ export function formatCompactSummary(
     before_tokens?: number
     after_tokens?: number
     kept_turns?: number
+    replaced_messages?: number
   },
   language?: string,
 ): string {
@@ -185,6 +186,13 @@ export function formatCompactSummary(
   }
   if (typeof data.kept_turns === "number") {
     parts.push(en ? `kept ${data.kept_turns} turns` : `保留 ${data.kept_turns} 轮`)
+  }
+  if (typeof data.replaced_messages === "number" && data.replaced_messages > 0) {
+    parts.push(
+      en
+        ? `${data.replaced_messages} messages summarized`
+        : `已压缩 ${data.replaced_messages} 条`,
+    )
   }
   if (parts.length === 0) return en ? "Context compressed" : "上下文已压缩"
   return parts.join(" · ")

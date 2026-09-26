@@ -144,6 +144,22 @@ test("formatCompactSummary shows before→after tokens and kept turns", () => {
   expect(
     formatCompactSummary({ before_tokens: 12400, after_tokens: 3100, kept_turns: 8 }, "en-US"),
   ).toBe("12.4k → 3.1k · kept 8 turns")
+  expect(
+    formatCompactSummary({
+      before_tokens: 12400,
+      after_tokens: 3100,
+      kept_turns: 8,
+      replaced_messages: 22,
+    }),
+  ).toBe("12.4k → 3.1k · 保留 8 轮 · 已压缩 22 条")
+  expect(
+    formatCompactSummary(
+      { kept_turns: 8, replaced_messages: 22 },
+      "en-US",
+    ),
+  ).toBe("kept 8 turns · 22 messages summarized")
+  // replaced_messages=0 不显示（没有旧消息被压缩）。
+  expect(formatCompactSummary({ kept_turns: 8, replaced_messages: 0 })).toBe("保留 8 轮")
   expect(formatCompactSummary({})).toBe("上下文已压缩")
 })
 
