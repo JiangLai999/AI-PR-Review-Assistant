@@ -15,8 +15,10 @@ import ai_pr_review.config as config_module
 import ai_pr_review.services.review_orchestrator as orchestrator_module
 from ai_pr_review.cli import main
 from ai_pr_review.config import (
+    AIClientConfig,
     AppConfig,
     PostProcessorConfig,
+    ProviderConfig,
     ReportRendererConfig,
     ResultStoreConfig,
 )
@@ -2616,3 +2618,156 @@ def test_demo_and_showcase_never_touch_the_network(monkeypatch):
     ):
         result = runner.invoke(main, args)
         assert result.exit_code == 0, (args, result.output, result.exception)
+
+
+# ---------------------------------------------------------------------------
+# 模型规格的 CLI 出口（设计 §4.1-D；原在 test_jsonl_backend.py，改用全局 --config 跑真实 CLI）
+# ---------------------------------------------------------------------------
+
+
+def test_config_show_and_export_keep_model_specs(tmp_path: Path) -> None:
+    """中转站规格能导出、能在 `config show`（脱敏）里回显——不改产品代码的回归。"""
+    config_path = tmp_path / "config.json"
+    config = AppConfig.from_env()
+    config.ai_client = AIClientConfig(
+        provider="custom",
+        api_key="relay-key",
+        model="relay-model",
+        base_url="https://relay.example.com/v1",
+        api_format="openai",
+    )
+    config.provider = ProviderConfig.from_model_provider(config.ai_client.model_provider)
+    config.provider.set_model_spec("relay-model", context_window=200_000, max_output=16_384)
+    config._sync_runtime_sections()
+    config.save(config_path, save_key=True)
+
+    runner = CliRunner()
+    shown = runner.invoke(main, ["--config", str(config_path), "config", "show"])
+    assert shown.exit_code == 0
+    shown_payload = json.loads(shown.output)
+    assert shown_payload["provider"]["models"]["relay-model"]["context_window"] == 200_000
+    assert shown_payload["provider"]["models"]["relay-model"]["max_output"] == 16_384
+
+    export_path = tmp_path / "export.json"
+    exported = runner.invoke(
+        main, ["--config", str(config_path), "config", "export", "--output", str(export_path)]
+    )
+    assert exported.exit_code == 0
+    payload = json.loads(export_path.read_text(encoding="utf-8"))
+    assert payload["provider"]["models"]["relay-model"]["context_window"] == 200_000
+    assert payload["provider"]["models"]["relay-model"]["max_output"] == 16_384
+
+
+def test_config_import_round_trips_a_relay_spec(tmp_path: Path) -> None:
+    """导入含规格的中转站配置后落盘同值（`save` 重建 provider 的路上不能丢）。"""
+    config_path = tmp_path / "config.json"
+    import_payload = {
+        "provider": {
+            "name": "custom",
+            "display_name": "Custom Endpoint",
+            "api_key": "relay-key",
+            "base_url": "https://relay.example.com/v1",
+            "api_format": "openai",
+            "models": {
+                "relay-model": {
+                    "name": "relay-model",
+                    "context_window": 200_000,
+                    "max_output": 16_384,
+                }
+            },
+            "default_model": "relay-model",
+        },
+        "preferences": {"output_format": "terminal", "language": "zh-CN"},
+    }
+    import_source = tmp_path / "import.json"
+    import_source.write_text(
+        json.dumps(import_payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+    result = CliRunner().invoke(
+        main, ["--config", str(config_path), "config", "import", str(import_source), "--save-key"]
+    )
+
+    assert result.exit_code == 0
+    saved = AppConfig.load(config_path)
+    assert saved.provider.models["relay-model"].context_window == 200_000
+    assert saved.provider.models["relay-model"].max_output == 16_384
+
+
+def test_config_import_ignores_unknown_preference_keys(tmp_path: Path) -> None:
+    """向前兼容：导入"更新版本导出的"配置时，本版本不认识的 preferences 键必须被忽略。
+
+    `config export` 每次都写全量 preferences，所以新版本导出的文件里一定有旧版本没有的
+    键；不过滤的话 `PreferencesConfig(**payload)` 直接 `TypeError`，用户连导入都做不了
+    （既有缺陷，见 docs/claude-backend-followup.md §3）。
+    """
+    config_path = tmp_path / "config.json"
+    import_payload = {
+        "provider": {
+            "name": "custom",
+            "display_name": "Custom Endpoint",
+            "api_key": "relay-key",
+            "base_url": "https://relay.example.com/v1",
+            "api_format": "openai",
+            "models": {"relay-model": {"name": "relay-model"}},
+            "default_model": "relay-model",
+        },
+        "preferences": {
+            "output_format": "json",
+            "language": "en",
+            # 假装这是"下一个版本"新增的偏好项
+            "future_preference_from_a_newer_release": {"enabled": True},
+        },
+    }
+    import_source = tmp_path / "import.json"
+    import_source.write_text(
+        json.dumps(import_payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["--config", str(config_path), "config", "import", str(import_source), "--save-key"],
+    )
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    saved = AppConfig.load(config_path)
+    # 认识的键照旧生效，不认识的键不进配置对象、也不落盘。
+    assert saved.preferences.output_format == "json"
+    assert saved.preferences.language == "en"
+    assert "future_preference_from_a_newer_release" not in saved.preferences.__dict__
+
+
+def test_config_health_reports_the_effective_spec_and_source(tmp_path: Path) -> None:
+    """§3.4：`config health` 的 JSON 多四个键；不联网时如实报 builtin/unknown。"""
+    config_path = tmp_path / "config.json"
+    config = AppConfig.from_env()
+    config.ai_client = AIClientConfig(
+        provider="deepseek",
+        api_key="deepseek-key",
+        model="deepseek-flash",
+        base_url="https://api.deepseek.com/v1",
+        api_format="openai",
+    )
+    config.provider = ProviderConfig.from_model_provider(config.ai_client.model_provider)
+    config.save(config_path, save_key=True)
+
+    result = CliRunner().invoke(main, ["--config", str(config_path), "config", "health"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    # 预设表里有 deepseek-flash 但进程里没有目录 → builtin（不是 models.dev）。
+    assert payload["spec_source"] == "builtin"
+    assert (payload["context_window"], payload["max_output"]) == (1_048_576, 384_000)
+    assert payload["needs_verification"] is False
+
+    # 不在预设表里的模型（既有用例用的 deepseek-chat 就是这一类）→ unknown。
+    second = AppConfig.load(config_path)
+    second.provider.default_model = "deepseek-chat"
+    second.provider.ensure_default_model_present()
+    second._sync_runtime_sections()
+    second.save(config_path, save_key=True)
+    result = CliRunner().invoke(main, ["--config", str(config_path), "config", "health"])
+
+    payload = json.loads(result.output)
+    assert payload["spec_source"] == "unknown"
+    assert (payload["context_window"], payload["max_output"]) == (32_768, 4_096)

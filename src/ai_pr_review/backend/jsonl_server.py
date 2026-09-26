@@ -28,10 +28,14 @@ from ai_pr_review.chat_session import (
     save_chat_session,
 )
 from ai_pr_review.config import (
+    CHAT_CONTEXT_BUDGET_RANGE,
     CHAT_SLOT_VALUES,
     CHAT_REASONING_EFFORTS,
     CONTEXT_WINDOW_RANGE,
+    DEFAULT_CHAT_CONTEXT_BUDGET,
     DEFAULT_CHAT_REASONING_EFFORT,
+    DEFAULT_MODEL_CONTEXT_WINDOW,
+    DEFAULT_MODEL_MAX_OUTPUT,
     MAX_OUTPUT_RANGE,
     MODEL_PROVIDER_PRESETS,
     MODEL_SPEC_SOURCES,
@@ -244,6 +248,35 @@ def _extract_ordinal(text: str) -> int | None:
         return None
 
 
+def _positive_int(value: Any) -> int | None:
+    """配置值的正整数读法；读不出来（None/非法/≤0）返回 None。
+
+    `bool` 是 `int` 的子类，但 `True` 作为 token 预算没有意义，按非法处理。
+    """
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _budget_literal(value: Any) -> int | None:
+    """`preferences.chat_context_budget` 的读法：必须是**合法区间内**的整数。
+
+    与 `PreferencesConfig` 的 `_normalize_bounded_int` 同一把尺子（同一个
+    `CHAT_CONTEXT_BUDGET_RANGE`）：越界的字面量在加载期已经被归一化成默认值，
+    这里再判一次是为了把它跟"用户就写了默认值"分开——配坏了要退回默认，不能因为
+    读不懂配置反而按模型规格把预算放大。
+    """
+    number = _positive_int(value)
+    if number is None:
+        return None
+    low, high = CHAT_CONTEXT_BUDGET_RANGE
+    return number if low <= number <= high else None
+
+
 # 用户消息里提到的仓库文件（Review-Aware Chat 的按需读源码，docs/claude-chat-repo-files.md）。
 # 上限按**字符**计：8000 字符 ≈ 2k token，够放下一个中等规模的源文件；总量 12000 保证
 # 两个文件也不会挤爆聊天上下文预算。识别出的路径最多 2 条——再多就不是"问某个文件"了。
@@ -258,6 +291,18 @@ CHAT_REPO_FINDING_WINDOW_LINES = 80
 CHAT_HISTORY_MESSAGE_LIMIT = 80
 CHAT_COMPACT_KEPT_TURNS = 10
 CHAT_REASONING_TOKEN_BUDGETS: dict[str, int] = {"low": 4000, "high": 8000, "max": 12000}
+# 本地/自建端点（Ollama 等）：不对输出上限做规格封顶，理由见 docs/claude-backend-followup.md §2.3。
+CHAT_LOCAL_PROVIDER_NAMES: frozenset[str] = frozenset({"ollama", "local"})
+# chat 上下文预算的推荐系数与上限（docs/claude-backend-followup.md §4.6）：
+# 预算是"注入审查上下文"的额度，prompt 骨架 / 对话历史 / 回答同样占用同一个窗口，
+# 因此只取模型窗口的一半；上限直接沿用 `preferences.chat_context_budget` 的合法上界
+# （用户手填得出来的最大值就是它），不再写第二份数字。
+CHAT_CONTEXT_BUDGET_RATIO = 0.5
+CHAT_CONTEXT_BUDGET_MAX = CHAT_CONTEXT_BUDGET_RANGE[1]
+# 预算来源（`chat.send` / `/context` 的 `budget_source`）：显式配置 / 模型规格推算 / 兜底默认。
+CHAT_BUDGET_SOURCES: tuple[str, ...] = ("config", "model_spec", "fallback")
+# `_config_preference_literal` 的"这个键在文件里根本不存在"哨兵（None 是合法 JSON 值）。
+_MISSING = object()
 # 先剔除 URL：`…/pull/31` 不是文件路径，`https://host/app.js` 里的 `app.js` 也不是
 # 用户要问的仓库文件（那是一个网址）。宁可漏掉 blob URL，也不要把网址当路径去拉。
 _URL_PATTERN = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
@@ -825,6 +870,9 @@ class JsonlBackend:
                 DEFAULT_CHAT_REASONING_EFFORT,
             ),
             "chat_context_budget": self._chat_context_budget(),
+            # 预算从哪来：显式配置 / 模型规格推算 / 兜底默认（§4）。键名与 `model` 不冲突，
+            # 是**新**键：TUI 把快照整份 spread 进 runtime，不能占用既有标量名。
+            "chat_context_budget_source": self._chat_context_budget_plan()[1],
             # Workbench Phase 1: the TUI needs this to decide whether a review
             # opens the side panels automatically (auto | always | off).
             "workbench_mode": getattr(self.config.preferences, "workbench_mode", "auto"),
@@ -1880,16 +1928,162 @@ class JsonlBackend:
         """
         return self._chat_slot_config().to_model_provider()
 
+    def _chat_spec_sources(self) -> tuple[object | None, dict[str, int | str] | None, object | None]:
+        """聊天槽模型的三个规格来源 `(落盘条目, 内置预设, 目录命中)`。
+
+        只读进程内已同步的目录索引，绝不在这里取数（`model.status`/`config.snapshot`
+        不联网是同一条硬规则）。
+        """
+        provider = self._chat_slot_config()
+        model_name = str(provider.default_model or "").strip()
+        if not model_name:
+            return None, None, None
+        preset = PROVIDER_MODEL_PRESETS.get(provider.name.lower(), {}).get(model_name)
+        state = self._catalog_state
+        catalog_spec = None if state is None else state.lookup(provider.name, model_name)
+        return provider.models.get(model_name), preset, catalog_spec
+
+    @staticmethod
+    def _user_written_spec(entry: object, preset: dict[str, int | str] | None) -> bool:
+        """落盘条目是否**由用户写出来的**（而不是我们替他填的默认值）。
+
+        判据是"与我们会自动写入的那份都不同"：`from_model_provider` 只会写预设值，
+        `ensure_default_model_present` 只会写 `32_768/4_096`，`set_model_spec`（配置助手
+        / `/model`）之外没有别的写入方。任何别的数字、或落在没有预设的模型上的非兜底
+        数字，都只能来自用户。
+
+        用户把规格改成与我们会自动写入的完全相同的值时分辨不出来——那种情况下按预设值
+        或兜底处理，结果也不会错（那几个数字本来就等价于"我们替他填的"）。
+        落盘值非法（`null`/0/字符串，手改配置可能出现）时同样返回 False：那不是规格。
+        """
+        if entry is None:
+            return False
+        current = (_positive_int(entry.context_window), _positive_int(entry.max_output))
+        if current[0] is None or current[1] is None:
+            return False
+        if current == (DEFAULT_MODEL_CONTEXT_WINDOW, DEFAULT_MODEL_MAX_OUTPUT):
+            return False
+        if preset is None:
+            return True
+        return current != (int(preset["context_window"]), int(preset["max_output"]))
+
+    def _chat_context_window(self) -> int | None:
+        """聊天槽模型的 `context_window`（预算推算用）；没有可信来源返回 `None`。
+
+        预算只会**提高**注入量（多花钱、多占窗口），所以口径最严：数字必须来自为它背书
+        的那份数据——用户真写过的条目，或本次进程同步到的目录。内置预设**不**参与放大：
+        那是我们自己填的数字，把它当用户规格会让所有既有用户在升级后从 8_000 一夜变成
+        100_000（多花钱、多占窗口，而用户什么都没改也没人告诉他）。
+
+        目录命中时用**目录值**而不是 `config.snapshot.model_spec` 的生效值：两者不一致时
+        （§2.8 会标 `needs_verification`）宁可少注入——按过期的 1M 预设往实际只有 8k 的
+        模型里塞上下文会直接超窗，反过来只是少给一点。
+        """
+        entry, preset, catalog_spec = self._chat_spec_sources()
+        if self._user_written_spec(entry, preset):
+            window = _positive_int(entry.context_window)
+            if window is not None:
+                return window
+        if catalog_spec is not None:
+            return _positive_int(getattr(catalog_spec, "context_window", None))
+        return None
+
+    def _chat_max_output(self) -> int | None:
+        """聊天槽模型的 `max_output`（请求额度封顶用）；没有可信来源返回 `None`。
+
+        与 `_chat_context_window` 同一套"谁背书用谁的数字"的顺序（用户条目 → 目录 →
+        预设），区别是这里**信任预设**：封顶只会**降低**请求额度、防的是云端按模型输出
+        上限直接 400，用的是仓库里唯一可引用的厂商数值（`PROVIDER_MODEL_PRESETS`）。
+        这条路径也必须在模型未知时返回 `None`（退回现状），否则 `deepseek-chat` 这类
+        只有 dataclass 兜底的模型会被按 4_096 砍掉回答额度。
+        """
+        entry, preset, catalog_spec = self._chat_spec_sources()
+        if self._user_written_spec(entry, preset):
+            output = _positive_int(entry.max_output)
+            if output is not None:
+                return output
+        if catalog_spec is not None:
+            output = _positive_int(getattr(catalog_spec, "max_output", None))
+            if output is not None:
+                return output
+        return None if preset is None else int(preset["max_output"])
+
+    def _chat_context_budget_plan(self) -> tuple[int, str]:
+        """聊天上下文预算 `(预算, 来源)`，来源 ∈ `CHAT_BUDGET_SOURCES`。
+
+        优先级（docs/claude-backend-followup.md §4）：
+        1. `config`：用户把 `preferences.chat_context_budget` 设成了**非默认值**；
+        2. `model_spec`：否则按聊天槽模型的 `context_window`（来源与优先级见
+           `_chat_context_window`：用户真写过的条目 → 目录命中）推算
+           `min(context_window * CHAT_CONTEXT_BUDGET_RATIO, CHAT_CONTEXT_BUDGET_MAX)`；
+        3. `fallback`：都没有（目录不可用、模型规格不可信）或配置里的值读不懂
+           → 退回 `DEFAULT_TOKEN_BUDGET`，也就是改造前的固定 8_000。
+
+        注意"键存在"不等于"用户选过"：`save()` 每次都写全量 preferences，所以判据只能是
+        **值**是否等于默认值。反过来，配置里写了非法值时 `PreferencesConfig` 会在加载时
+        静默归一化成默认值，这里再去读一次文件字面量来分辨"没配"与"配错了"——配错了
+        仍然退回默认，绝不因为读不懂配置就把预算放大（沿用 A3 的防御语义）。
+        """
+        declared = getattr(self.config.preferences, "chat_context_budget", None)
+        value = _budget_literal(declared)
+        if value is not None and value != DEFAULT_CHAT_CONTEXT_BUDGET:
+            return value, "config"  # 常见情形不读盘
+        # 走到这里只有三种可能：没配、配的就是默认值、配坏了 —— 前两种在 `preferences`
+        # 里长得一模一样，第三种（0/负数/字符串/null/越界）还会被加载期归一化成默认值，
+        # 所以再读一次文件字面量把它们分开。
+        literal = self._config_preference_literal("chat_context_budget", _MISSING)
+        if declared is None:
+            # 防御路径：现版本的 `PreferencesConfig` 一定有这个字段（补默认值），
+            # 只有将来字段被移出、或偏好对象换成别的形状时才会走到。
+            value = _budget_literal(None if literal is _MISSING else literal)
+            if value is not None and value != DEFAULT_CHAT_CONTEXT_BUDGET:
+                return value, "config"
+        if value is None and (declared is not None or literal is not _MISSING):
+            # 写了但读不懂：退回默认（沿用 A3 的防御语义），绝不因此放大预算。
+            return DEFAULT_TOKEN_BUDGET, "fallback"
+        if _budget_literal(literal) is None and literal is not _MISSING:
+            # 配置文件里那一份非法/越界（加载期已归一化成默认值）：同样退回默认。
+            return DEFAULT_TOKEN_BUDGET, "fallback"
+        window = self._chat_context_window()
+        if window is not None:
+            return (
+                max(1, min(int(window * CHAT_CONTEXT_BUDGET_RATIO), CHAT_CONTEXT_BUDGET_MAX)),
+                "model_spec",
+            )
+        return DEFAULT_TOKEN_BUDGET, "fallback"
+
     def _chat_context_budget(self) -> int:
-        """聊天上下文的 token 预算（§9.D；A3/A5 起可配置，默认 8000）。"""
-        raw = getattr(self.config.preferences, "chat_context_budget", None)
-        if raw is None:
-            raw = self._config_preference_literal("chat_context_budget")
-        try:
-            budget = int(raw)
-        except (TypeError, ValueError):
-            return DEFAULT_TOKEN_BUDGET
-        return budget if budget > 0 else DEFAULT_TOKEN_BUDGET
+        """聊天上下文的 token 预算（§9.D；A3/A5 起可配置，来源见 `_chat_context_budget_plan`）。"""
+        return self._chat_context_budget_plan()[0]
+
+    def _chat_max_tokens(self, *, reasoning_budget: int = 0) -> int:
+        """本轮 chat 请求的输出 token 上限（**回答 + 思考**，两者共用同一个额度）。
+
+        现状是 `ai_client.max_tokens`，思考档位再额外预留给定的 token（§C6）。规格落地后
+        这两者之和可能超过模型规格的 `max_output`：Anthropic 会直接 400，OpenAI 兼容端点
+        同样按模型的输出上限拒收——"规格改了但请求体没变"于是变成硬失败。这里把总额度
+        封顶到规格值，等价于题目里的 `min(max_tokens, max_output - 思考预算) + 思考预算`
+        （同一式子的移项写法，好处是 `max_output < 思考预算` 时不会出现负数中间量：
+        那种情况下总额度就是 `max_output`，思考可能吃满额度——这是模型规格与档位本身的
+        矛盾，不假装能两全，用户可下调 `/think` 档位或修正规格）。
+
+        `max_output` 的来源与优先级见 `_chat_max_output`（用户条目的规范 → 目录 → 预设）。
+
+        **本地端点不封顶**（`CHAT_LOCAL_PROVIDER_NAMES`）：Ollama 这类端点不会因超限报错，
+        而预设表里给本地模型的 `max_output`（如 1_024）是我们自己写死的猜测，不是厂商限制；
+        §C6 的实测结论（预留不足时思考吃满额度、答案为空）正是靠这份预留换来的。
+
+        对默认安装（anthropic 预设 `max_output = 8_192`）的实际影响：`/think high|max`
+        从"发 12_096/16_096"变成"发 8_192"，也就是回答的可用额度从 4_096 起算——这正是
+        改造前会被 Anthropic 400 拒收的那一档，代价是预留被规格吃掉一部分。
+        """
+        requested = self.config.ai_client.max_tokens + max(0, reasoning_budget)
+        if self._chat_slot_provider().name.lower() in CHAT_LOCAL_PROVIDER_NAMES:
+            return requested
+        max_output = self._chat_max_output()
+        if max_output is None:
+            return requested
+        return max(1, min(requested, max_output))
 
     def _chat_reasoning_effort(self) -> str:
         """当前 Chat 思考档位；旧配置由 `PreferencesConfig` 在加载时补默认值。"""
@@ -1897,14 +2091,17 @@ class JsonlBackend:
         normalized = str(effort or DEFAULT_CHAT_REASONING_EFFORT).strip().lower()
         return normalized if normalized in CHAT_REASONING_EFFORTS else DEFAULT_CHAT_REASONING_EFFORT
 
-    def _config_preference_literal(self, field: str) -> Any:
-        """从生效的配置文件里取 `preferences.<field>` 的字面量（读不到返回 None）。
+    def _config_preference_literal(self, field: str, default: Any = None) -> Any:
+        """从生效的配置文件里取 `preferences.<field>` 的字面量（读不到返回 `default`）。
 
         只用于读 config 层尚未声明的偏好项（理由见 `_chat_context_budget`）。分层加载与
         `AppConfig.load` 同序，后者覆盖前者。只取这一个键，其余内容（含凭据）既不读进
         内存也不落日志；任何 I/O / 解析失败都当作"没配"。
+
+        `default` 默认是 `None`，是因为 `null` 也是合法的 JSON 值：要分辨"文件里写的是
+        `null`"和"文件里没有这个键"，调用方得传一个哨兵（`_MISSING`）。
         """
-        value: Any = None
+        value: Any = default
         for path in AppConfig.active_config_paths(self.config_path):
             try:
                 payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -2338,7 +2535,7 @@ class JsonlBackend:
 
     def _context_status(self, session: Session | None, *, leading: str = "") -> dict[str, Any]:
         """`/context` 的展示体：当前绑定、PR 标识与 token 估算（含裁剪情况）。"""
-        budget = self._chat_context_budget()
+        budget, budget_source = self._chat_context_budget_plan()
         run_id = session.current_run_id if session is not None else None
         if not run_id:
             return {
@@ -2352,6 +2549,7 @@ class JsonlBackend:
                 "run_id": None,
                 "token_estimate": None,
                 "token_budget": budget,
+                "budget_source": budget_source,
                 "trimmed": [],
             }
         from ai_pr_review.services.result_store import ResultStore
@@ -2379,6 +2577,7 @@ class JsonlBackend:
                 "run_id": run_id,
                 "token_estimate": None,
                 "token_budget": budget,
+                "budget_source": budget_source,
                 "trimmed": [],
             }
         lines = [f"Run: {run_id}"]
@@ -2395,6 +2594,7 @@ class JsonlBackend:
             "run_id": run_id,
             "token_estimate": context.tokens,
             "token_budget": context.budget,
+            "budget_source": budget_source,
             "trimmed": list(context.trimmed),
             "pr": {"url": run.get("pr_url", ""), "label": label},
         }
@@ -2455,17 +2655,17 @@ class JsonlBackend:
         ]
         chat_options: dict[str, Any] = {
             "system_prompt": self._chat_system_prompt(session, repo_files),
-            "max_tokens": self.config.ai_client.max_tokens,
             "timeout_seconds": self.config.ai_client.timeout_seconds,
         }
         reasoning_effort = self._chat_reasoning_effort()
+        reasoning_budget = 0
         if reasoning_effort == "auto" and is_local:
             # 本地思考型模型（Qwen3.5 / DeepSeek-R1 系）默认会自动思考：
             # Ollama 的 OpenAI 兼容端点会忽略 thinking/reasoning_effort
             # （docs/model-reasoning-probe.md 的 R1/R2 实测），传参只是"尽力而为"；
             # 真正的兜底是预留预算——实测 12/16 次思考吃满 max_tokens 导致答案为空（R3）。
             chat_options["reasoning_effort"] = "none"
-            chat_options["max_tokens"] += CHAT_REASONING_TOKEN_BUDGETS["high"]
+            reasoning_budget = CHAT_REASONING_TOKEN_BUDGETS["high"]
         elif reasoning_effort == "off":
             # Qwen3.5 / DeepSeek-R1 style locally hosted models otherwise spend
             # the whole answer budget in the reasoning channel and return an
@@ -2476,7 +2676,9 @@ class JsonlBackend:
             # (docs/reasoning-effort-probe.md); reserve enough room or the
             # answer can arrive empty.
             chat_options["reasoning_effort"] = reasoning_effort
-            chat_options["max_tokens"] += CHAT_REASONING_TOKEN_BUDGETS[reasoning_effort]
+            reasoning_budget = CHAT_REASONING_TOKEN_BUDGETS[reasoning_effort]
+        # 预留之后还要过一遍模型规格的 `max_output`（§2）：规格改了，请求体必须跟着变。
+        chat_options["max_tokens"] = self._chat_max_tokens(reasoning_budget=reasoning_budget)
         reasoning_parts: list[str] = []
 
         async def capture_reasoning(delta: str) -> None:
@@ -2619,6 +2821,10 @@ class JsonlBackend:
                 )
             )
         )
+        # 只读数字，**不加键**：`assistant.finished.context` 是契约 v1 冻结的五键
+        # （docs/chat-contract-verification.md，"finished.context 五键齐全"），
+        # 精确键集被 tests/test_chat_contract_events.py 钉死，加键就会撕契约。
+        # 预算**来源**走 `/context` 与 `config.snapshot.chat_context_budget_source`（§4.5）。
         budget = self._chat_context_budget()
         return {
             "used_tokens": used_tokens,
@@ -2730,7 +2936,8 @@ class JsonlBackend:
         response = await provider.chat(
             [{"role": "user", "content": transcript}],
             system_prompt=user_prompt,
-            max_tokens=self.config.ai_client.max_tokens,
+            # 压缩也是一次 chat 场景的模型调用（没有思考预留）：同样不得越过规格的 max_output。
+            max_tokens=self._chat_max_tokens(),
             timeout_seconds=self.config.ai_client.timeout_seconds,
         )
         summary = self._truncate(str(getattr(response, "text", "")).strip(), 20000)
@@ -3382,7 +3589,7 @@ class JsonlBackend:
                 elif command == "help":
                     result(
                         {
-                            "text": "/setup  配置助手\n/status 查看运行状态\n/model [chat|review <模型名>] 查看/切换模型\n/think off|low|high|max|auto 设置思考档位\n/review 开始 PR 审查\n/cancel 取消当前审查\n/retry 重试上一次操作\n/report 查看当前报告\n/export json|markdown 导出当前报告\n/history 查看对话历史\n/history --runs 查看审查历史\n/explain <run_id> 解释 Finding 与证据\n/context [run_id|off] 查看/切换/解除审查上下文绑定\n/feedback <run_id> <finding_id> <status> [note] 记录 Finding 反馈\n/publish [run_id] [--confirm] 预览并发布审查评论到 GitHub\n/compact [指令] 压缩会话历史\n/demo [case_key|list] 运行离线 Demo\n/showcase 查看参赛演示路径\n/exit   退出 Chat"
+                            "text": "/help 显示此帮助信息\n/status 查看运行状态\n/setup 打开配置助手\n/model status|chat|review <模型ID>|local|cloud|hybrid 查看/切换模型与运行时\n/think off|low|high|max|auto 设置思考档位（本地端点置灰）\n/review <PR URL> 开始 PR 审查\n/cancel 取消当前对话或审查\n/retry 重试上一次审查\n/report 查看当前报告\n/export json|markdown [路径] 导出当前报告\n/history [N] 查看最近 N 条对话消息\n/history --runs 查看审查历史\n/history <run_id> 载入该 Run 并绑定为当前上下文\n/context [run_id|off] 查看/切换/解除审查上下文绑定\n/explain <run_id> 解释 Finding 与证据\n/feedback <run_id> <finding_id> <status> [note] 记录 Finding 反馈\n/publish [run_id] [--confirm] 预览并发布审查评论到 GitHub\n/new 开始新会话\n/compact [指令] 压缩会话历史（保留最近 10 轮）\n/demo [case_key|list] 运行离线 Demo\n/showcase 查看参赛演示路径\n/workbench 展开/收起审查工作台"
                         }
                     )
                 elif command == "setup":

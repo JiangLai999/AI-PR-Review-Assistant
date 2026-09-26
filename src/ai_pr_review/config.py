@@ -742,6 +742,9 @@ DEFAULT_WORKBENCH_MODE = "auto"
 CHAT_REASONING_EFFORTS: tuple[str, ...] = ("off", "low", "high", "max", "auto")
 DEFAULT_CHAT_REASONING_EFFORT = "auto"
 DEFAULT_CHAT_CONTEXT_BUDGET = 8000
+# `preferences.chat_context_budget` 的合法闭区间。后端推算预算时也用它判断"配置文件里
+# 那个字面量算不算配坏了"——两处各写一套数字迟早漂移（同 CONTEXT_WINDOW_RANGE 的做法）。
+CHAT_CONTEXT_BUDGET_RANGE: tuple[int, int] = (1, 200_000)
 
 
 def normalize_workbench_mode(value: object) -> str:
@@ -1041,7 +1044,7 @@ class PreferencesConfig:
             self.chat_context_budget,
             field="chat_context_budget",
             default=DEFAULT_CHAT_CONTEXT_BUDGET,
-            bounds=(1, 200_000),
+            bounds=CHAT_CONTEXT_BUDGET_RANGE,
         )
 
 
@@ -1294,6 +1297,21 @@ def _default_local_provider() -> "ProviderConfig":
     return ProviderConfig.from_model_provider(ModelProviderConfig.from_name("ollama"))
 
 
+def filter_dataclass_payload(config_type: type, payload: dict[str, object]) -> dict[str, object]:
+    """Ignore fields introduced by newer versions when loading old installs.
+
+    User config files outlive the CLI version that created them. Filtering
+    unknown keys keeps an older pipx installation from crashing before it can
+    run `pr-review config` or `pr-review chat` and lets the user upgrade in
+    place instead of losing access to the CLI.
+
+    Module-level（而不是只做 `AppConfig` 的静态方法）：`config_entry.run_config_import`
+    与 `AppConfig._apply_payload` 是同一件事的两个入口，共用这一份实现才不会各漏各的键。
+    """
+    allowed = {item.name for item in fields(config_type)}
+    return {key: value for key, value in payload.items() if key in allowed}
+
+
 @dataclass
 class AppConfig:
     """应用全局配置。"""
@@ -1452,15 +1470,8 @@ class AppConfig:
     def _filter_dataclass_payload(
         config_type: type, payload: dict[str, object]
     ) -> dict[str, object]:
-        """Ignore fields introduced by newer versions when loading old installs.
-
-        User config files outlive the CLI version that created them. Filtering
-        unknown keys keeps an older pipx installation from crashing before it can
-        run `pr-review config` or `pr-review chat` and lets the user upgrade in
-        place instead of losing access to the CLI.
-        """
-        allowed = {item.name for item in fields(config_type)}
-        return {key: value for key, value in payload.items() if key in allowed}
+        """保留旧名：实现见模块级 `filter_dataclass_payload`（两个入口共用一份）。"""
+        return filter_dataclass_payload(config_type, payload)
 
     def _apply_payload(self, data: dict[str, object]) -> None:
         if isinstance(data.get("pr_fetcher"), dict):

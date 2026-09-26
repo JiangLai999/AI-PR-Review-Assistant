@@ -6,6 +6,10 @@
 另覆盖 claude-route-slots 任务的新增字段：CHAT/REVIEW 双槽路由
 （chat_slot / review_slot + resolve_* / sync_review_slot_to_strategy）与
 仓库上下文配置项（repo_context 及其三个上限）。
+
+模型规格（`ProviderConfig.set_model_spec` / 取值边界 / 未知键过滤）的用例按设计
+`docs/b2b3-wiring-design.md` §4.1-C 归位到本文件（原落在 tests/test_jsonl_backend.py，
+理由见 `docs/claude-backend-followup.md` §1）。
 """
 
 from __future__ import annotations
@@ -19,18 +23,26 @@ import pytest
 
 from ai_pr_review.config import (
     CHAT_SLOT_VALUES,
+    CONTEXT_WINDOW_RANGE,
+    DEFAULT_MODEL_CONTEXT_WINDOW,
+    DEFAULT_MODEL_MAX_OUTPUT,
     DEFAULT_REPO_CONTEXT,
     DEFAULT_REPO_CONTEXT_BUDGET_TOKENS,
     DEFAULT_REPO_CONTEXT_MAX_FILES,
     DEFAULT_REPO_CACHE_MAX_MB,
     DEFAULT_WORKBENCH_MODE,
+    MAX_OUTPUT_RANGE,
+    MODEL_SPEC_SOURCES,
     REPO_CONTEXT_MODES,
     REVIEW_SLOT_VALUES,
     WORKBENCH_MODES,
     AIClientConfig,
     AppConfig,
+    ModelProviderConfig,
     PreferencesConfig,
     ProviderConfig,
+    ProviderModelConfig,
+    filter_dataclass_payload,
     normalize_chat_slot,
     normalize_repo_cache_max_mb,
     normalize_repo_context,
@@ -684,3 +696,83 @@ def test_route_slot_and_repo_context_fields_reach_the_snapshot_views(tmp_path: P
     reloaded = AppConfig.load(config_path).preferences.__dict__
     for key in NEW_PREFERENCE_KEYS:
         assert reloaded[key] == view[key], key
+
+
+# ---------------------------------------------------------------------------
+# 模型规格：写入口、取值边界、未知键过滤（设计 §4.1-C；原在 test_jsonl_backend.py）
+# ---------------------------------------------------------------------------
+
+
+def test_set_model_spec_touches_only_the_target_model() -> None:
+    """`ProviderConfig.set_model_spec`：只动目标条目，不动 `default_model` 与别的模型。"""
+    provider = ProviderConfig.from_model_provider(ModelProviderConfig.from_name("deepseek"))
+    other_before = (
+        provider.models["deepseek-v4-pro"].context_window,
+        provider.models["deepseek-v4-pro"].max_output,
+    )
+
+    assert (
+        provider.set_model_spec(
+            "deepseek-flash", context_window=1_000_000, max_output=393_216
+        )
+        is True
+    )
+    assert (provider.models["deepseek-flash"].context_window) == 1_000_000
+    assert (provider.models["deepseek-flash"].max_output) == 393_216
+    assert (
+        provider.models["deepseek-v4-pro"].context_window,
+        provider.models["deepseek-v4-pro"].max_output,
+    ) == other_before
+    assert provider.default_model == "deepseek-chat"
+
+    # 同值重写不算"发生写入"；两个参数都 None 更不算。
+    assert (
+        provider.set_model_spec(
+            "deepseek-flash", context_window=1_000_000, max_output=393_216
+        )
+        is False
+    )
+    assert provider.set_model_spec("deepseek-flash") is False
+    # 中转站那种"预设表里没有"的模型名：显式提交规格会新建条目（B3）。
+    assert provider.set_model_spec("relay-model", context_window=200_000) is True
+    assert provider.models["relay-model"].context_window == 200_000
+    assert provider.models["relay-model"].max_output == 4_096
+
+
+def test_model_spec_bounds_are_sane() -> None:
+    """取值与边界只存一份：`config` 的常量就是 `jsonl_server` 校验用的那一份。"""
+    from ai_pr_review.backend import jsonl_server
+
+    assert CONTEXT_WINDOW_RANGE == (1_024, 10_000_000)
+    assert MAX_OUTPUT_RANGE == (1, 10_000_000)
+    assert jsonl_server.CONTEXT_WINDOW_RANGE is CONTEXT_WINDOW_RANGE
+    assert jsonl_server.MAX_OUTPUT_RANGE is MAX_OUTPUT_RANGE
+    assert jsonl_server.MODEL_SPEC_SOURCES is MODEL_SPEC_SOURCES
+    assert MODEL_SPEC_SOURCES == {"models.dev", "cache", "builtin", "unknown"}
+    assert jsonl_server.CATALOG_SOURCES == {"models.dev", "cache", "builtin"}
+    # 兜底规格与 `ProviderModelConfig` 的字段默认值是同一组数字。
+    assert ProviderModelConfig(name="x").context_window == DEFAULT_MODEL_CONTEXT_WINDOW
+    assert ProviderModelConfig(name="x").max_output == DEFAULT_MODEL_MAX_OUTPUT
+
+
+def test_filter_dataclass_payload_is_shared_by_load_and_import(tmp_path: Path) -> None:
+    """未知键过滤只有一份实现：加载路径与导入路径（config_entry）行为一致。
+
+    真实场景是"新版本写的配置文件被旧版本读到"：旧代码没有新键的字段，
+    `PreferencesConfig(**payload)` 会 `TypeError`，用户连 `pr-review config` 都进不去。
+    """
+    payload = {
+        "output_format": "json",
+        "some_future_preference": {"nested": 1},
+    }
+    filtered = filter_dataclass_payload(PreferencesConfig, payload)
+    assert filtered == {"output_format": "json"}
+    # 静态方法保留旧名，两处调用同一个实现（config_entry 直接用模块级函数）。
+    assert AppConfig._filter_dataclass_payload(PreferencesConfig, payload) == filtered
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"preferences": payload}, ensure_ascii=False), encoding="utf-8"
+    )
+    loaded = AppConfig.load(config_path)
+    assert loaded.preferences.output_format == "json"

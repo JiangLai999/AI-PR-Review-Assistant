@@ -14,16 +14,15 @@ from typing import Any
 import pytest
 
 from ai_pr_review.backend.jsonl_server import JsonlBackend, ReviewCancelled
-from ai_pr_review.config import (
-    CONTEXT_WINDOW_RANGE,
-    DEFAULT_MODEL_CONTEXT_WINDOW,
-    DEFAULT_MODEL_MAX_OUTPUT,
-    MAX_OUTPUT_RANGE,
-    MODEL_SPEC_SOURCES,
-    AppConfig,
-    ProviderModelConfig,
-)
+from ai_pr_review.config import AppConfig
+# 模型规格的取值边界/来源集合（CONTEXT_WINDOW_RANGE 等）已随 C 组用例迁到
+# tests/test_config.py（docs/claude-backend-followup.md §1），本文件不再直接引用。
 from ai_pr_review.services.model_catalog import ModelCatalog
+
+# 聊天上下文预算的兜底值（= review_context.DEFAULT_TOKEN_BUDGET）：没有目录数据、
+# 也没有用户写过的规格时用它。按模型规格推算的路径要显式造数据才会走到
+# （docs/claude-backend-followup.md §4）。
+DEFAULT_CHAT_BUDGET = 8_000
 
 
 def test_jsonl_backend_health_and_config_snapshot(tmp_path: Path) -> None:
@@ -4358,7 +4357,9 @@ def test_context_command_reports_switches_and_clears_the_binding(tmp_path: Path)
         assert unbound["bound"] is False
         assert unbound["run_id"] is None
         assert unbound["token_estimate"] is None
-        assert unbound["token_budget"] == 8000
+        assert unbound["token_budget"] == DEFAULT_CHAT_BUDGET
+        # 该进程没有同步过目录、用户也没写过规格：来源如实报兜底（§4）。
+        assert unbound["budget_source"] == "fallback"
         assert "审查上下文：未绑定" in unbound["text"]
         assert "/context <run_id>" in unbound["text"]
 
@@ -4367,7 +4368,8 @@ def test_context_command_reports_switches_and_clears_the_binding(tmp_path: Path)
         assert bound["bound"] is True
         assert bound["run_id"] == run_id
         assert bound["token_estimate"] > 0
-        assert bound["token_budget"] == 8000
+        assert bound["token_budget"] == DEFAULT_CHAT_BUDGET
+        assert bound["budget_source"] == "fallback"
         assert bound["trimmed"] == []
         assert "已切换审查上下文" in bound["text"]
         assert f"Run: {run_id}" in bound["text"]
@@ -4556,15 +4558,18 @@ def test_chat_degrades_to_plain_chat_when_context_cannot_be_built(
 
 
 def test_chat_context_budget_preference_is_read_defensively(tmp_path: Path) -> None:
-    """预算来自 `preferences.chat_context_budget`（§9.D），非法值退回 8000。"""
+    """预算显式配置优先（§9.D）；非法值退回默认，绝不因此放大预算。
+
+    没配时也不凭空放大：模型规格不可信（没目录、没用户规格）就退回 `DEFAULT_CHAT_BUDGET`。
+    """
     backend = JsonlBackend(tmp_path / "config.json")
-    assert backend._chat_context_budget() == 8000
+    assert backend._chat_context_budget_plan() == (DEFAULT_CHAT_BUDGET, "fallback")
     backend.config.preferences.chat_context_budget = 1200
-    assert backend._chat_context_budget() == 1200
+    assert backend._chat_context_budget_plan() == (1200, "config")
     backend.config.preferences.chat_context_budget = 0
-    assert backend._chat_context_budget() == 8000
+    assert backend._chat_context_budget_plan() == (8000, "fallback")
     backend.config.preferences.chat_context_budget = "abc"
-    assert backend._chat_context_budget() == 8000
+    assert backend._chat_context_budget_plan() == (8000, "fallback")
 
 
 def test_review_context_budget_trim_never_claims_an_empty_run(tmp_path: Path) -> None:
@@ -5484,11 +5489,11 @@ def test_chat_history_window_is_80_messages_and_the_trim_is_announced(
 
 
 def test_chat_context_budget_can_be_set_in_the_config_file(tmp_path: Path) -> None:
-    """A3：`chat_context_budget` 可配（默认 8000）。
+    """A3：`chat_context_budget` 可配（字段现已进 `PreferencesConfig`，值仍以文件为准）。
 
-    该字段还没进 `PreferencesConfig`（配置层由组 B/Codex 负责），`AppConfig.load` 会把
-    未知键过滤掉，所以后端直接读配置文件里的字面量——用户在配置文件里写就生效。
-    非法值一律回退默认值，绝不把 0/负数/字符串传进预算。
+    `AppConfig.load` 会过滤未知键、也会把非法值归一化成默认值，所以后端另外读一次文件
+    字面量：为的是把"没配"和"配坏了"分开——配坏了照旧退回默认，绝不因为读不懂配置
+    就把预算放大（docs/claude-backend-followup.md §4.4）。
     """
     config_path = tmp_path / "config.json"
 
@@ -5499,16 +5504,129 @@ def test_chat_context_budget_can_be_set_in_the_config_file(tmp_path: Path) -> No
 
     write_budget(1200)
     backend = JsonlBackend(config_path)
-    assert backend._chat_context_budget() == 1200
+    assert backend._chat_context_budget_plan() == (1200, "config")
     # 生效到真正用预算的地方（/context 的 token 预算展示）
     assert backend._context_status(None)["token_budget"] == 1200
+    assert backend._context_status(None)["budget_source"] == "config"
 
     for bad in (0, -5, "abc", None, [1200]):
         write_budget(bad)
-        assert JsonlBackend(config_path)._chat_context_budget() == 8000
+        assert JsonlBackend(config_path)._chat_context_budget_plan() == (8000, "fallback")
 
-    # 配置文件不存在/读不动：默认值，不抛
-    assert JsonlBackend(tmp_path / "missing.json")._chat_context_budget() == 8000
+    # 配置文件不存在/读不动：不抛，退回兜底预算。
+    assert JsonlBackend(tmp_path / "missing.json")._chat_context_budget_plan() == (
+        DEFAULT_CHAT_BUDGET,
+        "fallback",
+    )
+
+
+def test_chat_context_budget_follows_a_user_written_spec(tmp_path: Path) -> None:
+    """§4：没显式配置时，预算按**聊天槽**模型写过的规格窗口推算，并报出来源。
+
+    系数 0.5：预算是"注入审查上下文"的额度，system prompt 骨架、对话历史与回答同样
+    占同一个窗口，只给一半才不会为了塞满上下文把回答挤没；上限 200_000 与
+    `preferences.chat_context_budget` 的合法上界一致（再大只是每轮多花钱）。
+    """
+    # 中转站模型（没有内置预设）：用户在助手里填的 200_000/16_384 就是唯一真源。
+    backend = _relay_backend_with_spec(
+        tmp_path, context_window=200_000, max_output=16_384
+    )
+    assert backend._chat_context_budget_plan() == (100_000, "model_spec")
+
+    # 1M 窗口按上限截到 200_000，不是 524_288。
+    backend.config.provider.set_model_spec("relay-model", context_window=1_048_576)
+    assert backend._chat_context_budget_plan() == (200_000, "model_spec")
+
+    # 小窗口模型（8_192）算出来 4_096，比默认 8_000 更小——这类模型本来就不该按
+    # 8_000 塞上下文（那会连回答一起挤掉）。
+    small = _relay_backend_with_spec(
+        tmp_path / "small", context_window=8_192, max_output=1_024
+    )
+    assert small._chat_context_budget_plan() == (4_096, "model_spec")
+
+
+def test_chat_context_budget_follows_the_catalog_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """目录同步过（配置助手打开过）之后，预算按目录命中的模型窗口重算（§4.2）。
+
+    这条路径只在**本次进程**取过数时生效：目录不可用时退回 8000（现状），
+    不拿预设表当用户的规格（见下一条用例）。
+    """
+
+    async def run() -> None:
+        backend = _deepseek_backend(tmp_path)
+        # 没有目录：退回兜底（deepseek-flash 的 1M 只是我们写的预设，不算用户规格）。
+        assert backend._chat_context_budget_plan() == (8_000, "fallback")
+
+        calls = _stub_catalog(monkeypatch)
+        await backend.handle({"id": "1", "method": "config.options", "params": {}})
+        assert calls["fetch"] == 1
+        assert backend._catalog_state is not None
+
+        # 生效值仍是落盘/预设的值（§2.8 目录不覆盖生效值）：1_048_576 的一半 =
+        # 524_288 被上限截到 200_000。
+        assert backend._chat_context_budget_plan() == (200_000, "model_spec")
+        # 只碰进程内索引，不因为算预算再取一次数。
+        assert calls["fetch"] == 1
+
+    asyncio.run(run())
+
+
+def test_chat_context_budget_falls_back_for_an_unknown_model(tmp_path: Path) -> None:
+    """模型规格不可信时退回默认 8000（现状），来源如实报 `fallback`。
+
+    `deepseek-chat` 的条目是 `from_model_provider` 写的 `32_768/4_096` 兜底值，
+    按它推算会把预算从 8_000 抬到 16_384——凭空猜测，与 §2.8"不猜"相反。
+    预设表同样不参与放大：那是我们自己填的数字，不是用户的选择（§4.3）。
+    """
+    from ai_pr_review.config import ModelProviderConfig, ProviderConfig
+
+    backend = JsonlBackend(tmp_path / "config.json")
+    backend.config.provider = ProviderConfig.from_model_provider(
+        ModelProviderConfig.from_name("deepseek")
+    )
+    backend.config._sync_runtime_sections()
+    assert backend.config.provider.default_model == "deepseek-chat"
+    assert backend._chat_context_window() is None
+    assert backend._chat_context_budget_plan() == (8_000, "fallback")
+
+    # 有预设、但条目与预设一致（= 我们自动写的）时同样不放大。
+    preset_backed = JsonlBackend(tmp_path / "preset.json")
+    preset_backed.config.provider = ProviderConfig.from_model_provider(
+        ModelProviderConfig.from_name("deepseek", model_name="deepseek-flash", api_key="k")
+    )
+    preset_backed.config._sync_runtime_sections()
+    assert preset_backed._chat_max_output() == 384_000  # 封顶这条路径信任预设
+    assert preset_backed._chat_context_window() is None  # 放大这条路径不信任预设
+    assert preset_backed._chat_context_budget_plan() == (8_000, "fallback")
+
+    # 用户显式填过规格（哪怕模型不在预设表里）就重新可信 —— 中转站的 B3 路径。
+    backend.config.provider.set_model_spec("deepseek-chat", context_window=64_000)
+    assert backend._chat_context_window() == 64_000
+    assert backend._chat_context_budget_plan() == (32_000, "model_spec")
+
+
+def test_chat_context_budget_source_vocabulary_is_pinned(tmp_path: Path) -> None:
+    """来源取值三选一；`/context` 与 `config.snapshot` 两处出口都带它（前端只渲染不推导）。
+
+    `assistant.finished.context` 是契约 v1 冻结的五键，**不**承载来源（§4.5）。
+    """
+    from ai_pr_review.backend import jsonl_server
+
+    assert jsonl_server.CHAT_BUDGET_SOURCES == ("config", "model_spec", "fallback")
+
+    backend = JsonlBackend(tmp_path / "config.json")
+    status = backend._context_status(None)
+    assert status["budget_source"] == "fallback"
+    assert status["token_budget"] == backend._chat_context_budget_plan()[0]
+    snapshot = backend._config_snapshot()
+    assert snapshot["chat_context_budget_source"] == "fallback"
+    assert snapshot["chat_context_budget"] == DEFAULT_CHAT_BUDGET
+
+    backend.config.preferences.chat_context_budget = 4_000
+    assert backend._context_status(None)["budget_source"] == "config"
+    assert backend._config_snapshot()["chat_context_budget_source"] == "config"
 
 
 def test_chat_reasoning_stream_is_separated_from_answer_and_history(
@@ -5564,7 +5682,16 @@ def test_chat_reasoning_stream_is_separated_from_answer_and_history(
             "total_tokens": 30,
         }
         assert finished["context"]["used_tokens"] == 20
-        assert finished["context"]["budget_tokens"] == 8000
+        # 契约 v1：`assistant.finished.context` 恰好五键（docs/chat-contract-verification.md），
+        # 预算来源不在其中，走 `/context` 与 `config.snapshot`（§4.5）。
+        assert set(finished["context"]) == {
+            "used_tokens",
+            "budget_tokens",
+            "used_percent",
+            "trimmed_messages",
+            "compacted",
+        }
+        assert finished["context"]["budget_tokens"] == DEFAULT_CHAT_BUDGET
         assert finished["warning"] is None
         assert response[0]["result"]["text"] == "visible answer"
         assert backend.sessions[session["session_id"]].messages[-1]["content"] == "visible answer"
@@ -5607,7 +5734,12 @@ def test_think_is_unsupported_for_ollama(monkeypatch: pytest.MonkeyPatch, tmp_pa
 def test_chat_reasoning_effort_is_passed_with_extra_budget(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """C6：off 关思考；low/high/max 直传并预留思考 token；auto 不传。"""
+    """C6：off 关思考；low/high/max 直传并预留思考 token；auto 不传。
+
+    预留之后还要过模型规格的 `max_output`（§2）：默认后端是 anthropic 预设里的
+    claude-sonnet-4-20250514（`max_output = 8_192`），所以 `4_096 + 12_000` 会被封顶到
+    8_192 —— 改造前这里发的是 16_096，Anthropic 会直接 400（超出模型输出上限）。
+    """
 
     async def run() -> None:
         backend = _chat_ready_backend(tmp_path)
@@ -5615,15 +5747,175 @@ def test_chat_reasoning_effort_is_passed_with_extra_budget(
         captured: dict[str, Any] = {}
         _stub_provider(monkeypatch, captured)
         base_budget = backend.config.ai_client.max_tokens
+        assert backend._chat_max_output() == 8_192
 
         await _execute_async(backend, "think", ["off"])
         await backend.handle(_chat_send(session["session_id"]))
         assert captured["options"]["reasoning_effort"] == "none"
+        # off 档没有预留，4_096 本来就在规格之内：请求体与改造前一致。
+        assert captured["options"]["max_tokens"] == base_budget
 
         await _execute_async(backend, "think", ["max"])
         await backend.handle(_chat_send(session["session_id"], "again"))
         assert captured["options"]["reasoning_effort"] == "max"
-        assert captured["options"]["max_tokens"] == base_budget + 12000
+        assert captured["options"]["max_tokens"] == 8_192
+        assert captured["options"]["max_tokens"] < base_budget + 12_000
+
+    asyncio.run(run())
+
+
+def _relay_backend_with_spec(
+    tmp_path: Path, *, context_window: int | None = None, max_output: int | None = None
+) -> JsonlBackend:
+    """聊天槽 = 中转站模型，并按参数写入显式规格（`set_model_spec` 只写非 None 的项）。"""
+    from ai_pr_review.config import AIClientConfig, ProviderConfig
+
+    backend = JsonlBackend(tmp_path / "config.json")
+    backend.config.ai_client = AIClientConfig(
+        provider="custom",
+        api_key="relay-key",
+        model="relay-model",
+        base_url="https://relay.example.com/v1",
+        api_format="openai",
+    )
+    backend.config.provider = ProviderConfig.from_model_provider(
+        backend.config.ai_client.model_provider
+    )
+    backend.config.provider.set_model_spec(
+        "relay-model", context_window=context_window, max_output=max_output
+    )
+    backend.config._sync_runtime_sections()
+    return backend
+
+
+def test_chat_max_tokens_follows_the_model_spec(tmp_path: Path) -> None:
+    """§2：chat 的输出额度封顶到规格 `max_output`（回答 + 思考共用这一个额度）。
+
+    等价于 `min(ai_client.max_tokens, max_output - 思考预算) + 思考预算`：改造前
+    `4_096 + 8_000 = 12_096` 会原样发给一个 `max_output = 3_000` 的模型，云端端点直接拒收。
+    """
+    base = JsonlBackend(tmp_path / "config.json").config.ai_client.max_tokens
+    assert base == 4_096
+
+    backend = _relay_backend_with_spec(
+        tmp_path, context_window=200_000, max_output=3_000
+    )
+    assert backend._chat_max_tokens(reasoning_budget=0) == 3_000
+    assert backend._chat_max_tokens(reasoning_budget=8_000) == 3_000
+    # 只读规格，绝不改用户的 ai_client 配置（审查链路继续用它）。
+    assert backend.config.ai_client.max_tokens == base
+
+    # 思考预算 ≥ max_output：总额度就是 max_output（绝不出现负数，也不越过规格）。
+    assert backend._chat_max_tokens(reasoning_budget=12_000) == 3_000
+
+    # 规格足够大时不封顶：预留照旧全额生效。
+    roomy = _relay_backend_with_spec(tmp_path, context_window=200_000, max_output=64_000)
+    assert roomy._chat_max_tokens(reasoning_budget=12_000) == base + 12_000
+
+
+def test_chat_max_tokens_leaves_untrusted_specs_and_local_endpoints_alone(
+    tmp_path: Path,
+) -> None:
+    """规格不可信或端点是本地时保持现状（§2.3）。
+
+    - `deepseek-chat` 那条 `32_768/4_096` 只是 `from_model_provider` 给不认识的模型写的
+      dataclass 兜底，不是"知道这个模型"——拿它封顶会让回答额度凭 4_096 缩水；
+    - Ollama 这类本地端点不会因超限报错，且 §C6 的实测结论（预留不足时思考吃满额度、
+      答案为空）正是靠这份预留换来的。
+    """
+    from ai_pr_review.config import ModelProviderConfig, ProviderConfig
+
+    base = JsonlBackend(tmp_path / "config.json").config.ai_client.max_tokens
+
+    untrusted = JsonlBackend(tmp_path / "untrusted.json")
+    untrusted.config.provider = ProviderConfig.from_model_provider(
+        ModelProviderConfig.from_name("deepseek")
+    )
+    untrusted.config._sync_runtime_sections()
+    assert untrusted._chat_slot_provider().model_name == "deepseek-chat"
+    assert untrusted._chat_max_output() is None
+    assert untrusted._chat_max_tokens(reasoning_budget=12_000) == base + 12_000
+
+    local = JsonlBackend(tmp_path / "local.json")
+    local.config.preferences.chat_slot = "local"
+    local.config._sync_runtime_sections()
+    assert local._chat_slot_provider().name == "ollama"
+    # 本地模型的预设规格对**封顶**是可信的……
+    assert local._chat_max_output() == 1_024
+    # ……但输出额度不封顶：1_024 是我们自己写死的猜测，不是端点限制。
+    assert local._chat_max_tokens(reasoning_budget=8_000) == base + 8_000
+
+
+def test_chat_spec_never_trusts_auto_written_or_malformed_entries(tmp_path: Path) -> None:
+    """回归：自动写入的条目、以及手改坏了的条目，都不得被当成"用户的规格"。
+
+    两条真实路径（2026-09-26 复检发现）：
+
+    1. `config import` 的 payload 没带 `models` 时，`ensure_default_model_present()` 会给
+       默认模型补一条 `32_768/4_096`。若把它当"用户规格"，预算会凭 32_768 翻到 16_384、
+       封顶还会把默认安装的回答额度砍到 4_096（连思考预留一起吃掉）；
+    2. 手改配置写下 `max_output: null` 时，`int(None)` 会让 `config.snapshot` /
+       `model.status` 这些**零网络**出口直接抛 TypeError（TUI 启动就探测失败）。
+    """
+    from ai_pr_review.config import ModelProviderConfig, ProviderConfig, ProviderModelConfig
+
+    # (1) 预设模型 + 兜底条目（= import 少了 models 时 ensure_default_model_present 补的那条）
+    backend = JsonlBackend(tmp_path / "config.json")
+    backend.config.provider = ProviderConfig.from_model_provider(
+        ModelProviderConfig.from_name("anthropic")
+    )
+    preset_model = backend.config.provider.default_model
+    backend.config.provider.models[preset_model] = ProviderModelConfig(name=preset_model)
+    backend.config._sync_runtime_sections()
+    assert (backend.config.provider.models[preset_model].context_window,
+            backend.config.provider.models[preset_model].max_output) == (32_768, 4_096)
+    # 兜底数字既不算"用户写过"（预算退回 8_000），也不能反过来砍额度（封顶改用预设值）。
+    assert backend._chat_context_window() is None
+    assert backend._chat_context_budget_plan() == (8_000, "fallback")
+    assert backend._chat_max_output() == 8_192
+    assert backend._chat_max_tokens(reasoning_budget=12_000) == 8_192
+
+    # (2) 落盘条目里混进 null：所有出口都必须活着（退回"不可信"），不得抛异常。
+    malformed = JsonlBackend(tmp_path / "malformed.json")
+    malformed.config.provider = ProviderConfig.from_model_provider(
+        ModelProviderConfig.from_name("deepseek")
+    )
+    malformed.config.provider.models["deepseek-chat"].context_window = None  # type: ignore[assignment]
+    malformed.config.provider.models["deepseek-chat"].max_output = None  # type: ignore[assignment]
+    malformed.config._sync_runtime_sections()
+    assert malformed._chat_context_window() is None
+    assert malformed._chat_max_output() is None
+    assert malformed._chat_context_budget_plan() == (8_000, "fallback")
+    assert malformed._chat_max_tokens(reasoning_budget=8_000) == 4_096 + 8_000
+    assert malformed._config_snapshot()["chat_context_budget"] == 8_000
+    assert malformed._context_status(None)["token_budget"] == 8_000
+
+
+def test_chat_request_body_is_capped_by_the_model_spec(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """端到端：规格改了，`stream_chat` 收到的 `max_tokens` 必须跟着变（§2 的初衷）。"""
+
+    async def run() -> None:
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=lambda event: None)
+        backend.config.provider.api_key = "test-key"
+        backend.config._sync_runtime_sections()
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        await _execute_async(backend, "think", ["high"])
+        # /think 会保存并重载配置，因此规格写在它之后。
+        backend.config.ai_client.api_key = "test-key"
+        backend.config.provider.set_model_spec(
+            backend.config.provider.default_model, max_output=3_000
+        )
+        backend.config._sync_runtime_sections()
+
+        await backend.handle(_chat_send(session["session_id"]))
+
+        assert captured["options"]["reasoning_effort"] == "high"
+        assert captured["options"]["max_tokens"] == 3_000
 
     asyncio.run(run())
 
@@ -5643,8 +5935,10 @@ def test_chat_usage_falls_back_to_estimated_context() -> None:
         compacted=False,
     )
     assert context["used_tokens"] == 10
-    assert context["budget_tokens"] == 8000
+    assert context["budget_tokens"] == DEFAULT_CHAT_BUDGET
     assert context["trimmed_messages"] == 2
+    # 契约 v1 冻结五键：预算来源不在 `context` 里（走 `/context` 与快照，§4.5）。
+    assert "budget_source" not in context
 
 
 def test_history_defaults_to_chat_and_runs_stay_available(tmp_path: Path) -> None:
@@ -5743,6 +6037,10 @@ def test_compact_failure_preserves_history(
 # ---------------------------------------------------------------------------
 # B1/B2/B3：models.dev 接进配置助手 + 规格可编辑 + 中转站逐项自定义
 # （docs/b2b3-wiring-design.md §4.1；全部离线，不发真实网络请求）
+#
+# A/B 组在本文件；C 组（ProviderConfig.set_model_spec / 取值边界）已归位
+# tests/test_config.py、D 组（config show/export/import/health）已归位 tests/test_cli.py，
+# 见 docs/claude-backend-followup.md §1。
 # ---------------------------------------------------------------------------
 
 # 真实的 models.dev 片段（2026-09-26 只读抓取）：deepseek 的 1000000/393216 +
@@ -6305,177 +6603,3 @@ def test_config_catalog_refresh_bypasses_the_process_memo(
     assert refreshed["result"]["model"]["catalog_state"]["source"] == "models.dev"
     # refresh 走的是 `ModelCatalog.refresh`（无视缓存），所以这里数的是 HTTP 层。
     assert calls["urlopen"] == 2
-
-
-def test_set_model_spec_touches_only_the_target_model() -> None:
-    """`ProviderConfig.set_model_spec`：只动目标条目，不动 `default_model` 与别的模型。"""
-    from ai_pr_review.config import ModelProviderConfig, ProviderConfig
-
-    provider = ProviderConfig.from_model_provider(ModelProviderConfig.from_name("deepseek"))
-    other_before = (
-        provider.models["deepseek-v4-pro"].context_window,
-        provider.models["deepseek-v4-pro"].max_output,
-    )
-
-    assert (
-        provider.set_model_spec(
-            "deepseek-flash", context_window=1_000_000, max_output=393_216
-        )
-        is True
-    )
-    assert (provider.models["deepseek-flash"].context_window) == 1_000_000
-    assert (provider.models["deepseek-flash"].max_output) == 393_216
-    assert (
-        provider.models["deepseek-v4-pro"].context_window,
-        provider.models["deepseek-v4-pro"].max_output,
-    ) == other_before
-    assert provider.default_model == "deepseek-chat"
-
-    # 同值重写不算"发生写入"；两个参数都 None 更不算。
-    assert (
-        provider.set_model_spec(
-            "deepseek-flash", context_window=1_000_000, max_output=393_216
-        )
-        is False
-    )
-    assert provider.set_model_spec("deepseek-flash") is False
-    # 中转站那种"预设表里没有"的模型名：显式提交规格会新建条目（B3）。
-    assert provider.set_model_spec("relay-model", context_window=200_000) is True
-    assert provider.models["relay-model"].context_window == 200_000
-    assert provider.models["relay-model"].max_output == 4_096
-
-
-def test_model_spec_bounds_are_sane() -> None:
-    """取值与边界只存一份：`config` 的常量就是 `jsonl_server` 校验用的那一份。"""
-    from ai_pr_review.backend import jsonl_server
-
-    assert CONTEXT_WINDOW_RANGE == (1_024, 10_000_000)
-    assert MAX_OUTPUT_RANGE == (1, 10_000_000)
-    assert jsonl_server.CONTEXT_WINDOW_RANGE is CONTEXT_WINDOW_RANGE
-    assert jsonl_server.MAX_OUTPUT_RANGE is MAX_OUTPUT_RANGE
-    assert jsonl_server.MODEL_SPEC_SOURCES is MODEL_SPEC_SOURCES
-    assert MODEL_SPEC_SOURCES == {"models.dev", "cache", "builtin", "unknown"}
-    assert jsonl_server.CATALOG_SOURCES == {"models.dev", "cache", "builtin"}
-    # 兜底规格与 `ProviderModelConfig` 的字段默认值是同一组数字。
-    assert ProviderModelConfig(name="x").context_window == DEFAULT_MODEL_CONTEXT_WINDOW
-    assert ProviderModelConfig(name="x").max_output == DEFAULT_MODEL_MAX_OUTPUT
-
-
-def test_config_show_and_export_keep_model_specs(tmp_path: Path) -> None:
-    """中转站规格能导出、能在 `config show`（脱敏）里回显——不改产品代码的回归。"""
-    from click.testing import CliRunner
-
-    from ai_pr_review.cli import main
-    from ai_pr_review.config import AIClientConfig, AppConfig, ProviderConfig
-
-    config_path = tmp_path / "config.json"
-    config = AppConfig.from_env()
-    config.ai_client = AIClientConfig(
-        provider="custom",
-        api_key="relay-key",
-        model="relay-model",
-        base_url="https://relay.example.com/v1",
-        api_format="openai",
-    )
-    config.provider = ProviderConfig.from_model_provider(config.ai_client.model_provider)
-    config.provider.set_model_spec("relay-model", context_window=200_000, max_output=16_384)
-    config._sync_runtime_sections()
-    config.save(config_path, save_key=True)
-
-    runner = CliRunner()
-    shown = runner.invoke(main, ["--config", str(config_path), "config", "show"])
-    assert shown.exit_code == 0
-    shown_payload = json.loads(shown.output)
-    assert shown_payload["provider"]["models"]["relay-model"]["context_window"] == 200_000
-    assert shown_payload["provider"]["models"]["relay-model"]["max_output"] == 16_384
-
-    export_path = tmp_path / "export.json"
-    exported = runner.invoke(
-        main, ["--config", str(config_path), "config", "export", "--output", str(export_path)]
-    )
-    assert exported.exit_code == 0
-    payload = json.loads(export_path.read_text(encoding="utf-8"))
-    assert payload["provider"]["models"]["relay-model"]["context_window"] == 200_000
-    assert payload["provider"]["models"]["relay-model"]["max_output"] == 16_384
-
-
-def test_config_import_round_trips_a_relay_spec(tmp_path: Path) -> None:
-    """导入含规格的中转站配置后落盘同值（`save` 重建 provider 的路上不能丢）。"""
-    from click.testing import CliRunner
-
-    from ai_pr_review.cli import main
-    from ai_pr_review.config import AppConfig
-
-    config_path = tmp_path / "config.json"
-    import_payload = {
-        "provider": {
-            "name": "custom",
-            "display_name": "Custom Endpoint",
-            "api_key": "relay-key",
-            "base_url": "https://relay.example.com/v1",
-            "api_format": "openai",
-            "models": {
-                "relay-model": {
-                    "name": "relay-model",
-                    "context_window": 200_000,
-                    "max_output": 16_384,
-                }
-            },
-            "default_model": "relay-model",
-        },
-        "preferences": {"output_format": "terminal", "language": "zh-CN"},
-    }
-    import_source = tmp_path / "import.json"
-    import_source.write_text(
-        json.dumps(import_payload, ensure_ascii=False), encoding="utf-8"
-    )
-
-    result = CliRunner().invoke(
-        main, ["--config", str(config_path), "config", "import", str(import_source), "--save-key"]
-    )
-
-    assert result.exit_code == 0
-    saved = AppConfig.load(config_path)
-    assert saved.provider.models["relay-model"].context_window == 200_000
-    assert saved.provider.models["relay-model"].max_output == 16_384
-
-
-def test_config_health_reports_the_effective_spec_and_source(tmp_path: Path) -> None:
-    """§3.4：`config health` 的 JSON 多四个键；不联网时如实报 builtin/unknown。"""
-    from click.testing import CliRunner
-
-    from ai_pr_review.cli import main
-    from ai_pr_review.config import AIClientConfig, AppConfig, ProviderConfig
-
-    config_path = tmp_path / "config.json"
-    config = AppConfig.from_env()
-    config.ai_client = AIClientConfig(
-        provider="deepseek",
-        api_key="deepseek-key",
-        model="deepseek-flash",
-        base_url="https://api.deepseek.com/v1",
-        api_format="openai",
-    )
-    config.provider = ProviderConfig.from_model_provider(config.ai_client.model_provider)
-    config.save(config_path, save_key=True)
-
-    result = CliRunner().invoke(main, ["--config", str(config_path), "config", "health"])
-
-    assert result.exit_code == 0
-    payload = json.loads(result.output)
-    # 预设表里有 deepseek-flash 但进程里没有目录 → builtin（不是 models.dev）。
-    assert payload["spec_source"] == "builtin"
-    assert (payload["context_window"], payload["max_output"]) == (1_048_576, 384_000)
-    assert payload["needs_verification"] is False
-
-    # 不在预设表里的模型（既有用例用的 deepseek-chat 就是这一类）→ unknown。
-    second = AppConfig.load(config_path)
-    second.provider.default_model = "deepseek-chat"
-    second.provider.ensure_default_model_present()
-    second._sync_runtime_sections()
-    second.save(config_path, save_key=True)
-    result = CliRunner().invoke(main, ["--config", str(config_path), "config", "health"])
-
-    payload = json.loads(result.output)
-    assert payload["spec_source"] == "unknown"
-    assert (payload["context_window"], payload["max_output"]) == (32_768, 4_096)
