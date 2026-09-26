@@ -4191,6 +4191,47 @@ def test_review_context_renders_l1_to_l4_with_stable_format(tmp_path: Path) -> N
     assert "[L4 被过滤 FINDING] 门槛 0.70 · 低于门槛 2 条 · 去重 1 条" in context
 
 
+def test_review_context_l3_covers_every_finding_not_just_top_three(tmp_path: Path) -> None:
+    """2026-09-26：L3 此前硬编码只给前 3 条全文——12 条 finding 时第 4-12 条
+    只有标题级信息，用户追问「第 6 条为什么判 medium」模型答不了。
+    现在 L3 覆盖全部（预算不足时仍按原链条逐条降级）。"""
+    from ai_pr_review.services.prompt_assembler import Finding
+    from ai_pr_review.services.review_context import build_review_context
+
+    backend = JsonlBackend(tmp_path / "config.json")
+    findings = [
+        Finding(
+            severity="critical" if index == 1 else "high" if index == 2 else "medium",
+            category="correctness",
+            file=f"src/m{index}.py",
+            line_start=index,
+            line_end=index,
+            title=f"标题 {index}",
+            problem=f"问题描述 {index}",
+            suggestion=f"修复建议 {index}",
+            confidence=0.9 - index * 0.01,
+            code_snippet="if x == 1:\n    pass",
+            evidence_status="valid",
+        )
+        for index in range(1, 13)
+    ]
+    run_id = _store_context_run(
+        backend, findings=findings, summary="审查完成，发现 12 个问题"
+    )
+
+    context = build_review_context(_context_store(backend), run_id)
+
+    assert context is not None
+    # 标题按实际条数渲染：12 条都在 L3 里（此前是"前 3 条"）
+    assert "[L3 重点 FINDING 全文] 前 12 条（按严重度排序）" in context
+    # 此前只能看到标题的第 6 条，现在有原因与建议全文
+    assert "问题描述 6" in context
+    assert "修复建议 6" in context
+    # 末条也在：证明不是"只保前 N 条"的截断
+    assert "问题描述 12" in context
+    assert "修复建议 12" in context
+
+
 def test_review_context_never_invents_unrecorded_layers(tmp_path: Path) -> None:
     """缺什么就少哪一段：没有 filtered_findings 就没有 L4，也不写"被过滤 0 条"。"""
     from ai_pr_review.services.review_context import build_review_context

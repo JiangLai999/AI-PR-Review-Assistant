@@ -32,8 +32,15 @@ from ai_pr_review.services.post_processor import SEVERITY_ORDER
 # 4 字符 ≈ 1 token（§9.D 的预算口径）。
 CHARS_PER_TOKEN = 4
 DEFAULT_TOKEN_BUDGET = 8000
-# L3 默认展示几条重点 finding（按严重度排序取前 N）。
-L3_MAX_FINDINGS = 3
+# L3（逐条全文：problem / suggestion / 代码片段）覆盖几条 finding。
+#
+# 2026-09-26 从 3 提到 20：实测用户问「看看 pr31」时，12 条 finding 里只有前 3 条
+# 有全文，模型对第 4-12 条只能说"只有标题级信息，需查看源码"——用户追问任意一条
+# （如"第 6 条为什么判 medium"）都无法回答。上下文预算早已动态化（chat_context_budget
+# 可配），且 `_budget_plans` 本就支持「按预算逐条增减 L3」，这个硬上限是过度保守。
+# 保留 20 作为**性能兜底**（findings 极端多时不渲染上百个块），常规审查（≤20 条）
+# 全部可得全文；预算不足时仍按原有链条逐条降级。
+L3_MAX_FINDINGS = 20
 # L3 的裁剪以「条」为单位，但单条自身过长同样会吃光预算，所以段落本身也要有界。
 L1_SUMMARY_LIMIT = 2000
 L3_PARAGRAPH_LIMIT = 1000
