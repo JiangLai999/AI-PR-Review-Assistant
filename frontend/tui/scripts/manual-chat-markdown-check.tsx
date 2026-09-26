@@ -44,6 +44,12 @@ const SAMPLE = [
   "| 1 | website/index.html:237 | critical |",
   "| 2 | website/js/main.js:86 | high |",
   "",
+  "建议这样改：",
+  "",
+  "```js",
+  "docsPanelBody.textContent = tab.html;",
+  "```",
+  "",
   "- 建议先修 `innerHTML` 那两处",
   "- 再核对占位符",
   "",
@@ -55,12 +61,37 @@ const WIDTH = 78
 const view = await testRender(
   () => (
     <box width={WIDTH} flexDirection="column">
+      {/* 用户输入：底色 + 橙色左框线（与 assistant 的纯文本回复区分） */}
+      <box
+        flexDirection="row"
+        marginBottom={1}
+        paddingLeft={1}
+        paddingRight={1}
+        backgroundColor="#1a1a1a"
+        border={["left"]}
+        borderColor="#fb8147"
+      >
+        <text width={WIDTH - 10} fg="#eeeeee">
+          对应仓库代码
+        </text>
+      </box>
       <markdown
         width={WIDTH}
         content={SAMPLE}
         syntaxStyle={chatMarkdownStyle()}
         fg="#808080"
         conceal={true}
+        renderNode={(token, ctx) => {
+          if (token.type !== "code") return undefined
+          const code = ctx.defaultRender()
+          if (code) {
+            const styled = code as { bg?: string; paddingLeft?: number; marginBottom?: number }
+            styled.bg = "#141414"
+            styled.paddingLeft = 1
+            styled.marginBottom = 1
+          }
+          return code
+        }}
         tableOptions={{ widthMode: "full", wrapMode: "word", borders: true, cellPadding: 1 }}
       />
     </box>
@@ -92,6 +123,9 @@ check(frame.includes("审查结果概览"), "标题文字仍然可见")
 check(frame.includes("4 条"), "粗体文字内容仍然可见")
 check(frame.includes("website/index.html"), "表格单元格内容仍然可见")
 check(/[│┌┐└┘├┤┬┴┼─]/.test(frame), "表格渲染出边框字符")
+check(frame.includes("│") && frame.includes("对应仓库代码"), "用户输入框有左框线且内容可见")
+check(frame.includes("textContent = tab.html"), "代码块内容可见")
+check(!frame.includes("```"), "代码块围栏 ``` 被隐藏")
 check(
   lines.length <= 30,
   `渲染行数不超过 30（实际 ${lines.length}）`,

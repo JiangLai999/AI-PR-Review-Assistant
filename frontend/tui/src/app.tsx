@@ -3944,24 +3944,48 @@ export function App() {
       <Show when={messages().length > 0 || streamingAssistant()}>
         <box width={chatContentWidth()} marginTop={2} flexDirection="column">
           <For each={messages()}>{(message) =>
-            <box flexDirection="row" gap={1} paddingBottom={1}>
-              <text fg={message.role === "user" ? orange : "#eeeeee"}>{message.role === "user" ? ">" : "●"}</text>
-              {/* 用户输入保持纯文本（原样回显）；assistant 回复走 Markdown 渲染，
-                  否则 `##` / `**` / 表格分隔线会原样显示（实测反馈）。 */}
-              <Show
-                when={message.role !== "user"}
-                fallback={
-                  <text width={Math.max(24, chatContentWidth() - 6)} fg="#eeeeee">
+            <Show
+              when={message.role !== "user"}
+              fallback={
+                /* 用户输入：深色底 + 橙色左框线——与 assistant 的纯文本回复一眼区分
+                   （实测反馈："用户输入和 AI 输出内容无法区分"）。 */
+                <box
+                  flexDirection="row"
+                  marginBottom={1}
+                  paddingLeft={1}
+                  paddingRight={1}
+                  backgroundColor="#1a1a1a"
+                  border={["left"]}
+                  borderColor={orange}
+                >
+                  <text width={Math.max(24, chatContentWidth() - 10)} fg="#eeeeee">
                     {message.content}
                   </text>
-                }
-              >
+                </box>
+              }
+            >
+              <box flexDirection="row" gap={1} paddingBottom={1}>
+                <text fg="#eeeeee">●</text>
                 <markdown
                   width={Math.max(24, chatContentWidth() - 6)}
                   content={message.content}
                   syntaxStyle={chatMarkdownStyle()}
                   fg={muted}
                   conceal={true}
+                  // 代码块加一层底色 + 左内边距，形成"代码框"观感。
+                  // Renderable 的 border 只能在构造时给，拿不到 ctx，所以用
+                  // bg/padding 表达（bg 在 CodeRenderable 上有 setter）。
+                  renderNode={(token, ctx) => {
+                    if (token.type !== "code") return undefined
+                    const code = ctx.defaultRender()
+                    if (code) {
+                      const styled = code as { bg?: string; paddingLeft?: number; marginBottom?: number }
+                      styled.bg = "#141414"
+                      styled.paddingLeft = 1
+                      styled.marginBottom = 1
+                    }
+                    return code
+                  }}
                   tableOptions={{
                     widthMode: "full",
                     wrapMode: "word",
@@ -3969,8 +3993,8 @@ export function App() {
                     cellPadding: 1,
                   }}
                 />
-              </Show>
-            </box>
+              </box>
+            </Show>
           }</For>
           <Show when={streamingAssistant()}>
             <box flexDirection="row" gap={1}>
