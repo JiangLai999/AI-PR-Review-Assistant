@@ -122,27 +122,36 @@
 - provider 已收集 `reasoning_parts` → 后端发 `assistant.reasoning_delta` / `reasoning_done`；TUI **灰色斜体独立区块**，**回复开始后收起**；**绝不混入正文或历史**。
 - **验收**：思考与正文分离；历史里不含思考文本。
 
-### C6 · 思考强度可选（**只在实测有效的供应商上开放**）
+### C6 · 思考强度可选（DeepSeek **实测有效** ✓）
 
-**先做的实测（`docs/reasoning-effort-probe.md`）**：DeepSeek `deepseek-flash` 对
-`reasoning_effort` **无实际响应**——同档位两次波动（711 vs 1715 字符）大于档位间差异，
-且**不传参数时反而最高**。API 收下参数但忽略它，最容易被误当成"支持"。
+**实测（`docs/reasoning-effort-probe.md`）**：`deepseek-flash` 支持
+`reasoning_effort: low|high|max`（默认 high）与 `thinking: disabled`；
+reasoning 长度**单调**：`disabled(0) < low(2.6k) < high(4.5k) < max(6.8k)`。
+（第一版实测曾误判为"无效"，原因是题目太简单 + `max_tokens` 截断 + 样本不足；
+修正后结论明确。）
 
-**因此原"五档可选"作废**，改为**能力驱动**：
+**档位设计**：
 
-1. **能力表**：每个 provider 显式声明"是否支持档位 + 参数名"，**默认不支持**。
-   - DeepSeek：❌ 不开放（UI 置灰 + 说明）
-   - MiMo：`variant: minimal|high|max` → ✅ 开放（实现时同样实测确认）
-   - OpenAI 推理系：`reasoning_effort` → ✅ 开放（同上）
-   - 未知/其它：❌ 不开放
-2. **不支持的模型**：`/think` 明确回「当前模型 `<name>` 不支持调整思考强度」，
-   **不假装写入配置**；配置助手对应项置灰。
-3. **支持的模型**：必须**先通过同款实测**（不同档位出现可观察的单调差异）才算支持；
-   `_p5_verify/p6proto/probe_reasoning_effort.py` 可直接扩成验收用例。
-4. **绝不以"API 不报错"作为支持依据**（DeepSeek 是反例）。
+| 档位 | 请求参数 |
+|---|---|
+| `off` | `{"thinking": {"type": "disabled"}}` |
+| `low` | `{"reasoning_effort": "low"}` |
+| `high`（默认） | `{"reasoning_effort": "high"}` |
+| `max` | `{"reasoning_effort": "max"}` |
 
-- **验收**：在**支持**的模型上，不同档位有可观察差异且命令生效并持久化；
-  在**不支持**的模型上，命令明确说明不支持、配置不被改写、请求体不带该参数。
+只暴露文档认可的有效值（`low/high/max` + 关闭）；`minimal/medium/xhigh/ultra`
+属兼容映射，不作为档位出现在 UI 里。
+
+**⚠️ 必须配套的 token 预算**：实测中 `max_tokens=2000` + `effort=max` 时
+**答案被思考挤成空串**（completion 顶满 2000、answer_chars=0）。因此
+`max_tokens` 要**按 effort 预留思考开销**（如
+`answer_budget + reasoning_budget(effort)`），否则用户会看到空回复。
+
+**其它供应商**：沿用同一套"**先实测再开放**"的规矩（MiMo `variant`、
+OpenAI 推理系），不支持者 UI 置灰、`/think` 明确说明、请求体不带该参数。
+
+- **验收**：① 四档在支持模型上产出**单调差异**且命令生效并持久化；
+  ② **答案不为空**（预算预留生效）；③ 不支持的供应商得到明确说明而非假选项。
 
 ---
 
