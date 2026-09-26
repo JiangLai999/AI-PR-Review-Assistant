@@ -634,6 +634,10 @@ DEFAULT_REPO_CACHE_MAX_MB = 200
 # L2 符号级定位开关（docs/mimo-l2-symbol-locator.md）：默认开启，
 # 仅在签名变化时触发 trees+grep，异常一律降级。
 DEFAULT_SYMBOL_LOCATE = True
+# L3 修复建议 patch 开关（docs/repo-aware-review-plan.md §6）：**默认关闭**。
+# 打开后每条 critical/high 且证据校验通过的 finding 都会额外发起一次模型调用
+# （真实成本），因此只有用户明确开启才跑；关闭时零构造、零调用。
+DEFAULT_SUGGESTED_PATCH = False
 # 合法闭区间（含端点）；越界一律回退默认值。
 REPO_CONTEXT_MAX_FILES_RANGE: tuple[int, int] = (1, 10)
 REPO_CONTEXT_BUDGET_TOKENS_RANGE: tuple[int, int] = (500, 32000)
@@ -760,6 +764,25 @@ def normalize_symbol_locate(value: object) -> bool:
     非法值只回退到 ``True`` 并记录一次 warning，不抛异常（与
     ``normalize_workbench_mode`` 同风格）。提示里不回显原值。
     """
+    return _normalize_bool_preference(
+        value, field="symbol_locate", default=DEFAULT_SYMBOL_LOCATE
+    )
+
+
+def normalize_suggested_patch(value: object) -> bool:
+    """把任意输入归一化为合法的 ``suggested_patch`` 开关（L3 修复建议）。
+
+    与 ``normalize_symbol_locate`` 同一套规则，但默认值是 **False**：旧配置没有
+    这个字段时保持关闭（开启会为达标 finding 增加模型调用），非法值只回退到
+    ``False`` 并记录一次 warning，不抛异常。提示里不回显原值。
+    """
+    return _normalize_bool_preference(
+        value, field="suggested_patch", default=DEFAULT_SUGGESTED_PATCH
+    )
+
+
+def _normalize_bool_preference(value: object, *, field: str, default: bool) -> bool:
+    """布尔偏好项的统一归一化：bool / 0-1 / "true|yes|on" 等字面量，其余回退。"""
     if isinstance(value, bool):
         return value
     if isinstance(value, int) and value in (0, 1):
@@ -770,8 +793,10 @@ def normalize_symbol_locate(value: object) -> bool:
             return True
         if normalized in {"false", "0", "no", "off"}:
             return False
-    _warn_invalid_preference("symbol_locate", "已回退为 true（可选值：true、false）")
-    return DEFAULT_SYMBOL_LOCATE
+    _warn_invalid_preference(
+        field, f"已回退为 {'true' if default else 'false'}（可选值：true、false）"
+    )
+    return default
 
 
 @dataclass
@@ -796,6 +821,9 @@ class PreferencesConfig:
     repo_cache_max_mb: int = DEFAULT_REPO_CACHE_MAX_MB
     # L2 符号定位：签名变化时在仓库内定位外部引用点（trees+grep）。
     symbol_locate: bool = DEFAULT_SYMBOL_LOCATE
+    # L3 修复建议 patch：为 critical/high 且证据校验通过的 finding 生成 unified
+    # diff 片段（每条多一次模型调用），默认关闭；只展示、绝不自动提交。
+    suggested_patch: bool = DEFAULT_SUGGESTED_PATCH
 
     def __post_init__(self) -> None:
         # 属性一旦构造出来就保证合法，加载/导入/向导三条路径因此共用同一套回退规则。
@@ -812,6 +840,7 @@ class PreferencesConfig:
         )
         self.repo_cache_max_mb = normalize_repo_cache_max_mb(self.repo_cache_max_mb)
         self.symbol_locate = normalize_symbol_locate(self.symbol_locate)
+        self.suggested_patch = normalize_suggested_patch(self.suggested_patch)
 
 
 def _preferences_of(config: object) -> object:

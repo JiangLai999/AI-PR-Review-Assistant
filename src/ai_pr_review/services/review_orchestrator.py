@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -29,9 +30,10 @@ from ai_pr_review.services.model_capabilities import (
     calculate_review_output_budget,
     get_model_capabilities,
 )
+from ai_pr_review.services.patch_generator import PatchGenerator, is_patch_eligible
 from ai_pr_review.services.post_processor import PostProcessor
 from ai_pr_review.services.pr_fetcher import PRFetcher
-from ai_pr_review.services.prompt_assembler import PromptAssembler, ReviewResult
+from ai_pr_review.services.prompt_assembler import Finding, PromptAssembler, ReviewResult
 from ai_pr_review.services.repo_context import FileSystemRepoCache
 from ai_pr_review.services.result_store import ResultStore
 from ai_pr_review.services.symbol_locator import (
@@ -39,6 +41,8 @@ from ai_pr_review.services.symbol_locator import (
     SymbolLocation,
     changed_symbols_from_impacts,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ReviewCancelled(Exception):
@@ -69,6 +73,16 @@ FILTER_REASON_SUMMARY_LABELS = {
 def elapsed_ms(started_at: float) -> int:
     """Milliseconds since `time.perf_counter()` reading `started_at`."""
     return max(0, round((time.perf_counter() - started_at) * 1000))
+
+
+def _stat_value(usage: object, key: str) -> int:
+    """从 ``usage_stats()`` 的结果里取一个非负整数；缺失/坏值记 0（不编造）。"""
+    if not isinstance(usage, dict):
+        return 0
+    try:
+        return max(0, int(usage.get(key, 0) or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def file_result_payload(
@@ -401,6 +415,14 @@ class ReviewOrchestrator:
                 update={"summary": self._build_empty_summary(filter_result)}
             )
 
+        # L3 修复建议（docs/repo-aware-review-plan.md §6）：写库前给达标 finding 生成
+        # unified diff 片段。开关默认关闭；关闭时不构造生成器、零模型调用。
+        # 刻意不新增 stage id：CLI/TUI 的 stage 标签表不在本任务写集内，未知 id 会
+        # 显示成裸 id 且进度条回退（见 docs/claude-l3-patch.md）。
+        review_result, suggested_patch_stats = await self._attach_suggested_patches(
+            review_result, file_contexts, ai_client, cancel_check
+        )
+
         stage("persisting", "正在写入本地 SQLite 历史与反馈数据")
         duration_seconds = time.perf_counter() - start_time
         total_cost = getattr(ai_client, "total_run_cost", 0.0)
@@ -468,6 +490,9 @@ class ReviewOrchestrator:
                 "interface_impacts": [impact.to_dict() for impact in interface_impacts],
                 # L2 符号定位：仅签名变化符号；定位为空时该符号如实缺席。
                 "symbols_located": symbols_located,
+                # L3 修复建议（§6）：开关状态 + 达标条数 + 生成/跳过/非法输出计数 +
+                # 真实 token 用量。开关关闭时这几个数字必须是 0，便于审计"没花钱"。
+                "suggested_patches": suggested_patch_stats,
             },
         )
 
@@ -483,6 +508,121 @@ class ReviewOrchestrator:
             filtered_findings=filtered_findings,
             cross_file_impacts=cross_file_impacts,
             interface_impacts=interface_impacts,
+        )
+
+    def _suggested_patch_enabled(self) -> bool:
+        """``preferences.suggested_patch``：默认关闭。
+
+        开启 = 每条达标 finding 多一次模型调用（真实成本），所以只有用户显式
+        打开才跑。读法与邻居 ``_symbol_locate_enabled`` 一致：构造时
+        ``PreferencesConfig.__post_init__`` 已归一化，这里只做布尔化。
+        """
+        return bool(getattr(self._config.preferences, "suggested_patch", False))
+
+    async def _attach_suggested_patches(
+        self,
+        review_result: ReviewResult,
+        file_contexts: list[tuple[FileDiff, FileContext]],
+        ai_client: AIClient,
+        cancel_check: Callable[[], bool] | None,
+    ) -> tuple[ReviewResult, dict[str, Any]]:
+        """为达标 finding 生成修复建议 patch，返回 (结果, 统计)。
+
+        达标 = ``critical``/``high`` 且 ``evidence_status == "valid"``（方案 §6）。
+        补丁只写回 ``Finding.suggested_patch``：不落盘到用户仓库、不提交。
+
+        - 开关关闭时**不构造** ``PatchGenerator``、不发起任何调用（零成本）；
+        - 生成失败/输出不合法/找不到该文件的上下文一律如实计入 ``patches_skipped``，
+          绝不中断审查；
+        - 取消语义与逐文件审查一致：每个 finding 的调用都经
+          ``call_with_cancellation``，用户取消时抛 ``ReviewCancelled``，不写库。
+        """
+        findings = list(review_result.findings)
+        candidates = [finding for finding in findings if is_patch_eligible(finding)]
+        stats: dict[str, Any] = {
+            "enabled": self._suggested_patch_enabled(),
+            "candidates": len(candidates),
+            "patches_generated": 0,
+            "patches_skipped": 0,
+            "calls": 0,
+            "patches_invalid": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
+        if not stats["enabled"] or not candidates:
+            return self._clear_suggested_patches(review_result), stats
+
+        try:
+            generator = PatchGenerator(client=ai_client)
+        except Exception as exc:
+            # 构造失败也属于"补丁生成不可用"：判过档的 finding 全部如实记为跳过。
+            logger.warning("patch generator unavailable: %s", exc)
+            stats["patches_skipped"] = len(candidates)
+            return self._clear_suggested_patches(review_result), stats
+
+        # finding.file -> 该文件的上下文：模型审查 A 却点名 B（跨文件 finding）时，
+        # 也必须用 B 自己的内容来写 B 的补丁；找不到上下文就如实跳过。
+        contexts = {file_diff.filename: context for file_diff, context in file_contexts}
+
+        updated: list[Finding] = []
+        for finding in findings:
+            patch = ""
+            if is_patch_eligible(finding):
+                context = contexts.get(finding.file)
+                if context is not None:
+                    try:
+                        patch = await call_with_cancellation(
+                            lambda: generator.generate(finding, context), cancel_check
+                        )
+                    except ReviewCancelled:
+                        raise
+                    except Exception as exc:
+                        # 兜底：生成器已自行降级，这里防的是自定义/替身实现抛出的异常。
+                        logger.warning(
+                            "suggested patch generation failed for %s: %s",
+                            finding.file,
+                            exc,
+                        )
+                if patch:
+                    stats["patches_generated"] += 1
+                else:
+                    stats["patches_skipped"] += 1
+            # 一律以本方法的结论重建该字段：schema 里没有它，模型自述的值不算数
+            # （与 sources/evidence_status 等服务端字段同一条原则）。
+            updated.append(finding.model_copy(update={"suggested_patch": patch}))
+
+        try:
+            usage = generator.usage_stats()
+        except Exception as exc:
+            # 统计读不出来不影响结果：数字保持 0（不编造），补丁照常写回。
+            logger.warning("patch usage stats unavailable: %s", exc)
+            usage = {}
+        stats.update(
+            {
+                "calls": _stat_value(usage, "calls"),
+                "patches_invalid": _stat_value(usage, "invalid_outputs"),
+                "input_tokens": _stat_value(usage, "input_tokens"),
+                "output_tokens": _stat_value(usage, "output_tokens"),
+            }
+        )
+        return review_result.model_copy(update={"findings": updated}), stats
+
+    @staticmethod
+    def _clear_suggested_patches(review_result: ReviewResult) -> ReviewResult:
+        """清空模型自述的 ``suggested_patch``；没有值时原样返回（零拷贝）。
+
+        该字段只由 ``PatchGenerator`` 生成并经语法校验写入：模型既看不到它
+        （不在交给模型的 schema 里），自述的内容也不得进入报告。
+        """
+        if not any(finding.suggested_patch for finding in review_result.findings):
+            return review_result
+        return review_result.model_copy(
+            update={
+                "findings": [
+                    finding.model_copy(update={"suggested_patch": ""})
+                    for finding in review_result.findings
+                ]
+            }
         )
 
     async def _load_base_signatures(

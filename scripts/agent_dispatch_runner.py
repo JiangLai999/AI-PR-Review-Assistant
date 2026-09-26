@@ -57,7 +57,9 @@ POLL_SECONDS = 5
 # "the log has not grown for N seconds" — a real one was found this way at
 # 21:44-21:52 (0% CPU, no output, no file changes).
 VERBOSE_AGENTS = {"mimo"}
-STALL_SECONDS = 720
+STALL_SECONDS = 600
+# 每 N 秒打印一次"日志多久没长"的心跳，便于事后判断卡住检测到底有没有跑
+HEARTBEAT_SECONDS = 120
 
 CLAUDE_CANDIDATES = (
     pathlib.Path(os.environ.get("APPDATA", "")) / "npm/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
@@ -209,6 +211,7 @@ def main(argv: list[str]) -> int:
                 deadline = started + args.timeout
                 last_size = 0
                 last_progress_at = started
+                last_heartbeat_at = started
                 while proc.poll() is None:
                     now = time.perf_counter()
                     if now > deadline:
@@ -226,10 +229,19 @@ def main(argv: list[str]) -> int:
                         elif now - last_progress_at > STALL_SECONDS:
                             print(
                                 f"[{task_id}] stalled: no log growth for "
-                                f"{STALL_SECONDS}s; terminating worker"
+                                f"{STALL_SECONDS}s; terminating worker",
+                                flush=True,
                             )
                             proc.terminate()
                             break
+                        if now - last_heartbeat_at >= HEARTBEAT_SECONDS:
+                            last_heartbeat_at = now
+                            print(
+                                f"[{task_id}] heartbeat: log={last_size}B "
+                                f"idle={now - last_progress_at:.0f}s "
+                                f"(stall at {STALL_SECONDS}s)",
+                                flush=True,
+                            )
                     if report.exists():
                         if report_seen_at is None:
                             report_seen_at = now

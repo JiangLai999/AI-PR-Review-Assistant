@@ -10,7 +10,7 @@ import json
 import re
 from pathlib import PurePosixPath
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer
 
 from ai_pr_review.config import PromptAssemblerConfig
 from ai_pr_review.models.pr_data import FileDiff
@@ -138,6 +138,9 @@ SERVER_SIDE_FINDING_FIELDS = (
     "evidence_status",
     "evidence_issues",
     "rule_id",
+    # L3 修复建议（unified diff 片段）：只由 PatchGenerator 在写库前填写，模型
+    # 既不产出也不得自述——否则模型可以直接往报告里塞未经校验的补丁。
+    "suggested_patch",
 )
 
 
@@ -166,6 +169,25 @@ class Finding(BaseModel):
     evidence_issues: list[str] = Field(default_factory=list)
     # 确定性规则身份，由 rule_catalog 写入；模型产出一律被置空。
     rule_id: str = ""
+    # L3 修复建议（docs/repo-aware-review-plan.md §6）：unified diff 片段，默认空。
+    # 可选字段——旧 run / 未生成的 finding 不带它也能校验通过；只由
+    # PatchGenerator 在写库前对 critical/high 且 evidence_status=="valid" 的
+    # finding 填写，只展示、绝不自动提交。
+    suggested_patch: str = ""
+
+    @model_serializer(mode="wrap")
+    def _serialize_without_empty_patch(self, handler):
+        """空 ``suggested_patch`` 不落进 payload（有值时照常带上）。
+
+        这是加法式字段：绝大多数 finding 没有补丁，输出 `"suggested_patch": ""`
+        只会给每份报告/历史 Run/demo payload 添噪音，并让所有**字节级快照**失效
+        （`pr-review demo --json-output` 的 SHA-256 冻结用例就是其中之一）。
+        省略等于"本次没有补丁建议"，语义完整；反序列化侧有默认值，旧/新 payload 都能读。
+        """
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("suggested_patch"):
+            data.pop("suggested_patch", None)
+        return data
 
     @field_validator("sources", mode="before")
     @classmethod
