@@ -215,3 +215,25 @@ python scripts/verify_review_reasoning.py --model deepseek-chat   # 换模型
 
 退出码：`0` 门禁全过；`1` 有门禁断言失败；`2` 环境不可用（无密钥 / 认证失败 / 四场景全部失败）。
 两次运行之间无需清理任何文件（脚本不落盘、不写配置、不建临时目录）。
+---
+
+## 8. 已加锁（第一步完成，2026-09-26）
+
+`tests/test_review_wire.py` —— 4 条 **wire 级**断言，钉住本文 §1 记录的现状。
+（说明：该任务原派 codex，因其模型中转持续网络失败无法完成，由主控实现并验证。）
+
+| 用例 | 钉住的现状 |
+|---|---|
+| `test_deepseek_review_wire_disables_thinking` | `response_format: json_object` + `thinking: {type: disabled}` + **不含** `reasoning_effort` + `max_tokens=6144`（能力档案值） |
+| `test_local_ollama_review_wire_forces_think_false` | `think: false`（另一条机制），无 `thinking` 对象、无 `reasoning_effort` |
+| `test_anthropic_review_wire_sends_no_thinking_params` | 不发 `thinking`/`reasoning_effort`（policy 空表 + provider 不看 `structured_output`） |
+| `test_patch_generator_path_wire_snapshot` | 非结构化路径：无 `thinking`/`reasoning_effort` —— **现状快照，不是期望语义**（§1.2 风险项），产品决定统一时先改此断言 |
+
+实现方法：monkeypatch `urllib.request.urlopen`（provider 的真实出网口）捕获请求体，不 mock
+请求构造；anthropic 走 SDK，改用 `client_factory` 捕获传给 provider 的 kwargs。
+
+复跑：`python -m pytest -q --no-cov tests/test_review_wire.py`（4 passed，0.2s）。
+
+**触发第二步的信号**：产品要"可调审查深度"时按 §4.3 实现（`preferences.review_reasoning_effort`
+默认 off），届时本文件的断言按新语义更新（off 档保持不变，low/high/max 出现
+`thinking: enabled` + `reasoning_effort` 且预算随档位增加）。
