@@ -122,10 +122,27 @@
 - provider 已收集 `reasoning_parts` → 后端发 `assistant.reasoning_delta` / `reasoning_done`；TUI **灰色斜体独立区块**，**回复开始后收起**；**绝不混入正文或历史**。
 - **验收**：思考与正文分离；历史里不含思考文本。
 
-### C6 · 思考强度可选
+### C6 · 思考强度可选（**只在实测有效的供应商上开放**）
 
-- `/think off|low|medium|high|max` → `preferences.reasoning_effort` → 请求体透传（provider 已支持）；不支持者静默降级；`/status` 显示档位。
-- **验收**：命令生效并持久化；不支持的供应商不报错。
+**先做的实测（`docs/reasoning-effort-probe.md`）**：DeepSeek `deepseek-flash` 对
+`reasoning_effort` **无实际响应**——同档位两次波动（711 vs 1715 字符）大于档位间差异，
+且**不传参数时反而最高**。API 收下参数但忽略它，最容易被误当成"支持"。
+
+**因此原"五档可选"作废**，改为**能力驱动**：
+
+1. **能力表**：每个 provider 显式声明"是否支持档位 + 参数名"，**默认不支持**。
+   - DeepSeek：❌ 不开放（UI 置灰 + 说明）
+   - MiMo：`variant: minimal|high|max` → ✅ 开放（实现时同样实测确认）
+   - OpenAI 推理系：`reasoning_effort` → ✅ 开放（同上）
+   - 未知/其它：❌ 不开放
+2. **不支持的模型**：`/think` 明确回「当前模型 `<name>` 不支持调整思考强度」，
+   **不假装写入配置**；配置助手对应项置灰。
+3. **支持的模型**：必须**先通过同款实测**（不同档位出现可观察的单调差异）才算支持；
+   `_p5_verify/p6proto/probe_reasoning_effort.py` 可直接扩成验收用例。
+4. **绝不以"API 不报错"作为支持依据**（DeepSeek 是反例）。
+
+- **验收**：在**支持**的模型上，不同档位有可观察差异且命令生效并持久化；
+  在**不支持**的模型上，命令明确说明不支持、配置不被改写、请求体不带该参数。
 
 ---
 
