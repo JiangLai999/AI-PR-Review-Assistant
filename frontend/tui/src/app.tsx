@@ -58,6 +58,17 @@ import {
   type SetupPreset,
   type SlotModelNames,
 } from "./setup-routing"
+import {
+  repoContextChoices,
+  repoContextDescription,
+  repoContextIndexOf,
+  repoContextLabel,
+  repoContextStoredValue,
+  repoContextSummary,
+  repoContextValue,
+  setupRepoContextField,
+  type RepoContextOptions,
+} from "./setup-repo-context"
 import type { InputRenderable, TextareaRenderable, KeyBinding, ScrollBoxRenderable } from "@opentui/core"
 
 const orange = "#fb8147"
@@ -124,6 +135,14 @@ type RuntimeSnapshot = {
   configuration_warnings?: string[]
   /** CHAT/REVIEW 双槽路由快照（config.snapshot / model.status 共用）。 */
   routing?: RoutingSnapshot
+  /**
+   * 仓库上下文档位。同名键后端有两种形状：`config.snapshot` 给纯字符串，
+   * `model.status` 给 `{value, options}`（后者会被 `onApplied` 并进同一个快照对象，
+   * 见 `app.tsx` 的 `setRuntime((current) => ({...current, ...status.result}))`）。
+   * 读取方一律走 `repoContextStoredValue()`；助手预选优先用
+   * `config.options.repo_context.value`，这里只是快照侧的兜底。
+   */
+  repo_context?: string | RepoContextOptions
 }
 
 const BRAND_PIXEL = [
@@ -807,6 +826,8 @@ type SetupOptions = {
   output_formats?: ChoiceOption[]
   chat_layouts?: ChoiceOption[]
   workbench_modes?: ChoiceOption[]
+  /** `{value, options}`：仓库上下文当前值与可选值（后端 REPO_CONTEXT_MODES）。 */
+  repo_context?: RepoContextOptions
   local: LocalSetupOption
   current: {
     runtime_profile?: string
@@ -1175,6 +1196,7 @@ type SetupScreen =
   | "auto_publish"
   | "chat_layout"
   | "workbench"
+  | "repo_context"
   | "summary"
 
 const screenStages: Record<SetupScreen, number> = {
@@ -1196,6 +1218,8 @@ const screenStages: Record<SetupScreen, number> = {
   auto_publish: 5,
   chat_layout: 5,
   workbench: 5,
+  // 仓库上下文三选一（方案 §4.6）：与 workbench 同属第 5 阶段"界面与输出"。
+  repo_context: 5,
   summary: 6,
 }
 
@@ -1226,18 +1250,23 @@ const screenTitles: Record<SetupScreen, string> = {
   auto_publish: "是否自动发布 GitHub 评论",
   chat_layout: "选择 Chat 布局",
   workbench: "选择审查工作台模式",
+  repo_context: "选择仓库上下文",
   summary: "确认并保存",
 }
 
 /**
- * 路由细化页的标题与方框文案（方案 §5.2 #15）。
+ * 双向文案屏幕的标题（方案 §5.2 #15、§4.6）。
  *
- * 助手其余屏幕目前是中文单语（改造前的现状），新增的两屏按 `ui_language` 出中英两版；
- * 其余屏幕保持原文案不动，避免"顺手翻译"改变既有交互的可见文本。
+ * 助手其余屏幕目前是中文单语（改造前的现状），新增的屏幕（路由细化两屏、仓库上下文）
+ * 按 `ui_language` 出中英两版；其余屏幕保持原文案不动，避免"顺手翻译"改变既有交互的
+ * 可见文本。
  */
-const routeScreenTitle = (value: SetupScreen, en: boolean, fallback: string): string => {
+const bilingualScreenTitle = (value: SetupScreen, en: boolean, fallback: string): string => {
   if (value === "route_chat") return en ? "Route detail · chat model" : "路由细化 · 对话模型"
   if (value === "route_review") return en ? "Route detail · review model" : "路由细化 · 审查模型"
+  if (value === "repo_context") {
+    return en ? "Repository context · review prefetch" : "仓库上下文 · 审查预取"
+  }
   return fallback
 }
 
@@ -1249,6 +1278,19 @@ const routeCopy = (en: boolean) => ({
   keys: en
     ? "↑↓ select · Tab/←→ switch box · Enter next · Esc back"
     : "↑↓ 选择 · Tab/←→ 切换方框 · Enter 下一步 · Esc 返回",
+})
+
+/**
+ * 仓库上下文三选一的屏内提示（选项名/说明在 setup-repo-context.ts 里出）。
+ *
+ * 这一屏是普通单选屏：↑↓ 选择、Enter 前进、Esc 取消助手，与 ui_language / output_format
+ * 等屏完全一致（页脚用通用文案，不覆盖）。
+ */
+const repoContextCopy = (en: boolean) => ({
+  // 一行放得下（74 列对话框内容区 68 列）：换行会白吃一行高度，其它屏的提示语同理。
+  hint: en
+    ? "What /review prefetches from the repo as extra model context."
+    : "审查时按此范围预取仓库文件，随 PR 一起送给模型。",
 })
 
 /**
@@ -1281,6 +1323,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
   const [autoPublishIndex, setAutoPublishIndex] = createSignal(1)
   const [chatLayoutIndex, setChatLayoutIndex] = createSignal(0)
   const [workbenchIndex, setWorkbenchIndex] = createSignal(0)
+  const [repoContextIndex, setRepoContextIndex] = createSignal(0)
   const [baseUrl, setBaseUrl] = createSignal("")
   const [apiKey, setApiKey] = createSignal("")
   const [localBaseUrl, setLocalBaseUrl] = createSignal("")
@@ -1311,6 +1354,8 @@ export function SetupWizardDialog(props: SetupDialogProps) {
       { value: "always", label: "常驻 / Always（一直显示工作台）" },
       { value: "off", label: "关闭 / Off（只用一行状态条显示进度）" },
     ]
+  /** 仓库上下文选项：`config.options.repo_context.options` 优先（兜底表在 setup-repo-context.ts）。 */
+  const repoContexts = () => repoContextChoices(options()?.repo_context)
   const local = () => options()?.local
   const selectedRuntime = () =>
     runtimeProfiles()[Math.min(runtimeIndex(), Math.max(0, runtimeProfiles().length - 1))]?.value ??
@@ -1329,6 +1374,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
   const selectedOutputFormat = () => outputFormats()[outputFormatIndex()]?.value ?? "terminal"
   const selectedChatLayout = () => chatLayouts()[chatLayoutIndex()]?.value ?? "compact"
   const selectedWorkbenchMode = () => workbenchModes()[workbenchIndex()]?.value ?? "auto"
+  const selectedRepoContext = () => repoContextValue(repoContexts(), repoContextIndex())
   const autoPublish = () => autoPublishIndex() === 0
   const remoteKeyConfigured = () =>
     options()?.current.remote_api_key_configured ?? options()?.current.api_key_configured ?? false
@@ -1384,6 +1430,9 @@ export function SetupWizardDialog(props: SetupDialogProps) {
   /** 确认页的三行摘要：custom 用实时选择，预设显示该预设的槽位定义。 */
   const routePreview = () => routeSummary(selectedRuntime(), routeSelection(), slotModels(), uiLanguage())
   const routeStageCopy = () => routeCopy(isEn(uiLanguage()))
+  /** 确认页「仓库上下文」行的显示值（双语 label，取自后端选项清单）。 */
+  const repoContextPreview = () =>
+    repoContextSummary(repoContexts(), selectedRepoContext(), uiLanguage())
 
   const indexOfValue = (items: ChoiceOption[], value?: string) => {
     const index = items.findIndex((item) => item.value === value)
@@ -1407,6 +1456,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
     "auto_publish",
     "chat_layout",
     "workbench",
+    "repo_context",
     "summary",
   ]
   const localOrder: SetupScreen[] = [
@@ -1420,6 +1470,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
     "auto_publish",
     "chat_layout",
     "workbench",
+    "repo_context",
     "summary",
   ]
   /**
@@ -1440,6 +1491,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
     "auto_publish",
     "chat_layout",
     "workbench",
+    "repo_context",
     "summary",
   ]
   const order = () => (isCustom() ? customOrder : needsCloud() ? cloudOrder : localOrder)
@@ -1493,6 +1545,9 @@ export function SetupWizardDialog(props: SetupDialogProps) {
         auto_publish_comment: autoPublish(),
         chat_layout: selectedChatLayout(),
         workbench_mode: selectedWorkbenchMode(),
+        // 仓库上下文（方案 §4.6）：显式发送屏幕上这一档；未改动时它就是后端当前值，
+        // 全新配置的当前值 = tests+imports（与后端 DEFAULT_REPO_CONTEXT 一致）。
+        ...setupRepoContextField(selectedRepoContext()),
       }
       if (isCustom()) {
         // 只有 custom 才附带两个槽位（`setupSlotFields` 保证其它预设返回空对象，
@@ -1603,9 +1658,25 @@ export function SetupWizardDialog(props: SetupDialogProps) {
       setWorkbenchIndex(
         indexOfValue(payload.workbench_modes ?? [], payload.current.workbench_mode),
       )
+      // 仓库上下文：预选后端落盘值；值缺失/未知时回落到推荐档（不是清单第一项）。
+      setRepoContextIndex(
+        repoContextIndexOf(
+          repoContextChoices(payload.repo_context),
+          repoContextStoredValue(payload.repo_context?.value ?? props.runtime.repo_context),
+        ),
+      )
       setAutoPublishIndex(payload.current.auto_publish_comment ? 0 : 1)
     } catch (cause) {
       setError(String(cause))
+      // `config.options` 读取失败也要给这一屏定预选：custom 分支只依赖固定的槽位取值，
+      // 读不到 options 也能走到确认页；不定的话序号停在初值 0，保存时会把用户落盘的档位
+      // 悄悄改成清单第一项 off。这里从快照兜底（认不出来就回落到推荐档）。
+      setRepoContextIndex(
+        repoContextIndexOf(
+          repoContextChoices(options()?.repo_context),
+          repoContextStoredValue(props.runtime.repo_context),
+        ),
+      )
     } finally {
       setLoading(false)
     }
@@ -1694,12 +1765,16 @@ export function SetupWizardDialog(props: SetupDialogProps) {
    * 首行并留下上一次的字符残影（确认页云端分支：三行摘要 + 5 行 Provider 明细 + 6 行
    * 通用项 + 提示 + 页脚 = 19 行，实测被截成 12 行）。
    *
-   * 现在按屏幕返回高度：确认页 26（内容 19 ≤ 20），供应商 / 路由细化页 24（≤ 18），
-   * 其余 22（≤ 16）。左/上位置同样做成 accessor，窗口尺寸变化时才会跟着重新居中。
+   * 现在按屏幕返回高度：确认页 28、供应商 / 路由细化页 24（≤ 18），其余 22（≤ 16）。
+   * 左/上位置同样做成 accessor，窗口尺寸变化时才会跟着重新居中。
+   *
+   * 确认页 28 的来由：加了「仓库上下文」一行后云端分支是 2 表头 + 1 间距 + 16 行 + 1 页脚
+   * = 20 行，正好顶到 26 行的内容区上限（26 - 边框 2 - padding 4 = 20），再多一行错误提示
+   * 就会溢出被渲染器静默吞掉首行；28 给内容区 22 行，留 1 行余量。
    */
   const dialogHeight = (): number =>
     screen() === "summary"
-      ? 26
+      ? 28
       : screen() === "provider" || isRouteScreen(screen())
         ? 24
         : 22
@@ -1763,7 +1838,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
       <text fg={orange}>配置助手 // SETUP WIZARD</text>
       <text fg={muted}>
         {screenStages[screen()]}/6 · {stageNames[screenStages[screen()]]} ·{" "}
-        {routeScreenTitle(screen(), isEn(uiLanguage()), screenTitles[screen()])}
+        {bilingualScreenTitle(screen(), isEn(uiLanguage()), screenTitles[screen()])}
       </text>
       <Show when={loading()}><text fg={muted}>读取配置选项中...</text></Show>
       <Show when={!loading() && screen() === "runtime"}>
@@ -2015,6 +2090,33 @@ export function SetupWizardDialog(props: SetupDialogProps) {
           />
         </box>
       </Show>
+      {/*
+        仓库上下文三选一（方案 §4.6）。选项清单/说明来自 setup-repo-context.ts
+        （后端 `config.options.repo_context.options` 优先），键盘模型与上面几屏完全一致：
+        ↑↓ 选择、Enter 下一步、Esc 取消助手——所以页脚沿用通用文案，不做特例。
+      */}
+      <Show when={!loading() && screen() === "repo_context"}>
+        <box marginTop={1} flexGrow={1}>
+          <select
+            options={repoContexts().map((item) => ({
+              name: repoContextLabel(item, uiLanguage()),
+              description: repoContextDescription(item, uiLanguage()),
+              value: item.value,
+            }))}
+            selectedIndex={repoContextIndex()}
+            focused
+            showDescription
+            width="100%"
+            height={8}
+            selectedBackgroundColor="#5a2e1c"
+            selectedTextColor="#ffffff"
+            descriptionColor={muted}
+            selectedDescriptionColor="#ffd0bb"
+            onChange={(index) => setRepoContextIndex(index)}
+          />
+          <text fg={muted}>{repoContextCopy(isEn(uiLanguage())).hint}</text>
+        </box>
+      </Show>
       <Show when={!loading() && screen() === "summary"}>
         <box marginTop={1} flexDirection="column">
           {/* 三行摘要（方案 §4.3 第 6 阶段）：运行模式 + 对话模型 + 审查模型。 */}
@@ -2042,6 +2144,12 @@ export function SetupWizardDialog(props: SetupDialogProps) {
           <text><span style={{ fg: orange }}>输出格式  </span><span style={{ fg: "#eeeeee" }}>{selectedOutputFormat()}</span></text>
           <text><span style={{ fg: orange }}>自动发布  </span><span style={{ fg: "#eeeeee" }}>{autoPublish() ? "是" : "否"}</span></text>
           <text><span style={{ fg: orange }}>Chat 布局 </span><span style={{ fg: "#eeeeee" }}>{selectedChatLayout()}</span></text>
+          {/*
+            仓库上下文行（方案 §4.6）：显示双语 label，而不是 off/tests/tests+imports 裸值。
+            标签走字符串字面量而不是 JSX 文本：JSX 文本节点里的连续空格会被编译器折叠成
+            一个（`"Repo ctx  "` 会退成 `"Repo ctx "`），字面量才保得住对齐用的填充。
+          */}
+          <text><span style={{ fg: orange }}>{isEn(uiLanguage()) ? "Repo ctx  " : "仓库上下文 "}</span><span style={{ fg: "#eeeeee" }}>{repoContextPreview()}</span></text>
           {/* 一行写完：这行原本会长到换行，多出的一行会把确认页挤出高度预算。 */}
           <text fg={muted}>Enter 保存到私有配置；高级项用 pr-review config --advanced。</text>
         </box>

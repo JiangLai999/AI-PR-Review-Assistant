@@ -17,6 +17,8 @@ __pycache__/
 # Per-agent TEMP dirs used by scripts/agent_dispatch_runner.py
 .pytest_claude/
 .pytest_mimo/
+# Agent bus run logs (belt-and-braces: the bus has its own .gitignore too)
+.agent-bus/runs/
 .coverage
 htmlcov/
 
