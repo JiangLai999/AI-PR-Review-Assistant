@@ -1,5 +1,6 @@
 import { createMemo, createSignal, For, Show, onMount, onCleanup } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
+import { SyntaxStyle } from "@opentui/core"
 import { BackendClient } from "./backend"
 import { isCurrentAssistantEvent, isForeignSessionEvent } from "./protocol"
 import { sendWithSessionRecovery } from "./session-recovery"
@@ -75,6 +76,41 @@ const orange = "#fb8147"
 const muted = "#808080"
 const panel = "#1e1e1e"
 const background = "#0a0a0a"
+
+/**
+ * Chat 消息的 Markdown 配色（与像素主题同一组颜色）。
+ *
+ * 背景：TUI 之前把 assistant 回复当**纯文本**渲染，于是 `##`、`**`、`| 表格 |`
+ * 全部原样显示——用户实测反馈"格式不受约束，很影响美观"。OpenTUI（我们已装的
+ * 0.1.101）自带 `MarkdownRenderable`，mimo-code 用的也是它；这里只负责配色，
+ * 语法由渲染器自己处理（`conceal` 默认就隐藏标记符）。
+ *
+ * 只建一次：`SyntaxStyle` 在底层持有 native 资源。
+ */
+let chatMarkdownStyleCache: SyntaxStyle | undefined
+export const chatMarkdownStyle = (): SyntaxStyle => {
+  if (chatMarkdownStyleCache === undefined) {
+    chatMarkdownStyleCache = SyntaxStyle.fromTheme([
+      { scope: ["default"], style: { foreground: "#eeeeee" } },
+      { scope: ["markup.strong"], style: { foreground: "#ffffff", bold: true } },
+      { scope: ["markup.italic"], style: { foreground: "#e8e8e8", italic: true } },
+      { scope: ["markup.raw"], style: { foreground: orange } },
+      { scope: ["markup.strikethrough"], style: { foreground: muted, dim: true } },
+      {
+        scope: ["markup.link", "markup.link.label"],
+        style: { foreground: "#7ec8ff", underline: true },
+      },
+      { scope: ["markup.link.url"], style: { foreground: "#5a9fd4", underline: true } },
+      {
+        scope: ["markup.heading", "markup.heading.1", "markup.heading.2", "markup.heading.3"],
+        style: { foreground: orange, bold: true },
+      },
+      { scope: ["markup.list"], style: { foreground: orange } },
+      { scope: ["markup.quote"], style: { foreground: muted, italic: true } },
+    ])
+  }
+  return chatMarkdownStyleCache
+}
 
 // Requests that must never hang the UI forever. The review budget mirrors the
 // backend's own 30-minute cap with headroom; chat is capped well above the
@@ -3910,13 +3946,49 @@ export function App() {
           <For each={messages()}>{(message) =>
             <box flexDirection="row" gap={1} paddingBottom={1}>
               <text fg={message.role === "user" ? orange : "#eeeeee"}>{message.role === "user" ? ">" : "●"}</text>
-              <text width={Math.max(24, chatContentWidth() - 6)} fg={message.role === "user" ? "#eeeeee" : muted}>{message.content}</text>
+              {/* 用户输入保持纯文本（原样回显）；assistant 回复走 Markdown 渲染，
+                  否则 `##` / `**` / 表格分隔线会原样显示（实测反馈）。 */}
+              <Show
+                when={message.role !== "user"}
+                fallback={
+                  <text width={Math.max(24, chatContentWidth() - 6)} fg="#eeeeee">
+                    {message.content}
+                  </text>
+                }
+              >
+                <markdown
+                  width={Math.max(24, chatContentWidth() - 6)}
+                  content={message.content}
+                  syntaxStyle={chatMarkdownStyle()}
+                  fg={muted}
+                  conceal={true}
+                  tableOptions={{
+                    widthMode: "full",
+                    wrapMode: "word",
+                    borders: true,
+                    cellPadding: 1,
+                  }}
+                />
+              </Show>
             </box>
           }</For>
           <Show when={streamingAssistant()}>
             <box flexDirection="row" gap={1}>
               <text fg={orange}>●</text>
-              <text width={Math.max(24, chatContentWidth() - 6)} fg="#eeeeee">{streamingAssistant()}</text>
+              <markdown
+                width={Math.max(24, chatContentWidth() - 6)}
+                content={streamingAssistant()}
+                syntaxStyle={chatMarkdownStyle()}
+                fg="#eeeeee"
+                conceal={true}
+                streaming={true}
+                tableOptions={{
+                  widthMode: "full",
+                  wrapMode: "word",
+                  borders: true,
+                  cellPadding: 1,
+                }}
+              />
             </box>
           </Show>
         </box>
