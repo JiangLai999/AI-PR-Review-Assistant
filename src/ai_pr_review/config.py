@@ -638,6 +638,9 @@ DEFAULT_SYMBOL_LOCATE = True
 # 打开后每条 critical/high 且证据校验通过的 finding 都会额外发起一次模型调用
 # （真实成本），因此只有用户明确开启才跑；关闭时零构造、零调用。
 DEFAULT_SUGGESTED_PATCH = False
+# 模型目录自动同步开关（docs/chat-experience-plan.md §B2）：配置助手打开时可
+# 拉一次 models.dev；chat/review 等高频路径不触发网络请求。
+DEFAULT_MODEL_CATALOG_FETCH = True
 # 合法闭区间（含端点）；越界一律回退默认值。
 REPO_CONTEXT_MAX_FILES_RANGE: tuple[int, int] = (1, 10)
 REPO_CONTEXT_BUDGET_TOKENS_RANGE: tuple[int, int] = (500, 32000)
@@ -781,6 +784,13 @@ def normalize_suggested_patch(value: object) -> bool:
     )
 
 
+def normalize_model_catalog_fetch(value: object) -> bool:
+    """把任意输入归一化为合法的 ``model_catalog_fetch`` 开关。"""
+    return _normalize_bool_preference(
+        value, field="model_catalog_fetch", default=DEFAULT_MODEL_CATALOG_FETCH
+    )
+
+
 def _normalize_bool_preference(value: object, *, field: str, default: bool) -> bool:
     """布尔偏好项的统一归一化：bool / 0-1 / "true|yes|on" 等字面量，其余回退。"""
     if isinstance(value, bool):
@@ -824,6 +834,8 @@ class PreferencesConfig:
     # L3 修复建议 patch：为 critical/high 且证据校验通过的 finding 生成 unified
     # diff 片段（每条多一次模型调用），默认关闭；只展示、绝不自动提交。
     suggested_patch: bool = DEFAULT_SUGGESTED_PATCH
+    # 模型目录：配置助手打开时可同步一次 models.dev；断网/关闭时回退内置预设。
+    model_catalog_fetch: bool = DEFAULT_MODEL_CATALOG_FETCH
 
     def __post_init__(self) -> None:
         # 属性一旦构造出来就保证合法，加载/导入/向导三条路径因此共用同一套回退规则。
@@ -841,6 +853,7 @@ class PreferencesConfig:
         self.repo_cache_max_mb = normalize_repo_cache_max_mb(self.repo_cache_max_mb)
         self.symbol_locate = normalize_symbol_locate(self.symbol_locate)
         self.suggested_patch = normalize_suggested_patch(self.suggested_patch)
+        self.model_catalog_fetch = normalize_model_catalog_fetch(self.model_catalog_fetch)
 
 
 def _preferences_of(config: object) -> object:
