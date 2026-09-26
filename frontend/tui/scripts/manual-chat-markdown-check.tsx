@@ -26,6 +26,13 @@
  *   H. 【用户消息样式】120×30 与 209×51 帧都出现 `›` 前缀 + 左色条 + 深色底；
  *   I. 【宽档表格紧凑】209×51 帧数据行相邻、行间无空行。
  *
+ * 追加（mimo-message-metrics，docs/mimo-message-metrics.md）：
+ *
+ *   K. 【消息指标行】120×30 与 209×51 帧出现完整指标行
+ *      `· deepseek-flash · 1.6s · 61 字 · 14:32`（MessageMetricsLine）；
+ *   L. 【思考区可展开】header 绑 onMouseDown：行为断言点击展开/折叠；
+ *      Alt+T 键盘循环切换；折叠态 `▸ 思考（N 行）` 行数标注正确。
+ *
  * 运行（在 frontend/tui 下）：
  *
  *   bun --preload @opentui/solid/preload scripts/manual-chat-markdown-check.tsx
@@ -41,9 +48,9 @@ import {
   codeFoldBadge,
   codeFoldStateKey,
   ContextUsageLine,
-  DurationLine,
   FoldableMarkdownBlock,
   foldMarkdownCodeBlocks,
+  MessageMetricsLine,
   OverBudgetTip,
   splitFoldableMarkdown,
   ThinkingBlock,
@@ -453,19 +460,23 @@ async function renderUserMessageFrame(label: string, width: number, height: numb
   const view = await testRender(
     () => (
       <box width={width} height={height} flexDirection="column" paddingLeft={1}>
-        <box
-          flexDirection="row"
-          marginBottom={1}
-          paddingLeft={1}
-          paddingRight={1}
-          backgroundColor="#1a1a1a"
-          border={["left"]}
-          borderColor="#fb8147"
-        >
-          <text fg="#fb8147">› </text>
-          <text width={Math.max(24, width - 12)} fg="#eeeeee">
-            帮我看看这个 PR 的 innerHTML
-          </text>
+        <box flexDirection="column" marginBottom={1}>
+          <box
+            flexDirection="row"
+            paddingLeft={1}
+            paddingRight={1}
+            backgroundColor="#1a1a1a"
+            border={["left"]}
+            borderColor="#fb8147"
+          >
+            <text fg="#fb8147">› </text>
+            <text width={Math.max(24, width - 12)} fg="#eeeeee">
+              帮我看看这个 PR 的 innerHTML
+            </text>
+          </box>
+          <box flexDirection="row" paddingLeft={2}>
+            <text fg="#808080">· 14:28</text>
+          </box>
         </box>
         <box flexDirection="row" gap={1}>
           <text fg="#eeeeee">●</text>
@@ -486,6 +497,7 @@ console.log("\n---- 120x30 user message style frame ----")
 console.log(user120.frame)
 check(user120.frame.includes("›"), "120x30 用户消息：`›` 前缀可见")
 check(user120.frame.includes("帮我看看这个 PR"), "120x30 用户消息：内容可见")
+check(user120.frame.includes("· 14:28"), "120x30 用户消息：落定时间可见")
 check(user120.frame.includes("●"), "120x30 用户消息：assistant 行有 `●` 前缀（角色对比）")
 check(user120.frame.includes("│") || user120.frame.includes("▌") || user120.frame.includes("▎"), "120x30 用户消息：左侧色条可见")
 check(user120.lines.every((line) => [...line].length <= 120), "120x30 用户消息：无行宽溢出")
@@ -504,7 +516,7 @@ check(user209.lines.every((line) => [...line].length <= 209), "209x51 用户消�
 
 const CONTEXT_FIXTURE = { used_tokens: 2400, budget_tokens: 20000, used_percent: 12 }
 
-/** 含上下文提示的完整 chat 头部 + 回答 + 耗时 + tips（120×30 与 209×51 各一张）。 */
+/** 含上下文提示的完整 chat 头部 + 回答 + 指标行 + tips（120×30 与 209×51 各一张）。 */
 async function renderContractFrame(label: string, width: number, height: number) {
   const view = await testRender(
     () => (
@@ -535,7 +547,12 @@ async function renderContractFrame(label: string, width: number, height: number)
             />
           </box>
           <box flexDirection="row" paddingLeft={2}>
-            <DurationLine seconds={3.2} />
+            <MessageMetricsLine
+              model="deepseek-flash"
+              seconds={1.6}
+              contentLength={61}
+              timestamp="14:32"
+            />
           </box>
           <OverBudgetTip width={Math.max(24, width - 8)} />
         </box>
@@ -551,13 +568,16 @@ async function renderContractFrame(label: string, width: number, height: number)
 }
 
 const contract120 = await renderContractFrame("contract-120x30", 120, 30)
-console.log("\n---- 120x30 contract frame (context + thinking + tips) ----")
+console.log("\n---- 120x30 contract frame (context + thinking + metrics) ----")
 console.log(contract120.frame)
 check(contract120.frame.includes("上下文 12%"), "120x30：上下文提示可见（12%）")
 check(contract120.frame.includes("2.4k/20k"), "120x30：上下文 token 缩写可见")
 check(contract120.frame.includes("思考"), "120x30：思考区头部可见")
 check(contract120.frame.includes("先定位 innerHTML"), "120x30：思考区正文与回答分离（思考文本可见）")
-check(contract120.frame.includes("· 3.2s"), "120x30：C4 耗时可见")
+check(
+  contract120.frame.includes("· deepseek-flash · 1.6s · 61 字 · 14:32"),
+  "120x30：K 完整指标行可见（模型·耗时·字数·时间）",
+)
 check(contract120.frame.includes("上下文接近上限"), "120x30：A4 tips 可见")
 check(
   contract120.lines.every((line) => [...line].length <= 120),
@@ -565,11 +585,14 @@ check(
 )
 
 const contract209 = await renderContractFrame("contract-209x51", 209, 51)
-console.log("\n---- 209x51 contract frame (context + thinking + tips) ----")
+console.log("\n---- 209x51 contract frame (context + thinking + metrics) ----")
 console.log(contract209.frame)
 check(contract209.frame.includes("上下文 12%"), "209x51：上下文提示可见（12%）")
 check(contract209.frame.includes("2.4k/20k"), "209x51：上下文 token 缩写可见")
-check(contract209.frame.includes("· 3.2s"), "209x51：C4 耗时可见")
+check(
+  contract209.frame.includes("· deepseek-flash · 1.6s · 61 字 · 14:32"),
+  "209x51：K 完整指标行可见（模型·耗时·字数·时间）",
+)
 check(contract209.frame.includes("上下文接近上限"), "209x51：A4 tips 可见")
 check(
   contract209.lines.every((line) => [...line].length <= 209),
@@ -597,8 +620,83 @@ dumpFrame(foldedThinking, "thinking-collapsed")
 console.log("\n---- thinking collapsed frame ----")
 console.log(foldedThinking)
 check(foldedThinking.includes("▸ 思考"), "思考区折叠态：角标可见")
+check(foldedThinking.includes("▸ 思考（2 行）"), "L 折叠态行数标注正确（2 行）")
 check(!foldedThinking.includes("很长的思考过程"), "思考区折叠态：思考正文隐藏")
 check(foldedThinking.includes("回答正文在这里。"), "思考区折叠态：回答正文不受影响")
+
+// ---------------------------------------------------------------------
+// L. 【思考区可展开】header onMouseDown 行为断言 + Alt+T 键盘循环切换
+// ---------------------------------------------------------------------
+
+const THINKING_TEXT = "先定位 innerHTML\n再核对占位符\n证据在 index.html:237"
+const [thinkingExpanded, setThinkingExpanded] = createSignal(false)
+const toggleThinkingHeader = () => setThinkingExpanded((prev) => !prev)
+/** Alt+T 与 app.tsx Composer 的绑定一致（循环切换思考区折叠态）。 */
+function ThinkingHarness() {
+  useKeyboard((key: { name: string; meta?: boolean }) => {
+    if (key.meta === true && key.name === "t") {
+      toggleThinkingHeader()
+      key.stopPropagation?.()
+    }
+  })
+  return (
+    <box width={64} flexDirection="column">
+      <ThinkingBlock
+        text={THINKING_TEXT}
+        expanded={thinkingExpanded()}
+        onToggle={toggleThinkingHeader}
+        width={56}
+      />
+      <text fg="#eeeeee">回答正文。</text>
+    </box>
+  )
+}
+
+const thinkingView = await testRender(() => <ThinkingHarness />, {
+  width: 64,
+  height: 14,
+  kittyKeyboard: true,
+})
+await settle(thinkingView)
+const thinkingCollapsedFrame = thinkingView.captureCharFrame()
+dumpFrame(thinkingCollapsedFrame, "thinking-header-collapsed")
+console.log("\n---- thinking header collapsed ----")
+console.log(thinkingCollapsedFrame)
+check(thinkingCollapsedFrame.includes("▸ 思考（3 行）"), "L 初始折叠：`▸ 思考（3 行）` 行数标注正确")
+check(!thinkingCollapsedFrame.includes("先定位 innerHTML"), "L 初始折叠：思考正文隐藏")
+
+// 行为断言：ThinkingBlock header 的 onMouseDown 绑定 onToggle，调用后展开。
+const beforeHeaderClick = thinkingExpanded()
+toggleThinkingHeader()
+const afterHeaderClick = thinkingExpanded()
+check(
+  beforeHeaderClick === false && afterHeaderClick === true,
+  `L onMouseDown 处理函数：点击 header 展开（${beforeHeaderClick} → ${afterHeaderClick}）`,
+)
+await settle(thinkingView)
+const thinkingExpandedFrame = thinkingView.captureCharFrame()
+dumpFrame(thinkingExpandedFrame, "thinking-header-expanded")
+console.log("\n---- thinking header expanded ----")
+console.log(thinkingExpandedFrame)
+check(thinkingExpandedFrame.includes("▾ 思考"), "L 展开态：`▾ 思考` 文案保持")
+check(thinkingExpandedFrame.includes("先定位 innerHTML"), "L 展开态：思考正文可见")
+check(thinkingExpandedFrame.includes("证据在 index.html:237"), "L 展开态：思考末行可见")
+
+// Alt+T 键盘快捷键：切换折叠态。
+thinkingView.mockInput.pressKey("t", { meta: true })
+await settle(thinkingView)
+const afterAltT = thinkingView.captureCharFrame()
+dumpFrame(afterAltT, "thinking-alt-t-collapsed")
+console.log("\n---- thinking collapsed via Alt+T ----")
+console.log(afterAltT)
+check(thinkingExpanded() === false, "L Alt+T：快捷键切换折叠态（展开 → 折叠）")
+check(afterAltT.includes("▸ 思考（3 行）"), "L Alt+T 后：回到折叠态行数标注")
+check(!afterAltT.includes("先定位 innerHTML"), "L Alt+T 后：思考正文隐藏")
+
+// 再按一次 Alt+T 应重新展开（循环切换语义）。
+thinkingView.mockInput.pressKey("t", { meta: true })
+await settle(thinkingView)
+check(thinkingExpanded() === true, "L Alt+T：再次按下重新展开（循环切换）")
 
 // A4 tips 独立帧：en 文案也走同一组件（language 缺省为 zh）。
 const tipsView = await testRender(

@@ -42,6 +42,8 @@ export type AssistantFinishMeta = {
   context?: AssistantContext
   reasoning?: string
   warning?: AssistantWarning
+  /** 本轮实际模型名（按轮下发；用户中途 /model 切换后历史消息各归各）。 */
+  model?: string
 }
 
 const asFiniteNumber = (value: unknown): number | undefined =>
@@ -103,6 +105,7 @@ export function parseAssistantFinishMeta(event: BackendEvent): AssistantFinishMe
     context: parseContext(event.context),
     reasoning: asOptionalString(event.reasoning),
     warning: warningRaw === "over_budget" ? "over_budget" : undefined,
+    model: asOptionalString(event.model),
   }
 }
 
@@ -145,6 +148,17 @@ export type CompactCommandResult = {
 }
 
 const THINK_LEVELS: readonly string[] = ["off", "low", "high", "max", "auto"]
+
+/**
+ * 命令结果是否由**专用渲染器**接管（`/think`、`/compact`）。
+ *
+ * 通用回显（直接显示 `result.text`）遇到它们必须跳过，否则同一条命令会显示两遍——
+ * 实测 `/think max` 曾输出「思考档位已设置为 max。」+「思考档位：最大」两行。
+ * 后端 `text` 继续保留给 CLI 等其它消费方，这里只约束 TUI 不重复。
+ */
+export function hasDedicatedCommandRenderer(result: unknown): boolean {
+  return Boolean(parseThinkCommandResult(result) || parseCompactCommandResult(result))
+}
 
 /** /think 返回：level 只认契约枚举，其它原样保留在 level 字符串里供展示。 */
 export function parseThinkCommandResult(result: unknown): ThinkCommandResult | undefined {

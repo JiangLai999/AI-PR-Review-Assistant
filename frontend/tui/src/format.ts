@@ -111,6 +111,66 @@ export function overBudgetTip(language?: string): string {
 }
 
 // ---------------------------------------------------------------------
+// 消息指标行（mimo-message-metrics）：模型 · 耗时 · 输出长度 · 对话时间
+// ---------------------------------------------------------------------
+
+/**
+ * 输出长度段：优先真实 token（`300 tok`），回退 content 字符数（zh `61 字` / en `61 chars`）。
+ * 两项都缺返回空串。token 用 `tok` 缩写（中英一致、省宽度）。
+ */
+export function formatOutputLength(
+  data: { completionTokens?: number; contentLength?: number },
+  language?: string,
+): string {
+  const tokens = data.completionTokens
+  if (typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0) {
+    return `${Math.round(tokens)} tok`
+  }
+  const chars = data.contentLength
+  if (typeof chars === "number" && Number.isFinite(chars) && chars >= 0) {
+    const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+    return `${Math.round(chars)} ${en ? "chars" : "字"}`
+  }
+  return ""
+}
+
+/**
+ * 消息指标行：`· deepseek-flash · 1.6s · 61 字 · 14:32`。
+ * 缺数据的项逐项省略（不显示占位符/0）；全缺返回空串（调用方整段不渲染）。
+ * 顺序固定为 模型 → 耗时 → 输出长度 → 对话时间；分隔符统一 ` · `。
+ */
+export function formatMessageMetrics(
+  data: {
+    model?: string
+    durationSeconds?: number
+    completionTokens?: number
+    contentLength?: number
+    timestamp?: string
+  },
+  language?: string,
+): string {
+  const parts: string[] = []
+  if (data.model) parts.push(data.model)
+  const duration = formatDurationSeconds(data.durationSeconds)
+  if (duration) parts.push(duration)
+  const length = formatOutputLength(data, language)
+  if (length) parts.push(length)
+  if (data.timestamp) parts.push(data.timestamp)
+  return parts.length > 0 ? `· ${parts.join(" · ")}` : ""
+}
+
+/**
+ * 状态栏思考强度角标：`THINK max` / `思考 max`。
+ * 档位用契约原词（off/low/high/max/auto），中英宽度一致可预测。
+ * 字段缺失（旧后端）返回空串，状态栏整段省略。
+ */
+export function formatEffortBadge(level: string | undefined, language?: string): string {
+  if (!level) return ""
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  return `${en ? "THINK" : "思考"} ${level}`
+}
+
+// ---------------------------------------------------------------------
 // C3 · 动画帧（无依赖；2-3 帧循环，teardown 由调用方清定时器）
 // ---------------------------------------------------------------------
 

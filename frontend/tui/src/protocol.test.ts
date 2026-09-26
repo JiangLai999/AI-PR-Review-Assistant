@@ -9,6 +9,7 @@ import {
   parseReasoningDelta,
   parseReviewReasoningOptions,
   parseThinkCommandResult,
+  hasDedicatedCommandRenderer,
 } from "./protocol"
 
 test("foreign-session filter keeps events that carry no session id", () => {
@@ -32,7 +33,7 @@ test("foreign-session filter drops session events once the session is cleared", 
 // 契约 v1 · assistant.finished 元数据（字段缺失时不崩溃、不显示）
 // ---------------------------------------------------------------------
 
-test("finish meta parses duration, usage, context, reasoning and warning", () => {
+test("finish meta parses duration, usage, context, reasoning, warning and model", () => {
   const meta = parseAssistantFinishMeta({
     event: "assistant.finished",
     duration_seconds: 3.25,
@@ -46,12 +47,15 @@ test("finish meta parses duration, usage, context, reasoning and warning", () =>
     },
     reasoning: "先定位再改",
     warning: "over_budget",
+    model: "deepseek-flash",
   })
   expect(meta.durationSeconds).toBe(3.25)
   expect(meta.usage?.total_tokens).toBe(1500)
+  expect(meta.usage?.completion_tokens).toBe(300)
   expect(meta.context?.used_percent).toBe(12)
   expect(meta.reasoning).toBe("先定位再改")
   expect(meta.warning).toBe("over_budget")
+  expect(meta.model).toBe("deepseek-flash")
 })
 
 test("finish meta tolerates missing fields from an older backend", () => {
@@ -61,6 +65,7 @@ test("finish meta tolerates missing fields from an older backend", () => {
   expect(meta.context).toBeUndefined()
   expect(meta.reasoning).toBeUndefined()
   expect(meta.warning).toBeUndefined()
+  expect(meta.model).toBeUndefined()
 })
 
 test("finish meta drops non-finite numbers and unknown warnings", () => {
@@ -75,6 +80,7 @@ test("finish meta drops non-finite numbers and unknown warnings", () => {
   expect(meta.usage).toBeUndefined()
   expect(meta.context).toBeUndefined()
   expect(meta.warning).toBeUndefined()
+  expect(meta.model).toBeUndefined()
 })
 
 test("reasoning delta only yields text for the reasoning event", () => {
@@ -114,6 +120,19 @@ test("think command result reads the backend's `effort` field (contract mismatch
   expect(legacy?.level).toBe("low")
   const both = parseThinkCommandResult({ kind: "think", effort: "max", level: "low" })
   expect(both?.level).toBe("max")
+})
+
+test("dedicated command renderer detection prevents duplicate echo", () => {
+  // 实测缺陷：`/think max` 曾显示两行——后端 text「思考档位已设置为 max。」
+  // 加上专用格式化「思考档位：最大」。这条断言防止通用回显再次重复显示。
+  expect(hasDedicatedCommandRenderer({ kind: "think", state: "set", effort: "high" })).toBe(
+    true,
+  )
+  expect(hasDedicatedCommandRenderer({ kind: "compact", kept_turns: 8 })).toBe(true)
+  // 其它命令（/status、/history…）仍走通用回显，不能被误判。
+  expect(hasDedicatedCommandRenderer({ text: "/status 的普通输出" })).toBe(false)
+  expect(hasDedicatedCommandRenderer({ runs: [] })).toBe(false)
+  expect(hasDedicatedCommandRenderer(undefined)).toBe(false)
 })
 
 test("compact command result keeps token counts and failure emphasis fields", () => {

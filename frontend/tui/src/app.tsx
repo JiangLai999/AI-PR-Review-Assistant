@@ -14,6 +14,7 @@ import {
   parseReasoningDelta,
   parseReviewReasoningOptions,
   parseThinkCommandResult,
+  hasDedicatedCommandRenderer,
   type CustomEndpointOptions,
   type ModelSpecBlock,
   type ModelSpecOptions,
@@ -36,6 +37,8 @@ import {
   formatCompactSummary,
   formatContextUsage,
   formatDurationSeconds,
+  formatEffortBadge,
+  formatMessageMetrics,
   formatModelHeadline,
   formatNeedsVerification,
   formatReviewEffortCost,
@@ -291,6 +294,8 @@ type RuntimeSnapshot = {
   chat_context_budget?: number
   /** 预算来源：config | model_spec | fallback（同上）。 */
   chat_context_budget_source?: string
+  /** chat 思考强度（config.snapshot）。缺字段 = 旧后端，状态栏不显示该段。 */
+  chat_reasoning_effort?: string
 }
 
 const BRAND_PIXEL = [
@@ -319,9 +324,16 @@ export function RuntimeStatusLine(props: {
 }) {
   const routingLabel = () =>
     routingStatusText(props.runtime.routing, props.runtime.ui_language) || (props.runtime.model ?? "model")
+  // 思考强度段：缺字段（旧后端）不显示；窄终端（<90 列）优先砍掉这一段，
+  // 保住路由/在线状态这类运维刚需（降级策略见 docs/mimo-message-metrics.md）。
+  const effortBadge = () =>
+    props.width >= 90
+      ? formatEffortBadge(props.runtime.chat_reasoning_effort, props.runtime.ui_language)
+      : ""
   return (
     <text fg={statusColors[props.status]}>
-      {props.runtime.runtime_profile ?? "RUNTIME"} · {statusLabels[props.status]} · {routingLabel()} ·{" "}
+      {props.runtime.runtime_profile ?? "RUNTIME"} · {statusLabels[props.status]} · {routingLabel()}
+      {effortBadge() ? ` · ${effortBadge()}` : ""} ·{" "}
       {props.runtime.available === false ? "OFFLINE" : props.runtime.available === true ? "ONLINE" : "0.1.0"} ·{" "}
       {props.width}×{props.height}
     </text>
@@ -380,6 +392,12 @@ type ChatMessage = {
   warning?: string
   /** C5 · 思考文本，独立于 content，不写入消息历史正文。 */
   thinking?: string
+  /** 指标行 · 本轮实际模型名（finished.model；缺失时渲染侧回退 runtime.model）。 */
+  model?: string
+  /** 指标行 · 真实输出 token（usage.completion_tokens；缺失回退 content.length）。 */
+  completionTokens?: number
+  /** 指标行 · 消息落定本地时间 HH:MM（用户消息也记，便于回看）。 */
+  timestamp?: string
 }
 
 // ---------------------------------------------------------------------
@@ -421,7 +439,8 @@ export function ThinkingBlock(props: {
       border={["left"]}
       borderColor="#555555"
     >
-      <text fg={muted} attributes={2}>
+      {/* header 可点击展开/折叠（参考代码块角标 onMouseDown 路径）。 */}
+      <text fg={muted} attributes={2} onMouseDown={props.onToggle}>
         {header()}
       </text>
       <Show when={props.expanded}>
@@ -433,12 +452,31 @@ export function ThinkingBlock(props: {
   )
 }
 
-/** C4 · assistant 底部耗时行；duration 缺失返回空（调用方整段隐藏）。 */
-export function DurationLine(props: { seconds: number | undefined; language?: string }) {
-  const text = () => {
-    const formatted = formatDurationSeconds(props.seconds)
-    return formatted ? `· ${formatted}` : ""
-  }
+/**
+ * 消息指标行（DurationLine 升级版）：`· deepseek-flash · 1.6s · 61 字 · 14:32`。
+ * 缺数据的项逐项省略；全缺时不渲染（调用方可不用外层 Show）。
+ * model 缺失时回退 fallbackModel（runtime.model），仍缺则省略该段。
+ */
+export function MessageMetricsLine(props: {
+  model?: string
+  fallbackModel?: string
+  seconds: number | undefined
+  completionTokens?: number
+  contentLength?: number
+  timestamp?: string
+  language?: string
+}) {
+  const text = () =>
+    formatMessageMetrics(
+      {
+        model: props.model || props.fallbackModel,
+        durationSeconds: props.seconds,
+        completionTokens: props.completionTokens,
+        contentLength: props.contentLength,
+        timestamp: props.timestamp,
+      },
+      props.language,
+    )
   return (
     <Show when={text()}>
       <text fg={muted}>{text()}</text>
@@ -885,7 +923,17 @@ function Composer(props: {
         props.onMessage({ role: "assistant", content: response.error?.message ?? "Backend request failed" })
         props.onStatus("ERROR")
       } else {
-        if (text.startsWith("/") && response.result?.text) {
+        // 有专用渲染器的命令（/think、/compact）不在这里做通用回显：
+        // 实测 `/think max` 曾显示两行——后端 text「思考档位已设置为 max。」
+        // 加上下面专用分支的「思考档位：最大」。后端 text 继续保留（CLI 等
+        // 其它消费方仍用它），TUI 侧只负责不重复。
+        const thinkResult = parseThinkCommandResult(response.result)
+        const compactResult = parseCompactCommandResult(response.result)
+        if (
+          text.startsWith("/") &&
+          response.result?.text &&
+          !hasDedicatedCommandRenderer(response.result)
+        ) {
           // §4：/context 结果追加预算来源一行（缺字段时不显示）。
           const budgetInfo = parseContextBudgetInfo(response.result)
           const budgetLine = formatBudgetSource(
@@ -899,7 +947,6 @@ function Composer(props: {
           props.onMessage({ role: "assistant", content })
         }
         // 契约 v1 · /think → kind:"think"：回显档位；unsupported 给置灰说明。
-        const thinkResult = parseThinkCommandResult(response.result)
         if (thinkResult) {
           const language = props.runtime.ui_language
           const body =
@@ -911,7 +958,6 @@ function Composer(props: {
           props.onMessage({ role: "assistant", content: body })
         }
         // 契约 v1 · /compact → kind:"compact"：tokens 与保留轮数；失败强调原历史未变。
-        const compactResult = parseCompactCommandResult(response.result)
         if (compactResult) {
           const language = props.runtime.ui_language
           const body =
@@ -3893,10 +3939,19 @@ export function App() {
   const compactHome = () => dimensions().height < 28
 
   let chatMessageSeq = 0
+  /** 消息落定本地时间 HH:MM（指标行「对话时间」段；用户消息也记，便于回看）。 */
+  const localHHMM = () => {
+    const now = new Date()
+    return `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`
+  }
   const appendMessage = (message: ChatMessage) =>
     setMessages((current) => [
       ...current,
-      { ...message, id: message.id ?? `msg-${(chatMessageSeq += 1)}` },
+      {
+        ...message,
+        id: message.id ?? `msg-${(chatMessageSeq += 1)}`,
+        timestamp: message.timestamp ?? localHHMM(),
+      },
     ])
 
   // ---------------------------------------------------------------------
@@ -3972,6 +4027,8 @@ export function App() {
   // ---------------------------------------------------------------------
   const [codeFoldExpanded, setCodeFoldExpanded] = createSignal<Record<string, boolean>>({})
   const [codeFoldCursor, setCodeFoldCursor] = createSignal(0)
+  // Alt+T 思考区循环游标（与 Alt+L 代码块游标同语义）。
+  const [thinkingCursor, setThinkingCursor] = createSignal(0)
   const isCodeBlockExpanded = (messageKey: string, blockIndex: number) =>
     codeFoldExpanded()[codeFoldStateKey(messageKey, blockIndex)] === true
   const codeFoldTargets = createMemo(() => {
@@ -4001,12 +4058,14 @@ export function App() {
     const key = codeFoldStateKey(messageKey, blockIndex)
     setCodeFoldExpanded((prev) => ({ ...prev, [key]: prev[key] !== true }))
   }
-  // C5 · Alt+T 切换最近一条带思考消息的折叠态（默认落定后折叠）。
+  // C5 · Alt+T 循环切换思考区折叠态（与 Alt+L 代码块循环同语义）。
   const toggleThinking = () => {
-    const withThinking = messages().filter((message) => message.thinking)
-    const latest = withThinking[withThinking.length - 1]
-    if (!latest?.id) return
-    setThinkingExpanded((prev) => ({ ...prev, [latest.id!]: !(prev[latest.id!] ?? false) }))
+    const withThinking = messages().filter((message) => message.thinking && message.id)
+    if (withThinking.length === 0) return
+    const cursor = thinkingCursor() % withThinking.length
+    const target = withThinking[cursor]
+    setThinkingExpanded((prev) => ({ ...prev, [target.id!]: !(prev[target.id!] ?? false) }))
+    setThinkingCursor((cursor + 1) % withThinking.length)
   }
   /** C1: table tier follows the markdown render width (chatContentWidth()-6). */
   const chatMarkdownTableOptions = () => chatTableOptions(Math.max(24, chatContentWidth() - 6))
@@ -4925,6 +4984,8 @@ export function App() {
             durationSeconds: meta.durationSeconds,
             warning: meta.warning,
             thinking: thinking || undefined,
+            model: meta.model,
+            completionTokens: meta.usage?.completion_tokens,
           })
           // 落定后思考区默认折叠（流式期间展开）。
           if (thinking) setThinkingExpanded((prev) => ({ ...prev, [messageKey]: false }))
@@ -5062,20 +5123,27 @@ export function App() {
               fallback={
                 /* 用户输入：左侧橙色色条 + `›` 前缀 + 深色底——与 assistant 的
                    `●` + 纯 markdown 回复一眼区分（实测反馈："用户输入和 AI 输出
-                   内容无法区分"）。`›` 用橙色，正文保持亮灰，zh/en 均成立。 */
-                <box
-                  flexDirection="row"
-                  marginBottom={1}
-                  paddingLeft={1}
-                  paddingRight={1}
-                  backgroundColor="#1a1a1a"
-                  border={["left"]}
-                  borderColor={orange}
-                >
-                  <text fg={orange}>› </text>
-                  <text width={Math.max(24, chatContentWidth() - 12)} fg="#eeeeee">
-                    {message.content}
-                  </text>
+                   内容无法区分"）。`›` 用橙色，正文保持亮灰，zh/en 均成立。
+                   落定时间（HH:MM）跟在气泡下，便于回看对话节奏。 */
+                <box flexDirection="column" marginBottom={1}>
+                  <box
+                    flexDirection="row"
+                    paddingLeft={1}
+                    paddingRight={1}
+                    backgroundColor="#1a1a1a"
+                    border={["left"]}
+                    borderColor={orange}
+                  >
+                    <text fg={orange}>› </text>
+                    <text width={Math.max(24, chatContentWidth() - 12)} fg="#eeeeee">
+                      {message.content}
+                    </text>
+                  </box>
+                  <Show when={message.timestamp}>
+                    <box flexDirection="row" paddingLeft={2}>
+                      <text fg={muted}>· {message.timestamp}</text>
+                    </box>
+                  </Show>
                 </box>
               }
             >
@@ -5110,12 +5178,18 @@ export function App() {
                   tableOptions={chatMarkdownTableOptions()}
                 />
               </box>
-              {/* C4 · 耗时（仅 assistant；缺失不显示）+ A4 超额 tips。 */}
-              <Show when={formatDurationSeconds(message.durationSeconds)}>
-                <box flexDirection="row" paddingLeft={2} paddingBottom={1}>
-                  <DurationLine seconds={message.durationSeconds} language={runtime().ui_language} />
-                </box>
-              </Show>
+              {/* 指标行：模型 · 耗时 · 输出长度 · 时间（缺哪项省哪项）+ A4 超额 tips。 */}
+              <box flexDirection="row" paddingLeft={2} paddingBottom={1}>
+                <MessageMetricsLine
+                  model={message.model}
+                  fallbackModel={runtime().model}
+                  seconds={message.durationSeconds}
+                  completionTokens={message.completionTokens}
+                  contentLength={message.content.length}
+                  timestamp={message.timestamp}
+                  language={runtime().ui_language}
+                />
+              </box>
               <Show when={message.warning === "over_budget"}>
                 <OverBudgetTip language={runtime().ui_language} width={chatContentWidth() - 6} />
               </Show>
@@ -5402,9 +5476,6 @@ export function App() {
     </box>
   )
 }
-
-
-
 
 
 

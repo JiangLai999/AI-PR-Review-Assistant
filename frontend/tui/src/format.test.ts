@@ -12,6 +12,9 @@ import {
   formatCompactSummary,
   formatContextUsage,
   formatDurationSeconds,
+  formatEffortBadge,
+  formatMessageMetrics,
+  formatOutputLength,
   formatReviewEffortCost,
   formatReviewEffortDisabled,
   formatThinkLevel,
@@ -106,6 +109,89 @@ test("overBudgetTip offers zh/en copy mentioning /compact and /new", () => {
   expect(en).toContain("/compact")
   expect(en).toContain("/new")
   expect(en.toLowerCase()).toContain("context")
+})
+
+// ---------------------------------------------------------------------
+// 消息指标行（mimo-message-metrics）：模型 · 耗时 · 输出长度 · 对话时间
+// ---------------------------------------------------------------------
+
+test("formatMessageMetrics renders every segment when all fields are present", () => {
+  expect(
+    formatMessageMetrics(
+      {
+        model: "deepseek-flash",
+        durationSeconds: 1.6,
+        contentLength: 61,
+        timestamp: "14:32",
+      },
+    ),
+  ).toBe("· deepseek-flash · 1.6s · 61 字 · 14:32")
+  expect(
+    formatMessageMetrics(
+      {
+        model: "deepseek-flash",
+        durationSeconds: 1.6,
+        completionTokens: 300,
+        timestamp: "14:32",
+      },
+      "en-US",
+    ),
+  ).toBe("· deepseek-flash · 1.6s · 300 tok · 14:32")
+})
+
+test("formatMessageMetrics prefers completion_tokens over content length", () => {
+  expect(
+    formatMessageMetrics({ completionTokens: 300, contentLength: 61 }).trim(),
+  ).toBe("· 300 tok")
+})
+
+test("formatMessageMetrics omits missing model segment", () => {
+  expect(
+    formatMessageMetrics({ durationSeconds: 1.6, contentLength: 61, timestamp: "14:32" }),
+  ).toBe("· 1.6s · 61 字 · 14:32")
+})
+
+test("formatMessageMetrics omits missing usage by falling back to chars", () => {
+  expect(formatMessageMetrics({ model: "m", contentLength: 61 })).toBe("· m · 61 字")
+  expect(formatMessageMetrics({ model: "m", contentLength: 61 }, "en-US")).toBe("· m · 61 chars")
+})
+
+test("formatMessageMetrics omits missing timestamp segment", () => {
+  expect(
+    formatMessageMetrics({ model: "m", durationSeconds: 2, completionTokens: 10 }),
+  ).toBe("· m · 2.0s · 10 tok")
+})
+
+test("formatMessageMetrics hides zero-length output and non-finite fields", () => {
+  // length 0 is a real value (empty completion) and should still render once present
+  expect(formatMessageMetrics({ completionTokens: 0 })).toBe("· 0 tok")
+  expect(
+    formatMessageMetrics({
+      model: "m",
+      durationSeconds: Number.NaN,
+      completionTokens: Number.POSITIVE_INFINITY,
+      timestamp: "14:32",
+    }),
+  ).toBe("· m · 14:32")
+})
+
+test("formatMessageMetrics returns empty string when every field is missing", () => {
+  expect(formatMessageMetrics({})).toBe("")
+})
+
+test("formatOutputLength labels zh/en char fallback and tok for real tokens", () => {
+  expect(formatOutputLength({ completionTokens: 300, contentLength: 61 })).toBe("300 tok")
+  expect(formatOutputLength({ contentLength: 61 })).toBe("61 字")
+  expect(formatOutputLength({ contentLength: 61 }, "en-US")).toBe("61 chars")
+  expect(formatOutputLength({})).toBe("")
+})
+
+test("formatEffortBadge shows level only when present", () => {
+  expect(formatEffortBadge("max")).toBe("思考 max")
+  expect(formatEffortBadge("max", "en-US")).toBe("THINK max")
+  expect(formatEffortBadge("off")).toBe("思考 off")
+  expect(formatEffortBadge(undefined)).toBe("")
+  expect(formatEffortBadge("")).toBe("")
 })
 
 // ---------------------------------------------------------------------

@@ -545,6 +545,34 @@ async function statusLineCases() {
       expect: /就绪 · deepseek-flash/,
       forbid: /CHAT/,
     },
+    {
+      label: "思考强度段（zh）",
+      runtime: {
+        runtime_profile: "cloud",
+        model: "deepseek-flash",
+        ui_language: "zh-CN",
+        chat_reasoning_effort: "max",
+      },
+      expect: /思考 max/,
+      forbid: /THINK/,
+    },
+    {
+      label: "思考强度段（en）",
+      runtime: {
+        runtime_profile: "cloud",
+        model: "deepseek-flash",
+        ui_language: "en-US",
+        chat_reasoning_effort: "high",
+      },
+      expect: /THINK high/,
+      forbid: /思考/,
+    },
+    {
+      label: "缺 chat_reasoning_effort：不显示思考强度段",
+      runtime: { runtime_profile: "cloud", model: "deepseek-flash", ui_language: "zh-CN" },
+      expect: /就绪 · deepseek-flash/,
+      forbid: /THINK|思考 max|思考 high/,
+    },
   ] as const
 
   for (const item of cases) {
@@ -565,6 +593,38 @@ async function statusLineCases() {
       console.log(`  | ${frame.trim()}`)
     } finally {
       view.renderer.destroy()
+    }
+  }
+
+  // 窄终端降级：width < 90 时思考强度段省略（策略见 docs/mimo-message-metrics.md）。
+  {
+    const narrowView = await testRender(
+      () => (
+        <box width="100%" height="2">
+          <RuntimeStatusLine
+            runtime={{
+              runtime_profile: "cloud",
+              model: "deepseek-flash",
+              ui_language: "zh-CN",
+              chat_reasoning_effort: "max",
+            }}
+            status="READY"
+            width={80}
+            height={24}
+          />
+        </box>
+      ),
+      { width: 80, height: 2 },
+    )
+    try {
+      await narrowView.renderOnce()
+      const frame = narrowView.captureCharFrame()
+      console.log(dumpFrame(frame, "status-窄终端-降级"))
+      check(!/思考|THINK/.test(frame), "窄终端（80 列）：思考强度段省略", frame.trim())
+      check(/deepseek-flash/.test(frame), "窄终端（80 列）：模型路由段保留", frame.trim())
+      console.log(`  | ${frame.trim()}`)
+    } finally {
+      narrowView.renderer.destroy()
     }
   }
 }
