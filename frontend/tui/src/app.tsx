@@ -39,6 +39,7 @@ import {
   formatSourceBadge,
   formatSpecBoundHint,
   formatThinkLevel,
+  formatThinkTransparent,
   formatThinkUnsupported,
   type MarkdownSegment,
   overBudgetTip,
@@ -886,7 +887,9 @@ function Composer(props: {
           const body =
             thinkResult.state === "unsupported"
               ? formatThinkUnsupported(thinkResult.reason, language)
-              : formatThinkLevel(thinkResult.level, language)
+              : thinkResult.state === "transparent"
+                ? formatThinkTransparent(thinkResult.level, thinkResult.reason, language)
+                : formatThinkLevel(thinkResult.level, language)
           props.onMessage({ role: "assistant", content: body })
         }
         // 契约 v1 · /compact → kind:"compact"：tokens 与保留轮数；失败强调原历史未变。
@@ -5291,8 +5294,6 @@ export function App() {
     </box>
   )
 }
-
-
 
 
 

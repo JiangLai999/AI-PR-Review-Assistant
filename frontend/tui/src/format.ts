@@ -165,6 +165,26 @@ export function formatThinkUnsupported(
 }
 
 /**
+ * `/think` 的 **transparent** 态（中转/自定义端点，C 组）：
+ * 档位已写入请求，但只是把 `reasoning_effort` 透传给上游——是否生效取决于上游服务。
+ * 展示档位 + 后端 reason（缺省时给通用提示），避免用户误以为一定生效。
+ */
+export function formatThinkTransparent(
+  level: string | undefined,
+  reason: string | undefined,
+  language?: string,
+): string {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  const base = formatThinkLevel(level, language)
+  const note =
+    reason ||
+    (en
+      ? "Whether it takes effect depends on the upstream provider"
+      : "是否生效取决于上游服务")
+  return `${base} · ${note}`
+}
+
+/**
  * /compact 成功回显：`12.4k → 3.1k · 保留 8 轮`。
  * 缺失字段整段跳过，不编造数字。
  */

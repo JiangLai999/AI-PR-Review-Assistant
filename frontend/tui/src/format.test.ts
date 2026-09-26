@@ -13,6 +13,7 @@ import {
   formatContextUsage,
   formatDurationSeconds,
   formatThinkLevel,
+  formatThinkTransparent,
   formatThinkUnsupported,
   formatTokenCount,
   overBudgetTip,
@@ -135,6 +136,20 @@ test("formatThinkUnsupported prefers the backend reason", () => {
   )
   expect(formatThinkUnsupported(undefined)).toContain("不支持")
   expect(formatThinkUnsupported(undefined, "en-US")).toContain("does not support")
+})
+
+test("formatThinkTransparent shows the level plus an upstream caveat", () => {
+  // 中转/自定义端点：档位已写入请求，但生效与否取决于上游——必须说清楚。
+  expect(formatThinkTransparent("high", undefined)).toBe(
+    "思考档位：高 · 是否生效取决于上游服务",
+  )
+  expect(formatThinkTransparent("high", "depends on api2d upstream")).toBe(
+    "思考档位：高 · depends on api2d upstream",
+  )
+  expect(formatThinkTransparent("high", undefined, "en-US")).toBe(
+    "Thinking level: high · Whether it takes effect depends on the upstream provider",
+  )
+  expect(formatThinkTransparent(undefined, undefined, "en-US")).toContain("—")
 })
 
 test("formatCompactSummary shows before→after tokens and kept turns", () => {
