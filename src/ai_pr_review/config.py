@@ -741,6 +741,10 @@ DEFAULT_WORKBENCH_MODE = "auto"
 
 CHAT_REASONING_EFFORTS: tuple[str, ...] = ("off", "low", "high", "max", "auto")
 DEFAULT_CHAT_REASONING_EFFORT = "auto"
+# 档位 → 思考 token 预算（low/high/max；off/auto 不预留）。两个消费方共用这一份数字，
+# 各写一套迟早漂移：`jsonl_server._chat` 用它预留 `max_tokens`，`services.reasoning_specs`
+# 用它填预算型供应商（anthropic/qwen/siliconflow）的 `budget_tokens`/`thinking_budget`。
+CHAT_REASONING_TOKEN_BUDGETS: dict[str, int] = {"low": 4000, "high": 8000, "max": 12000}
 DEFAULT_CHAT_CONTEXT_BUDGET = 8000
 # `preferences.chat_context_budget` 的合法闭区间。后端推算预算时也用它判断"配置文件里
 # 那个字面量算不算配坏了"——两处各写一套数字迟早漂移（同 CONTEXT_WINDOW_RANGE 的做法）。

@@ -31,6 +31,7 @@ from ai_pr_review.config import (
     CHAT_CONTEXT_BUDGET_RANGE,
     CHAT_SLOT_VALUES,
     CHAT_REASONING_EFFORTS,
+    CHAT_REASONING_TOKEN_BUDGETS,
     CONTEXT_WINDOW_RANGE,
     DEFAULT_CHAT_CONTEXT_BUDGET,
     DEFAULT_CHAT_REASONING_EFFORT,
@@ -59,6 +60,17 @@ from ai_pr_review.services.model_catalog import (
     lookup_in_index,
 )
 from ai_pr_review.services.model_providers.factory import create_model_provider
+# 思考参数规格表（数据源 docs/reasoning-specs-research.md）：`_chat` 按供应商注入、
+# `/think` 按三态（set/transparent/unsupported）回显都用它，两份逻辑不再各写一套映射。
+from ai_pr_review.services.reasoning_specs import (
+    STATE_SET,
+    STATE_TRANSPARENT,
+    STATE_UNSUPPORTED,
+    ReasoningSupport,
+    build_reasoning_params,
+    describe_support,
+    reasoning_support,
+)
 from ai_pr_review.services.repo_context import SOURCE_EXTENSIONS
 from ai_pr_review.services.review_context import (
     DEFAULT_TOKEN_BUDGET,
@@ -290,7 +302,9 @@ CHAT_REPO_FINDING_WINDOW_LINES = 80
 # A3：对话历史窗口（原为硬编码的 40 条）。裁剪时必须明确告知用户，不再静默丢弃。
 CHAT_HISTORY_MESSAGE_LIMIT = 80
 CHAT_COMPACT_KEPT_TURNS = 10
-CHAT_REASONING_TOKEN_BUDGETS: dict[str, int] = {"low": 4000, "high": 8000, "max": 12000}
+# 档位 → 思考 token 预算表已挪到 `config.CHAT_REASONING_TOKEN_BUDGETS`：本模块与
+# `services/reasoning_specs`（预算型供应商的 budget_tokens）共用同一份数字，上面的
+# import 把它带进来，名字保持不变（既有调用点与文档都按这个名字写）。
 # 本地/自建端点（Ollama 等）：不对输出上限做规格封顶，理由见 docs/claude-backend-followup.md §2.3。
 CHAT_LOCAL_PROVIDER_NAMES: frozenset[str] = frozenset({"ollama", "local"})
 # chat 上下文预算的推荐系数与上限（docs/claude-backend-followup.md §4.6）：
@@ -2103,6 +2117,76 @@ class JsonlBackend:
         normalized = str(effort or DEFAULT_CHAT_REASONING_EFFORT).strip().lower()
         return normalized if normalized in CHAT_REASONING_EFFORTS else DEFAULT_CHAT_REASONING_EFFORT
 
+    # 能经 `stream_chat(**kwargs)` 直达请求体的键：OpenAI 兼容 provider 的白名单
+    # （services/model_providers/openai.py 的 `for passthrough_key in ("think",
+    # "reasoning_effort")`）。其余顶层参数（`thinking` / `enable_thinking` /
+    # `thinking_budget` / `reasoning`）走 provider 配置的 `extra_params`。
+    _KWARG_REASONING_KEYS: frozenset[str] = frozenset({"think", "reasoning_effort"})
+
+    def _apply_reasoning_params(
+        self,
+        provider_config: ModelProviderConfig,
+        chat_options: dict[str, Any],
+        params: dict[str, Any],
+    ) -> None:
+        """把规格表算出的思考参数拆到两条既有通道上（不新增 provider 接口）。
+
+        - `think` / `reasoning_effort`：OpenAI 兼容 provider 的 kwargs 白名单，直传；
+        - 其余顶层参数：写进本次 provider 配置的 `extra_params`——OpenAI 兼容 provider
+          （`payload = {..., **self.config.extra_params}`）与 Anthropic provider
+          （`messages.create(**self.config.extra_params)`）都会原样并进请求体。
+
+        `provider_config` 是 `_chat_slot_provider()` 为**本轮**新建的临时对象
+        （`ProviderConfig.to_model_provider()` 每次构造新的 ModelProviderConfig，且不
+        回写 `self.config`），因此这里的写入既不影响落盘配置，也不影响其它槽位。
+        """
+        for key, value in params.items():
+            if key in self._KWARG_REASONING_KEYS:
+                chat_options[key] = value
+            else:
+                provider_config.extra_params[key] = value
+
+    def _think_result(
+        self, support: ReasoningSupport, effort: str, *, query: bool = False
+    ) -> dict[str, Any]:
+        """`/think` 的结果体（契约 v1：`kind`/`state`/`effort` 三个键保持不变）。
+
+        三态（数据源 `services.reasoning_specs`，字段语义见 docs/reasoning-specs.md）：
+
+        - `set`：参数形态明确，档位已生效；
+        - `transparent`：已写入档位，但只是把 `reasoning_effort` 透传给上游，是否生效
+          取决于上游服务（C 组中转/自定义端点）；
+        - `unsupported`：置灰（官方无该参数 / 本地产品决策 / 未收录），**不改档位**，
+          `reason` 给出原因、`doc_url` 给出官方依据（有的话）。
+
+        `query=True` 是"只查询不设置"（`/think` 不带参数）：文案换成当前档位回显。
+        前端 `parseThinkCommandResult` 只读 `state`/`effort`
+        （`reason` 在 unsupported 时优先显示），因此这里可以安全地多带键。
+        """
+        payload: dict[str, Any] = {
+            "kind": "think",
+            "state": support.state,
+            "effort": effort,
+            **describe_support(support.provider),
+        }
+        if support.state == STATE_UNSUPPORTED:
+            reason = support.reason or "该后端未提供思考参数"
+            payload["reason"] = reason
+            payload["text"] = f"当前思考档位不可调：{reason}"
+        elif support.state == STATE_TRANSPARENT:
+            hint = support.reason or "是否生效取决于上游服务"
+            payload["reason"] = hint
+            payload["text"] = (
+                f"当前思考档位：{effort}；{hint}"
+                if query
+                else f"思考档位已设置为 {effort}（{hint}）。"
+            )
+        elif query:
+            payload["text"] = f"当前思考档位：{effort}。\n用法：/think off|low|high|max|auto"
+        else:
+            payload["text"] = f"思考档位已设置为 {effort}。"
+        return payload
+
     def _config_preference_literal(self, field: str, default: Any = None) -> Any:
         """从生效的配置文件里取 `preferences.<field>` 的字面量（读不到返回 `default`）。
 
@@ -2648,7 +2732,6 @@ class JsonlBackend:
         is_local = provider_config.name.lower() in {"ollama", "local"}
         if not provider_config.api_key and not is_local:
             raise RuntimeError(f"Missing API key for provider: {provider_config.name}")
-        provider = create_model_provider(provider_config)
         text = self._truncate(text, 12000)
         # 用户点名了某个仓库文件时，按需把该 run 的 head 提交里的那份内容拉进本轮
         # system prompt（实测：绑定 run 后问"website/js/main.js 里的 tab.html
@@ -2671,26 +2754,40 @@ class JsonlBackend:
         }
         reasoning_effort = self._chat_reasoning_effort()
         reasoning_budget = 0
-        if reasoning_effort == "auto" and is_local:
-            # 本地思考型模型（Qwen3.5 / DeepSeek-R1 系）默认会自动思考：
-            # Ollama 的 OpenAI 兼容端点会忽略 thinking/reasoning_effort
-            # （docs/model-reasoning-probe.md 的 R1/R2 实测），传参只是"尽力而为"；
-            # 真正的兜底是预留预算——实测 12/16 次思考吃满 max_tokens 导致答案为空（R3）。
+        support = reasoning_support(provider_config.name)
+        if is_local:
+            # 本地是**产品决策**下的置灰档位（reasoning_specs：ollama/local 形态 switch、
+            # confidence=product-decision）：不按档位映射，恒发快速模式兜底
+            # `reasoning_effort: "none"` + 预留 `high` 档思考量。Ollama 的 OpenAI 兼容
+            # 端点会忽略该参数（docs/model-reasoning-probe.md 的 R1/R2 实测），传参只是
+            # "尽力而为"；真正的兜底是这份预留——实测思考吃满 max_tokens 时答案恒为空（R3）。
             chat_options["reasoning_effort"] = "none"
-            reasoning_budget = CHAT_REASONING_TOKEN_BUDGETS["high"]
-        elif reasoning_effort == "off":
-            # Qwen3.5 / DeepSeek-R1 style locally hosted models otherwise spend
-            # the whole answer budget in the reasoning channel and return an
-            # empty `content`, which Chat surfaces as a connection failure.
-            chat_options["reasoning_effort"] = "none"
+            if reasoning_effort != "off":
+                reasoning_budget = CHAT_REASONING_TOKEN_BUDGETS["high"]
         elif reasoning_effort != "auto":
-            # Thinking consumes the same completion budget as the answer
-            # (docs/reasoning-effort-probe.md); reserve enough room or the
-            # answer can arrive empty.
-            chat_options["reasoning_effort"] = reasoning_effort
-            reasoning_budget = CHAT_REASONING_TOKEN_BUDGETS[reasoning_effort]
+            # `auto` 的语义是"不碰参数"（现状保持）。其余档位按供应商规格表注入：
+            # unsupported/未收录 → 空 dict（不编造参数），transparent → 透传 reasoning_effort。
+            # 预留（思考与回答共用同一份 completion 额度，docs/reasoning-effort-probe.md）
+            # 只在"真的会思考"的供应商上做：置灰的供应商不要白占额度。
+            if support.injects:
+                reasoning_budget = CHAT_REASONING_TOKEN_BUDGETS.get(reasoning_effort, 0)
+            self._apply_reasoning_params(
+                provider_config,
+                chat_options,
+                build_reasoning_params(
+                    provider_config.name,
+                    reasoning_effort,
+                    # 预算型供应商（Anthropic：budget_tokens < max_tokens）要先知道最终额度，
+                    # 因此这里用与下一行同一个 `_chat_max_tokens`（确定性纯函数）。
+                    max_tokens=self._chat_max_tokens(reasoning_budget=reasoning_budget),
+                    answer_tokens=self.config.ai_client.max_tokens,
+                ),
+            )
         # 预留之后还要过一遍模型规格的 `max_output`（§2）：规格改了，请求体必须跟着变。
         chat_options["max_tokens"] = self._chat_max_tokens(reasoning_budget=reasoning_budget)
+        # provider 在参数定型之后才构造：预算型供应商的 budget_tokens 依赖最终 max_tokens，
+        # 而 provider 与 provider_config 共享同一个配置对象（`_apply_reasoning_params` 的注释）。
+        provider = create_model_provider(provider_config)
         reasoning_parts: list[str] = []
 
         async def capture_reasoning(delta: str) -> None:
@@ -4022,46 +4119,28 @@ class JsonlBackend:
                         if isinstance(raw_args, list)
                         else []
                     )
+                    # 三态由 `reasoning_specs` 判定（供应商级）：set=参数形态明确；
+                    # transparent=透传上游（是否生效取决于上游）；unsupported=置灰
+                    # （官方无该参数 / 本地产品决策 / 未收录），置灰时不写偏好——
+                    # 写进去只会让用户以为"设置成功了"。
+                    provider_config = self._chat_slot_provider()
+                    support = reasoning_support(provider_config.name)
                     if not args:
-                        effort = self._chat_reasoning_effort()
                         result(
-                            {
-                                "kind": "think",
-                                "state": "set",
-                                "effort": effort,
-                                "text": f"当前思考档位：{effort}。\n用法：/think off|low|high|max|auto",
-                            }
+                            self._think_result(
+                                support, self._chat_reasoning_effort(), query=True
+                            )
                         )
+                    elif support.state == STATE_SET or support.state == STATE_TRANSPARENT:
+                        effort = args[0]
+                        if effort not in CHAT_REASONING_EFFORTS:
+                            error("思考档位仅支持 off、low、high、max 或 auto。", "invalid_request")
+                        self.config.preferences.chat_reasoning_effort = effort
+                        self.config.save(self.config_path, save_key=True)
+                        result(self._think_result(support, effort))
                     else:
-                        provider_config = self._chat_slot_provider()
-                        if provider_config.name.lower() in {"ollama", "local"}:
-                            result(
-                                {
-                                    "kind": "think",
-                                    "state": "unsupported",
-                                    # 实测（docs/chat-live-verification.md）：Ollama 的 OpenAI 兼容端点
-                                    # 在**流式**下会响应 think=false；本地恒无思考是产品决策
-                                    # （固定快速模式，2026-09-26 用户裁定"不开放"），不是端点不支持。
-                                    "reason": (
-                                        "本地模型固定使用快速模式（不展示思考），档位不可调；"
-                                        "需要思考强度请切换云端模型"
-                                    ),
-                                }
-                            )
-                        else:
-                            effort = args[0]
-                            if effort not in CHAT_REASONING_EFFORTS:
-                                error("思考档位仅支持 off、low、high、max 或 auto。", "invalid_request")
-                            self.config.preferences.chat_reasoning_effort = effort
-                            self.config.save(self.config_path, save_key=True)
-                            result(
-                                {
-                                    "kind": "think",
-                                    "state": "set",
-                                    "effort": effort,
-                                    "text": f"思考档位已设置为 {effort}。",
-                                }
-                            )
+                        # 置灰：档位保持原值（`effort` 回显当前值，便于前端提示"没变"）。
+                        result(self._think_result(support, self._chat_reasoning_effort()))
                 else:
                     error(f"Unsupported command: {command}", "unsupported_command")
             else:

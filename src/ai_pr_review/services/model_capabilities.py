@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ai_pr_review.services.reasoning_specs import reasoning_support
+
 
 @dataclass(frozen=True, slots=True)
 class ModelCapabilityProfile:
@@ -16,6 +18,15 @@ class ModelCapabilityProfile:
     supports_thinking_disable: bool = False
     reasoning_field: str | None = None
     api_style: str = "custom"
+
+    @property
+    def reasoning_form(self) -> str:
+        """供应商的思考参数形态（`reasoning_specs` 是唯一数据源）。
+
+        做成属性而不是新字段：档案对象的构造点（含测试）都不用改，且不会出现
+        "档案里抄了一份参数形态、规格表里又一份"的漂移。
+        """
+        return reasoning_support(self.provider).form
 
 
 def get_model_capabilities(provider: str, model: str) -> ModelCapabilityProfile:

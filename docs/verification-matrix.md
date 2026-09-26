@@ -48,7 +48,8 @@
 | C5 | 思考内容独立展示（`ThinkingBlock`，落定折叠） | `app.tsx:369`（`ThinkingBlock`）；`protocol.ts:113`（`parseReasoningDelta`） | 契约隔离断言 + manual 帧 | `fa04897`+`1c1a829`；`test_contract_event_sequence_is_legal_and_reasoning_is_isolated`；帧 `frame-thinking-collapsed.txt` | ✅ 已验证 |
 | C5b | 用户消息样式（橙色条 + `›` 前缀 + 深色底） | `app.tsx:4856-4869`（user 分支） | manual 断言（H 组 9 条） | `bd1d358`；帧 `frame-user-message-120x30.txt`/`frame-user-message-209x51.txt` | ✅ 已验证 |
 | C5c | 宽屏表格紧凑化（`cellPadding` 1→0） | `app.tsx:179`（`chatTableOptions` 宽档） | manual 断言（I 组 3 条：行间无空行） | `bd1d358`；帧 `frame-table-209x51.txt` | ✅ 已验证 |
-| C6 | 思考强度可选（`/think off\|low\|high\|max\|auto` + 档位预算预留 + 本地置灰） | `jsonl_server.py:2088`（`_chat_reasoning_effort`）、`:2660-2681`（预算与请求参数）、`:4011`（`/think` 分发）、`:293`（`CHAT_REASONING_TOKEN_BUDGETS`）；`config.py:962`（`normalize_chat_reasoning_effort`） | 契约 stub + **DeepSeek 真机** + 本地置灰用例 | `fa04897`；DeepSeek `c398808`（6/6）；本地 `7a5acae`；`docs/chat-deepseek-live-verification.md` §2/§3 | ⚠️ 部分验证 |
+| C6 | 思考强度可选（`/think off\|low\|high\|max\|auto` + 档位预算预留 + 本地置灰） | `jsonl_server.py:2114`（`_chat_reasoning_effort`）、`:2755-2790`（预算与请求参数）、`:4115`（`/think` 分发）、`:2126`（`_apply_reasoning_params`）、`:2149`（`_think_result`）；`config.py:747`（`CHAT_REASONING_TOKEN_BUDGETS`）、`:962`（`normalize_chat_reasoning_effort`） | 契约 stub + **DeepSeek 真机** + 本地置灰用例 | `fa04897`；DeepSeek `c398808`（6/6）；本地 `7a5acae`；`docs/chat-deepseek-live-verification.md` §2/§3 | ⚠️ 部分验证 |
+| C6b | **供应商差异化思考参数（数据驱动，19 家 + 本地）** | `services/reasoning_specs.py:145`（`REASONING_SPECS`）、`:486`（`reasoning_support`）、`:571`（`build_reasoning_params`）、`:619`（`covered_providers`）；`jsonl_server.py:2126`（两条注入通道 kwargs/`extra_params`）、`:2149`（三态 `set/transparent/unsupported`）；`config.py:747`（预算表单一来源）；`model_capabilities.py:23`（`reasoning_form` 转读规格表） | pytest：`tests/test_reasoning_specs.py` 105 条（19 家 × 四档映射 + unknown 兜底 + Anthropic 预算约束 + transparent）；`tests/test_jsonl_backend.py:5783`（**wire 级** stub `urlopen` 读请求体）、`:6000/:6055/:6080/:6100`（置灰/透传/三态） | 本次任务 `claude-reasoning-specs-impl`（未提交，工作区交付）；数据源 `docs/reasoning-specs-research.md`；实现口径 `docs/reasoning-specs.md`；全量 `python -m pytest -q --no-cov` → **1258 passed, 1 skipped**（2026-09-26，TEMP/TMP=`.pytest_claude`） | ✅ 已验证（文档级；**未做真机验证**，用户裁定） |
 
 ### 组 D · 探测工具
 
@@ -89,6 +90,7 @@
 | 6 | ~~**契约 `context.budget_source`**~~ | ~~不在契约 v1~~ | **已完成（主控，2026-09-26）**：契约扩为六键并同步文档与两处测试；TUI 消费见第 3 条（mimo 进行中） |
 | 7 | **`max_output < 思考预留` 的档位降级** | 只封顶总额度，不自动降档；可能答案被思考挤空 | 产品决策是否自动降档（`docs/claude-backend-followup.md` §6.6）；补 `/think` 反馈文案 |
 | 8 | **manual-route-wizard-check 首测 flaky** | 一次测量 `PASS=104 FAIL=2`，随后三次复跑均 `PASS=107 FAIL=0` | 若 `claude-config-wizard-fix` 收尾后仍偶发，需查焦点/时序；当前以 107/0 为准并记录波动 |
+| 9 | **`/think` 的 `transparent` 态在 TUI 未渲染提示** | 后端已返回 `state:"transparent"` + `reason`（"是否生效取决于上游"）+ `form`/`doc_url`，但 TUI 只区分 `unsupported` 与"其它"（`app.tsx:887`），`transparent` 仍渲染成档位行 | 本次任务明确"不改前端"；前端排期后按 `state === "transparent"` 走一条提示文案（后端字段已就绪，无需再改后端） |
 
 ---
 

@@ -5734,14 +5734,20 @@ def test_think_is_unsupported_for_ollama(monkeypatch: pytest.MonkeyPatch, tmp_pa
     asyncio.run(run())
 
 
-def test_chat_reasoning_effort_is_passed_with_extra_budget(
+def test_chat_reasoning_params_follow_the_provider_spec(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """C6：off 关思考；low/high/max 直传并预留思考 token；auto 不传。
+    """C6 → 数据驱动：档位参数按**供应商规格**注入（`services/reasoning_specs.py`）。
 
-    预留之后还要过模型规格的 `max_output`（§2）：默认后端是 anthropic 预设里的
-    claude-sonnet-4-20250514（`max_output = 8_192`），所以 `4_096 + 12_000` 会被封顶到
-    8_192 —— 改造前这里发的是 16_096，Anthropic 会直接 400（超出模型输出上限）。
+    默认后端是 anthropic 预设里的 claude-sonnet-4-20250514（`max_output = 8_192`）：
+    官方只认 `thinking: {type, budget_tokens}`（调研 §3.1），`reasoning_effort` 对它无效
+    ——正是"界面切换了、参数没生效"的那一类供应商。预算字段走 provider 配置的
+    `extra_params`（OpenAI 兼容与 Anthropic 两家 provider 都会把它并进请求体：
+    openai.py 的 `{**self.config.extra_params}` / anthropic.py 的
+    `messages.create(**self.config.extra_params)`）。
+
+    预留之后还要过模型规格的 `max_output`（§2）：`4_096 + 12_000` 会被封顶到 8_192，
+    再按官方约束 `budget_tokens < max_tokens` 与回答额度收敛。
     """
 
     async def run() -> None:
@@ -5754,15 +5760,80 @@ def test_chat_reasoning_effort_is_passed_with_extra_budget(
 
         await _execute_async(backend, "think", ["off"])
         await backend.handle(_chat_send(session["session_id"]))
-        assert captured["options"]["reasoning_effort"] == "none"
+        # off = thinking disabled（官方关闭方式），不再发 reasoning_effort。
+        assert "reasoning_effort" not in captured["options"]
+        assert captured["config"].extra_params["thinking"] == {"type": "disabled"}
         # off 档没有预留，4_096 本来就在规格之内：请求体与改造前一致。
         assert captured["options"]["max_tokens"] == base_budget
 
         await _execute_async(backend, "think", ["max"])
         await backend.handle(_chat_send(session["session_id"], "again"))
-        assert captured["options"]["reasoning_effort"] == "max"
+        assert "reasoning_effort" not in captured["options"]
+        # 8_192 - 4_096（回答额度）= 4_096 才是留给思考的空间：12_000 的上限被它收敛。
+        assert captured["config"].extra_params["thinking"] == {
+            "type": "enabled",
+            "budget_tokens": 4_096,
+        }
         assert captured["options"]["max_tokens"] == 8_192
         assert captured["options"]["max_tokens"] < base_budget + 12_000
+
+    asyncio.run(run())
+
+
+def test_chat_injects_deepseek_reasoning_params_at_the_wire(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """真 provider + stub `urlopen`：规格表算出的参数必须真的出现在请求体里。
+
+    `_chat` 把参数拆到两条通道——`reasoning_effort` 走 kwargs 白名单，`thinking` 走
+    provider 配置的 `extra_params`；只断言 kwargs 会漏掉后半句，而"参数没生效"正是
+    本次要修的 bug。DeepSeek 四档是**既有行为**（off 关、low/high/max 直传并预留）。
+    """
+
+    async def run() -> None:
+        from ai_pr_review.config import ModelProviderConfig, ProviderConfig
+
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=lambda event: None)
+        backend.config.provider = ProviderConfig.from_model_provider(
+            ModelProviderConfig.from_name(
+                "deepseek", api_key="test-key", model_name="deepseek-flash"
+            )
+        )
+        backend.config._sync_runtime_sections()
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        payloads: list[dict[str, Any]] = []
+
+        class StreamResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __iter__(self):
+                yield b'data: {"choices":[{"delta":{"content":"ok"}}]}\n'
+                yield b"data: [DONE]\n"
+
+        def fake_urlopen(req, **kwargs):
+            payloads.append(json.loads(req.data.decode()))
+            return StreamResponse()
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        base_budget = backend.config.ai_client.max_tokens
+
+        backend.config.preferences.chat_reasoning_effort = "high"
+        response = await backend.handle(_chat_send(session["session_id"]))
+        assert response[0]["ok"] is True
+        assert payloads[0]["thinking"] == {"type": "enabled"}
+        assert payloads[0]["reasoning_effort"] == "high"
+        # 预留照旧（deepseek-flash 的规格上限 384_000 不会封顶）。
+        assert payloads[0]["max_tokens"] == base_budget + 8_000
+
+        backend.config.preferences.chat_reasoning_effort = "off"
+        await backend.handle(_chat_send(session["session_id"], "again"))
+        assert payloads[1]["thinking"] == {"type": "disabled"}
+        assert "reasoning_effort" not in payloads[1]
+        assert payloads[1]["max_tokens"] == base_budget
 
     asyncio.run(run())
 
@@ -5917,8 +5988,144 @@ def test_chat_request_body_is_capped_by_the_model_spec(
 
         await backend.handle(_chat_send(session["session_id"]))
 
-        assert captured["options"]["reasoning_effort"] == "high"
         assert captured["options"]["max_tokens"] == 3_000
+        # anthropic：预算必须 ≥1_024 且 < max_tokens。`max_tokens - 1 = 2_999` 挤不下
+        # high 档的 8_000（回答额度 4_096 也已超过 2_999），退回官方下限 1_024——
+        # 既不发会被 400 拒收的值，也不假装档位没生效。
+        assert captured["config"].extra_params["thinking"]["budget_tokens"] == 1_024
+
+    asyncio.run(run())
+
+
+def test_chat_skips_reasoning_params_for_unsupported_and_unknown_providers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """置灰的供应商不注入任何思考参数，也不预留思考额度（不编造参数）。
+
+    两类：官方文档就没有该参数（baichuan，调研 §3.11）、以及**未收录**的供应商名
+    （规格表查不到 → unknown 兜底，绝不按"看起来像 OpenAI 兼容"就透传）。
+    """
+
+    async def run() -> None:
+        from ai_pr_review.config import AIClientConfig, ModelProviderConfig, ProviderConfig
+
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=lambda event: None)
+        backend.config.provider = ProviderConfig.from_model_provider(
+            ModelProviderConfig.from_name("baichuan", api_key="test-key")
+        )
+        backend.config._sync_runtime_sections()
+        backend.config.preferences.chat_reasoning_effort = "max"
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+        base_budget = backend.config.ai_client.max_tokens
+
+        await backend.handle(_chat_send(session["session_id"]))
+        assert "reasoning_effort" not in captured["options"]
+        assert captured["config"].extra_params == {}
+        assert captured["options"]["max_tokens"] == base_budget  # 没有思考预留
+
+        unknown = JsonlBackend(tmp_path / "unknown.json", event_sink=lambda event: None)
+        unknown.config.ai_client = AIClientConfig(
+            provider="mystery-llm",
+            api_key="relay-key",
+            model="mystery-1",
+            base_url="https://mystery.example.com/v1",
+            api_format="openai",
+        )
+        unknown.config.provider = ProviderConfig.from_model_provider(
+            unknown.config.ai_client.model_provider
+        )
+        unknown.config._sync_runtime_sections()
+        unknown.config.preferences.chat_reasoning_effort = "high"
+        unknown_session = (
+            await unknown.handle({"id": "s", "method": "session.create"})
+        )[0]["result"]
+        captured.clear()
+        _stub_provider(monkeypatch, captured)
+
+        await unknown.handle(_chat_send(unknown_session["session_id"]))
+        assert "reasoning_effort" not in captured["options"]
+        assert captured["config"].extra_params == {}
+        assert captured["options"]["max_tokens"] == base_budget
+
+    asyncio.run(run())
+
+
+def test_chat_passes_reasoning_effort_through_for_relay_providers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """C 组（中转/自定义端点）：无自有思考参数 → 透传 `reasoning_effort`（四档含 off）。"""
+
+    async def run() -> None:
+        backend = _relay_backend_with_spec(tmp_path)
+        backend.config.preferences.chat_reasoning_effort = "high"
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        await backend.handle(_chat_send(session["session_id"]))
+        assert captured["config"].extra_params == {}  # 透传走 kwargs，不占 extra_params
+        assert captured["options"]["reasoning_effort"] == "high"
+        # 透传端点接的常是推理模型：思考额度照旧预留（与改造前的行为一致）。
+        assert captured["options"]["max_tokens"] == 4_096 + 8_000
+
+        backend.config.preferences.chat_reasoning_effort = "off"
+        await backend.handle(_chat_send(session["session_id"], "again"))
+        assert captured["options"]["reasoning_effort"] == "none"
+
+    asyncio.run(run())
+
+
+def test_think_reports_transparent_state_for_relay_providers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`/think` 第三态：透传型端点已切换档位，但必须提示"是否生效取决于上游"。"""
+
+    async def run() -> None:
+        backend = _relay_backend_with_spec(tmp_path)
+        reply = await _execute_async(backend, "think", ["low"])
+        assert reply["ok"] is True
+        result = reply["result"]
+        assert result["kind"] == "think"
+        assert result["state"] == "transparent"
+        assert result["effort"] == "low"  # 契约 v1 字段保持不变（前端读 effort）
+        assert "取决于上游" in result["reason"]
+        payload = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+        assert payload["preferences"]["chat_reasoning_effort"] == "low"
+
+    asyncio.run(run())
+
+
+def test_think_is_unsupported_for_vendors_without_reasoning_params(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """官方文档没有该参数的供应商：置灰 + 给出原因与官方 URL，且不写偏好。"""
+
+    async def run() -> None:
+        from ai_pr_review.config import ModelProviderConfig, ProviderConfig
+
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=lambda event: None)
+        backend.config.provider = ProviderConfig.from_model_provider(
+            ModelProviderConfig.from_name("baichuan", api_key="test-key")
+        )
+        backend.config._sync_runtime_sections()
+
+        reply = await _execute_async(backend, "think", ["max"])
+        assert reply["ok"] is True
+        result = reply["result"]
+        assert result["state"] == "unsupported"
+        assert "thinking/reasoning" in result["reason"]
+        assert result["doc_url"] == "https://platform.baichuan-ai.com/docs"
+        # 置灰时**不落盘**：档位偏好保持原值，连配置文件都不该被写出来。
+        assert not (tmp_path / "config.json").exists()
+
+        # 未收录的供应商名同样置灰（unknown 兜底，不许"猜一个参数"）。
+        backend.config.provider.name = "mystery-llm"
+        backend.config._sync_runtime_sections()
+        unknown = await _execute_async(backend, "think", ["high"])
+        assert unknown["result"]["state"] == "unsupported"
+        assert "未收录" in unknown["result"]["reason"]
 
     asyncio.run(run())
 
