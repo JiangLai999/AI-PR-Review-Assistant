@@ -43,8 +43,10 @@ emit + usage/reasoning 透传）。`config.py` 增加 `chat_reasoning_effort` �
 
 ### 本地模型的预算兜底（主控补充）
 
-实测（`docs/model-reasoning-probe.md`）：Ollama 的 OpenAI 兼容端点会忽略
-`thinking`/`reasoning_effort`，且 12/16 次思考吃满 `max_tokens=2000` 导致**答案为空**。
+实测：本地端点对 `thinking`/`reasoning_effort` 的处理**取决于路径**——非流式被忽略
+（`docs/model-reasoning-probe.md`；且 12/16 次思考吃满 `max_tokens=2000` 导致**答案为空**），
+流式 `think=false` 生效（`docs/chat-live-verification.md`）。产品决策（2026-09-26）：
+本地固定快速模式、不展示思考（`OllamaProvider` 的 `think=False` 保留）。
 因此 `auto` 档 + 本地 provider 时：保留尽力而为的 `reasoning_effort="none"`，
 并额外预留 `CHAT_REASONING_TOKEN_BUDGETS["high"]`（8000）预算，保证答案落地。
 

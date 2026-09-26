@@ -122,25 +122,29 @@ and near the limit you get a `/compact` / `/new` tip.
 
 > **端点收下参数 ≠ 参数生效**：只有 reasoning 长度（或行为）出现可复现的、单调的差异才算生效；否则一律按"忽略"处理。
 
-该文档对本机 Ollama `qwen3.5:4b` 的实测判定是 `NOT-SUPPORTED / none`，因此产品侧把档位**置灰**并说明原因
-（对应返回 `state = "unsupported"`、文案"OpenAI 兼容端点会忽略 reasoning_effort，档位已置灰"），
-而不是假装可以切换。
+该文档对本机 Ollama `qwen3.5:4b` 的**非流式**探测判定是 `NOT-SUPPORTED / none`；后续产品链路
+的**流式**实测（`docs/chat-live-verification.md`）发现 `think=false` 在流式下**生效**。据此产品
+做出明确决策（2026-09-26 用户裁定）：**本地固定快速模式、不展示思考**，档位**置灰**并如实说明
+（`state = "unsupported"`，文案：「本地模型固定使用快速模式（不展示思考），档位不可调；
+需要思考强度请切换云端模型」），而不是假装可以切换。
 
 ### English
 
 `/think` sets the reasoning depth for chat (`preferences.chat_reasoning_effort`, default `auto`,
 persisted to the config). Without arguments it only reports the current level.
 
-**Why the levels are greyed out on local Ollama**: local traffic goes through an OpenAI-compatible
-endpoint that *accepts* `reasoning_effort` and then *ignores* it. `docs/model-reasoning-probe.md`
-concludes:
+**Why the levels are greyed out on local Ollama**: the probe below classified the local model as
+`NOT-SUPPORTED / none` on the **non-streaming** path (`docs/model-reasoning-probe.md`), while a later
+**streaming** measurement (`docs/chat-live-verification.md`) showed `think=false` *does* take effect
+on the wire. The product therefore made an explicit decision (user ruling, 2026-09-26): **local chat
+is fixed to fast mode and never shows thinking**, with the levels greyed out and stated honestly:
 
 > **Accepting a parameter ≠ honouring it** ("端点收下参数 ≠ 参数生效"): a level only counts as effective
 > when reasoning length/behaviour shows a reproducible, monotonic difference; otherwise treat it as ignored.
 
-The probe classified the local Ollama model as `NOT-SUPPORTED / none`, so the UI **greys the levels out
-and says why** (backend returns `state = "unsupported"` with "OpenAI 兼容端点会忽略 reasoning_effort，档位已置灰")
-instead of pretending the switch works.
+The backend returns `state = "unsupported"` with: 「本地模型固定使用快速模式（不展示思考），档位不可调；
+需要思考强度请切换云端模型」 (“Local models run in fast mode and never show thinking; switch to a cloud
+model for reasoning levels.”) instead of pretending the switch works.
 
 | 命令 Command | 用途 Purpose | 用法 Usage | 示例 Example | 注意 Note |
 |---|---|---|---|---|

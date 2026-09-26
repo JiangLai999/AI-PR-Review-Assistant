@@ -85,11 +85,14 @@ async def stream_chat(self, messages, on_delta, **kwargs):
 `think=false` 被忽略（R1 FAIL）——本次证实**流式模式下该参数有效**。
 两处结论都需要保留：**同一参数在流式/非流式路径下行为不同**。
 
-**影响与选项**（改动另开任务，本轮只记录）：
+**影响与决策**（2026-09-26 用户裁定）：
 
-1. 维持现状：本地 chat 不做思考展示（档位已置灰，UI 语义一致），速度优先；
-2. 想开放本地思考展示：把 `setdefault("think", False)` 限定到 routing 调用路径
-   （或由 `_chat` 显式传 `think`），代价是本地回复明显变慢（本轮已观测 46s 级）。
+- **决策：不开放**。本地 chat 固定使用快速模式（`think=False`），不展示思考内容；
+  档位维持置灰，UI 语义一致（看不到思考区即所见即所得）。
+- 依据：开放后本地回复明显变慢（本轮长链题已观测 46s 级），而本地场景的定位是
+  "快速可用"；需要思考强度控制的用户走云端档位（`docs/chat-deepseek-live-verification.md`）。
+- 实现层面无需改动：`OllamaProvider.stream_chat` 的 `setdefault("think", False)`
+  **保留现状**即为该决策；若未来想开放，参考选项 2（把默认值限定到 routing 路径）。
 
 ## 4. 结论
 

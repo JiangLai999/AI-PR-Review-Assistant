@@ -205,8 +205,9 @@ OpenAI 推理系），不支持者 UI 置灰、`/think` 明确说明、请求体
 **四种参数模型**——枚举档位（DeepSeek / OpenAI）、预算制（Anthropic）、
 变体名（MiMo）、开关（Ollama 原生）。统一四档 `off/low/high/max` 由后端映射：
 OpenAI 无 `max` → 就近用 `high`；Anthropic 用 `budget_tokens`（2k/16k/64k）。
-**Ollama 当前走的 OpenAI 兼容端点会忽略 `think`**（实测），因此本地模型默认
-**置灰并说明**，除非改走原生端点。
+**Ollama 走 OpenAI 兼容端点**：非流式探测下 `think` 被忽略（`docs/model-reasoning-probe.md`），
+流式链路下 `think=false` 生效（`docs/chat-live-verification.md`）。产品决策（2026-09-26 用户裁定）：
+本地**固定快速模式（不展示思考）、档位置灰并如实说明**。
 
 - **验收**：① 四档在支持模型上产出**单调差异**且命令生效并持久化；
   ② **答案不为空**（预算预留生效）；③ 不支持的供应商得到明确说明而非假选项。

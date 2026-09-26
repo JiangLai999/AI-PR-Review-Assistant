@@ -5724,7 +5724,9 @@ def test_think_is_unsupported_for_ollama(monkeypatch: pytest.MonkeyPatch, tmp_pa
         reply = await _execute_async(backend, "think", ["max"])
         assert reply["ok"] is True
         assert reply["result"]["state"] == "unsupported"
-        assert "OpenAI 兼容端点会忽略 reasoning_effort" in reply["result"]["reason"]
+        # 2026-09-26 用户裁定"不开放"：本地固定快速模式是产品决策，不是端点限制
+        # （实测流式 think=false 生效，见 docs/chat-live-verification.md）。
+        assert "本地模型固定使用快速模式" in reply["result"]["reason"]
         payload = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
         assert payload["preferences"]["chat_reasoning_effort"] == "auto"
 

@@ -4021,7 +4021,13 @@ class JsonlBackend:
                                 {
                                     "kind": "think",
                                     "state": "unsupported",
-                                    "reason": "OpenAI 兼容端点会忽略 reasoning_effort，档位已置灰",
+                                    # 实测（docs/chat-live-verification.md）：Ollama 的 OpenAI 兼容端点
+                                    # 在**流式**下会响应 think=false；本地恒无思考是产品决策
+                                    # （固定快速模式，2026-09-26 用户裁定"不开放"），不是端点不支持。
+                                    "reason": (
+                                        "本地模型固定使用快速模式（不展示思考），档位不可调；"
+                                        "需要思考强度请切换云端模型"
+                                    ),
                                 }
                             )
                         else:
