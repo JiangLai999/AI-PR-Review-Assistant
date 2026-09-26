@@ -100,9 +100,12 @@ class PostProcessor:
         )
 
     def _default_deduplication_rule(self, finding: Finding) -> Hashable:
+        # 同一文件、同一 10 行桶内视为重复：**刻意不按 category 分桶**。
+        # 实测（PR #31 真实 run）：`website/js/main.js:86` 被写成两条
+        # （high 94% 与 high 80%），只因分类不同就没被合并，报告里看着像
+        # 两个独立缺陷。同位置的两条只会保留更强的那条（见 _is_better_finding）。
         return (
             finding.file,
-            finding.category,
             finding.line_start // 10,
         )
 

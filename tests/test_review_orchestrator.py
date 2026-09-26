@@ -1777,3 +1777,40 @@ class TestFileSystemRepoCache:
         # 干净的路径键不得依赖真实目录结构
         assert not (tmp_path.parent / "evil.py").exists()
         assert not (tmp_path / "evil.py").exists()
+
+
+def test_post_processor_merges_same_location_findings_across_categories() -> None:
+    """实测（PR #31 真实 run）：`website/js/main.js:86` 被写成两条
+    （high 94% 与 high 80%），只因分类不同（security vs ai_analysis）就没有合并，
+    报告里看着像两个独立缺陷。同一文件、同一 10 行桶内只应保留更强的那条。
+    """
+    processor = PostProcessor(PostProcessorConfig(confidence_threshold=0.6))
+
+    def make(category: str, confidence: float, title: str) -> Finding:
+        return Finding(
+            severity="high",
+            category=category,
+            file="website/js/main.js",
+            line_start=86,
+            line_end=86,
+            title=title,
+            problem="innerHTML 直接写入",
+            suggestion="改用 textContent 或白名单清洗",
+            confidence=confidence,
+            code_snippet="docsPanelBody.innerHTML = tab.html;",
+        )
+
+    processed, stats = processor.process_with_stats(
+        ReviewResult(
+            summary="s",
+            findings=[
+                make("security", 0.94, "潜在 HTML 注入"),
+                make("performance", 0.80, "未转义写入"),
+            ],
+        )
+    )
+
+    assert [finding.title for finding in processed.findings] == ["潜在 HTML 注入"]
+    assert stats["duplicates"] == 1
+    assert stats["before"] == 2
+    assert stats["after"] == 1
