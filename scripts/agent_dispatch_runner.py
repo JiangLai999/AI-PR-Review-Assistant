@@ -56,7 +56,8 @@ POLL_SECONDS = 5
 # silent until the end). For those we can detect a genuinely stuck worker as
 # "the log has not grown for N seconds" — a real one was found this way at
 # 21:44-21:52 (0% CPU, no output, no file changes).
-VERBOSE_AGENTS = {"mimo"}
+# 这些 CLI 会持续往 stdout 打进度，因此"日志 N 秒没长"可以判为卡住
+VERBOSE_AGENTS = {"mimo", "codex"}
 STALL_SECONDS = 600
 # 每 N 秒打印一次"日志多久没长"的心跳，便于事后判断卡住检测到底有没有跑
 HEARTBEAT_SECONDS = 120
@@ -68,6 +69,11 @@ CLAUDE_CANDIDATES = (
 MIMO_CANDIDATES = (
     pathlib.Path.home() / ".mimocode/bin/mimo.exe",
     pathlib.Path.home() / ".mimocode/bin/mimo.cmd",
+)
+CODEX_CANDIDATES = (
+    # 用 .cmd：.ps1 不能直接被 subprocess 执行，CMD 包装器在两种 shell 下都可用
+    pathlib.Path(os.environ.get("APPDATA", "")) / "npm/codex.cmd",
+    pathlib.Path(os.environ.get("APPDATA", "")) / "npm/codex.exe",
 )
 
 DISPATCH_PROMPT = """你是 {root} 项目的协作 agent（{agent}）。任务 {task_id} 已经由调度器用你的名义认领。
@@ -149,6 +155,21 @@ def _agent_command(
             "--dangerously-skip-permissions",
             "--dir",
             str(ROOT),
+        ], env
+    if agent == "codex":
+        # `codex exec` 是官方非交互入口；与 claude/mimo 同样跳过确认（本地受控环境，
+        # 任务自带 write_scope 约束）。真实模型由用户的 ~/.codex/config.toml 决定
+        # （当前是 GLM-5.3-Flash + 第三方中转），运行器不覆盖它。
+        exe = _find_exe(CODEX_CANDIDATES, "codex")
+        if exe is None:
+            return None
+        return [
+            exe,
+            "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--cd",
+            str(ROOT),
+            prompt,
         ], env
     return None
 
