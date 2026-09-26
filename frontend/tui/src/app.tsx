@@ -13,7 +13,12 @@ import {
 import { sendWithSessionRecovery } from "./session-recovery"
 import { commandArgumentLabel, commandCompletion, commandDescription, commandEnterAction, commandMatches } from "./command-menu"
 import {
+  codeFoldBadge,
+  codeFoldStateKey,
+  CODE_FOLD_LINE_THRESHOLD,
   cursorFrame,
+  foldableCodeBlocks,
+  foldMarkdownCodeBlocks,
   formatChatHistoryLines,
   formatCompactFailure,
   formatCompactSummary,
@@ -21,11 +26,21 @@ import {
   formatDurationSeconds,
   formatThinkLevel,
   formatThinkUnsupported,
+  type MarkdownSegment,
   overBudgetTip,
+  splitFoldableMarkdown,
   thinkingPlaceholder,
   truncateMiddle,
   workspaceRootLabel,
 } from "./format"
+export {
+  codeFoldBadge,
+  codeFoldStateKey,
+  CODE_FOLD_LINE_THRESHOLD,
+  foldableCodeBlocks,
+  foldMarkdownCodeBlocks,
+  splitFoldableMarkdown,
+}
 import { detailScrollDelta } from "./keymap"
 import {
   demoPanelFromPayload,
@@ -149,96 +164,18 @@ export type ChatTableOptions = {
 export function chatTableOptions(renderWidth: number): ChatTableOptions {
   return renderWidth < CHAT_TABLE_WIDE_BREAKPOINT
     ? { widthMode: "content", cellPadding: 0, wrapMode: "word", borders: true }
-    : { widthMode: "full", cellPadding: 1, wrapMode: "word", borders: true }
+    : // cellPadding 在 @opentui/TextTable 里是单一数字（垂直/水平共用，见
+      // TextTable.js `cellY = rowOffsets + 1 + cellPadding` / `cellLeft = …`），
+      // 无法只保留水平内边距。宽档原来的 cellPadding:1 会在每行数据上下各插
+      // 一行空行，209×51 帧里表格行高膨胀；按 mimo-chat-render-c3 决策改为 0，
+      // 保留 widthMode:"full" 铺满宽度。
+      { widthMode: "full", cellPadding: 0, wrapMode: "word", borders: true }
 }
 
-// ---------------------------------------------------------------------
-// C2 · 长代码块折叠（docs/mimo-chat-render-c.md）
-// >15 行的围栏代码块默认只渲染前 15 行，块内末尾给角标 `▸ 展开（共 M 行）`；
-// 展开后渲染全文并给 `▾ 收起`。短块（≤15 行）原样保留。
-// ---------------------------------------------------------------------
-export const CODE_FOLD_LINE_THRESHOLD = 15
-
-export function codeFoldBadge(lineCount: number, expanded: boolean): string {
-  return expanded ? "▾ 收起" : `▸ 展开（共 ${lineCount} 行）`
-}
-
-/** Fold state key: message id + code-block index inside that message. */
-export function codeFoldStateKey(messageKey: string, blockIndex: number): string {
-  return `${messageKey}#${blockIndex}`
-}
-
-export type FoldableCodeBlock = { index: number; lineCount: number }
-
-/**
- * 围栏代码块扫描：`index` 是消息内第几个代码块（从 0 起，短块也计数），
- * `lineCount` 是块体行数。折叠状态按「消息 id + 块序号」对齐。
- */
-export function foldableCodeBlocks(content: string): FoldableCodeBlock[] {
-  const lines = content.split("\n")
-  const blocks: FoldableCodeBlock[] = []
-  let blockIndex = 0
-  let i = 0
-  while (i < lines.length) {
-    if (!/^```/.test(lines[i])) {
-      i += 1
-      continue
-    }
-    const body: string[] = []
-    let j = i + 1
-    while (j < lines.length && !/^```[ \t]*$/.test(lines[j])) {
-      body.push(lines[j])
-      j += 1
-    }
-    if (body.length > CODE_FOLD_LINE_THRESHOLD) {
-      blocks.push({ index: blockIndex, lineCount: body.length })
-    }
-    blockIndex += 1
-    i = j < lines.length ? j + 1 : lines.length
-  }
-  return blocks
-}
-
-/**
- * 按展开状态重写 markdown：长块截到阈值行并在块内末尾加角标。
- * `isExpanded` 收到块序号（与 `foldableCodeBlocks` 的 index 一致）。
- */
-export function foldMarkdownCodeBlocks(
-  content: string,
-  isExpanded: (blockIndex: number) => boolean,
-): string {
-  const lines = content.split("\n")
-  const out: string[] = []
-  let blockIndex = 0
-  let i = 0
-  while (i < lines.length) {
-    const open = lines[i]
-    if (!/^```/.test(open)) {
-      out.push(open)
-      i += 1
-      continue
-    }
-    const body: string[] = []
-    let j = i + 1
-    while (j < lines.length && !/^```[ \t]*$/.test(lines[j])) {
-      body.push(lines[j])
-      j += 1
-    }
-    const closed = j < lines.length
-    const idx = blockIndex
-    blockIndex += 1
-    if (body.length > CODE_FOLD_LINE_THRESHOLD) {
-      const expanded = isExpanded(idx)
-      const visible = expanded ? body : body.slice(0, CODE_FOLD_LINE_THRESHOLD)
-      out.push(open, ...visible, codeFoldBadge(body.length, expanded))
-    } else {
-      out.push(open, ...body)
-    }
-    if (closed) out.push(lines[j])
-    i = closed ? j + 1 : lines.length
-  }
-  return out.join("\n")
-}
+// C2 · 长代码块折叠的纯函数（CODE_FOLD_LINE_THRESHOLD / codeFoldBadge /
+// codeFoldStateKey / foldableCodeBlocks / foldMarkdownCodeBlocks /
+// splitFoldableMarkdown）已迁至 format.ts，便于 format.test.ts 直接覆盖；
+// 本文件从 "./format" 导入并 re-export，scripts/manual-*.tsx 的既有导入路径不变。
 
 
 // Requests that must never hang the UI forever. The review budget mirrors the
@@ -482,6 +419,80 @@ export function ContextUsageLine(props: {
     <Show when={label()}>
       <text fg={muted}>{label()}</text>
     </Show>
+  )
+}
+
+/**
+ * C3 批次 · 可折叠 markdown 正文（方案 A：角标可点击）。
+ * `splitFoldableMarkdown` 把正文切成「markdown 段 + 角标位」；可折叠代码块
+ * 自成一段（`foldable: true` → renderNode 去掉块尾 marginBottom），角标作为
+ * 独立 `<text onMouseDown>` 紧跟其后，视觉上仍是块尾角标。Alt+L 走上层
+ * Composer 的 `onToggleCodeFold`（无障碍键盘路径保留）。
+ */
+export function FoldableMarkdownBlock(props: {
+  content: string
+  messageKey: string
+  isExpanded: (blockIndex: number) => boolean
+  onToggleAt: (messageKey: string, blockIndex: number) => void
+  width: number
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  syntaxStyle: any
+  fg: string
+  bulletFg: string
+  streaming?: boolean
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tableOptions: any
+}) {
+  return (
+    <box flexDirection="column">
+      <For each={splitFoldableMarkdown(props.content, props.isExpanded)}>
+        {(seg, index) =>
+          seg.kind === "markdown" ? (
+            <box flexDirection="row" gap={1}>
+              {/* 首段用 `●` 项目符号；后续段用 1 格占位，gap=1 使 markdown
+                  起点与首段对齐（● 占 1 格）。 */}
+              {index() === 0 ? <text fg={props.bulletFg}>●</text> : <text width={1}> </text>}
+              <markdown
+                width={props.width}
+                content={seg.content}
+                syntaxStyle={props.syntaxStyle}
+                fg={props.fg}
+                conceal={true}
+                streaming={props.streaming}
+                // 代码块加一层底色 + 左内边距，形成"代码框"观感。
+                // foldable 段去掉 marginBottom，让块尾角标贴住代码块。
+                renderNode={(token, ctx) => {
+                  if (token.type !== "code") return undefined
+                  const code = ctx.defaultRender()
+                  if (code) {
+                    const styled = code as {
+                      bg?: string
+                      paddingLeft?: number
+                      marginBottom?: number
+                    }
+                    styled.bg = "#141414"
+                    styled.paddingLeft = 1
+                    styled.marginBottom = seg.foldable ? 0 : 1
+                  }
+                  return code
+                }}
+                tableOptions={props.tableOptions}
+              />
+            </box>
+          ) : (
+            // paddingLeft=2 与代码块内文字对齐（markdown 起点 1 + code paddingLeft 1）。
+            <box flexDirection="row" paddingLeft={2}>
+              <text
+                onMouseDown={() => props.onToggleAt(props.messageKey, seg.blockIndex)}
+                fg={muted}
+              >
+                {codeFoldBadge(seg.lineCount, seg.expanded)}
+              </text>
+            </box>
+          )
+        }
+      </For>
+    </box>
   )
 }
 
@@ -3292,6 +3303,11 @@ export function App() {
     setCodeFoldExpanded((prev) => ({ ...prev, [key]: prev[key] !== true }))
     setCodeFoldCursor((cursor + 1) % targets.length)
   }
+  /** 角标鼠标点击：直接切换指定块，不走 Alt+L 的游标循环。 */
+  const toggleCodeFoldAt = (messageKey: string, blockIndex: number) => {
+    const key = codeFoldStateKey(messageKey, blockIndex)
+    setCodeFoldExpanded((prev) => ({ ...prev, [key]: prev[key] !== true }))
+  }
   // C5 · Alt+T 切换最近一条带思考消息的折叠态（默认落定后折叠）。
   const toggleThinking = () => {
     const withThinking = messages().filter((message) => message.thinking)
@@ -4351,8 +4367,9 @@ export function App() {
             <Show
               when={message.role !== "user"}
               fallback={
-                /* 用户输入：深色底 + 橙色左框线——与 assistant 的纯文本回复一眼区分
-                   （实测反馈："用户输入和 AI 输出内容无法区分"）。 */
+                /* 用户输入：左侧橙色色条 + `›` 前缀 + 深色底——与 assistant 的
+                   `●` + 纯 markdown 回复一眼区分（实测反馈："用户输入和 AI 输出
+                   内容无法区分"）。`›` 用橙色，正文保持亮灰，zh/en 均成立。 */
                 <box
                   flexDirection="row"
                   marginBottom={1}
@@ -4362,7 +4379,8 @@ export function App() {
                   border={["left"]}
                   borderColor={orange}
                 >
-                  <text width={Math.max(24, chatContentWidth() - 10)} fg="#eeeeee">
+                  <text fg={orange}>› </text>
+                  <text width={Math.max(24, chatContentWidth() - 12)} fg="#eeeeee">
                     {message.content}
                   </text>
                 </box>
@@ -4383,30 +4401,19 @@ export function App() {
                   width={chatContentWidth() - 6}
                 />
               </Show>
-              <box flexDirection="row" gap={1} paddingBottom={1}>
-                <text fg="#eeeeee">●</text>
-                <markdown
+              {/* C3 批次 · 方案 A：角标拆出为独立 onMouseDown 元素，Alt+L 保留。 */}
+              <box flexDirection="column" paddingBottom={1}>
+                <FoldableMarkdownBlock
+                  content={message.content}
+                  messageKey={message.id ?? "unknown"}
+                  isExpanded={(blockIndex) =>
+                    isCodeBlockExpanded(message.id ?? "unknown", blockIndex)
+                  }
+                  onToggleAt={toggleCodeFoldAt}
                   width={Math.max(24, chatContentWidth() - 6)}
-                  content={foldMarkdownCodeBlocks(message.content, (blockIndex) =>
-                    isCodeBlockExpanded(message.id ?? "unknown", blockIndex),
-                  )}
                   syntaxStyle={chatMarkdownStyle()}
                   fg={muted}
-                  conceal={true}
-                  // 代码块加一层底色 + 左内边距，形成"代码框"观感。
-                  // Renderable 的 border 只能在构造时给，拿不到 ctx，所以用
-                  // bg/padding 表达（bg 在 CodeRenderable 上有 setter）。
-                  renderNode={(token, ctx) => {
-                    if (token.type !== "code") return undefined
-                    const code = ctx.defaultRender()
-                    if (code) {
-                      const styled = code as { bg?: string; paddingLeft?: number; marginBottom?: number }
-                      styled.bg = "#141414"
-                      styled.paddingLeft = 1
-                      styled.marginBottom = 1
-                    }
-                    return code
-                  }}
+                  bulletFg="#eeeeee"
                   tableOptions={chatMarkdownTableOptions()}
                 />
               </box>
@@ -4445,20 +4452,18 @@ export function App() {
                   </box>
                 }
               >
-                <box flexDirection="row" gap={1}>
-                  <text fg={orange}>●</text>
-                  <markdown
-                    width={Math.max(24, chatContentWidth() - 6)}
-                    content={foldMarkdownCodeBlocks(streamingAssistant(), (blockIndex) =>
-                      isCodeBlockExpanded("streaming", blockIndex),
-                    )}
-                    syntaxStyle={chatMarkdownStyle()}
-                    fg="#eeeeee"
-                    conceal={true}
-                    streaming={true}
-                    tableOptions={chatMarkdownTableOptions()}
-                  />
-                </box>
+                <FoldableMarkdownBlock
+                  content={streamingAssistant()}
+                  messageKey="streaming"
+                  isExpanded={(blockIndex) => isCodeBlockExpanded("streaming", blockIndex)}
+                  onToggleAt={toggleCodeFoldAt}
+                  width={Math.max(24, chatContentWidth() - 6)}
+                  syntaxStyle={chatMarkdownStyle()}
+                  fg="#eeeeee"
+                  bulletFg={orange}
+                  streaming={true}
+                  tableOptions={chatMarkdownTableOptions()}
+                />
                 {/* C3 · 流式正文末尾闪烁光标（2-3 帧循环）。 */}
                 <box flexDirection="row" paddingLeft={2}>
                   <text fg={orange} attributes={1}>

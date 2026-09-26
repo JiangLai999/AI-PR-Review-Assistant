@@ -202,6 +202,176 @@ export function formatCompactFailure(
     : `${detail} — 原历史未变`
 }
 
+// ---------------------------------------------------------------------
+// C2 · 长代码块折叠（docs/mimo-chat-render-c.md / mimo-chat-render-c3.md）
+// 纯函数，便于单测；app.tsx 负责状态与 JSX 接线。
+// ---------------------------------------------------------------------
+
+/** >15 行的围栏代码块默认折叠。 */
+export const CODE_FOLD_LINE_THRESHOLD = 15
+
+/** 角标文案（zh 固定，与 en UI 提示分离；用户指定文案不变）。 */
+export function codeFoldBadge(lineCount: number, expanded: boolean): string {
+  return expanded ? "▾ 收起" : `▸ 展开（共 ${lineCount} 行）`
+}
+
+/** Fold state key: message id + code-block index inside that message. */
+export function codeFoldStateKey(messageKey: string, blockIndex: number): string {
+  return `${messageKey}#${blockIndex}`
+}
+
+export type FoldableCodeBlock = { index: number; lineCount: number }
+
+/**
+ * 围栏代码块扫描：`index` 是消息内第几个代码块（从 0 起，短块也计数），
+ * `lineCount` 是块体行数。折叠状态按「消息 id + 块序号」对齐。
+ */
+export function foldableCodeBlocks(content: string): FoldableCodeBlock[] {
+  const lines = content.split("\n")
+  const blocks: FoldableCodeBlock[] = []
+  let blockIndex = 0
+  let i = 0
+  while (i < lines.length) {
+    if (!/^```/.test(lines[i])) {
+      i += 1
+      continue
+    }
+    const body: string[] = []
+    let j = i + 1
+    while (j < lines.length && !/^```[ \t]*$/.test(lines[j])) {
+      body.push(lines[j])
+      j += 1
+    }
+    if (body.length > CODE_FOLD_LINE_THRESHOLD) {
+      blocks.push({ index: blockIndex, lineCount: body.length })
+    }
+    blockIndex += 1
+    i = j < lines.length ? j + 1 : lines.length
+  }
+  return blocks
+}
+
+/**
+ * 按展开状态重写 markdown：长块截到阈值行并在块内末尾加角标。
+ * `isExpanded` 收到块序号（与 `foldableCodeBlocks` 的 index 一致）。
+ */
+export function foldMarkdownCodeBlocks(
+  content: string,
+  isExpanded: (blockIndex: number) => boolean,
+): string {
+  const lines = content.split("\n")
+  const out: string[] = []
+  let blockIndex = 0
+  let i = 0
+  while (i < lines.length) {
+    const open = lines[i]
+    if (!/^```/.test(open)) {
+      out.push(open)
+      i += 1
+      continue
+    }
+    const body: string[] = []
+    let j = i + 1
+    while (j < lines.length && !/^```[ \t]*$/.test(lines[j])) {
+      body.push(lines[j])
+      j += 1
+    }
+    const closed = j < lines.length
+    const idx = blockIndex
+    blockIndex += 1
+    if (body.length > CODE_FOLD_LINE_THRESHOLD) {
+      const expanded = isExpanded(idx)
+      const visible = expanded ? body : body.slice(0, CODE_FOLD_LINE_THRESHOLD)
+      out.push(open, ...visible, codeFoldBadge(body.length, expanded))
+    } else {
+      out.push(open, ...body)
+    }
+    if (closed) out.push(lines[j])
+    i = closed ? j + 1 : lines.length
+  }
+  return out.join("\n")
+}
+
+// ---------------------------------------------------------------------
+// C3 批次 · 角标可点击：markdown 分段 + 块尾角标位置
+// 把可折叠代码块的角标从 markdown 内容中拆出，渲染为独立的
+// `<text onMouseDown>` 元素（方案 A）。`foldMarkdownCodeBlocks` 仍保留
+// 纯字符串路径供兼容/对照，但 app.tsx 的聊天渲染改走本分段函数。
+// ---------------------------------------------------------------------
+
+export type MarkdownSegment =
+  | { kind: "markdown"; content: string; foldable?: boolean }
+  | {
+      kind: "foldBadge"
+      blockIndex: number
+      lineCount: number
+      expanded: boolean
+    }
+
+/**
+ * 把 markdown 切成「正文段 + 角标位」序列：
+ * - 可折叠长代码块 → 自成一段 markdown（截断/展开，**不含**角标，`foldable: true`），
+ *   其后紧跟一个 `foldBadge` 段；调用方把 `foldBadge` 渲染成独立可点击 `<text>`。
+ *   `foldable` 让 renderNode 去掉块尾 marginBottom，角标才能贴住块尾（方案 A）。
+ * - 短块与其它内容留在 markdown 流里，不打断分段。
+ * - 空段不会产生（首/尾/连续折叠块都能正确处理）。
+ */
+export function splitFoldableMarkdown(
+  content: string,
+  isExpanded: (blockIndex: number) => boolean,
+): MarkdownSegment[] {
+  const lines = content.split("\n")
+  const segments: MarkdownSegment[] = []
+  let buffer: string[] = []
+  let blockIndex = 0
+  let i = 0
+
+  const flushMarkdown = () => {
+    if (buffer.length > 0) {
+      segments.push({ kind: "markdown", content: buffer.join("\n") })
+      buffer = []
+    }
+  }
+
+  while (i < lines.length) {
+    const open = lines[i]
+    if (!/^```/.test(open)) {
+      buffer.push(open)
+      i += 1
+      continue
+    }
+    const body: string[] = []
+    let j = i + 1
+    while (j < lines.length && !/^```[ \t]*$/.test(lines[j])) {
+      body.push(lines[j])
+      j += 1
+    }
+    const closed = j < lines.length
+    const idx = blockIndex
+    blockIndex += 1
+    if (body.length > CODE_FOLD_LINE_THRESHOLD) {
+      flushMarkdown()
+      const expanded = isExpanded(idx)
+      const visible = expanded ? body : body.slice(0, CODE_FOLD_LINE_THRESHOLD)
+      const blockLines = [open, ...visible]
+      if (closed) blockLines.push(lines[j])
+      segments.push({ kind: "markdown", content: blockLines.join("\n"), foldable: true })
+      segments.push({
+        kind: "foldBadge",
+        blockIndex: idx,
+        lineCount: body.length,
+        expanded,
+      })
+    } else {
+      buffer.push(open, ...body)
+      if (closed) buffer.push(lines[j])
+    }
+    i = closed ? j + 1 : lines.length
+  }
+  flushMarkdown()
+  return segments
+}
+
 /**
  * /history 对话消息列表：行首序号 + 角色标签 + 截断正文。
  * 与 /history --runs 的审查列表（对话框 select）视觉区分：这是纯文本序号列表。

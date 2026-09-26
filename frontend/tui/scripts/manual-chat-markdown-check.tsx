@@ -1,5 +1,5 @@
 /**
- * Chat Markdown 渲染的文本证据脚本（任务 mimo-chat-render-c）。
+ * Chat Markdown 渲染的文本证据脚本（任务 mimo-chat-render-c / -c3）。
  *
  * 背景（用户实测反馈）：TUI 之前把 assistant 回复当**纯文本**渲染，于是
  * `##`、`**`、`| 表格 |` 全部原样显示，很影响观感。现在改用 OpenTUI 自带的
@@ -14,10 +14,17 @@
  * 追加（C1/C2，docs/mimo-chat-render-c.md）：
  *
  *   E. 【C1 表格分档】同一张 3 列表格在 120x30（窄档 <100 列 →
- *      content/cellPadding 0）与 209x51（宽档 ≥100 列 → full/cellPadding 1）
- *      都不溢出、也不过留白；
+ *      content/cellPadding 0）与 209x51（宽档 ≥100 列 → full/cellPadding 0，
+ *      见 mimo-chat-render-c3 紧凑化决策）都不溢出、也不过留白；
  *   F. 【C2 代码折叠】30 行代码块默认只渲染前 15 行 + `▸ 展开（共 30 行）`，
  *      不出现第 16 行内容；Alt+L 切开后全文可见并给出 `▾ 收起`；短块不变。
+ *
+ * 追加（C3 批次，docs/mimo-chat-render-c3.md）：
+ *
+ *   G. 【角标可点击】折叠角标是独立 `<text onMouseDown>` 元素（方案 A）；
+ *      对 onMouseDown 处理函数做行为断言：调用后折叠态翻转、帧内容切换；
+ *   H. 【用户消息样式】120×30 与 209×51 帧都出现 `›` 前缀 + 左色条 + 深色底；
+ *   I. 【宽档表格紧凑】209×51 帧数据行相邻、行间无空行。
  *
  * 运行（在 frontend/tui 下）：
  *
@@ -31,11 +38,14 @@ import { join } from "node:path"
 import {
   chatMarkdownStyle,
   chatTableOptions,
+  codeFoldBadge,
   codeFoldStateKey,
   ContextUsageLine,
   DurationLine,
+  FoldableMarkdownBlock,
   foldMarkdownCodeBlocks,
   OverBudgetTip,
+  splitFoldableMarkdown,
   ThinkingBlock,
 } from "../src/app"
 
@@ -104,7 +114,7 @@ const WIDTH = 78
 const view = await testRender(
   () => (
     <box width={WIDTH} flexDirection="column">
-      {/* 用户输入：底色 + 橙色左框线（与 assistant 的纯文本回复区分） */}
+      {/* 用户输入：`›` 前缀 + 底色 + 橙色左框线（与 assistant 的纯文本回复区分） */}
       <box
         flexDirection="row"
         marginBottom={1}
@@ -114,7 +124,8 @@ const view = await testRender(
         border={["left"]}
         borderColor="#fb8147"
       >
-        <text width={WIDTH - 10} fg="#eeeeee">
+        <text fg="#fb8147">› </text>
+        <text width={WIDTH - 12} fg="#eeeeee">
           对应仓库代码
         </text>
       </box>
@@ -166,6 +177,7 @@ check(frame.includes("4 条"), "粗体文字内容仍然可见")
 check(frame.includes("website/index.html"), "表格单元格内容仍然可见")
 check(/[│┌┐└┘├┤┬┴┼─]/.test(frame), "表格渲染出边框字符")
 check(frame.includes("│") && frame.includes("对应仓库代码"), "用户输入框有左框线且内容可见")
+check(frame.includes("›") && frame.includes("对应仓库代码"), "用户输入框有 `›` 前缀且内容可见")
 check(frame.includes("textContent = tab.html"), "代码块内容可见")
 check(!frame.includes("```"), "代码块围栏 ``` 被隐藏")
 check(
@@ -198,8 +210,8 @@ check(
 )
 const wideOptions = chatTableOptions(132)
 check(
-  wideOptions.widthMode === "full" && wideOptions.cellPadding === 1,
-  `宽档（132 列）→ full + cellPadding 1（实际 ${wideOptions.widthMode}/${wideOptions.cellPadding}）`,
+  wideOptions.widthMode === "full" && wideOptions.cellPadding === 0,
+  `宽档（132 列）→ full + cellPadding 0（实际 ${wideOptions.widthMode}/${wideOptions.cellPadding}）`,
 )
 
 async function renderTableFrame(label: string, width: number, height: number) {
@@ -260,10 +272,40 @@ check(
   wide.tableWidth >= 130,
   `209x51：宽档铺满渲染宽度（tableWidth=${wide.tableWidth} ≈ 132）`,
 )
-check(wide.tableOptions.cellPadding === 1, "209x51：cellPadding 1（宽档不松）")
+check(wide.tableOptions.cellPadding === 0, "209x51：cellPadding 0（宽档不膨胀行高）")
+// I. 【宽档表格紧凑】数据行相邻：找出数据行（含 website/ 的行），断言它们在
+// 帧里连续出现（之间没有空行）。cellPadding 1 时每行上下各插一行空行导致
+// 行高膨胀；cellPadding 0 后数据行应紧贴。
+{
+  const dataRowIndexes = wide.lines
+    .map((line, index) => (line.includes("website/") ? index : -1))
+    .filter((index) => index >= 0)
+  check(dataRowIndexes.length >= 3, `209x51：找到 ${dataRowIndexes.length} 条数据行`)
+  const gaps: number[] = []
+  for (let k = 1; k < dataRowIndexes.length; k += 1) {
+    gaps.push(dataRowIndexes[k] - dataRowIndexes[k - 1])
+  }
+  // 相邻数据行之间不应隔出空行（间距 1 = 紧贴，间距 2 = 中间夹一行边框/空行）。
+  // 允许 ≤2：一条分隔线行（├─┼─┤）可以夹在两数据行之间；>2 说明有空行膨胀。
+  const maxGap = gaps.length > 0 ? Math.max(...gaps) : 0
+  check(
+    dataRowIndexes.length < 2 || maxGap <= 2,
+    `209x51：数据行相邻无空行（maxGap=${maxGap} ≤ 2）`,
+    gaps.join(","),
+  )
+  const blankBetweenData = dataRowIndexes.some((rowIndex, k) => {
+    if (k === 0) return false
+    for (let r = dataRowIndexes[k - 1] + 1; r < rowIndex; r += 1) {
+      if (wide.lines[r].trim() === "") return true
+    }
+    return false
+  })
+  check(!blankBetweenData, "209x51：数据行之间不出现空行")
+}
 
 // ---------------------------------------------------------------------
-// F. 【C2 代码折叠】30 行代码块：默认折叠 → Alt+L 展开 → 角标/全文断言
+// F. 【C2 代码折叠】30 行代码块：默认折叠 → Alt+L / 鼠标点击角标展开
+//    C3 批次改用 FoldableMarkdownBlock（角标是独立 onMouseDown 元素）。
 // ---------------------------------------------------------------------
 
 const CODE_LINES = Array.from(
@@ -282,10 +324,15 @@ const toggleFold = () => {
   const key = codeFoldStateKey(messageId, 0)
   setCodeFoldExpanded((prev) => ({ ...prev, [key]: prev[key] !== true }))
 }
+/** 与 app.tsx 的 toggleCodeFoldAt 同语义：直接切换指定块。 */
+const toggleFoldAt = (_messageKey: string, blockIndex: number) => {
+  const key = codeFoldStateKey(messageId, blockIndex)
+  setCodeFoldExpanded((prev) => ({ ...prev, [key]: prev[key] !== true }))
+}
 
 const FOLD_WIDTH = 72
 
-/** Alt+L 与 app.tsx Composer 的绑定一致：meta+l 切换当前代码块角标。 */
+/** Alt+L 与 app.tsx Composer 的绑定一致；角标 onMouseDown 走 toggleFoldAt。 */
 function FoldHarness() {
   useKeyboard((key: { name: string; meta?: boolean }) => {
     if (key.meta === true && key.name === "l") {
@@ -295,23 +342,15 @@ function FoldHarness() {
   })
   return (
     <box width={FOLD_WIDTH} flexDirection="column">
-      <markdown
+      <FoldableMarkdownBlock
+        content={FOLD_SAMPLE}
+        messageKey={messageId}
+        isExpanded={isExpanded}
+        onToggleAt={toggleFoldAt}
         width={FOLD_WIDTH}
-        content={foldMarkdownCodeBlocks(FOLD_SAMPLE, isExpanded)}
         syntaxStyle={chatMarkdownStyle()}
         fg="#808080"
-        conceal={true}
-        renderNode={(token, ctx) => {
-          if (token.type !== "code") return undefined
-          const code = ctx.defaultRender()
-          if (code) {
-            const styled = code as { bg?: string; paddingLeft?: number; marginBottom?: number }
-            styled.bg = "#141414"
-            styled.paddingLeft = 1
-            styled.marginBottom = 1
-          }
-          return code
-        }}
+        bulletFg="#eeeeee"
         tableOptions={chatTableOptions(FOLD_WIDTH)}
       />
     </box>
@@ -335,7 +374,50 @@ check(!foldedFrame.includes("line 16 of thirty"), "折叠态：第 16 行不出�
 check(!foldedFrame.includes("line 30 of thirty"), "折叠态：第 30 行不出现")
 check(foldedFrame.includes("▸ 展开（共 30 行）"), "折叠态：角标文案 `▸ 展开（共 30 行）`")
 
-// Alt+L 展开。
+// G. 【角标可点击】onMouseDown 处理函数行为断言：直接调用 handler（OpenTUI
+// 在鼠标按下时调用的就是它），折叠态应翻转、帧内容应切换。
+const segmentsBeforeClick = splitFoldableMarkdown(FOLD_SAMPLE, isExpanded)
+const badgeBefore = segmentsBeforeClick.find((s) => s.kind === "foldBadge")
+check(
+  badgeBefore !== undefined && badgeBefore.kind === "foldBadge" && badgeBefore.expanded === false,
+  "角标点击前：foldBadge 段处于折叠态",
+)
+check(
+  badgeBefore !== undefined && badgeBefore.kind === "foldBadge" && codeFoldBadge(badgeBefore.lineCount, badgeBefore.expanded) === "▸ 展开（共 30 行）",
+  "角标点击前：badge 文案为 `▸ 展开（共 30 行）`",
+)
+
+// 行为断言：调用 onMouseDown 绑定的 toggleFoldAt（messageKey, blockIndex）。
+const beforeClickState = isExpanded(0)
+toggleFoldAt(messageId, 0)
+const afterClickState = isExpanded(0)
+check(
+  beforeClickState === false && afterClickState === true,
+  `onMouseDown 处理函数：折叠态翻转（${beforeClickState} → ${afterClickState}）`,
+)
+// 翻转后分段结果里 foldBadge 应为 expanded，且块段含全文。
+const segmentsAfterClick = splitFoldableMarkdown(FOLD_SAMPLE, isExpanded)
+const badgeAfter = segmentsAfterClick.find((s) => s.kind === "foldBadge")
+check(
+  badgeAfter !== undefined && badgeAfter.kind === "foldBadge" && badgeAfter.expanded === true,
+  "onMouseDown 处理函数：foldBadge 段变为展开态",
+)
+const blockAfter = segmentsAfterClick.find((s) => s.kind === "markdown" && s.foldable)
+check(
+  blockAfter !== undefined && blockAfter.kind === "markdown" && blockAfter.content.includes("line 30 of thirty"),
+  "onMouseDown 处理函数：块段渲染全文（line 30 可见）",
+)
+
+// 再次调用应回到折叠态（toggle 语义）。
+toggleFoldAt(messageId, 0)
+check(isExpanded(0) === false, "onMouseDown 处理函数：再次调用回到折叠态")
+// 显式复位，保证后续 Alt+L 断言从确定的折叠态出发。
+setCodeFoldExpanded({})
+await settle(foldView)
+const refoldedFrame = foldView.captureCharFrame()
+check(refoldedFrame.includes("▸ 展开（共 30 行）"), "行为断言后复位：角标回到折叠态")
+
+// Alt+L 展开（键盘无障碍路径保留）。
 foldView.mockInput.pressKey("l", { meta: true })
 await settle(foldView)
 const expandedFrame = foldView.captureCharFrame()
@@ -357,9 +439,67 @@ check(
   "短块（1 行）折叠前后内容不变",
   shortFolded.slice(0, 80),
 )
+const shortSegments = splitFoldableMarkdown(SHORT_CODE, () => false)
+check(
+  shortSegments.length === 1 && shortSegments[0].kind === "markdown",
+  "短块：splitFoldableMarkdown 不产生 foldBadge 段",
+)
 
 // ---------------------------------------------------------------------
-// G. 【C3/C4/C5 + A4/A5】契约 v1 帧：上下文提示、思考区分离、tips
+// H. 【用户消息样式】120×30 与 209×51 帧：`›` 前缀 + 左色条 + 深色底
+// ---------------------------------------------------------------------
+
+async function renderUserMessageFrame(label: string, width: number, height: number) {
+  const view = await testRender(
+    () => (
+      <box width={width} height={height} flexDirection="column" paddingLeft={1}>
+        <box
+          flexDirection="row"
+          marginBottom={1}
+          paddingLeft={1}
+          paddingRight={1}
+          backgroundColor="#1a1a1a"
+          border={["left"]}
+          borderColor="#fb8147"
+        >
+          <text fg="#fb8147">› </text>
+          <text width={Math.max(24, width - 12)} fg="#eeeeee">
+            帮我看看这个 PR 的 innerHTML
+          </text>
+        </box>
+        <box flexDirection="row" gap={1}>
+          <text fg="#eeeeee">●</text>
+          <text fg="#808080">已定位两处 innerHTML 注入点。</text>
+        </box>
+      </box>
+    ),
+    { width, height },
+  )
+  await settle(view)
+  const frame = view.captureCharFrame()
+  dumpFrame(frame, label)
+  return { frame, lines: frame.replace(/\n+$/, "").split("\n") }
+}
+
+const user120 = await renderUserMessageFrame("user-message-120x30", 120, 30)
+console.log("\n---- 120x30 user message style frame ----")
+console.log(user120.frame)
+check(user120.frame.includes("›"), "120x30 用户消息：`›` 前缀可见")
+check(user120.frame.includes("帮我看看这个 PR"), "120x30 用户消息：内容可见")
+check(user120.frame.includes("●"), "120x30 用户消息：assistant 行有 `●` 前缀（角色对比）")
+check(user120.frame.includes("│") || user120.frame.includes("▌") || user120.frame.includes("▎"), "120x30 用户消息：左侧色条可见")
+check(user120.lines.every((line) => [...line].length <= 120), "120x30 用户消息：无行宽溢出")
+
+const user209 = await renderUserMessageFrame("user-message-209x51", 209, 51)
+console.log("\n---- 209x51 user message style frame ----")
+console.log(user209.frame)
+check(user209.frame.includes("›"), "209x51 用户消息：`›` 前缀可见")
+check(user209.frame.includes("帮我看看这个 PR"), "209x51 用户消息：内容可见")
+check(user209.frame.includes("●"), "209x51 用户消息：assistant 行有 `●` 前缀（角色对比）")
+check(user209.lines.every((line) => [...line].length <= 209), "209x51 用户消息：无行宽溢出")
+
+// ---------------------------------------------------------------------
+// J. 【C3/C4/C5 + A4/A5】契约 v1 帧：上下文提示、思考区分离、tips
 // ---------------------------------------------------------------------
 
 const CONTEXT_FIXTURE = { used_tokens: 2400, budget_tokens: 20000, used_percent: 12 }

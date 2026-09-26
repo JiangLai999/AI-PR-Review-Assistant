@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test"
 import {
+  codeFoldBadge,
+  codeFoldStateKey,
+  CODE_FOLD_LINE_THRESHOLD,
   compactPath,
   cursorFrame,
+  foldableCodeBlocks,
+  foldMarkdownCodeBlocks,
   formatChatHistoryLines,
   formatCompactFailure,
   formatCompactSummary,
@@ -12,6 +17,7 @@ import {
   formatTokenCount,
   overBudgetTip,
   spinnerFrame,
+  splitFoldableMarkdown,
   thinkingPlaceholder,
   truncateMiddle,
   workspaceRootLabel,
@@ -164,4 +170,97 @@ test("formatChatHistoryLines numbers messages and truncates long bodies", () => 
   expect(lines[1]).toContain("assistant")
   expect(lines[1]).toContain("…")
   expect(lines[1].length).toBeLessThan(80)
+})
+
+// ---------------------------------------------------------------------
+// C2/C3 · 代码折叠纯函数 + 角标分段（mimo-chat-render-c3）
+// ---------------------------------------------------------------------
+
+test("codeFoldBadge keeps the user-facing copy", () => {
+  expect(codeFoldBadge(30, false)).toBe("▸ 展开（共 30 行）")
+  expect(codeFoldBadge(30, true)).toBe("▾ 收起")
+  expect(CODE_FOLD_LINE_THRESHOLD).toBe(15)
+})
+
+test("codeFoldStateKey joins message id and block index", () => {
+  expect(codeFoldStateKey("msg-3", 0)).toBe("msg-3#0")
+  expect(codeFoldStateKey("streaming", 2)).toBe("streaming#2")
+})
+
+test("foldableCodeBlocks lists only long fenced blocks with stable indexes", () => {
+  const long = ["```js", ...Array.from({ length: 20 }, (_, i) => `l${i}`), "```"].join("\n")
+  const short = ["```js", "one", "```"].join("\n")
+  const blocks = foldableCodeBlocks(`${short}\n\n${long}\n\n${short}`)
+  expect(blocks).toHaveLength(1)
+  expect(blocks[0].index).toBe(1) // 短块占 index 0
+  expect(blocks[0].lineCount).toBe(20)
+})
+
+test("foldMarkdownCodeBlocks truncates long blocks and leaves short blocks alone", () => {
+  const long = ["```js", ...Array.from({ length: 20 }, (_, i) => `l${i}`), "```"].join("\n")
+  const folded = foldMarkdownCodeBlocks(long, () => false)
+  expect(folded).toContain("l0")
+  expect(folded).toContain("l14")
+  expect(folded).not.toContain("l15")
+  expect(folded).toContain("▸ 展开（共 20 行）")
+  const expanded = foldMarkdownCodeBlocks(long, () => true)
+  expect(expanded).toContain("l19")
+  expect(expanded).toContain("▾ 收起")
+  const short = ["```js", "one", "```"].join("\n")
+  expect(foldMarkdownCodeBlocks(short, () => false)).toBe(short)
+})
+
+test("splitFoldableMarkdown emits markdown segments plus foldBadge slots", () => {
+  const long = ["```js", ...Array.from({ length: 20 }, (_, i) => `l${i}`), "```"].join("\n")
+  const content = `prose before\n\n${long}\n\nprose after`
+  const segments = splitFoldableMarkdown(content, () => false)
+  // 段序：prose-before(markdown) + 折叠代码块(markdown, foldable) + 角标 + prose-after(markdown)
+  expect(segments.map((s) => s.kind)).toEqual([
+    "markdown",
+    "markdown",
+    "foldBadge",
+    "markdown",
+  ])
+  const [before, block, badge, after] = segments
+  expect(before.kind === "markdown" && before.content).toContain("prose before")
+  expect(block.kind === "markdown" && block.foldable).toBe(true)
+  expect(block.kind === "markdown" && block.content).toContain("l0")
+  expect(block.kind === "markdown" && block.content).not.toContain("▸ 展开")
+  expect(badge.kind === "foldBadge" && badge.blockIndex).toBe(0)
+  expect(badge.kind === "foldBadge" && badge.lineCount).toBe(20)
+  expect(badge.kind === "foldBadge" && badge.expanded).toBe(false)
+  expect(after.kind === "markdown" && after.content).toContain("prose after")
+})
+
+test("splitFoldableMarkdown flips the badge expanded flag and grows the block segment", () => {
+  const long = ["```js", ...Array.from({ length: 20 }, (_, i) => `l${i}`), "```"].join("\n")
+  const collapsed = splitFoldableMarkdown(long, () => false)
+  const expanded = splitFoldableMarkdown(long, () => true)
+  const collapsedBlock = collapsed.find((s) => s.kind === "markdown")
+  const expandedBlock = expanded.find((s) => s.kind === "markdown")
+  expect(collapsedBlock?.kind === "markdown" && collapsedBlock.content).not.toContain("l19")
+  expect(expandedBlock?.kind === "markdown" && expandedBlock.content).toContain("l19")
+  const collapsedBadge = collapsed.find((s) => s.kind === "foldBadge")
+  const expandedBadge = expanded.find((s) => s.kind === "foldBadge")
+  expect(collapsedBadge?.kind === "foldBadge" && collapsedBadge.expanded).toBe(false)
+  expect(expandedBadge?.kind === "foldBadge" && expandedBadge.expanded).toBe(true)
+})
+
+test("splitFoldableMarkdown leaves short-block content in a single markdown segment", () => {
+  const short = ["```js", "one", "```"].join("\n")
+  const segments = splitFoldableMarkdown(`${short}\n\nafter`, () => false)
+  expect(segments).toHaveLength(1)
+  expect(segments[0].kind).toBe("markdown")
+  expect(segments[0].kind === "markdown" && segments[0].content).toBe(`${short}\n\nafter`)
+})
+
+test("splitFoldableMarkdown handles leading and consecutive foldable blocks", () => {
+  const long = ["```js", ...Array.from({ length: 20 }, (_, i) => `l${i}`), "```"].join("\n")
+  const leading = splitFoldableMarkdown(long, () => false)
+  expect(leading[0].kind).toBe("markdown")
+  expect(leading[1].kind).toBe("foldBadge")
+  const double = splitFoldableMarkdown(`${long}\n${long}`, () => false)
+  const kinds = double.map((s) => s.kind)
+  expect(kinds).toEqual(["markdown", "foldBadge", "markdown", "foldBadge"])
+  expect(double.filter((s) => s.kind === "foldBadge").map((s) => (s.kind === "foldBadge" ? s.blockIndex : -1))).toEqual([0, 1])
 })
