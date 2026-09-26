@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test"
 import {
   chatCommands,
+  commandArgumentLabel,
   commandCompletion,
+  commandDescription,
   commandEnterAction,
   commandMatches,
 } from "./command-menu"
@@ -161,4 +163,40 @@ test("/model status with trailing space runs the connectivity check", () => {
   const options = commandMatches("/model status ")
   expect(options.map((item) => item.name)).toEqual(["/model status"])
   expect(commandEnterAction("/model status ", options[0], options.length)).toEqual({ kind: "run" })
+})
+
+// ---------------------------------------------------------------------
+// 契约 v1 · /think /compact /history 命令 UI
+// ---------------------------------------------------------------------
+
+test("think and compact commands are advertised with argument completion", () => {
+  const names = chatCommands.map((item) => item.name)
+  expect(names).toContain("/think")
+  expect(names).toContain("/compact")
+  const think = chatCommands.find((item) => item.name === "/think")!
+  const compact = chatCommands.find((item) => item.name === "/compact")!
+  expect(commandCompletion(think)).toBe("/think ")
+  expect(commandCompletion(compact)).toBe("/compact ")
+  expect(commandMatches("/thi").map((item) => item.name)).toEqual(["/think"])
+  expect(commandMatches("/com").map((item) => item.name)).toEqual(["/compact"])
+  expect(commandEnterAction("/think", think, 1)).toEqual({ kind: "complete", draft: "/think " })
+  // 带参草稿不被命令菜单吞掉（与 /review 等一致）。
+  expect(commandMatches("/think high")).toEqual([])
+  expect(commandMatches("/compact 压缩掉旧讨论")).toEqual([])
+})
+
+test("history command description distinguishes conversation list from runs", () => {
+  const history = chatCommands.find((item) => item.name === "/history")!
+  expect(commandDescription(history)).toContain("对话消息列表")
+  expect(commandDescription(history, "en-US")).toContain("conversation")
+  expect(commandArgumentLabel(history)).toContain("--runs")
+})
+
+test("command descriptions and arguments have zh/en twins for the new commands", () => {
+  for (const name of ["/think", "/compact", "/history"]) {
+    const command = chatCommands.find((item) => item.name === name)!
+    expect(commandDescription(command).length).toBeGreaterThan(0)
+    expect(commandDescription(command, "en-US").length).toBeGreaterThan(0)
+    expect(commandDescription(command)).not.toBe(commandDescription(command, "en-US"))
+  }
 })

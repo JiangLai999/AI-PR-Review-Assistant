@@ -1,11 +1,31 @@
-import { createMemo, createSignal, For, Show, onMount, onCleanup } from "solid-js"
+import { createEffect, createMemo, createSignal, For, Show, onMount, onCleanup } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { SyntaxStyle } from "@opentui/core"
 import { BackendClient } from "./backend"
-import { isCurrentAssistantEvent, isForeignSessionEvent } from "./protocol"
+import {
+  isCurrentAssistantEvent,
+  isForeignSessionEvent,
+  parseAssistantFinishMeta,
+  parseCompactCommandResult,
+  parseReasoningDelta,
+  parseThinkCommandResult,
+} from "./protocol"
 import { sendWithSessionRecovery } from "./session-recovery"
-import { commandCompletion, commandEnterAction, commandMatches } from "./command-menu"
-import { truncateMiddle, workspaceRootLabel } from "./format"
+import { commandArgumentLabel, commandCompletion, commandDescription, commandEnterAction, commandMatches } from "./command-menu"
+import {
+  cursorFrame,
+  formatChatHistoryLines,
+  formatCompactFailure,
+  formatCompactSummary,
+  formatContextUsage,
+  formatDurationSeconds,
+  formatThinkLevel,
+  formatThinkUnsupported,
+  overBudgetTip,
+  thinkingPlaceholder,
+  truncateMiddle,
+  workspaceRootLabel,
+} from "./format"
 import { detailScrollDelta } from "./keymap"
 import {
   demoPanelFromPayload,
@@ -371,7 +391,100 @@ type ChatMessage = {
   id?: string
   role: "user" | "assistant"
   content: string
+  /** C4 · assistant.finished.duration_seconds；缺失则不显示耗时行。 */
+  durationSeconds?: number
+  /** A4 · assistant.finished.warning（如 "over_budget"）。 */
+  warning?: string
+  /** C5 · 思考文本，独立于 content，不写入消息历史正文。 */
+  thinking?: string
 }
+
+// ---------------------------------------------------------------------
+// C3/C4/C5 + A4/A5 · Chat 契约 v1 展示组件
+// 导出给 scripts/manual-*.tsx 做帧断言；数据解析在 protocol.ts / format.ts。
+// ---------------------------------------------------------------------
+
+/**
+ * C5 · 独立思考区：暗色斜体、可折叠。
+ * 默认折叠理由：思考过程往往很长，落定后正文才是交付物；流式期间默认展开
+ * （用户正在等答案，想看到模型在做什么），落定后折叠避免刷屏。
+ */
+export function ThinkingBlock(props: {
+  text: string
+  expanded: boolean
+  onToggle: () => void
+  language?: string
+  width?: number
+  streaming?: boolean
+}) {
+  const width = () => Math.max(24, props.width ?? 72)
+  const en = () => String(props.language ?? "zh-CN").toLowerCase().startsWith("en")
+  const header = () =>
+    props.expanded
+      ? en()
+        ? "▾ Thinking"
+        : "▾ 思考"
+      : en()
+        ? `▸ Thinking (${props.text.split("\n").length} lines)`
+        : `▸ 思考（${props.text.split("\n").length} 行）`
+  return (
+    <box
+      width={width()}
+      flexDirection="column"
+      marginBottom={1}
+      paddingLeft={1}
+      paddingRight={1}
+      backgroundColor="#121212"
+      border={["left"]}
+      borderColor="#555555"
+    >
+      <text fg={muted} attributes={2}>
+        {header()}
+      </text>
+      <Show when={props.expanded}>
+        <text width={width() - 2} fg="#9a9a9a" attributes={2}>
+          {props.text}
+        </text>
+      </Show>
+    </box>
+  )
+}
+
+/** C4 · assistant 底部耗时行；duration 缺失返回空（调用方整段隐藏）。 */
+export function DurationLine(props: { seconds: number | undefined; language?: string }) {
+  const text = () => {
+    const formatted = formatDurationSeconds(props.seconds)
+    return formatted ? `· ${formatted}` : ""
+  }
+  return (
+    <Show when={text()}>
+      <text fg={muted}>{text()}</text>
+    </Show>
+  )
+}
+
+/** A4 · over_budget tips：muted/warn 色，不用报警红。 */
+export function OverBudgetTip(props: { language?: string; width?: number }) {
+  return (
+    <box width={Math.max(24, props.width ?? 72)} marginTop={1} flexDirection="column">
+      <text fg="#f3c742">{overBudgetTip(props.language)}</text>
+    </box>
+  )
+}
+
+/** A5 · 上下文提示：`上下文 12% · 2.4k/20k`；无 context 时不渲染。 */
+export function ContextUsageLine(props: {
+  context: { used_tokens?: number; budget_tokens?: number; used_percent?: number } | undefined
+  language?: string
+}) {
+  const label = () => formatContextUsage(props.context, props.language)
+  return (
+    <Show when={label()}>
+      <text fg={muted}>{label()}</text>
+    </Show>
+  )
+}
+
 type ReviewFinding = {
   /** Backend finding id; `/feedback` matches on this, never on the list index. */
   finding_id?: string
@@ -486,6 +599,8 @@ function Composer(props: {
   onReviewRequest: (url: string) => void
   onOpenFindings: () => void
   onOpenHistory: () => void
+  /** /history 默认：对话消息列表（与 /history --runs 的审查列表区分）。 */
+  onOpenChatHistory: () => void
   onOpenModel: () => void
   onExplain: () => void
   onFeedback: () => void
@@ -501,6 +616,8 @@ function Composer(props: {
   onToggleWorkbench: () => void
   /** Toggle the focused long code block's fold badge (`Alt+L`). */
   onToggleCodeFold: () => void
+  /** C5 · Toggle the thinking block fold (`Alt+T`). */
+  onToggleThinking: () => void
   /** Show the `Alt+L 代码块` hint only when a foldable block exists. */
   codeFoldActive?: boolean
   /** Show the `Alt+W 工作台` hint only when a workbench exists. */
@@ -637,7 +754,13 @@ function Composer(props: {
       submitLock = false
       return
     }
+    // /history 分流：对话消息列表（默认）vs 审查列表（--runs）vs 单条 Run（后端）。
     if (text === "/history") {
+      props.onOpenChatHistory()
+      submitLock = false
+      return
+    }
+    if (text === "/history --runs" || text === "/history --runs ") {
       props.onOpenHistory()
       submitLock = false
       return
@@ -707,6 +830,26 @@ function Composer(props: {
       } else {
         if (text.startsWith("/") && response.result?.text) {
           props.onMessage({ role: "assistant", content: String(response.result.text) })
+        }
+        // 契约 v1 · /think → kind:"think"：回显档位；unsupported 给置灰说明。
+        const thinkResult = parseThinkCommandResult(response.result)
+        if (thinkResult) {
+          const language = props.runtime.ui_language
+          const body =
+            thinkResult.state === "unsupported"
+              ? formatThinkUnsupported(thinkResult.reason, language)
+              : formatThinkLevel(thinkResult.level, language)
+          props.onMessage({ role: "assistant", content: body })
+        }
+        // 契约 v1 · /compact → kind:"compact"：tokens 与保留轮数；失败强调原历史未变。
+        const compactResult = parseCompactCommandResult(response.result)
+        if (compactResult) {
+          const language = props.runtime.ui_language
+          const body =
+            compactResult.ok === false || compactResult.error
+              ? formatCompactFailure(compactResult.error, language)
+              : formatCompactSummary(compactResult, language)
+          props.onMessage({ role: "assistant", content: body })
         }
         // A dropped `assistant.finished` frame used to swallow the reply
         // silently; fall back to the request's own result text.
@@ -842,6 +985,11 @@ function Composer(props: {
       key.stopPropagation?.()
       return
     }
+    if (props.focused !== false && key.meta === true && key.name === "t") {
+      props.onToggleThinking()
+      key.stopPropagation?.()
+      return
+    }
     if (props.focused === false) return
     if (key.name === "tab" && matches().length === 0) {
       key.preventDefault()
@@ -893,8 +1041,8 @@ function Composer(props: {
         <box backgroundColor="#202020" borderStyle="single" borderColor="#555555" paddingLeft={1} paddingRight={1} flexDirection="column">
           <For each={visibleMatches()}>{(entry) =>
             <text bg={entry.index === menuIndex() ? "#5a2e1c" : "#202020"}>
-              <span style={{ fg: entry.index === menuIndex() ? "#ffffff" : orange }}>{entry.command.name}{entry.command.argument ? ` ${entry.command.argument}` : ""}</span>
-              <span style={{ fg: muted }}>  {entry.command.description}</span>
+              <span style={{ fg: entry.index === menuIndex() ? "#ffffff" : orange }}>{entry.command.name}{commandArgumentLabel(entry.command, props.runtime.ui_language) ? ` ${commandArgumentLabel(entry.command, props.runtime.ui_language)}` : ""}</span>
+              <span style={{ fg: muted }}>  {commandDescription(entry.command, props.runtime.ui_language)}</span>
             </text>
           }</For>
           <text fg={muted}>↑↓ 选择 · Tab 补全 · Enter 执行或补全 · Esc 关闭</text>
@@ -2967,6 +3115,16 @@ export function App() {
   const [sessionId, setSessionId] = createSignal<string>()
   const [messages, setMessages] = createSignal<ChatMessage[]>([])
   const [streamingAssistant, setStreamingAssistant] = createSignal("")
+  // C5 · 思考流独立累积，绝不与正文拼接，也不写入消息历史。
+  const [streamingThinking, setStreamingThinking] = createSignal("")
+  // C5 · 每条消息思考区展开态；默认落定后折叠（见 ThinkingBlock 注释）。
+  const [thinkingExpanded, setThinkingExpanded] = createSignal<Record<string, boolean>>({})
+  // C3 · 动画 tick（光标/spinner）；onCleanup 清定时器。
+  const [animTick, setAnimTick] = createSignal(0)
+  // A5 · 最近一次 assistant.finished.context（旧后端没有则保持 undefined）。
+  const [assistantContext, setAssistantContext] = createSignal<
+    { used_tokens?: number; budget_tokens?: number; used_percent?: number } | undefined
+  >()
   const [activeChatRequestId, setActiveChatRequestId] = createSignal<string>()
   // Request ids whose reply already reached the transcript through
   // `assistant.finished` / `assistant.cancelled`. Used to decide whether the
@@ -3134,6 +3292,13 @@ export function App() {
     setCodeFoldExpanded((prev) => ({ ...prev, [key]: prev[key] !== true }))
     setCodeFoldCursor((cursor + 1) % targets.length)
   }
+  // C5 · Alt+T 切换最近一条带思考消息的折叠态（默认落定后折叠）。
+  const toggleThinking = () => {
+    const withThinking = messages().filter((message) => message.thinking)
+    const latest = withThinking[withThinking.length - 1]
+    if (!latest?.id) return
+    setThinkingExpanded((prev) => ({ ...prev, [latest.id!]: !(prev[latest.id!] ?? false) }))
+  }
   /** C1: table tier follows the markdown render width (chatContentWidth()-6). */
   const chatMarkdownTableOptions = () => chatTableOptions(Math.max(24, chatContentWidth() - 6))
 
@@ -3232,6 +3397,14 @@ export function App() {
     onCleanup(() => clearInterval(timer))
   })
 
+  // C3 · 光标/spinner 动画 tick（2-3 帧循环）；teardown 清定时器。
+  createEffect(() => {
+    const active = Boolean(streamingAssistant() || activeChatRequestId())
+    if (!active) return
+    const timer = setInterval(() => setAnimTick((tick) => tick + 1), 180)
+    onCleanup(() => clearInterval(timer))
+  })
+
   const updateStageState = (stageId: string, patch: Partial<ReviewStageState>) => {
     setReviewStages((current) => {
       const index = current.findIndex((stage) => stage.id === stageId)
@@ -3281,6 +3454,34 @@ export function App() {
     } catch (error) {
       appendMessage({ role: "assistant", content: String(error) })
     }
+  }
+
+  /**
+   * /history（无参）：对话消息列表——行首序号 + 截断正文。
+   * 与 /history --runs 的审查列表（HistoryDialog select）视觉区分：
+   * 这是纯文本序号列表，直接落在 transcript 里。
+   */
+  const openChatHistory = () => {
+    const lines = formatChatHistoryLines(messages(), {
+      contentWidth: Math.max(24, chatContentWidth() - 10),
+      language: runtime().ui_language,
+    })
+    if (lines.length === 0) {
+      appendMessage({
+        role: "assistant",
+        content: isEn(runtime().ui_language)
+          ? "No conversation messages yet."
+          : "当前会话还没有对话消息。",
+      })
+      return
+    }
+    const header = isEn(runtime().ui_language)
+      ? `CHAT HISTORY · ${lines.length} message(s)`
+      : `对话历史 · ${lines.length} 条消息`
+    appendMessage({
+      role: "assistant",
+      content: [header, "", ...lines].join("\n"),
+    })
   }
 
   const openHistoryRun = async (run: HistoryRun) => {
@@ -3816,6 +4017,7 @@ export function App() {
         if (event.event?.startsWith("assistant.") && !isCurrentAssistantEvent(event, sessionId(), activeChatRequestId())) return
         if (event.event === "assistant.started") {
           setStreamingAssistant("")
+          setStreamingThinking("")
           setBackendStatus("THINKING")
         }
         if (event.event === "review.started") {
@@ -3993,22 +4195,54 @@ export function App() {
         if (event.event === "assistant.delta") {
           setStreamingAssistant((current) => current + String(event.text ?? ""))
         }
+        // C5 · 思考流独立累积（契约 v1）；缺字段/旧后端时不进这里。
+        if (event.event === "assistant.reasoning_delta") {
+          const piece = parseReasoningDelta(event)
+          if (piece !== undefined) setStreamingThinking((current) => current + piece)
+        }
         if (event.event === "assistant.finished") {
+          const meta = parseAssistantFinishMeta(event)
+          // C5 · finished.reasoning 仅作兜底：流已给过则不重复拼接。
+          const streamedThinking = streamingThinking()
+          const thinking =
+            streamedThinking ||
+            (meta.reasoning ?? "")
           const finalText = String(event.text ?? streamingAssistant())
-          appendMessage({ role: "assistant", content: finalText })
+          const messageKey = `msg-${(chatMessageSeq += 1)}`
+          appendMessage({
+            id: messageKey,
+            role: "assistant",
+            content: finalText,
+            durationSeconds: meta.durationSeconds,
+            warning: meta.warning,
+            thinking: thinking || undefined,
+          })
+          // 落定后思考区默认折叠（流式期间展开）。
+          if (thinking) setThinkingExpanded((prev) => ({ ...prev, [messageKey]: false }))
+          if (meta.context) setAssistantContext(meta.context)
           if (typeof event.request_id === "string") renderedAssistantReplies.add(event.request_id)
           setStreamingAssistant("")
+          setStreamingThinking("")
           setBackendStatus("READY")
         }
         if (event.event === "assistant.cancelled") {
           const partial = streamingAssistant()
-          if (partial) appendMessage({ role: "assistant", content: `${partial} [已取消]` })
+          const streamedThinking = streamingThinking()
+          if (partial) {
+            appendMessage({
+              role: "assistant",
+              content: `${partial} [已取消]`,
+              thinking: streamedThinking || undefined,
+            })
+          }
           if (typeof event.request_id === "string") renderedAssistantReplies.add(event.request_id)
           setStreamingAssistant("")
+          setStreamingThinking("")
           setBackendStatus("READY")
         }
         if (event.event === "assistant.failed") {
           setStreamingAssistant("")
+          setStreamingThinking("")
           setBackendStatus("ERROR")
         }
       })
@@ -4022,9 +4256,15 @@ export function App() {
   return (
     <box width="100%" height="100%" backgroundColor={background} alignItems="center" flexDirection="column">
       <Show when={messages().length === 0 && !reviewStage() && !errorMessage() && !compactHome()} fallback={
-        <box width={76} marginTop={1} flexDirection="row" justifyContent="space-between">
-          <text fg={orange}>PR REVIEW / CHAT</text>
-          <text fg={muted}>{runtime().provider_display ?? runtime().provider ?? ""} · {runtime().model ?? ""}</text>
+        <box width={76} marginTop={1} flexDirection="column">
+          <box flexDirection="row" justifyContent="space-between">
+            <text fg={orange}>PR REVIEW / CHAT</text>
+            <text fg={muted}>{runtime().provider_display ?? runtime().provider ?? ""} · {runtime().model ?? ""}</text>
+          </box>
+          {/* A5 · 上下文用量；无 context 字段时整行不渲染。 */}
+          <box flexDirection="row" justifyContent="flex-end">
+            <ContextUsageLine context={assistantContext()} language={runtime().ui_language} />
+          </box>
         </box>
       }>
         <PixelLogo language={runtime().ui_language} />
@@ -4071,7 +4311,7 @@ export function App() {
       <box flexGrow={1} minWidth={0} flexDirection="column" alignItems="center">
       <scrollbox width="100%" flexGrow={1} scrollY stickyScroll stickyStart="bottom" scrollbarOptions={{ showArrows: false }}>
         <box width="100%" alignItems="center" flexDirection="column">
-      <Show when={messages().length === 0 && !composerDraft() && !streamingAssistant() && !errorMessage() && !reviewStage() && !compactHome()}>
+      <Show when={messages().length === 0 && !composerDraft() && !streamingAssistant() && !streamingThinking() && !activeChatRequestId() && !errorMessage() && !reviewStage() && !compactHome()}>
         <QuickStartPanel language={runtime().ui_language} />
       </Show>
       <Show when={errorMessage()}>
@@ -4105,7 +4345,7 @@ export function App() {
           </Show>
         </box>
       </Show>
-      <Show when={messages().length > 0 || streamingAssistant()}>
+      <Show when={messages().length > 0 || streamingAssistant() || streamingThinking() || activeChatRequestId()}>
         <box width={chatContentWidth()} marginTop={2} flexDirection="column">
           <For each={messages()}>{(message) =>
             <Show
@@ -4128,6 +4368,21 @@ export function App() {
                 </box>
               }
             >
+              {/* C5 · 独立思考区：在正文之前，绝不拼接进 content。 */}
+              <Show when={message.thinking}>
+                <ThinkingBlock
+                  text={message.thinking!}
+                  expanded={thinkingExpanded()[message.id ?? ""] === true}
+                  onToggle={() =>
+                    setThinkingExpanded((prev) => ({
+                      ...prev,
+                      [message.id ?? ""]: !(prev[message.id ?? ""] ?? false),
+                    }))
+                  }
+                  language={runtime().ui_language}
+                  width={chatContentWidth() - 6}
+                />
+              </Show>
               <box flexDirection="row" gap={1} paddingBottom={1}>
                 <text fg="#eeeeee">●</text>
                 <markdown
@@ -4155,22 +4410,62 @@ export function App() {
                   tableOptions={chatMarkdownTableOptions()}
                 />
               </box>
+              {/* C4 · 耗时（仅 assistant；缺失不显示）+ A4 超额 tips。 */}
+              <Show when={formatDurationSeconds(message.durationSeconds)}>
+                <box flexDirection="row" paddingLeft={2} paddingBottom={1}>
+                  <DurationLine seconds={message.durationSeconds} language={runtime().ui_language} />
+                </box>
+              </Show>
+              <Show when={message.warning === "over_budget"}>
+                <OverBudgetTip language={runtime().ui_language} width={chatContentWidth() - 6} />
+              </Show>
             </Show>
           }</For>
-          <Show when={streamingAssistant()}>
-            <box flexDirection="row" gap={1}>
-              <text fg={orange}>●</text>
-              <markdown
-                width={Math.max(24, chatContentWidth() - 6)}
-                content={foldMarkdownCodeBlocks(streamingAssistant(), (blockIndex) =>
-                  isCodeBlockExpanded("streaming", blockIndex),
-                )}
-                syntaxStyle={chatMarkdownStyle()}
-                fg="#eeeeee"
-                conceal={true}
-                streaming={true}
-                tableOptions={chatMarkdownTableOptions()}
-              />
+          <Show when={streamingThinking()}>
+            <ThinkingBlock
+              text={streamingThinking()}
+              expanded
+              onToggle={() => {}}
+              language={runtime().ui_language}
+              width={chatContentWidth() - 6}
+              streaming
+            />
+          </Show>
+          <Show when={streamingAssistant() || activeChatRequestId()}>
+            <box flexDirection="column">
+              <Show
+                when={streamingAssistant()}
+                fallback={
+                  /* C3 · 等待首 token：spinner + 思考中 */
+                  <box flexDirection="row" gap={1}>
+                    <text fg={orange}>●</text>
+                    <text fg={muted}>
+                      {thinkingPlaceholder(animTick(), runtime().ui_language)}
+                    </text>
+                  </box>
+                }
+              >
+                <box flexDirection="row" gap={1}>
+                  <text fg={orange}>●</text>
+                  <markdown
+                    width={Math.max(24, chatContentWidth() - 6)}
+                    content={foldMarkdownCodeBlocks(streamingAssistant(), (blockIndex) =>
+                      isCodeBlockExpanded("streaming", blockIndex),
+                    )}
+                    syntaxStyle={chatMarkdownStyle()}
+                    fg="#eeeeee"
+                    conceal={true}
+                    streaming={true}
+                    tableOptions={chatMarkdownTableOptions()}
+                  />
+                </box>
+                {/* C3 · 流式正文末尾闪烁光标（2-3 帧循环）。 */}
+                <box flexDirection="row" paddingLeft={2}>
+                  <text fg={orange} attributes={1}>
+                    {cursorFrame(animTick())}
+                  </text>
+                </box>
+              </Show>
             </box>
           </Show>
         </box>
@@ -4194,6 +4489,7 @@ export function App() {
         onReviewRequest={(url) => setPendingReviewUrl(url)}
         onOpenFindings={openFindings}
         onOpenHistory={() => void openHistory()}
+        onOpenChatHistory={openChatHistory}
         onOpenModel={() => setModelOpen(true)}
         onExplain={() => void explainCurrentRun()}
         onFeedback={() => openFeedback()}
@@ -4207,6 +4503,7 @@ export function App() {
         onCancel={cancelCurrentTask}
         onToggleWorkbench={toggleWorkbench}
         onToggleCodeFold={toggleCodeFold}
+        onToggleThinking={toggleThinking}
         codeFoldActive={codeFoldTargets().length > 0}
         workbenchActive={workbenchVisible()}
         onDraftChange={setComposerDraft}

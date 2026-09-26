@@ -32,7 +32,11 @@ import {
   chatMarkdownStyle,
   chatTableOptions,
   codeFoldStateKey,
+  ContextUsageLine,
+  DurationLine,
   foldMarkdownCodeBlocks,
+  OverBudgetTip,
+  ThinkingBlock,
 } from "../src/app"
 
 const outDir = join(tmpdir(), "ai-pr-review-chat-markdown")
@@ -353,6 +357,126 @@ check(
   "短块（1 行）折叠前后内容不变",
   shortFolded.slice(0, 80),
 )
+
+// ---------------------------------------------------------------------
+// G. 【C3/C4/C5 + A4/A5】契约 v1 帧：上下文提示、思考区分离、tips
+// ---------------------------------------------------------------------
+
+const CONTEXT_FIXTURE = { used_tokens: 2400, budget_tokens: 20000, used_percent: 12 }
+
+/** 含上下文提示的完整 chat 头部 + 回答 + 耗时 + tips（120×30 与 209×51 各一张）。 */
+async function renderContractFrame(label: string, width: number, height: number) {
+  const view = await testRender(
+    () => (
+      <box width={width} height={height} flexDirection="column" paddingLeft={1}>
+        <box width={width - 2} flexDirection="row" justifyContent="space-between">
+          <text fg="#fb8147">PR REVIEW / CHAT</text>
+          <text fg="#808080">deepseek · deepseek-flash</text>
+        </box>
+        <box width={width - 2} flexDirection="row" justifyContent="flex-end">
+          <ContextUsageLine context={CONTEXT_FIXTURE} />
+        </box>
+        <box width={width - 2} marginTop={1} flexDirection="column">
+          <ThinkingBlock
+            text={"先定位 innerHTML 再核对占位符。\n证据在 website/index.html:237。"}
+            expanded
+            onToggle={() => {}}
+            width={Math.max(24, width - 8)}
+          />
+          <box flexDirection="row" gap={1}>
+            <text fg="#eeeeee">●</text>
+            <markdown
+              width={Math.max(24, width - 8)}
+              content={"已修复 `innerHTML` 两处，并核对占位符。"}
+              syntaxStyle={chatMarkdownStyle()}
+              fg="#808080"
+              conceal={true}
+              tableOptions={chatTableOptions(Math.max(24, width - 8))}
+            />
+          </box>
+          <box flexDirection="row" paddingLeft={2}>
+            <DurationLine seconds={3.2} />
+          </box>
+          <OverBudgetTip width={Math.max(24, width - 8)} />
+        </box>
+      </box>
+    ),
+    { width, height },
+  )
+  await settle(view)
+  const frame = view.captureCharFrame()
+  dumpFrame(frame, label)
+  const lines = frame.replace(/\n+$/, "").split("\n")
+  return { frame, lines }
+}
+
+const contract120 = await renderContractFrame("contract-120x30", 120, 30)
+console.log("\n---- 120x30 contract frame (context + thinking + tips) ----")
+console.log(contract120.frame)
+check(contract120.frame.includes("上下文 12%"), "120x30：上下文提示可见（12%）")
+check(contract120.frame.includes("2.4k/20k"), "120x30：上下文 token 缩写可见")
+check(contract120.frame.includes("思考"), "120x30：思考区头部可见")
+check(contract120.frame.includes("先定位 innerHTML"), "120x30：思考区正文与回答分离（思考文本可见）")
+check(contract120.frame.includes("· 3.2s"), "120x30：C4 耗时可见")
+check(contract120.frame.includes("上下文接近上限"), "120x30：A4 tips 可见")
+check(
+  contract120.lines.every((line) => [...line].length <= 120),
+  "120x30：无行宽溢出",
+)
+
+const contract209 = await renderContractFrame("contract-209x51", 209, 51)
+console.log("\n---- 209x51 contract frame (context + thinking + tips) ----")
+console.log(contract209.frame)
+check(contract209.frame.includes("上下文 12%"), "209x51：上下文提示可见（12%）")
+check(contract209.frame.includes("2.4k/20k"), "209x51：上下文 token 缩写可见")
+check(contract209.frame.includes("· 3.2s"), "209x51：C4 耗时可见")
+check(contract209.frame.includes("上下文接近上限"), "209x51：A4 tips 可见")
+check(
+  contract209.lines.every((line) => [...line].length <= 209),
+  "209x51：无行宽溢出",
+)
+
+// 思考区折叠态：正文可见、思考正文隐藏（默认落定后折叠）。
+const foldThinkingView = await testRender(
+  () => (
+    <box width={72} flexDirection="column">
+      <ThinkingBlock
+        text={"很长的思考过程\n不该默认刷屏。"}
+        expanded={false}
+        onToggle={() => {}}
+        width={64}
+      />
+      <text fg="#eeeeee">回答正文在这里。</text>
+    </box>
+  ),
+  { width: 72, height: 12 },
+)
+await settle(foldThinkingView)
+const foldedThinking = foldThinkingView.captureCharFrame()
+dumpFrame(foldedThinking, "thinking-collapsed")
+console.log("\n---- thinking collapsed frame ----")
+console.log(foldedThinking)
+check(foldedThinking.includes("▸ 思考"), "思考区折叠态：角标可见")
+check(!foldedThinking.includes("很长的思考过程"), "思考区折叠态：思考正文隐藏")
+check(foldedThinking.includes("回答正文在这里。"), "思考区折叠态：回答正文不受影响")
+
+// A4 tips 独立帧：en 文案也走同一组件（language 缺省为 zh）。
+const tipsView = await testRender(
+  () => (
+    <box width={72} flexDirection="column">
+      <OverBudgetTip width={64} language="en-US" />
+    </box>
+  ),
+  { width: 72, height: 6 },
+)
+await settle(tipsView)
+const tipsFrame = tipsView.captureCharFrame()
+dumpFrame(tipsFrame, "over-budget-tip-en")
+console.log("\n---- over-budget tips (en) frame ----")
+console.log(tipsFrame)
+check(tipsFrame.includes("/compact"), "A4 tips：提到 /compact")
+check(tipsFrame.includes("/new"), "A4 tips：提到 /new")
+check(tipsFrame.toLowerCase().includes("context near limit"), "A4 tips：en 文案可见")
 
 console.log(failures.length === 0 ? `\nALL PASS · frames: ${outDir}` : `\nFAILURES: ${failures.length}`)
 process.exit(failures.length === 0 ? 0 : 1)
