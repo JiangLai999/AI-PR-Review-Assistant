@@ -410,12 +410,21 @@ def _review_completed_fields(report: dict[str, Any]) -> dict[str, Any]:
     filter stats get no `filtered` key rather than a fabricated
     `{"below_threshold": 0}`.
     """
-    pr = report.get("pr") if isinstance(report.get("pr"), dict) else {}
-    counts = report.get("counts") if isinstance(report.get("counts"), dict) else {}
-    run = report.get("run") if isinstance(report.get("run"), dict) else {}
-    findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+    # 显式两步收窄：`report.get()` 返回 `Any | None`，直接在 isinstance 三元里用会被
+    # mypy 判成 `Any | dict | None`（对 Any 不做收窄），下游 `.get()` 全部报 union-attr。
+    pr_value = report.get("pr")
+    pr: dict[str, Any] = pr_value if isinstance(pr_value, dict) else {}
+    counts_value = report.get("counts")
+    counts: dict[str, Any] = counts_value if isinstance(counts_value, dict) else {}
+    run_value = report.get("run")
+    run: dict[str, Any] = run_value if isinstance(run_value, dict) else {}
+    findings_value = report.get("findings")
+    findings: list[Any] = findings_value if isinstance(findings_value, list) else []
 
-    by_severity = counts.get("by_severity") if isinstance(counts.get("by_severity"), dict) else {}
+    by_severity_value = counts.get("by_severity")
+    by_severity: dict[str, Any] = (
+        by_severity_value if isinstance(by_severity_value, dict) else {}
+    )
     severity = {
         level: int(_as_float(by_severity.get(level, 0)))
         for level in ("critical", "high", "medium", "low", "info")
@@ -1417,12 +1426,12 @@ class JsonlBackend:
             effective_context = (
                 values["context_window"]
                 if values["context_window"] is not None
-                else int(current["context_window"])
+                else int(_as_float(current["context_window"]))
             )
             effective_output = (
                 values["max_output"]
                 if values["max_output"] is not None
-                else int(current["max_output"])
+                else int(_as_float(current["max_output"]))
             )
             if effective_output > effective_context:
                 raise ConfigValidationError(
@@ -1981,7 +1990,10 @@ class JsonlBackend:
         """
         entry, preset, catalog_spec = self._chat_spec_sources()
         if self._user_written_spec(entry, preset):
-            window = _positive_int(entry.context_window)
+            # `entry` 的静态类型是 `object | None`（来源三元组刻意放宽，见
+            # `_chat_spec_sources`），属性访问走 getattr 兜底：None 或非 dataclass
+            # 都安全回落到 None，与 `catalog_spec` 分支的写法保持一致。
+            window = _positive_int(getattr(entry, "context_window", None))
             if window is not None:
                 return window
         if catalog_spec is not None:
@@ -1999,7 +2011,7 @@ class JsonlBackend:
         """
         entry, preset, catalog_spec = self._chat_spec_sources()
         if self._user_written_spec(entry, preset):
-            output = _positive_int(entry.max_output)
+            output = _positive_int(getattr(entry, "max_output", None))
             if output is not None:
                 return output
         if catalog_spec is not None:
@@ -3756,21 +3768,25 @@ class JsonlBackend:
                     )
                     run_id = args[0] if len(args) > 0 else ""
                     finding_id = args[1] if len(args) > 1 else ""
-                    status = args[2].lower() if len(args) > 2 else ""
+                    # 独立命名：同名 `status` 在上面的模型状态分支里是 dict，复用会让
+                    # mypy 报赋值冲突（运行期无碍，但遮蔽降低可读性）。
+                    feedback_status = args[2].lower() if len(args) > 2 else ""
                     note = args[3] if len(args) > 3 else ""
-                    if not run_id or not finding_id or not status:
+                    if not run_id or not finding_id or not feedback_status:
                         error(
                             "用法：/feedback <run_id> <finding_id> <status> [note]",
                             "invalid_request",
                         )
-                    elif status not in FEEDBACK_STATUSES:
+                    elif feedback_status not in FEEDBACK_STATUSES:
                         error(
-                            f"无效的反馈状态：{status}；可选："
+                            f"无效的反馈状态：{feedback_status}；可选："
                             + ", ".join(sorted(FEEDBACK_STATUSES)),
                             "invalid_request",
                         )
                     else:
-                        outcome = self._record_feedback(run_id, finding_id, status, note)
+                        outcome = self._record_feedback(
+                            run_id, finding_id, feedback_status, note
+                        )
                         if outcome["ok"]:
                             result(outcome)
                         else:

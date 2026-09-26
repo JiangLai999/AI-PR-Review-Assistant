@@ -251,9 +251,11 @@ def build_patch_prompts(
     return PATCH_SYSTEM_PROMPT, "\n".join(sections)
 
 
-def _as_int(value: object) -> int:
+def _as_int(value: Any) -> int:
     try:
-        return int(value)  # type: ignore[arg-type]
+        # 参数放宽为 `Any`（与 jsonl_server 的 `_as_float` 同款）：本函数就是"尽力转换"，
+        # 用 `object` 会让 mypy 报 call-overload，而补 ignore 又绑定具体错误码、容易失配。
+        return int(value)
     except (TypeError, ValueError, OverflowError):
         # OverflowError 来自 `int(float("inf"))`：构造参数写坏了也只是降级，不抛。
         return 0
