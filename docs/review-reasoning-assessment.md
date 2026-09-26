@@ -4,6 +4,9 @@
 > 脚本：`scripts/verify_review_reasoning.py`（可复跑）· 端点：DeepSeek 官方 `deepseek-flash`
 > 密钥：只从 `DEEPSEEK_API_KEY` 环境变量读取，**从不打印、不落盘**；除 DeepSeek 端点外无任何网络请求。
 > 关联：`docs/verification-matrix.md`（Live-review-think 行）· `docs/reasoning-effort-probe.md`（裸 API 四档）· `docs/chat-deepseek-live-verification.md`（chat 侧四档）· `docs/claude-backend-followup.md` §2.5
+>
+> **阅读顺序（2026-09-26 更新）**：**§10 = 最新状态**（第二步落地后的产品入口真机复验：四档数据 + 长 diff × max 预算边界 + 未决项收口）；
+> **§9 = 第二步落地记录**（offline wire 证据）；**§1–§8 = 第一步的历史评估**（旧语义 + `extra_params` 夹具真机数据），方法学仍在但结论已被 §10 取代。
 
 ---
 
@@ -194,11 +197,11 @@
 |---|---|---|
 | 1 | 产品语义未拍板 | 本任务把事实与代价补齐了，但"review 要不要可调档位"仍是产品决策（(c) 第二步的入口形态也待定） |
 | 2 | review 侧看不到思考文本 | 非流式 `_chat_sync` 不填 `ProviderResponse.reasoning`（`openai.py:439-444`），reasoning 只在 `content` 为空时被当答案兜底（`:463-473`）——开了思考也只有 token 计数；若 content 为空，兜底文本会进 JSON 解析并失败 |
-| 3 | 大 prompt × max 档的预算边界未测 | 本次最小 diff（prompt 4.6k 字符）reasoning 仅 3688 字符；长 diff 下 max 档可能顶到 6144/12288 上限 |
-| 4 | 单模型单端点单样本 | 只有 `deepseek-flash`（官方端点）各 1 次；`deepseek-chat`、中转站（custom 端点）、其它供应商未测；裸 API 的单调性由 `docs/reasoning-effort-probe.md`（每档 3 次）背书 |
+| 3 | ~~大 prompt × max 档的预算边界未测~~ **已收口（2026-09-26，见 §10.4）** | 382 行 / 29.6k 字符 patch × `max`（产品入口）：completion **5139 / 20192 tokens（余量 15053）**、`finish_reason=stop`、答案 6393 字符、JSON 可解析——未截断、未空答；预留 12000 只用了 22.4% |
+| 4 | 单模型单端点单样本 | **部分收口**（§10.2/§10.3）：仍是 `deepseek-flash` + 官方端点，但样本扩到"短四档 4 + 长四档 3 + 长 off 1"；`deepseek-chat`、中转站（custom 端点）、其它供应商未测；裸 API 的单调性由 `docs/reasoning-effort-probe.md`（每档 3 次）背书 |
 | 5 | `patch_generator` 路径未真机验证 | §1.2：`structured_output=False` ⇒ 对 DeepSeek 是"思考默认开启"，仅代码推断 |
 | 6 | 本任务未提交 | 任务约束禁止 git 操作；证据为工作区文件 `scripts/verify_review_reasoning.py`、本文件、`docs/verification-matrix.md`（Live-review-think 行 + §2 #1 两行）、`.pytest_claude/review-reasoning-run{1,2}.utf8.log` |
-| 7 | `thinking: enabled` 不带 effort 的情形未测 | 真机只测了 enabled+low / enabled+max 两个组合；按官方文档缺省应为 `high`，未实测（§0.2 的措辞已按此收窄） |
+| 7 | `thinking: enabled` 不带 effort 的情形未测 | 真机只测了带 effort 的组合（第一版 enabled+low / enabled+max；第二步后 low/high/max 四档全部带 effort，见 §10.5）；按官方文档缺省应为 `high`，**仍未实测**（§0.2 的措辞已按此收窄） |
 | 8 | 混合编排（CLI 默认路径）未单独真机验证 | `hybrid_orchestrator.py:371-377` 同样调 `review_code`，但会按文件重建 provider 配置、可能把低复杂度文件路由到本地模型；本次真机只覆盖 `AIClient` + `review_orchestrator` 的等价调用参数（kwargs 完全一致，因为都是 `review_code`），路由差异未测 |
 | 9 | 非 deepseek 供应商的 review 思考行为未测 | §1.1 末表是按 `structured_review_params` 的离线结果推的；"兼容供应商 = 供应商默认（思考型即开启）"只有代码推断 |
 
@@ -206,17 +209,28 @@
 
 ## 7. 复跑指引
 
+> **2026-09-26 更新（第二步后）**：脚本默认口径已从"extra_params 夹具四场景"换成
+> **产品入口**的 `levels` + `long` 两个场景（默认 7 次调用）。上面 §2 的四个夹具场景仍在，
+> 用 `--scenario legacy` 调出。当前默认命令与数据见 §10。
+
 ```powershell
 # 密钥只从环境变量读，勿写进命令行/文档
 $env:TEMP='C:\Users\21986\Desktop\ican\AI-PR-Review-Assistant\.pytest_claude'
 $env:TMP=$env:TEMP
 $env:PYTHONIOENCODING='utf-8'   # 中文输出重定向到文件时避免 cp936 乱码
-python scripts/verify_review_reasoning.py            # 4 次调用，打印表格 + 断言
-python scripts/verify_review_reasoning.py --json     # 机器可读
-python scripts/verify_review_reasoning.py --model deepseek-chat   # 换模型
+python scripts/verify_review_reasoning.py                       # 默认：四档（短）+ 长 diff × max ×2 + off 对照 = 7 次调用
+python scripts/verify_review_reasoning.py --json                # 机器可读
+python scripts/verify_review_reasoning.py --scenario levels     # 只跑四档（4 次）
+python scripts/verify_review_reasoning.py --scenario long       # 只跑长 diff 边界（3 次）
+python scripts/verify_review_reasoning.py --scenario levels --prompt long --level low,high,max
+                                                                # 四档跑在长 diff 上（3 次；max 兼具边界样本，§10 的数据就是这么来的）
+python scripts/verify_review_reasoning.py --scenario legacy     # 第一版 extra_params 夹具（4 次，§2 数据）
+python scripts/verify_review_reasoning.py --model deepseek-chat # 换模型（注意封顶来源会变，见 §10.2）
 ```
 
-退出码：`0` 门禁全过；`1` 有门禁断言失败；`2` 环境不可用（无密钥 / 认证失败 / 四场景全部失败）。
+脚本内置**硬预算**：计划超过 `CALL_BUDGET = 8` 次真实调用直接拒绝跑（exit 2），不会因为参数组合悄悄多花钱。
+
+退出码：`0` 门禁全过；`1` 有门禁断言失败；`2` 环境不可用（无密钥 / 认证失败 / 场景全部失败 / 超预算）。
 两次运行之间无需清理任何文件（脚本不落盘、不写配置、不建临时目录）。
 ---
 
@@ -344,7 +358,7 @@ CLI 出口实测（临时配置目录，`AI_PR_REVIEW_CONFIG` 指向它；无网
 
 | # | 项 | 说明 |
 |---|---|---|
-| 1 | 真机（联网）验证 | 本任务约束禁止真实网络请求；上线前建议按 §7 的复跑指引用 `--model deepseek-flash` 在 `low/high/max` 各跑一次（wire 形态与 §2 场景 `think_low`/`think_max` 完全一致，但那是改前用 `extra_params` 夹具测的） |
+| 1 | ~~真机（联网）验证~~ **已完成（2026-09-26，见 §10）** | 本次按 §7 复跑指引走**产品入口**：短四档 + 长 diff（382 行）四档 + 长 off 对照，完成调用 8 次、10/10 门禁全过；wire 形态与本节离线表逐字一致（`off`=`disabled`+无 effort，`low/high/max`=`enabled`+effort+预算随档位增加） |
 | 2 | 低成本/长 diff 的预算边界 | §6 #3 仍在：`max` 档在长 prompt 上可能把额度大量吃在 reasoning 上（cap 只保证不超 `max_output`，不自动降档） |
 | 3 | 前端接入 | TUI 尚未渲染 `config.options.review_reasoning_effort`（本任务明确不改前端）；状态栏也没有该字段（只进了 `config.options` 与 `config.snapshot`） |
 | 4 | 向导丢字段（**既有问题，非本任务引入**） | `cli._prompt_interface_preferences` / `cli._prompt_preferences` 整体重建 `PreferencesConfig`，字段清单里没有 `repo_context`（4 项）、`symbol_locate`、`chat_slot`/`review_slot`、`chat_reasoning_effort`、`chat_context_budget` —— 跑一次 CLI 向导会把它们静默重置为默认值。本任务只把自己的字段加进清单（否则新档位有同样问题），其余字段的取舍（哪些该在向导里提问）建议另开任务处理 |
@@ -353,3 +367,117 @@ CLI 出口实测（临时配置目录，`AI_PR_REVIEW_CONFIG` 指向它；无网
 | 7 | 每次请求新建 provider 的 SDK 客户端不复用 | 走 `extra_params` 通道的供应商（anthropic/zhipu/qwen/siliconflow…）在开启档位时**每个请求**新建一份 provider 配置副本 + provider；anthropic 会在 `_default_client_factory` 里新建一个 `AsyncAnthropic`（未显式 `aclose()`，随 GC 回收）。100 文件 × `high` ≈ 100 个客户端实例（并发上限 2）。chat 侧本来就是每轮新建 provider，口径一致；若后续要优化，可给 provider 加"按参数复用"的缓存 |
 | 8 | `config import` 对旧导出会把档位打回 off | `config_entry.run_config_import` 整体替换 `preferences`（与其它偏好一致）：旧的导出文件里没有这个键，导入后按默认 `off` 处理。文档已在这里点名，避免下一次"导入后档位怎么没了"的困惑 |
 | 9 | Anthropic 协议的中转端点只能"置灰" | 见 §9.2 末段：这类端点的 effort 透传会被 SDK 丢弃，因此整档不生效（有出口说明）。若将来要支持，需要按 Anthropic 的 `thinking.budget_tokens` 参数形态另开一条规格（当前按供应商名查表，`custom` 拿到的是 transparent 那条） |
+
+---
+
+## 10. 第二步后 · 真机复验（任务 `claude-review-live-verify`，2026-09-26）
+
+第二步（§9）落地时只有 offline wire 证据，§9.4 #1 写着"上线前建议按 §7 复跑一次真机"。本节就是那次复跑：
+**走产品入口**（`preferences.review_reasoning_effort` → `AIClientConfig.review_reasoning_effort` →
+`ai_client._review_reasoning_plan`），不再用 §2/§4.3 的 `extra_params` 夹具；端点仍是 DeepSeek 官方 `deepseek-flash`。
+
+### 10.1 方法
+
+| 项 | 值 |
+|---|---|
+| 入口 | `AIClient.review_code` 真实调用；每个场景一个 `AIClient`，档位写在 `AIClientConfig.review_reasoning_effort`（产品字段，不是夹具）。`max_retries=1`（调用数可核对，且不允许格式修复重试掩盖"答案被挤空"），`timeout_seconds=300` |
+| 长 diff | **382 行 / 13038 字符** patch（`difflib.unified_diff` 合成，含拼串 SQL / 无超时 / 无重试 / 全局缓存等真实缺陷）→ 产品 `ContextBuilder`（tree-sitter 解析出 11 个函数，窗口上下文 12216 字符）→ `PromptAssembler`：**user 26226 + system 3340 = 29566 字符** |
+| 短 diff | §2 那一份最小 diff：system 3340 + user 1276 = **4616 字符** |
+| 命令 | run3：`python scripts/verify_review_reasoning.py`（默认口径：短四档 + 长 diff off 对照）；run4：`python scripts/verify_review_reasoning.py --scenario levels --prompt long --level low,high,max` |
+| 调用 | **完成 8 次**（run3：短 off/low/high/max + 长 off；run4：长 low/high/max）；另有 1 次中途终止，见 §10.6 |
+| 密钥 | 只从 `DEEPSEEK_API_KEY` 读，**不打印、不落盘**；除 DeepSeek 端点外无任何网络请求；`TEMP/TMP` 指向仓库内 `.pytest_claude` |
+
+日志：`.pytest_claude/review-live-run4.utf8.log`（本节主数据，**10/10 门禁全过，exit 0**）、
+`.pytest_claude/review-live-run3.utf8.log`（含被中止的那次与短 diff 数据）。
+
+### 10.2 四档数据（长 diff · 产品入口）
+
+| 档位 | wire `thinking` | `reasoning_effort` | `max_tokens` | reasoning 字符 | reasoning tokens | completion tokens | 答案 ≈tokens | 答案字符 | findings | JSON | finish | 耗时 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `low` | `{"type":"enabled"}` | `low` | 12192 | 1931 | 476 | 1343 | 867 | 2226 | 3 | ✅ | stop | 6.0s |
+| `high` | `{"type":"enabled"}` | `high` | 16192 | 7310 | 1877 | 3420 | 1543 | 4331 | 5 | ✅ | stop | 13.9s |
+| `max` | `{"type":"enabled"}` | `max` | **20192** | **9828** | **2693** | **5139** | 2446 | 6393 | 7 | ✅ | stop | 20.7s |
+
+- **预算与产品规则逐字吻合**：12192 = 8192+4000、16192 = 8192+8000、20192 = 8192+12000。
+  8192 是 `calculate_review_output_budget` 对 ≥12k 字符输入的 deepseek 基础额度（`model_capabilities.py:83`）；
+  +4000/+8000/+12000 来自 `CHAT_REASONING_TOKEN_BUDGETS`（`config.py:753`）。
+- **封顶口径修正（实测核对）**：任务书写"受 `max_output=32768` 封顶"——32768 是**能力档案**给 deepseek 的值，
+  而 `_review_max_output` 是**内置预设优先**：`deepseek-flash` 在 `PROVIDER_MODEL_PRESETS` 里 `max_output = 384000`
+  （`config.py:372`），所以 +12000 全额生效、根本触不到封顶。32768 只在"预设里没有的模型"上生效
+  （如 `--model deepseek-chat`：20192 < 32768，仍不封顶）。**结论：本档位在 deepseek 上不存在被 `max_output` 截断的风险。**
+- **单调性成立**（单次抽样）：reasoning 字符 1931 < 7310 < 9828；tokens 476 < 1877 < 2693；
+  completion tokens 1343 < 3420 < 5139；耗时 6.0 < 13.9 < 20.7s。
+- 三档 `finish_reason` 全为 `stop`，答案全部非空且 JSON 可解析（findings 3/5/7）。
+
+**与 §2（最小 diff）的量级对照**：同样 `max` 档，短 diff reasoning 3688 字符 / completion 1519 tok / 6.4s
+→ 长 diff 9828 字符 / 5139 tok / 20.7s（**2.7× / 3.4× / 3.2×**）。注意 §2 是 `extra_params` 夹具、本表是产品入口
+（wire 形态逐字一致，入口不同），倍数只作量级参考。
+
+### 10.3 短 diff 对照（run3，含 off 基线）
+
+| 场景 | `max_tokens` | reasoning 字符 | completion tokens | 答案字符 | findings | finish | 耗时 |
+|---|---|---|---|---|---|---|---|
+| 短 × `off`（现状） | 6144 | **0** | 702 | 1851 | 3 | stop | 3.6s |
+| 短 × `low` | 10144 | *未采到* | *未采到* | *未采到* | 2 | — | 1.9s |
+| 短 × `high` | 14144 | *未采到* | *未采到* | *未采到* | 3 | — | 4.5s |
+| 短 × `max` | 18144 | *未采到* | *未采到* | *未采到* | 2 | — | 5.1s |
+| 长 × `off` | 8192 | **0** | 1846 | 4646 | 7 | stop | 7.2s |
+
+- 打星的三行是 §10.6 探针缺陷的产物：**wire 侧（`thinking`/`effort`/`max_tokens`）与产品侧（解析成功、findings 数、
+  耗时）都正常**，只有 response 侧的 token/文本没采到；`off` 两行（短/长）完整，是成本基线。
+- `off` 仍是"显式关闭"（wire `thinking: {"type":"disabled"}`、无 `reasoning_effort`），与 §9.2 的离线表逐字一致；
+  长 diff 下基础额度按产品规则升到 8192（≥12k 字符）。
+
+### 10.4 长 diff × max 的预算边界（本任务重点）
+
+单次抽样，但余量极大，方向性明确：
+
+1. **没有吃满额度**：max 档 completion **5139 / 20192 tokens，余量 15053（74.5% 未用）**；`finish_reason=stop`（非 `length`）。
+2. **答案没有被挤空**：原始 `message.content` 6393 字符，**未走** `_extract_message_text` 的 reasoning 兜底
+   （`answer_from_reasoning=False`），JSON 解析 + `ReviewResult` 校验通过（findings 7）。
+3. **思考确实与答案抢同一份额度**：reasoning 2693 tok 占请求额度 13.3%，占本次 completion 的 **52.4%**
+   ——思考比答案（2446 tok）还多，这正是 `docs/reasoning-effort-probe.md` 记录的下限风险的形态；
+   但在 382 行规模上离"吃满"还差一个量级。
+4. **+12000 预留足够，且远有余量**：预留 12000 全额生效（20192−8192），思考只用了其中 **22.4%**（2693/12000）。
+5. **外推的边界**（粗估，仅供量级参考）：`max` 档在 29.6k 字符输入上用了 2693 tok 思考；
+   若 reasoning 随输入规模近似线性增长，要吃掉 12000 预留需要约 **4.5 倍输入（≈130k 字符）**——
+   远超单文件 review 的典型规模（本样本 382 行已触发 `calculate_review_output_budget` 的最高基础档 8192）。
+   **真正会先出问题的是 `max_output` 小的模型**：stepfun/hunyuan 预设 4096 时"基础额度 + 预留"被封回 4096，
+   即**实际预留为 0**（§9.2 有 wire 断言）——那里的风险是"档位生效但预留被吃掉"，与本样本无关。
+
+### 10.5 收口：§6 / §9.4 未决项
+
+| 原未决项 | 结论（2026-09-26 真机） |
+|---|---|
+| §6 #3 大 prompt × max 的预算边界未测 | **收口**：382 行 / 29.6k 字符 patch × max = 5139/20192 tok（余量 15053），未截断、未空答、JSON 可解析（§10.4） |
+| §9.4 #1 第二步没有真机复跑 | **收口**：四档全部走产品入口（§10.2/§10.3），wire 形态与 §9.2 的离线断言表逐字一致 |
+| §6 #4 单模型单端点单样本 | **部分收口**：仍是单模型（`deepseek-flash`）+ 官方端点；样本从"各 1 次"扩到"短四档 4 + 长四档 3 + 长 off 1"（§10.2/§10.3）。`deepseek-chat`、中转站、其它供应商仍未测 |
+| §6 #7 `thinking: enabled` 不带 effort | **仍开放**：本次四档都带 effort，enabled-only（官方默认 high）未覆盖 |
+| §6 #2 review 侧看不到思考文本 | **仍开放**：本次 `ProviderResponse.reasoning` 仍 **0/7 非空**（非流式路径不回填），只有 token 计数可用 |
+
+### 10.6 探针缺陷与调用预算（诚实记录）
+
+- **缺陷**：第一次运行（run3）的探针只包了 `AIClient._provider.chat`。开启档位时 `_review_request_provider`
+  会**为本次请求新建一个 provider 副本**（`thinking` 走 extra_params 通道），副本上的 `chat` 不是被包住的那一个
+  ——于是 run3 里 low/high/max 三档的 **response 侧（reasoning 字符/token、completion tokens、content 字符）
+  全部记成 0**。修法：把拦截挪到**工厂层**（`install_chat_probe` 包 `ai_client.create_model_provider`），
+  run4 三档全部采到（见 §10.2）。
+- **代价与取舍**：run3 的 5 次调用里，第 6 次（长 diff × max）在修复前被**中止**（进程 kill，未产生任何数据）；
+  修好后用 run4 的 3 次补齐。**完成调用合计 8 次**（= 任务预算 ≤8）；被中止的那次客户端中断、**是否计费未知**，
+  按最坏情况记 9 次，如实列在本任务的预算风险里（不由文档口径消化）。
+- 补测的取舍：四档整体挪到长 diff 上跑（`--scenario levels --prompt long`），既补齐 response 侧，
+  又直接回答"长 prompt × max"的边界问题；短 diff 的 low/high/max 因此只留 wire + 产品侧结果（§10.3）。
+- 复跑：`python scripts/verify_review_reasoning.py`（默认 7 次调用，四档在短 diff 上）；
+  脚本内置硬预算 `CALL_BUDGET = 8`，超了直接拒绝跑（exit 2）。
+
+### 10.7 推荐配置（**建议**，本任务不改任何产品代码）
+
+1. **档位与默认值维持现状**：`review_reasoning_effort` 默认 `off`（§9 落地口径，本次真机确认 off 仍是"显式关闭 + 0 reasoning + 6144/8192 基础额度"）；
+   要"深度审查"时 **`high` 是性价比拐点**：长 diff 上 high 的 reasoning 是 low 的 3.9 倍（1877 vs 476 tok），
+   但 findings 从 3 涨到 5、completion 只涨 2.5 倍（3420 vs 1343）；`max` 再多 1.4 倍 reasoning / 1.5 倍 completion，
+   findings 7。成本敏感选 `low/high`，质量优先才上 `max`。
+2. **预算预留维持 +4000/+8000/+12000**：长 diff 上 max 只用了预留的 22.4%，**无需上调**；
+   若将来要压成本，可考虑按输入规模缩放预留（如 `+min(12000, 输入字符数/4)`），但那是新需求，不是本次结论。
+3. **唯一建议的加固（可选，另开任务）**：`max_output ≤ 8192` 的供应商在 `high/max` 档下预留会被封顶吃掉
+   （stepfun/hunyuan 预设 4096 的极端情形 = **预留 0**，档位参数照发但额度没涨）。当前出口只在"整档送不出去"时置灰，
+   建议给这类情形补一条"档位已生效、但预留被 `max_output` 吃掉"的提示文案（后端字段已具备，属前端/出口范围）。
