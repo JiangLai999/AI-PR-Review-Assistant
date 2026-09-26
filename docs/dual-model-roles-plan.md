@@ -1,6 +1,10 @@
 # 双模型角色分离方案（CHAT / REVIEW）
 
-状态：**待评审**（尚未开发）
+状态：**已实现**（2026-09-26；验收见 `docs/review-context-acceptance.md`）
+—— 本文保留为设计记录，实现与验收分散在下列交付中：
+`docs/claude-route-slots.md`（配置层）、`docs/claude-chat-routing.md`（协议/运行时）、
+`docs/claude-review-context.md`（审查上下文）、`docs/claude-tui-route.md`（自定义路由界面）、
+`docs/claude-tui-repo-context.md`（仓库上下文开关）、`docs/claude-repo-config.md`（repo_context + /model）
 日期：2026-09-25
 相关实测：`docs/claude-p6-dual-model-strategies.md`
 

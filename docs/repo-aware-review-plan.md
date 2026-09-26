@@ -1,6 +1,10 @@
 # 仓库感知审查方案（Repo-Aware Review）
 
-状态：**待评审**（尚未开发）
+状态：**L1 + L2 已实现**（2026-09-26），L3 进行中，L4 明确不做
+—— 验收证据：`docs/l2-symbol-acceptance.md`（真实仓库逐行核对）、
+`docs/mimo-l2-recon.md`（数据源实测）；实现记录：`docs/mimo-repo-context.md`（L1-a）、
+`docs/mimo-repo-inject.md`（L1-b/接入）、`docs/claude-repo-config.md` 与
+`docs/claude-tui-repo-context.md`（L1-c 配置入口）、`docs/mimo-l2-symbol-locator.md`（L2）
 日期：2026-09-25
 配套方案：`docs/dual-model-roles-plan.md`（CHAT/REVIEW 双槽 + 审查上下文）
 
