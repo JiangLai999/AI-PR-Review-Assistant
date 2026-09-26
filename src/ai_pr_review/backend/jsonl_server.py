@@ -129,6 +129,18 @@ REPO_CONTEXT_LABELS: dict[str, str] = {
     "tests": "仅测试文件 / Tests only",
     "tests+imports": "测试与依赖 / Tests + imports",
 }
+# L2 符号定位开关（preferences.symbol_locate，docs/mimo-l2-symbol-locator.md）：取值是布尔，
+# 顺序固定为 开启 → 关闭。与 repo_context 同惯例——后端给 value + label，TUI 不硬编码文案。
+SYMBOL_LOCATE_CHOICES: tuple[tuple[bool, str], ...] = (
+    (True, "开启 / On"),
+    (False, "关闭 / Off"),
+)
+# `config.setup` 载荷里 symbol_locate 接受的非布尔写法，与 `config.normalize_symbol_locate`
+# （config.py:756-774）同一套口径。这里刻意重列而不是复用那个函数：它对非法值只告警回退，
+# 而向导要的是"非法就整单报错"，两者语义相反。口径一致性由
+# `tests/test_jsonl_backend.py::test_symbol_locate_vocabulary_matches_the_config_layer` 钉住。
+SYMBOL_LOCATE_TRUE_VALUES: frozenset[str] = frozenset({"true", "1", "yes", "on"})
+SYMBOL_LOCATE_FALSE_VALUES: frozenset[str] = frozenset({"false", "0", "no", "off"})
 
 
 def _utc_now() -> str:
@@ -671,6 +683,43 @@ class JsonlBackend:
             ],
         }
 
+    def _symbol_locate_options(self) -> dict[str, Any]:
+        """L2 符号定位开关的当前值与可选值（与 `_repo_context_options` 同键同形）。
+
+        `value` 是落盘值（bool，config 层已保证合法），`options[].value` 是
+        `config.setup` 接受的取值，`label` 供 TUI 直接渲染。这里的 `options[].value`
+        是**布尔**（`true`/`false` 那种字符串写法也接受，见 `_coerce_symbol_locate`），
+        因此前端提交时不必把布尔转成字符串。
+        """
+        return {
+            "value": self.config.preferences.symbol_locate,
+            "options": [
+                {"value": value, "label": label} for value, label in SYMBOL_LOCATE_CHOICES
+            ],
+        }
+
+    @staticmethod
+    def _coerce_symbol_locate(value: Any) -> bool:
+        """把 `config.setup` 载荷里的 `symbol_locate` 解析成布尔。
+
+        接受 `config.normalize_symbol_locate` 的那套写法（bool / 0|1 / "true"|"false"
+        等），但非法值**抛错**而不是像加载配置那样回退：这是用户刚在向导里做出的选择，
+        悄悄改成别的档位比报错更糟（同 `_setup_slot` / `repo_context`）。
+        """
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in SYMBOL_LOCATE_TRUE_VALUES:
+                return True
+            if normalized in SYMBOL_LOCATE_FALSE_VALUES:
+                return False
+        raise ConfigValidationError(
+            "符号定位仅支持 true 或 false。（symbol_locate accepts true or false.）"
+        )
+
     def _setup_options(self) -> dict[str, Any]:
         """Return provider/model choices for the TUI setup wizard.
 
@@ -784,6 +833,9 @@ class JsonlBackend:
             # 仓库上下文（docs/repo-aware-review-plan.md §4.6）：配置助手第 5 阶段的三选一，
             # 与 routing 同级，供前端预选并回填到 config.setup。
             "repo_context": self._repo_context_options(),
+            # L2 符号定位开关（docs/mimo-l2-symbol-locator.md）：同样与 routing 同级，
+            # 供前端预选并回填到 config.setup。
+            "symbol_locate": self._symbol_locate_options(),
         }
 
     @staticmethod
@@ -967,6 +1019,10 @@ class JsonlBackend:
                     "（repo_context accepts off, tests or tests+imports.）"
                 )
             preferences.repo_context = repo_context
+        if "symbol_locate" in params and params.get("symbol_locate") is not None:
+            # L2 符号定位开关（docs/mimo-l2-symbol-locator.md §2）：`null`/缺失与其它偏好
+            # 一样是"保持不变"（部分更新），给了值就必须能解析成布尔，否则整单失败。
+            preferences.symbol_locate = self._coerce_symbol_locate(params["symbol_locate"])
         if "auto_publish_comment" in params:
             auto_publish = params["auto_publish_comment"]
             if not isinstance(auto_publish, bool):
@@ -1116,6 +1172,8 @@ class JsonlBackend:
             "routing": self._routing_snapshot(),
             # 供状态栏显示仓库上下文的当前档位（与 config.options 同键同形）。
             "repo_context": self._repo_context_options(),
+            # L2 符号定位开关同理（与 config.options 同键同形），状态栏/TUI 读同一份。
+            "symbol_locate": self._symbol_locate_options(),
         }
         try:
             provider = create_model_provider(provider_config)

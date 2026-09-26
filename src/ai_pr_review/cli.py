@@ -3477,6 +3477,13 @@ def history_command(
     help="Set repo context prefetch: off skips it, tests adds matching tests, "
     "tests+imports also adds imported files.",
 )
+@click.option(
+    "--symbol-locate/--no-symbol-locate",
+    "symbol_locate",
+    default=None,
+    help="Toggle L2 symbol location: when a changed signature has call sites elsewhere "
+    "in the repo, locate them (default: on).",
+)
 @click.pass_context
 def preferences_command(
     ctx: click.Context,
@@ -3486,6 +3493,7 @@ def preferences_command(
     output_format: str | None,
     workbench: str | None,
     repo_context: str | None,
+    symbol_locate: bool | None,
 ) -> None:
     """Show or update CLI preferences."""
     config_path = _config_path_from_context(ctx)
@@ -3511,6 +3519,12 @@ def preferences_command(
         config.preferences.repo_context = repo_context
         config.save(config_path, save_key=_active_config_has_saved_api_key(config_path))
     payload["repo_context"] = config.preferences.repo_context
+    # L2 符号定位开关（docs/mimo-l2-symbol-locator.md）同理：`--symbol-locate` /
+    # `--no-symbol-locate` 一条命令即可脚本化，两个都不传时只回显当前值、不落盘。
+    if symbol_locate is not None:
+        config.preferences.symbol_locate = symbol_locate
+        config.save(config_path, save_key=_active_config_has_saved_api_key(config_path))
+    payload["symbol_locate"] = config.preferences.symbol_locate
     click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 

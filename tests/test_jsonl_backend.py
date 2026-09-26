@@ -3517,6 +3517,254 @@ def test_config_options_and_model_status_expose_repo_context(
 
 
 # ---------------------------------------------------------------------------
+# L2 符号定位开关的配置入口（docs/mimo-l2-symbol-locator.md）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (False, False),
+        (True, True),
+        (0, False),
+        (1, True),
+        ("off", False),
+        ("on", True),
+        (" FALSE ", False),
+        ("True", True),
+    ],
+)
+def test_config_setup_persists_symbol_locate(
+    raw: Any, expected: bool, tmp_path: Path
+) -> None:
+    """布尔与 config 层接受的字符串/数字写法都要能落盘，回显随值变化。"""
+    from ai_pr_review.config import AppConfig
+
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+
+    backend._apply_setup({"runtime_profile": "local", "symbol_locate": raw})
+
+    assert backend.config.preferences.symbol_locate is expected
+    assert backend._setup_options()["symbol_locate"]["value"] is expected
+    assert AppConfig.load(config_path).preferences.symbol_locate is expected
+
+
+def test_config_setup_symbol_locate_does_not_touch_other_preferences(tmp_path: Path) -> None:
+    """开关是加法式的：同一次提交里的既有偏好一个都不改。"""
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+    backend._apply_setup({"runtime_profile": "local", "repo_context": "tests"})
+
+    snapshot = backend._apply_setup({"runtime_profile": "local", "symbol_locate": False})
+
+    assert snapshot["repo_context"] == "tests"
+    assert snapshot["workbench_mode"] == "auto"
+    assert snapshot["chat_layout"] == "compact"
+    assert backend.config.preferences.symbol_locate is False
+
+
+@pytest.mark.parametrize("raw", ["maybe", "yes please", "tru", "", 2, -1, 2.0, [], {}])
+def test_config_setup_rejects_an_invalid_symbol_locate_and_writes_nothing(
+    raw: Any, tmp_path: Path
+) -> None:
+    """非法开关值整单失败：既不像加载配置那样静默回退成 true，也不能悄悄写成别的值。
+
+    （`""` 也在非法之列：对布尔开关来说"部分更新"的写法是**不传**或传 `null`，
+    空串是发送方的真实错误，静默当 `true` 会把一个坏载荷变成"看起来成功"。）
+    """
+    from ai_pr_review.config import AppConfig, ConfigValidationError
+
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+    backend._apply_setup({"runtime_profile": "local", "symbol_locate": False})
+
+    with pytest.raises(ConfigValidationError) as excinfo:
+        backend._apply_setup({"runtime_profile": "local", "symbol_locate": raw})
+
+    message = str(excinfo.value)
+    assert "符号定位仅支持" in message
+    assert "symbol_locate accepts true or false" in message
+    # 内存与磁盘都保持上一次的合法值。
+    assert backend.config.preferences.symbol_locate is False
+    assert AppConfig.load(config_path).preferences.symbol_locate is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"runtime_profile": "local", "local_model": "qwen3.5:4b"},
+        {"runtime_profile": "local", "symbol_locate": None},
+    ],
+)
+def test_config_setup_without_symbol_locate_keeps_the_stored_value(
+    payload: dict[str, Any], tmp_path: Path
+) -> None:
+    """部分更新：字段缺失或为 `null` 时保持已落盘的值，不重置成默认的 true。"""
+    from ai_pr_review.config import AppConfig
+
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+    backend._apply_setup({"runtime_profile": "local", "symbol_locate": False})
+
+    backend._apply_setup(payload)
+
+    assert backend.config.preferences.symbol_locate is False
+    assert AppConfig.load(config_path).preferences.symbol_locate is False
+
+
+def test_config_options_and_model_status_expose_symbol_locate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`config.options` 与 `model.status` 同键同形；默认为开启，关掉后两处同步。"""
+    _offline_model_provider(monkeypatch)
+    backend = JsonlBackend(tmp_path / "config.json")
+
+    options = backend._setup_options()["symbol_locate"]
+    assert options["value"] is True  # 默认开启（config.DEFAULT_SYMBOL_LOCATE）
+    assert [item["value"] for item in options["options"]] == [True, False]
+    assert all(item["label"] for item in options["options"])
+
+    backend._apply_setup({"runtime_profile": "local", "symbol_locate": False})
+
+    assert backend._setup_options()["symbol_locate"]["value"] is False
+    status = _execute(backend, "model", ["status"])["result"]["status"]
+    assert status["symbol_locate"] == backend._setup_options()["symbol_locate"]
+    assert status["symbol_locate"]["value"] is False
+
+
+def test_protocol_config_options_and_setup_carry_symbol_locate(tmp_path: Path) -> None:
+    """协议层：`config.options` 暴露开关，`config.setup` 接受布尔与字符串写法，非法值返回错误事件。"""
+    backend = JsonlBackend(tmp_path / "config.json")
+
+    options = asyncio.run(
+        backend.handle({"id": "1", "method": "config.options", "params": {}})
+    )[0]
+    assert options["ok"] is True
+    assert options["result"]["symbol_locate"]["value"] is True
+    assert [item["value"] for item in options["result"]["symbol_locate"]["options"]] == [
+        True,
+        False,
+    ]
+    # 加法式扩展：既有出口一个都没被挤掉。
+    assert options["result"]["repo_context"]["value"] == "tests+imports"
+    assert options["result"]["current"]["workbench_mode"] == "auto"
+
+    disabled = asyncio.run(
+        backend.handle(
+            {
+                "id": "2",
+                "method": "config.setup",
+                "params": {"runtime_profile": "local", "symbol_locate": False},
+            }
+        )
+    )[0]
+    assert disabled["ok"] is True
+    assert backend.config.preferences.symbol_locate is False
+
+    enabled = asyncio.run(
+        backend.handle(
+            {
+                "id": "3",
+                "method": "config.setup",
+                "params": {"runtime_profile": "local", "symbol_locate": "on"},
+            }
+        )
+    )[0]
+    assert enabled["ok"] is True
+    assert backend.config.preferences.symbol_locate is True
+
+    # 非法值经协议边界返回错误事件而不是抛穿（沿用既有错误映射），且不改内存。
+    rejected = asyncio.run(
+        backend.handle(
+            {
+                "id": "4",
+                "method": "config.setup",
+                "params": {"runtime_profile": "local", "symbol_locate": "sometimes"},
+            }
+        )
+    )[0]
+    assert rejected["ok"] is False
+    assert "符号定位仅支持" in rejected["error"]["message"]
+    assert backend.config.preferences.symbol_locate is True
+
+
+def test_symbol_locate_vocabulary_matches_the_config_layer() -> None:
+    """`_coerce_symbol_locate` 与 `config.normalize_symbol_locate` 必须逐值同口径。
+
+    后端重列了一份解析表（理由见 `jsonl_server.py` 的注释）：config 层对非法值只告警回退，
+    向导层要报错。这个用例把两张表钉在一起——config 层不告警的写法，向导必须接受且解析成
+    同一个布尔；config 层告警的写法，向导必须拒绝。
+    """
+    import warnings
+
+    from ai_pr_review.config import ConfigValidationError, normalize_symbol_locate
+
+    samples: list[Any] = [
+        True,
+        False,
+        0,
+        1,
+        2,
+        -1,
+        0.0,
+        1.0,
+        "true",
+        "false",
+        " TRUE ",
+        "Off",
+        "yes",
+        "no",
+        "on",
+        "1",
+        "0",
+        "maybe",
+        "tru",
+        "",
+        " ",
+        None,
+        [],
+        {},
+    ]
+    for raw in samples:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            expected = normalize_symbol_locate(raw)
+        config_rejects = any("symbol_locate" in str(item.message) for item in caught)
+        try:
+            parsed = JsonlBackend._coerce_symbol_locate(raw)
+        except ConfigValidationError:
+            backend_rejects = True
+        else:
+            backend_rejects = False
+            assert parsed is expected, raw
+        assert backend_rejects is config_rejects, raw
+
+
+def test_symbol_locate_switch_reaches_the_orchestrator_predicate(tmp_path: Path) -> None:
+    """落盘字段就是消费方读的那个：`ReviewOrchestrator._symbol_locate_enabled()`。
+
+    配置入口的意义在于"改得动真正的开关"——这里用 `AppConfig.load()` 重新读回落盘结果，
+    确认编排器看到的就是向导刚写入的值（消费逻辑本身由 `tests/test_symbol_locator.py` 覆盖）。
+    """
+    from ai_pr_review.config import AppConfig
+    from ai_pr_review.services.review_orchestrator import ReviewOrchestrator
+
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+    backend._apply_setup({"runtime_profile": "local", "symbol_locate": False})
+
+    orchestrator = ReviewOrchestrator.__new__(ReviewOrchestrator)
+    orchestrator._config = AppConfig.load(config_path)
+
+    assert orchestrator._symbol_locate_enabled() is False
+
+    backend._apply_setup({"runtime_profile": "local", "symbol_locate": True})
+    orchestrator._config = AppConfig.load(config_path)
+    assert orchestrator._symbol_locate_enabled() is True
+
+
+# ---------------------------------------------------------------------------
 # `/model` 子命令（docs/dual-model-roles-plan.md §5.3）
 # ---------------------------------------------------------------------------
 

@@ -1197,6 +1197,77 @@ def test_cli_preferences_command_rejects_invalid_repo_context(monkeypatch, tmp_p
     assert not config_path.exists()
 
 
+def test_cli_preferences_command_toggles_symbol_locate(monkeypatch, tmp_path: Path):
+    """`--no-symbol-locate` 关掉 L2 符号定位，`--symbol-locate` 再打开（一条命令即可脚本化）。"""
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+    config = config_module.AppConfig.from_env()
+    config.ai_client = config_module.AIClientConfig(
+        provider="deepseek",
+        api_key="deepseek-key",
+        model="deepseek-chat",
+        base_url="https://api.deepseek.com/v1",
+        api_format="openai",
+    )
+    config.save(config_path, save_key=True)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["preferences", "--no-symbol-locate"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)["symbol_locate"] is False
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["preferences"]["symbol_locate"] is False
+    # 不该碰其他偏好，也不该把已保存的 Key 丢掉。
+    assert persisted["preferences"]["repo_context"] == "tests+imports"
+    assert persisted["preferences"]["workbench_mode"] == "auto"
+    assert persisted["ai_client"]["api_key"] == "deepseek-key"
+    assert config_module.AppConfig.load(config_path).preferences.symbol_locate is False
+
+    again = runner.invoke(main, ["preferences", "--symbol-locate"])
+
+    assert again.exit_code == 0
+    assert json.loads(again.output)["symbol_locate"] is True
+    assert (
+        json.loads(config_path.read_text(encoding="utf-8"))["preferences"]["symbol_locate"]
+        is True
+    )
+
+
+def test_cli_config_preferences_alias_sets_symbol_locate(monkeypatch, tmp_path: Path):
+    """`pr-review config preferences` 别名同样生效（与 `--repo-context` 共用同一实现）。"""
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["config", "preferences", "--no-symbol-locate"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)["symbol_locate"] is False
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["preferences"]["symbol_locate"] is False
+
+
+def test_cli_preferences_command_echoes_symbol_locate_without_writing(
+    monkeypatch, tmp_path: Path
+):
+    """两个开关都不传：只回显当前值（默认开启），不落盘、不创建配置文件。"""
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", config_path)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["preferences"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["symbol_locate"] is True
+    assert payload["repo_context"] == "tests+imports"
+    assert not config_path.exists()
+
+
 def test_cli_config_export_snapshot_carries_workbench_mode(monkeypatch, tmp_path: Path):
     config_path = tmp_path / "config.json"
     export_path = tmp_path / "export.json"
