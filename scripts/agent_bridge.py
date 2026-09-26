@@ -302,7 +302,10 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init")
     d = sub.add_parser("dispatch")
-    d.add_argument("--agent", choices=("claude", "mimo"), required=True)
+    # 协作执行器：claude / mimo / codex(GLM) / opencode(MiMo-V2.6-Flash-Free)
+    d.add_argument(
+        "--agent", choices=("claude", "mimo", "codex", "opencode"), required=True
+    )
     d.add_argument("--task-id", default=None)
     d.add_argument("--objective", required=True)
     d.add_argument("--scope", action="append", default=[])

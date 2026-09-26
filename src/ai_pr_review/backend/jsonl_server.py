@@ -18,8 +18,15 @@ from collections.abc import Awaitable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable, NamedTuple, cast
 
+# 会话落盘（A2）：`chat_session.json` 与 CLI 的 `pr-review chat` 共用同一份文件，
+# 格式也共用（见 chat_session.load_chat_session）——两个前端切换着用不该互相看不见。
+from ai_pr_review.chat_session import (
+    clear_chat_session,
+    load_chat_session,
+    save_chat_session,
+)
 from ai_pr_review.config import (
     CHAT_SLOT_VALUES,
     MODEL_PROVIDER_PRESETS,
@@ -220,6 +227,12 @@ def _extract_ordinal(text: str) -> int | None:
 CHAT_REPO_FILE_MAX_CHARS = 8000
 CHAT_REPO_FILES_TOTAL_CHARS = 12000
 CHAT_REPO_FILES_LIMIT = 2
+# A1（docs/chat-experience-plan.md §A1）：被本次 run 的 finding 点名的文件不再从文件头
+# 截断——头部截断会让 finding 行（实测 index.html:237，而文件只给到 ~200 行）根本不在
+# 注入内容里，模型于是把整轮输出花在"数行号"上。改成取 finding 行号 ± 该值行的窗口。
+CHAT_REPO_FINDING_WINDOW_LINES = 80
+# A3：对话历史窗口（原为硬编码的 40 条）。裁剪时必须明确告知用户，不再静默丢弃。
+CHAT_HISTORY_MESSAGE_LIMIT = 80
 # 先剔除 URL：`…/pull/31` 不是文件路径，`https://host/app.js` 里的 `app.js` 也不是
 # 用户要问的仓库文件（那是一个网址）。宁可漏掉 blob URL，也不要把网址当路径去拉。
 _URL_PATTERN = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
@@ -262,6 +275,35 @@ def _mentioned_repo_paths(text: str) -> list[str]:
         if len(paths) >= CHAT_REPO_FILES_LIMIT:
             break
     return paths
+
+
+def _normalized_repo_path(path: str) -> str:
+    """仓库路径的比较用规范形（统一分隔符、去掉开头的 `./`、小写）。
+
+    findings 里存的是仓库相对路径（`website/index.html`），用户在消息里可能写
+    `./website/index.html` 或 `website\\index.html`；不统一就匹配不上，A1 的窗口逻辑
+    会静默退化成头部截断——而"静默退化"正是这个 bug 最难查的地方。
+    """
+    return path.replace("\\", "/").strip().lstrip("./").lower()
+
+
+def _chat_timestamp() -> str:
+    """对话消息的时间戳，沿用 CLI 既有格式（`HH:MM`，见 chat_runtime.send_once）。"""
+    return datetime.now().strftime("%H:%M")
+
+
+class _RepoFileWindow(NamedTuple):
+    """被 finding 点名的文件要注入的行窗口（A1）。
+
+    `anchor` 是首个 finding 的行区间：窗口放不下时以它为中心收缩，保证要修的那一行
+    一定在注入内容里；`extra` 是窗口之外还有 finding 的起始行号（写进标注，让模型知道
+    这个文件还有别的问题点没给出来）。
+    """
+
+    first: int
+    last: int
+    anchor: tuple[int, int]
+    extra: list[int]
 
 
 def _failed_run_suffix(store: Any, run_id: str) -> str:
@@ -1394,13 +1436,46 @@ class JsonlBackend:
         return self._chat_slot_config().to_model_provider()
 
     def _chat_context_budget(self) -> int:
-        """聊天上下文的 token 预算（§9.D；配置缺省时用构建器的默认值）。"""
-        raw = getattr(self.config.preferences, "chat_context_budget", DEFAULT_TOKEN_BUDGET)
+        """聊天上下文的 token 预算（§9.D；A3 起可配置，默认 8000）。
+
+        读取顺序：
+        1. `preferences.chat_context_budget`——config 层加了这个字段之后就是它；
+        2. 配置文件里的 `preferences.chat_context_budget` **字面量**——该字段目前还没进
+           `PreferencesConfig`，`AppConfig.load` 会按 dataclass 字段过滤掉未知键，所以
+           "文件里写了、属性上读不到"的值只可能回到原始 JSON 里找。这是本任务 write_scope
+           内能给到的"可配"：用户在配置文件里写就生效，字段进配置层后自动走第 1 条；
+        3. 构建器的默认值（8000）。
+
+        非法值（非数字、≤0）一律回退默认值——坏配置不该让聊天预算变成 0 或负数。
+        """
+        raw = getattr(self.config.preferences, "chat_context_budget", None)
+        if raw is None:
+            raw = self._config_preference_literal("chat_context_budget")
         try:
             budget = int(raw)
         except (TypeError, ValueError):
             return DEFAULT_TOKEN_BUDGET
         return budget if budget > 0 else DEFAULT_TOKEN_BUDGET
+
+    def _config_preference_literal(self, field: str) -> Any:
+        """从生效的配置文件里取 `preferences.<field>` 的字面量（读不到返回 None）。
+
+        只用于读 config 层尚未声明的偏好项（理由见 `_chat_context_budget`）。分层加载与
+        `AppConfig.load` 同序，后者覆盖前者。只取这一个键，其余内容（含凭据）既不读进
+        内存也不落日志；任何 I/O / 解析失败都当作"没配"。
+        """
+        value: Any = None
+        for path in AppConfig.active_config_paths(self.config_path):
+            try:
+                payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue  # 合法 JSON 但不是对象（数组/字符串）：当作没配
+            preferences = payload.get("preferences")
+            if isinstance(preferences, dict) and field in preferences:
+                value = preferences[field]
+        return value
 
     def _chat_system_prompt(self, session: Session, repo_files: str = "") -> str:
         """语言指令 + （绑定了 Run 时的）审查上下文（§9.2 C）+ 本轮提到的仓库文件。
@@ -1596,7 +1671,12 @@ class JsonlBackend:
         return paths
 
     def _collect_repo_files(self, run_id: str, paths: list[str]) -> str:
-        """`_repo_files_for_chat` 的同步主体（在线程里跑，见上）。"""
+        """`_repo_files_for_chat` 的同步主体（在线程里跑，见上）。
+
+        A1 起按"这个文件有没有被本次 finding 点名"分流：点名的取 finding 行号窗口，
+        没点名的仍是头部截断——两种情形都必须在文件头写明"给的是哪一段、文件多大"，
+        否则模型只能靠数行号猜。
+        """
         from ai_pr_review.services.result_store import ResultStore
 
         run = ResultStore(self.config.result_store).get_run_summary(run_id)
@@ -1619,6 +1699,8 @@ class JsonlBackend:
 
         fetcher = self._chat_pr_fetcher()
         cache = self._chat_repo_cache(owner, repo, sha)
+        # 本次 run 的 findings 点名了哪些文件、在哪几行（读不到就是 {}，全部按头部截断）。
+        spans = self._finding_line_spans(run_id)
         budget = CHAT_REPO_FILES_TOTAL_CHARS
         for path in paths:
             try:
@@ -1632,20 +1714,160 @@ class JsonlBackend:
             if budget <= 0:
                 lines.append(f"(未能读取 {path}：本轮注入已达 {CHAT_REPO_FILES_TOTAL_CHARS} 字符上限)")
                 continue
-            body, budget = self._truncate_repo_file(
-                content, min(CHAT_REPO_FILE_MAX_CHARS, budget), budget
+            body, note, budget = self._repo_file_excerpt(
+                content,
+                min(CHAT_REPO_FILE_MAX_CHARS, budget),
+                budget,
+                spans.get(_normalized_repo_path(path)),
             )
-            lines.append(f"### {path}\n```\n{body}\n```")
+            header = f"### {path}\n{note}" if note else f"### {path}"
+            lines.append(f"{header}\n```\n{body}\n```")
         lines.append(self._repo_files_rules())
         return "\n\n".join(lines)
 
+    def _finding_line_spans(self, run_id: str) -> dict[str, list[tuple[int, int]]]:
+        """本次 run 的 findings 按文件归并出的行区间（A1 取窗口的依据）。
+
+        读不到 findings（run 被清理、库读不了、旧记录没有）就返回 `{}`：此时所有文件都
+        按"未被点名"处理，绝不猜行号——猜出来的窗口比头部截断更糟。
+        """
+        try:
+            from ai_pr_review.services.result_store import ResultStore
+
+            result = ResultStore(self.config.result_store).get_result(run_id)
+        except Exception:
+            return {}
+        spans: dict[str, list[tuple[int, int]]] = {}
+        for finding in getattr(result, "findings", None) or []:
+            path = _normalized_repo_path(str(getattr(finding, "file", "") or ""))
+            line_start = _optional_int(getattr(finding, "line_start", None))
+            if not path or line_start is None or line_start < 1:
+                continue
+            line_end = _optional_int(getattr(finding, "line_end", None)) or line_start
+            spans.setdefault(path, []).append((line_start, max(line_start, line_end)))
+        return spans
+
     @staticmethod
-    def _truncate_repo_file(content: str, limit: int, budget: int) -> tuple[str, int]:
-        """按 `limit` 截断单文件并扣减本轮总量预算，返回 `(正文, 剩余预算)`。"""
-        if len(content) > limit:
-            marker = f"\n… [内容已截断，仅显示前 {limit} 个字符]"
-            content = content[: max(0, limit - len(marker))] + marker
-        return content, budget - len(content)
+    def _finding_window(spans: list[tuple[int, int]], total_lines: int) -> _RepoFileWindow:
+        """把 findings 的行区间扩成 ± CHAT_REPO_FINDING_WINDOW_LINES 行的注入窗口。
+
+        多条 finding 时取**首个窗口**（方案 A1：覆盖并集或首个窗口），与之重叠的 finding
+        一并并进来；窗口之外还有 finding 的话把它们的行号返回给调用方写进标注——模型因此
+        知道"这个文件还有别的问题点在窗口外"，而不是以为窗口之外没有问题。
+        """
+        radius = CHAT_REPO_FINDING_WINDOW_LINES
+        # 行号先夹进文件范围：findings 记的是变更后的行号，而注入的是 head 提交的原文，
+        # 万一记录的行号超出文件（改过/截断过），后面的取值必须仍然是有效下标。
+        ordered = [
+            (min(max(1, start), total_lines), min(max(1, end), total_lines))
+            for start, end in sorted(spans)
+        ]
+        first = max(1, ordered[0][0] - radius)
+        last = ordered[0][1] + radius
+        for line_start, line_end in ordered[1:]:
+            if max(1, line_start - radius) <= last + 1:
+                last = max(last, line_end + radius)
+        extra = [line_start for line_start, line_end in ordered if line_end > last]
+        return _RepoFileWindow(
+            first=min(first, total_lines),
+            last=min(last, total_lines),
+            anchor=ordered[0],
+            extra=extra,
+        )
+
+    def _repo_file_excerpt(
+        self,
+        content: str,
+        limit: int,
+        budget: int,
+        spans: list[tuple[int, int]] | None,
+    ) -> tuple[str, str, int]:
+        """渲染单个注入文件：返回 `(正文, 标注, 剩余总量预算)`。
+
+        标注描述的永远是**真正注入的内容**：窗口/头部被字符预算截断时，行范围随之收窄，
+        不会出现"标注说给了 157-317 行、实际只给到 220 行"这种偏差。
+        """
+        all_lines = content.splitlines()
+        total_lines = len(all_lines)
+        if total_lines == 0:
+            return "", "（文件为空）", budget
+        window = self._finding_window(spans, total_lines) if spans else None
+        if window is None:
+            body, shown_first, shown_last = self._fit_lines(all_lines, 1, total_lines, None, limit)
+        else:
+            body, shown_first, shown_last = self._fit_lines(
+                all_lines, window.first, window.last, window.anchor, limit
+            )
+        note = self._excerpt_note(window, shown_first, shown_last, total_lines)
+        return body, note, budget - len(body)
+
+    @staticmethod
+    def _fit_lines(
+        all_lines: list[str],
+        first: int,
+        last: int,
+        anchor: tuple[int, int] | None,
+        limit: int,
+    ) -> tuple[str, int, int]:
+        """在 `[first, last]` 内按字符预算取一段**连续**文本，返回 `(正文, 首行, 末行)`。
+
+        `anchor` 为空（文件没被 finding 点名）时从 `first` 向下顺次取，即原有的头部截断；
+        `anchor` 非空时以 finding 所在行为中心向两侧扩展——**先保证 finding 行本身**，
+        再交替补上下文。否则预算一紧，截断就会把 A1 要修的那一行又切掉，等于没修。
+        """
+        joined = "\n".join(all_lines[first - 1 : last])
+        if len(joined) <= limit:
+            return joined, first, last
+        marker = f"\n… [内容已截断，仅显示前 {limit} 个字符]"
+        room = max(0, limit - len(marker))
+
+        def size(lo: int, hi: int) -> int:
+            return sum(len(text) + 1 for text in all_lines[lo - 1 : hi]) - 1
+
+        if anchor is None:
+            lo, hi = first, first - 1
+            for number in range(first, last + 1):
+                if size(first, number) > room:
+                    break
+                hi = number
+            if hi < lo:
+                # 第一行就超预算（单行超长文件）：按字符切，仍给出内容而不是空块。
+                return all_lines[first - 1][:room] + marker, first, first
+        else:
+            lo, hi = anchor
+            if size(lo, hi) > room:
+                return all_lines[lo - 1][:room] + marker, lo, lo
+            up, down = lo - 1, hi + 1
+            up_added = down_added = 0
+            while True:
+                if up >= first and (up_added <= down_added or down > last) and size(up, hi) <= room:
+                    lo, up, up_added = up, up - 1, up_added + 1
+                    continue
+                if down <= last and size(lo, down) <= room:
+                    hi, down, down_added = down, down + 1, down_added + 1
+                    continue
+                break
+        return "\n".join(all_lines[lo - 1 : hi]) + marker, lo, hi
+
+    @staticmethod
+    def _excerpt_note(
+        window: _RepoFileWindow | None,
+        shown_first: int,
+        shown_last: int,
+        total_lines: int,
+    ) -> str:
+        """注入段文件头的行号标注（A1 的"必须标注"）。"""
+        if window is None:
+            # 未被点名：头部截断，只在真的截断时标注（没截断就没什么可提醒的）。
+            if shown_last >= total_lines:
+                return ""
+            return f"（文件共 {total_lines} 行，此处仅显示前 {shown_last} 行）"
+        note = f"（显示第 {shown_first}-{shown_last} 行，文件共 {total_lines} 行"
+        if shown_first > window.first or shown_last < window.last:
+            note += f"；窗口 {window.first}-{window.last} 行已按预算截断"
+        if window.extra:
+            note += f"；另有 finding 在第 {'、'.join(str(line) for line in window.extra)} 行"
+        return note + "）"
 
     @staticmethod
     def _repo_files_rules() -> str:
@@ -1655,7 +1877,9 @@ class JsonlBackend:
             "1. 上面的文件内容取自本次审查的 head 提交，只依据它回答这个文件的问题；\n"
             '2. 上面没有给出内容的文件（包括以"(未能读取 …)"标注的）不得臆测，'
             '也不要用你记忆里的同名文件替代，请明说"没读到"；\n'
-            "3. 引用代码时必须给出「文件:行」。"
+            "3. 引用代码时必须给出「文件:行」；\n"
+            "4. 文件头标注了行号范围的，只给了那一段（不是全文）：直接按标注的行号引用，"
+            "不要再自己数行号；标注范围之外的代码不得臆测。"
         )
 
     def _bind_session_run(self, session_id: str | None, run_id: str) -> bool:
@@ -1777,7 +2001,15 @@ class JsonlBackend:
         # 从哪来"，模型只答得出"需要查看源码"，因为它手上只有 findings 记录）。
         # 必须在 `_resolve_context` 之后算：这一轮刚切换的绑定就是要去读的那个 run。
         repo_files = await self._repo_files_for_chat(session, text)
-        history = [*session.messages, {"role": "user", "content": text}]
+        # 落盘的消息带 timestamp/duration_seconds（沿用 CLI 既有格式），但**上线路的**
+        # 只保留协议需要的 role/content：部分 OpenAI 兼容端点对消息里的未知字段直接报错。
+        transcript = [
+            *session.messages,
+            {"role": "user", "content": text, "timestamp": _chat_timestamp()},
+        ]
+        wire_history = [
+            {"role": message["role"], "content": message["content"]} for message in transcript
+        ]
         chat_options: dict[str, Any] = {
             "system_prompt": self._chat_system_prompt(session, repo_files),
             "max_tokens": self.config.ai_client.max_tokens,
@@ -1788,8 +2020,9 @@ class JsonlBackend:
             # the whole answer budget in the reasoning channel and return an
             # empty `content`, which Chat surfaces as a connection failure.
             chat_options["reasoning_effort"] = "none"
+        started = time.perf_counter()
         response = await provider.stream_chat(
-            history,
+            wire_history,
             on_delta,
             cancel_event=cancel_event,
             **chat_options,
@@ -1797,15 +2030,83 @@ class JsonlBackend:
         if cancel_event.is_set():
             raise asyncio.CancelledError
         response_text = self._truncate(response.text, 20000)
-        # The binding notice is UI-only: the transcript keeps the clean answer
-        # so later turns are not fed a machine-generated prefix.
-        session.messages = [*history, {"role": "assistant", "content": response_text}][-40:]
+        # A2：会话落盘。只写 role/content/timestamp（assistant 另带 duration_seconds，
+        # 既有格式的一部分、组 C 的 C4 要用），**不写 review 上下文**——system prompt
+        # 里的审查上下文与仓库文件都是每轮现算的，落盘只会让历史重复膨胀并重复计费。
+        session.messages, dropped = self._trim_history(
+            [
+                *transcript,
+                {
+                    "role": "assistant",
+                    "content": response_text,
+                    "timestamp": _chat_timestamp(),
+                    "duration_seconds": round(time.perf_counter() - started, 3),
+                },
+            ]
+        )
+        self._persist_session(session)
+        # 提示文案只进 UI（`assistant.finished.text`），不进 transcript：否则下一轮会把
+        # 机器生成的句子当成对话内容再发一遍。绑定提示同理。
+        # 绑定提示是**前缀**（它框定这条回答针对哪次审查），裁剪提示是**后缀**
+        # （回答读完之后才需要知道"前面的话已被移出上下文"）。
+        prefix = ""
+        suffix = ""
         if auto_bound_run:
-            return (
+            prefix = (
                 f"（已按你的指代绑定审查 run {auto_bound_run[:8]}；"
-                f"用 /context 查看详情，或 /context off 解绑）\n\n{response_text}"
+                f"用 /context 查看详情，或 /context off 解绑）\n\n"
             )
-        return response_text
+        if dropped:
+            # A3：裁剪必须明说。旧实现静默 `[-40:]`，用户只看到模型"忘了"前面说过的话。
+            print(
+                f"chat history over {CHAT_HISTORY_MESSAGE_LIMIT} messages "
+                f"({dropped} dropped from the prompt)",
+                file=sys.stderr,
+                flush=True,
+            )
+            suffix = (
+                f"\n\n（对话历史超过 {CHAT_HISTORY_MESSAGE_LIMIT} 条，"
+                f"最旧的 {dropped} 条已不进入本轮上下文；/new 可开始新会话）"
+            )
+        return f"{prefix}{response_text}{suffix}"
+
+    @staticmethod
+    def _trim_history(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+        """对话历史窗口（A3：`[-40:]` → `[-CHAT_HISTORY_MESSAGE_LIMIT:]`）。
+
+        返回 `(保留的消息, 被丢弃的条数)`；丢弃条数交给调用方**明确告知**用户，不再静默截断。
+        """
+        if len(messages) <= CHAT_HISTORY_MESSAGE_LIMIT:
+            return messages, 0
+        kept = messages[-CHAT_HISTORY_MESSAGE_LIMIT:]
+        return kept, len(messages) - len(kept)
+
+    def _restore_session_messages(self) -> list[dict[str, Any]]:
+        """新建会话时恢复落盘的对话历史（A2：backend 重启后接着聊）。
+
+        读不到（首次运行 / 文件损坏 / 无权限）就是空历史：恢复失败不该挡住聊天。
+        """
+        try:
+            return load_chat_session(self.config_path)
+        except Exception as exc:
+            print(
+                f"chat session restore failed ({exc.__class__.__name__}: {exc}); "
+                "starting with an empty history",
+                file=sys.stderr,
+                flush=True,
+            )
+            return []
+
+    def _persist_session(self, session: Session) -> None:
+        """把会话落盘（A2）。写失败只记 warning：磁盘问题不该让这轮回答失败。"""
+        try:
+            save_chat_session(self.config_path, session.messages)
+        except Exception as exc:
+            print(
+                f"chat session save failed ({exc.__class__.__name__}: {exc})",
+                file=sys.stderr,
+                flush=True,
+            )
 
     def _resolve_context(self, session: Session, text: str) -> str | None:
         """按消息内容决定这一轮绑定的审查 run；返回"本轮新绑定"的 run_id。
@@ -2306,8 +2607,14 @@ class JsonlBackend:
                 else:
                     result(self._apply_runtime_profile(str(params.get("value", ""))))
             elif method == "session.create":
-                session = Session(session_id=uuid.uuid4().hex)
+                # A2：新建会话从 `chat_session.json` 恢复历史——TUI 重启后接着聊，
+                # 而不是每次打开都从零开始（`/new` 是唯一清空入口）。
+                session = Session(
+                    session_id=uuid.uuid4().hex,
+                    messages=self._restore_session_messages(),
+                )
                 self.sessions[session.session_id] = session
+                self._persist_session(session)
                 result(self._session_snapshot(session))
             elif method == "session.get":
                 existing_session = self.sessions.get(str(params.get("session_id", "")))
@@ -2770,6 +3077,16 @@ class JsonlBackend:
                                     self.review_cancellations.pop(review_session_id, None)
                                     self.event_counts.pop(review_session_id, None)
                 elif command == "new":
+                    # A2：`/new` 必须同时清掉落盘的会话，否则下次启动又把它恢复回来——
+                    # 用户会以为"新建会话"没生效。
+                    try:
+                        clear_chat_session(self.config_path)
+                    except Exception as exc:
+                        print(
+                            f"chat session clear failed ({exc.__class__.__name__}: {exc})",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                     session = Session(session_id=uuid.uuid4().hex)
                     self.sessions[session.session_id] = session
                     result(self._session_snapshot(session))

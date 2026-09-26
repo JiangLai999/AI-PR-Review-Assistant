@@ -5177,3 +5177,324 @@ def test_chat_falls_back_to_the_findings_files_when_the_user_just_asks_for_code(
         assert "your_github_token" in prompt, "注入的应是真实读取到的内容"
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# A1-A3（docs/chat-experience-plan.md 组 A 第一批）：
+# 按 finding 行号取窗口 / 会话落盘 / 历史窗口与预算
+# ---------------------------------------------------------------------------
+
+
+def _seed_run_with_findings(
+    backend: JsonlBackend,
+    findings: list[tuple[str, int, int]],
+    *,
+    pr_number: int = 31,
+    head_sha: str = "b" * 40,
+) -> str:
+    """落库一条 head_sha 齐全、且**点名了具体文件与行号**的 run（A1 取窗口的依据）。"""
+    from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
+    from ai_pr_review.services.result_store import ResultStore
+
+    return ResultStore(backend.config.result_store).save_result(
+        f"https://github.com/example/repo/pull/{pr_number}",
+        ReviewResult(
+            summary="审查完成",
+            findings=[
+                Finding(
+                    severity="critical",
+                    category="security",
+                    title=f"{path}:{line_start} 的问题",
+                    file=path,
+                    line_start=line_start,
+                    line_end=line_end,
+                    problem="问题描述",
+                    suggestion="修复建议",
+                    confidence=0.9,
+                    code_snippet="",
+                )
+                for path, line_start, line_end in findings
+            ],
+        ),
+        head_sha=head_sha,
+    )
+
+
+def test_chat_injects_a_line_window_around_the_finding_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A1 实测根因：index.html 的 finding 在 237 行，旧实现只注入前 ~200 行。
+
+    用户实测时模型把整轮输出花在"数行号"上——因为它手上的内容里根本没有那一行。
+    现在被 finding 点名的文件取 finding 行号 ± 80 行的窗口，并在文件头标注范围。
+    """
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        run_id = _seed_run_with_findings(backend, [("website/index.html", 237, 237)])
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = run_id
+        content = "\n".join(f"<div>row {index}</div>" for index in range(1, 413))
+        fetcher = _StubRepoFetcher({"website/index.html": content})
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        # 消息里没有文件名：走"对应的仓库代码"兜底到 findings 点名的文件（.html 不在
+        # SOURCE_EXTENSIONS 里，显式路径那条路认不出它）。
+        response = await backend.handle(_chat_send(session_id, "对应的仓库代码"))
+
+        assert response[0]["ok"] is True
+        prompt = captured["options"]["system_prompt"]
+        assert "### website/index.html" in prompt
+        # 标注必须给出窗口范围与文件总行数（方案 §A1 的文案）
+        assert "（显示第 157-317 行，文件共 412 行）" in prompt
+        # 注入内容真的覆盖 finding 所在行，且不是从文件头截断的
+        assert "<div>row 237</div>" in prompt
+        assert "<div>row 157</div>" in prompt
+        assert "<div>row 1</div>" not in prompt
+        assert "<div>row 412</div>" not in prompt
+
+    asyncio.run(run())
+
+
+def test_chat_head_truncates_a_file_no_finding_names_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A1：没被本次 finding 点名的文件仍是头部截断，但必须写明"只给了前 M 行"。
+
+    旧实现只写"仅显示前 8000 个字符"，模型无法知道自己看到的占全文多少——这正是
+    "数行号"的另一半原因。
+    """
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        # 这条 run 的 finding 在别的文件上：本次提到的文件属于"未被点名"。
+        run_id = _seed_run_with_findings(backend, [("src/flagged.py", 12, 14)])
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = run_id
+        content = "\n".join(f"row {index} " + "x" * 40 for index in range(1, 600))
+        fetcher = _StubRepoFetcher({"src/plain.py": content})
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(_chat_send(session_id, "src/plain.py 讲了什么"))
+
+        assert response[0]["ok"] is True
+        prompt = captured["options"]["system_prompt"]
+        assert "### src/plain.py" in prompt
+        note = re.search(r"（文件共 599 行，此处仅显示前 (\d+) 行）", prompt)
+        assert note is not None, "未被点名的文件也必须标注文件总行数与实际给出的行数"
+        assert 0 < int(note.group(1)) < 599
+        assert "row 1 " in prompt
+        assert "row 599 " not in prompt
+        # 没被点名 → 不出现窗口文案
+        assert "显示第" not in prompt
+
+    asyncio.run(run())
+
+
+def test_chat_names_the_findings_that_fall_outside_the_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """同一文件里相隔很远的 finding：窗口取首个，其余的只点名行号（不假装给全）。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        run_id = _seed_run_with_findings(
+            backend, [("src/big.py", 237, 237), ("src/big.py", 900, 905)]
+        )
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = run_id
+        content = "\n".join(f"line {index}" for index in range(1, 1001))
+        fetcher = _StubRepoFetcher({"src/big.py": content})
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(_chat_send(session_id, "src/big.py 的问题在哪几行"))
+
+        assert response[0]["ok"] is True
+        prompt = captured["options"]["system_prompt"]
+        assert "（显示第 157-317 行，文件共 1000 行；另有 finding 在第 900 行）" in prompt
+        assert "line 237" in prompt
+        assert "line 900" not in prompt, "窗口外的内容不该被顺带注入"
+
+    asyncio.run(run())
+
+
+def test_chat_keeps_the_finding_line_when_the_window_overflows_the_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A1：窗口本身超预算时"窗口内再截断"，但**必须先保住 finding 那一行**。
+
+    否则行很长的文件（HTML 常见）会重演同一个 bug：截断把要修的那一行又切掉了。
+    """
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        run_id = _seed_run_with_findings(backend, [("website/index.html", 237, 237)])
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = run_id
+        content = "\n".join(f"L{index:04d}|" + "y" * 200 for index in range(1, 413))
+        fetcher = _StubRepoFetcher({"website/index.html": content})
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(_chat_send(session_id, "对应的仓库代码"))
+
+        assert response[0]["ok"] is True
+        prompt = captured["options"]["system_prompt"]
+        assert "L0237|" in prompt, "finding 所在行必须在注入内容里"
+        assert "；窗口 157-317 行已按预算截断）" in prompt
+        assert "… [内容已截断" in prompt
+        # 标注里的实际范围比窗口窄（如实描述真正注入的内容）
+        note = re.search(r"（显示第 (\d+)-(\d+) 行，文件共 412 行；窗口 157-317", prompt)
+        assert note is not None
+        assert 157 <= int(note.group(1)) <= 237 <= int(note.group(2)) <= 317
+
+    asyncio.run(run())
+
+
+def test_chat_session_is_persisted_and_restored_by_a_new_backend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A2：会话落盘（role/content/timestamp），backend 重启后接着聊。
+
+    只存对话本身：system prompt（含审查上下文与注入的源码）每轮现算，绝不落盘——
+    落了盘会让历史重复膨胀、重复计费，还会让注入的源码在后续轮次里"阴魂不散"。
+    """
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        assert session["messages"] == []
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(_chat_send(session_id, "第一个问题"))
+        assert response[0]["ok"] is True
+
+        session_path = tmp_path / "chat_session.json"
+        payload = json.loads(session_path.read_text(encoding="utf-8"))
+        assert [message["role"] for message in payload] == ["user", "assistant"]
+        assert payload[0]["content"] == "第一个问题"
+        assert payload[1]["content"] == "stub"
+        assert all(
+            set(message) <= {"role", "content", "timestamp", "duration_seconds"}
+            for message in payload
+        ), "落盘字段仅限 role/content/timestamp（assistant 另有既有格式的 duration_seconds）"
+        assert all(message["timestamp"] for message in payload)
+        assert "请默认使用中文回答" not in session_path.read_text(encoding="utf-8")
+
+        # 新实例（TUI 重启）拿到同样的历史；旧绑定（current_run_id）不落盘，回到普通聊天
+        restarted = _chat_ready_backend(tmp_path)
+        restored = (await restarted.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        assert [message["role"] for message in restored["messages"]] == ["user", "assistant"]
+        assert restored["messages"][0]["content"] == "第一个问题"
+        assert restored["current_run_id"] is None
+
+    asyncio.run(run())
+
+
+def test_new_command_clears_the_persisted_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A2：`/new` 清空 —— 包括落盘的那一份，否则重启后旧对话又回来了。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+        await backend.handle(_chat_send(session_id, "第一轮"))
+        session_path = tmp_path / "chat_session.json"
+        assert session_path.exists()
+
+        reply = await _execute_async(backend, "new", [])
+        assert reply["result"]["messages"] == []
+        assert not session_path.exists(), "/new 必须把落盘的会话一起清掉"
+
+        restarted = _chat_ready_backend(tmp_path)
+        restored = (await restarted.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        assert restored["messages"] == [], "清空后重启不该把旧对话恢复回来"
+
+    asyncio.run(run())
+
+
+def test_chat_history_window_is_80_messages_and_the_trim_is_announced(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A3：历史窗口 40 → 80 条；裁剪时**明确告知**，不再静默丢弃（旧实现用户只看到模型失忆）。"""
+    from ai_pr_review.backend.jsonl_server import CHAT_HISTORY_MESSAGE_LIMIT
+
+    assert CHAT_HISTORY_MESSAGE_LIMIT == 80
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        texts: list[str] = []
+        for index in range(41):  # 40 轮 = 80 条（正好到上限），第 41 轮触发裁剪
+            response = await backend.handle(_chat_send(session_id, f"第 {index} 问"))
+            assert response[0]["ok"] is True
+            texts.append(str(response[0]["result"]["text"]))
+
+        # 满 80 条之前不得出现提示（不制造噪音）
+        assert all("对话历史超过" not in text for text in texts[:40])
+        messages = backend.sessions[session_id].messages
+        assert len(messages) == CHAT_HISTORY_MESSAGE_LIMIT
+        # 82 条 → 丢最旧 2 条，并在**回答之后**明说（提示是后缀，不能挤在回答前面）
+        assert texts[40].endswith(
+            "\n\n（对话历史超过 80 条，最旧的 2 条已不进入本轮上下文；/new 可开始新会话）"
+        )
+        assert texts[40].startswith("stub")
+        # 提示只进 UI：落盘的 transcript 仍是干净的一问一答
+        payload = json.loads((tmp_path / "chat_session.json").read_text(encoding="utf-8"))
+        assert len(payload) == CHAT_HISTORY_MESSAGE_LIMIT
+        assert all("对话历史超过" not in message["content"] for message in payload)
+
+    asyncio.run(run())
+
+
+def test_chat_context_budget_can_be_set_in_the_config_file(tmp_path: Path) -> None:
+    """A3：`chat_context_budget` 可配（默认 8000）。
+
+    该字段还没进 `PreferencesConfig`（配置层由组 B/Codex 负责），`AppConfig.load` 会把
+    未知键过滤掉，所以后端直接读配置文件里的字面量——用户在配置文件里写就生效。
+    非法值一律回退默认值，绝不把 0/负数/字符串传进预算。
+    """
+    config_path = tmp_path / "config.json"
+
+    def write_budget(value: Any) -> None:
+        config_path.write_text(
+            json.dumps({"preferences": {"chat_context_budget": value}}), encoding="utf-8"
+        )
+
+    write_budget(1200)
+    backend = JsonlBackend(config_path)
+    assert backend._chat_context_budget() == 1200
+    # 生效到真正用预算的地方（/context 的 token 预算展示）
+    assert backend._context_status(None)["token_budget"] == 1200
+
+    for bad in (0, -5, "abc", None, [1200]):
+        write_budget(bad)
+        assert JsonlBackend(config_path)._chat_context_budget() == 8000
+
+    # 配置文件不存在/读不动：默认值，不抛
+    assert JsonlBackend(tmp_path / "missing.json")._chat_context_budget() == 8000

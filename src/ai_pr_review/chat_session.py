@@ -20,12 +20,20 @@ def chat_context_path(config_path: Path | None) -> Path:
 
 
 def load_chat_session(config_path: Path | None) -> list[dict[str, Any]]:
+    """读取落盘的对话历史；读不到/读坏了都返回 `[]`（绝不抛）。
+
+    格式：`[{"role", "content", "timestamp"[, "duration_seconds"]}, …]`。CLI 的
+    `pr-review chat` 与 TUI 后端（`JsonlBackend`）共用这一份文件，因此两边的消息
+    形状必须一致：新增字段只能加可选字段，且必须容忍旧文件缺字段。
+    """
     session_path = chat_session_path(config_path)
     if not session_path.exists():
         return []
     try:
         payload = json.loads(session_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, OSError):
+        # 坏文件/读不动都当作"没有历史"：恢复会话失败不该让调用方（聊天循环、
+        # 后端启动路径）跟着失败，更不该把半截历史喂给模型。
         return []
     if not isinstance(payload, list):
         return []
