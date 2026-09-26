@@ -78,12 +78,24 @@
 - **方案**：配置助手新增「模型规格」屏（每个被使用的槽一次）：上下文长度、单次最大输出；非法值回退预设 + warning；三出口（`config.setup`/`config.options`/`model.status`）同步。
 - **验收**：改后持久化并回显；非法值回退 + warning；`max_tokens` 随之变化。
 
-### B2 · 官方 API 规格实时同步
+### B2 · 模型规格与能力同步（**主源已选定**）
 
-- **现状**：规格写死在 `PROVIDER_MODEL_PRESETS`。
-- **方案**：拉官方模型列表（如 DeepSeek `/v1/models`）合并进预设，只覆盖"官方确认存在"的字段，其余保持预设并标注 `source: presets|official`；按 provider + 小时级 TTL 缓存；失败静默降级 + warning；配置助手提供"刷新规格"。
-- **边界**：官方接口多不返回上下文长度/价格 → **如实标注"未知，使用预设"**，绝不编造。
-- **验收**：可拉取的 provider 更新模型列表；失败时与今天一致；来源字段出现在快照里。
+- **现状**：规格写死在 `PROVIDER_MODEL_PRESETS`；官方 `/v1/models` 通常**不返回**上下文长度与思考能力。
+- **方案**（依据 `docs/model-metadata-sources.md` 的实测评估）：
+  - **主源 models.dev**（`api.json`）：提供 `limit.context` / `limit.output` /
+    `reasoning_options`（`toggle` / `effort+values` / `budget_tokens+min`）/ 价格；
+    223 providers、5452 个 reasoning 模型，DeepSeek 条目与本机实测**逐项吻合**。
+  - **交叉源 OpenRouter**（`supported_parameters`）用于 OpenAI 兼容生态的参数名校验。
+  - **官方文档**用于关键供应商的语义校验（如 DeepSeek 的 effort 兼容映射表）。
+  - 合并策略：只覆盖"来源确认存在"的字段，其余保持预设并标注
+    `source: modelsdev|openrouter|official|presets`；按 provider + 小时级 TTL 缓存；
+    失败静默降级 + warning；配置助手提供"刷新规格"。
+  - **冲突不自动二选一**：标记 `needs_verification`，UI 提示并给出一键实测入口
+    （`_p5_verify/p6proto/probe_*` 脚本可直接复用）。
+- **边界**：拿不到就**如实标注 unknown**，绝不套用别家取值；models.dev 不区分端点
+  （Ollama 的 `think` 原生有效、兼容端点失效），这类差异仍需抽验。
+- **验收**：DeepSeek 条目能自动带出 `context=1,000,000` / `output=393,216` /
+  `effort∈{low,high,max}` + `toggle`；来源字段出现在快照里；冲突时标记而非猜测。
 
 ### B3 · 第三方中转站的自定义参数
 
