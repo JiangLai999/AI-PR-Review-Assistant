@@ -7,12 +7,23 @@ import re
 import sqlite3
 import threading
 import time
+import urllib.error
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from ai_pr_review.backend.jsonl_server import JsonlBackend, ReviewCancelled
+from ai_pr_review.config import (
+    CONTEXT_WINDOW_RANGE,
+    DEFAULT_MODEL_CONTEXT_WINDOW,
+    DEFAULT_MODEL_MAX_OUTPUT,
+    MAX_OUTPUT_RANGE,
+    MODEL_SPEC_SOURCES,
+    AppConfig,
+    ProviderModelConfig,
+)
+from ai_pr_review.services.model_catalog import ModelCatalog
 
 
 def test_jsonl_backend_health_and_config_snapshot(tmp_path: Path) -> None:
@@ -5727,3 +5738,744 @@ def test_compact_failure_preserves_history(
         assert backend.sessions[session_id].messages == original
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# B1/B2/B3：models.dev 接进配置助手 + 规格可编辑 + 中转站逐项自定义
+# （docs/b2b3-wiring-design.md §4.1；全部离线，不发真实网络请求）
+# ---------------------------------------------------------------------------
+
+# 真实的 models.dev 片段（2026-09-26 只读抓取）：deepseek 的 1000000/393216 +
+# effort low,high,max + toggle；anthropic 的 200000/8192 + budget_tokens ≥1024。
+# 刻意选成"与内置预设不一致"（deepseek：预设 1048576/384000）与"一致"
+# （anthropic：预设就是 200000/8192）各一条，供两种判定分支使用。
+CATALOG_PAYLOAD: dict[str, Any] = {
+    "deepseek": {
+        "models": {
+            "deepseek-flash": {
+                "reasoning": True,
+                "reasoning_options": [
+                    {"type": "effort", "values": ["low", "high", "max"]},
+                    {"type": "toggle"},
+                ],
+                "limit": {"context": 1_000_000, "output": 393_216},
+            }
+        }
+    },
+    "anthropic": {
+        "models": {
+            "claude-sonnet-4-20250514": {
+                "reasoning": True,
+                "reasoning_options": [{"type": "budget_tokens", "min": 1024}],
+                "limit": {"context": 200_000, "output": 8_192},
+            }
+        }
+    },
+}
+
+
+@pytest.fixture(autouse=True)
+def _offline_model_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """本文件任何用例都不许真的去拉 models.dev。
+
+    `config.options` 的协议分支会取数（§3.3.3），不打桩的话整份用例都会联网。
+    打的是 HTTP 层而不是 `fetch`：失败路径因此与真实断网逐字一致
+    （`_fetch_from_source` 自己吞异常并记住失败）。需要目录的用例再用
+    `_stub_catalog` 覆盖这一层。
+    """
+    ModelCatalog.reset_cache()
+
+    def failing_urlopen(request, timeout):
+        raise urllib.error.URLError("offline")
+
+    monkeypatch.setattr(
+        "ai_pr_review.services.model_catalog.urllib_request.urlopen", failing_urlopen
+    )
+    yield
+    ModelCatalog.reset_cache()
+
+
+def _stub_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, Any] | None = CATALOG_PAYLOAD,
+) -> dict[str, int]:
+    """把 models.dev 的 HTTP 层换成 `payload`（`None` = 断网），返回取数计数。
+
+    计数打在 `ModelCatalog.fetch` 上而不是 urlopen：目录自己也有进程级缓存，
+    数 URL 分不清"backend 的 `_catalog_state` memo 生效"和"恰好命中目录缓存"。
+    """
+    calls = {"fetch": 0}
+    original_fetch = ModelCatalog.fetch
+
+    def counting_fetch(self, *, refresh: bool = False):
+        calls["fetch"] += 1
+        return original_fetch(self, refresh=refresh)
+
+    class StubResponse:
+        def __enter__(self) -> "StubResponse":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        calls["urlopen"] = calls.get("urlopen", 0) + 1
+        if payload is None:
+            raise urllib.error.URLError("offline")
+        return StubResponse()
+
+    monkeypatch.setattr(ModelCatalog, "fetch", counting_fetch)
+    monkeypatch.setattr(
+        "ai_pr_review.services.model_catalog.urllib_request.urlopen", fake_urlopen
+    )
+    ModelCatalog.reset_cache()
+    return calls
+
+
+def _deepseek_backend(tmp_path: Path, config_path: Path | None = None) -> JsonlBackend:
+    """主（远端）槽 = deepseek / deepseek-flash，并同步活跃槽（`model.status` 读它）。
+
+    走 `ModelProviderConfig.from_name` 的真实路径：base_url 就是官方端点，
+    后续若干断言依赖 `endpoint_matches_preset` 为真。
+    """
+    from ai_pr_review.config import ModelProviderConfig, ProviderConfig
+
+    backend = JsonlBackend(config_path or (tmp_path / "config.json"))
+    backend.config.provider = ProviderConfig.from_model_provider(
+        ModelProviderConfig.from_name(
+            "deepseek", model_name="deepseek-flash", api_key="test-key"
+        )
+    )
+    backend.config._sync_runtime_sections()
+    return backend
+
+
+def _catalog_options(backend: JsonlBackend, request_id: str = "1") -> dict[str, Any]:
+    events = asyncio.run(
+        backend.handle({"id": request_id, "method": "config.options", "params": {}})
+    )
+    assert events[0]["ok"] is True
+    return events[0]["result"]
+
+
+def test_config_options_fetches_the_catalog_once_per_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """打开助手 = 一次取数（方案 §B2）；同一个助手里的第二次不得翻转 source。"""
+    calls = _stub_catalog(monkeypatch)
+    backend = JsonlBackend(tmp_path / "config.json")
+
+    first = _catalog_options(backend, "1")["model"]
+    second = _catalog_options(backend, "2")["model"]
+
+    assert calls["fetch"] == 1
+    assert first["catalog_state"]["source"] == "models.dev"
+    assert second["catalog_state"]["source"] == "models.dev"
+    assert first["catalog_state"]["reason"] == ""
+    assert first["catalog_state"]["fetched_at"] == second["catalog_state"]["fetched_at"]
+
+
+def test_config_options_falls_back_to_builtin_when_the_catalog_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """断网/形状错误一律静默回退内置预设：`ok` 仍为 true，绝不抛错挡配置流程。"""
+    calls = _stub_catalog(monkeypatch, payload=None)
+    backend = _deepseek_backend(tmp_path)
+
+    model = _catalog_options(backend)["model"]
+
+    assert calls["fetch"] == 1
+    assert model["catalog_state"]["source"] == "builtin"
+    assert model["catalog_state"]["reason"] == "fetch_failed"
+    assert model["slots"]["remote"]["source"] == "builtin"  # deepseek-flash 有内置预设
+    assert model["catalog"] is None
+    assert model["context_window"] == 1_048_576  # 预设值原样生效
+
+
+def test_config_options_respects_model_catalog_fetch_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`preferences.model_catalog_fetch=false`：一次都不取，reason 如实写 disabled。"""
+    calls = _stub_catalog(monkeypatch)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"preferences": {"model_catalog_fetch": False}}), encoding="utf-8"
+    )
+    backend = JsonlBackend(config_path)
+
+    model = _catalog_options(backend)["model"]
+
+    assert calls["fetch"] == 0
+    assert model["catalog_state"]["enabled"] is False
+    assert model["catalog_state"]["source"] == "builtin"
+    assert model["catalog_state"]["reason"] == "disabled"
+
+
+def test_model_spec_block_marks_a_user_override_without_overwriting_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """§2.8 硬规则 1：生效值永远是落盘值，目录值只摆在 `catalog` 里，绝不静默覆盖。"""
+    _stub_catalog(monkeypatch)
+    backend = _deepseek_backend(tmp_path)
+    backend.config.provider.set_model_spec(
+        "deepseek-flash", context_window=128_000, max_output=8_192
+    )
+    backend.config._sync_runtime_sections()
+
+    _catalog_options(backend)
+    model = backend._setup_options()["model"]
+
+    assert model["context_window"] == 128_000
+    assert model["max_output"] == 8_192
+    assert model["catalog"]["context_window"] == 1_000_000
+    assert model["catalog"]["max_output"] == 393_216
+    assert model["source"] == "builtin"
+    assert model["needs_verification"] is True
+    # 读出口没有写盘：落盘值仍是用户填的那两个数。
+    assert backend.config.provider.models["deepseek-flash"].context_window == 128_000
+
+
+def test_model_spec_block_matches_the_catalog_when_values_agree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """生效值与目录一致 → source 是目录来源，reasoning 摘要串按 controls 顺序拼。"""
+    _stub_catalog(monkeypatch)
+    backend = JsonlBackend(tmp_path / "config.json")  # 默认 anthropic/claude-sonnet-4-20250514
+
+    model = _catalog_options(backend)["model"]
+
+    assert (model["context_window"], model["max_output"]) == (200_000, 8_192)
+    assert model["source"] == "models.dev"
+    assert model["needs_verification"] is False
+    assert model["endpoint_matches_preset"] is True
+    assert model["reasoning"] == "预算 ≥1024"
+
+
+def test_custom_endpoint_specs_never_take_official_presets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """B3 的核心：中转站的自定义模型名不套用任何官方数字，规格由用户逐项填。"""
+    _stub_catalog(monkeypatch)
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+
+    backend._apply_setup(
+        {
+            "runtime_profile": "cloud",
+            "provider_name": "custom",
+            "model_name": "relay-model",
+            "base_url": "https://relay.example.com/v1",
+            "api_format": "openai",
+            "context_window": 200_000,
+            "max_output": 16_384,
+        }
+    )
+
+    entry = backend.config.provider.models["relay-model"]
+    assert (entry.context_window, entry.max_output) == (200_000, 16_384)
+    reloaded = AppConfig.load(config_path)
+    assert (reloaded.provider.models["relay-model"].context_window) == 200_000
+    assert (reloaded.provider.models["relay-model"].max_output) == 16_384
+
+    model = backend._setup_options()["model"]["slots"]["remote"]
+    assert model["provider"] == "custom"
+    assert model["preset"] is None  # 预设表里只有字面量 custom-model
+    assert model["source"] == "unknown"
+    assert model["needs_verification"] is False  # 没有可比对的官方数据，不假称要核对
+    custom = backend._setup_options()["custom_endpoint"]
+    assert custom["default_model"] == "relay-model"
+    assert custom["base_url"] == "https://relay.example.com/v1"
+    assert (custom["context_window"], custom["max_output"]) == (200_000, 16_384)
+
+
+def test_config_setup_persists_specs_and_all_exits_read_them_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """§2.5：提交的规格必须活过 `save`（save 会重建 provider），三个出口同键同形。"""
+    _stub_catalog(monkeypatch)
+    _offline_model_provider(monkeypatch)
+    config_path = tmp_path / "config.json"
+    backend = _deepseek_backend(tmp_path, config_path)
+
+    async def run() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        # 先打开一次助手把目录取回来，再看提交之后三个出口是否一致。
+        await backend.handle({"id": "0", "method": "config.options", "params": {}})
+        snapshot = backend._apply_setup(
+            {
+                "runtime_profile": "cloud",
+                "provider_name": "deepseek",
+                "model_name": "deepseek-flash",
+                "context_window": 1_000_000,
+                "max_output": 393_216,
+            }
+        )
+        options = (
+            await backend.handle({"id": "1", "method": "config.options", "params": {}})
+        )[0]["result"]
+        status = (
+            await backend.handle({"id": "2", "method": "model.status", "params": {}})
+        )[0]["result"]
+        return snapshot, options, status
+
+    snapshot, options, status = asyncio.run(run())
+
+    reloaded = AppConfig.load(config_path)
+    assert reloaded.provider.models["deepseek-flash"].context_window == 1_000_000
+    assert reloaded.provider.models["deepseek-flash"].max_output == 393_216
+
+    for block in (options["model"], snapshot["model_spec"], status["model_spec"]):
+        assert block["context_window"] == 1_000_000
+        assert block["max_output"] == 393_216
+        assert block["source"] == "models.dev"
+        assert block["needs_verification"] is False
+    # 同键同形：`slots` 只属于 config.options（快照/状态是"活跃槽那一份"）。
+    assert set(snapshot["model_spec"]) == set(options["model"]) - {"slots"}
+    assert set(status["model_spec"]) == set(snapshot["model_spec"])
+    assert set(options["model"]["slots"]) == {"remote", "local"}
+
+
+def test_config_setup_spec_params_are_partial_updates(tmp_path: Path) -> None:
+    """缺失/`null` = 保持落盘值：只给一个字段时不碰另一个槽、也不重置另一个字段。"""
+    config_path = tmp_path / "config.json"
+    backend = _deepseek_backend(tmp_path, config_path)
+
+    backend._apply_setup({"runtime_profile": "custom", "local_max_output": 2_048})
+
+    local_entry = backend.config.local_provider.models["qwen3.5:4b"]
+    assert (local_entry.context_window, local_entry.max_output) == (8_192, 2_048)
+    remote_entry = backend.config.provider.models["deepseek-flash"]
+    assert (remote_entry.context_window, remote_entry.max_output) == (1_048_576, 384_000)
+
+    # 显式 null 与"字段缺失"同义：不动任何值。
+    backend._apply_setup(
+        {
+            "runtime_profile": "custom",
+            "local_context_window": None,
+            "local_max_output": None,
+        }
+    )
+
+    assert AppConfig.load(config_path).local_provider.models["qwen3.5:4b"].max_output == 2_048
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"context_window": 1_023},  # 越界（下界 1024）
+        {"context_window": 10_000_001},  # 越界（上界）
+        {"max_output": 0},  # 越界（下界 1）
+        {"context_window": True},  # bool 不是整数
+        {"context_window": 1e6},  # float 拒绝（只接受 int 与数字串）
+        {"max_output": "not a number"},
+        {"context_window": 1_024, "max_output": 10_000_000},  # 输出 > 上下文
+    ],
+)
+def test_config_setup_rejects_an_invalid_spec_and_writes_nothing(
+    params: dict[str, Any], tmp_path: Path
+) -> None:
+    """非法规格整单失败：文案含「模型规格」（TUI 靠它路由回该屏），磁盘一字不动。"""
+    from ai_pr_review.config import ConfigValidationError, ModelProviderConfig, ProviderConfig
+
+    config_path = tmp_path / "config.json"
+    backend = JsonlBackend(config_path)
+    backend.config.provider = ProviderConfig.from_model_provider(
+        ModelProviderConfig.from_name("deepseek", model_name="deepseek-flash", api_key="k")
+    )
+    backend.config._sync_runtime_sections()
+    backend._apply_setup(
+        {
+            "runtime_profile": "cloud",
+            "provider_name": "deepseek",
+            "model_name": "deepseek-flash",
+            "context_window": 1_000_000,
+            "max_output": 393_216,
+        }
+    )
+    before_bytes = config_path.read_bytes()
+    before_entry = backend.config.provider.models["deepseek-flash"]
+
+    with pytest.raises(ConfigValidationError) as excinfo:
+        backend._apply_setup(dict(params))
+
+    assert "模型规格" in str(excinfo.value)
+    assert config_path.read_bytes() == before_bytes
+    after = backend.config.provider.models["deepseek-flash"]
+    assert (after.context_window, after.max_output) == (
+        before_entry.context_window,
+        before_entry.max_output,
+    )
+
+
+def test_config_setup_applies_specs_in_the_custom_routing_profile(tmp_path: Path) -> None:
+    """`runtime_profile="custom"` 只写槽位路由，规格参数不能被分支静默吞掉。"""
+    config_path = tmp_path / "config.json"
+    backend = _deepseek_backend(tmp_path, config_path)
+
+    backend._apply_setup(
+        {
+            "runtime_profile": "custom",
+            "chat_slot": "local",
+            "review_slot": "remote",
+            "context_window": 1_000_000,
+            "max_output": 393_216,
+        }
+    )
+
+    entry = backend.config.provider.models["deepseek-flash"]
+    assert (entry.context_window, entry.max_output) == (1_000_000, 393_216)
+    assert backend.config.preferences.chat_slot == "local"
+    reloaded = AppConfig.load(config_path)
+    assert reloaded.provider.models["deepseek-flash"].context_window == 1_000_000
+    assert reloaded.preferences.chat_slot == "local"
+
+
+def test_model_status_spec_key_does_not_shadow_the_model_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """§2.3 硬约束：规格块叫 `model_spec`。`model` 必须还是字符串模型名。"""
+    _stub_catalog(monkeypatch)
+    _offline_model_provider(monkeypatch)
+    backend = _deepseek_backend(tmp_path)
+
+    status = asyncio.run(
+        backend.handle({"id": "1", "method": "model.status", "params": {}})
+    )[0]["result"]
+
+    assert status["model"] == "deepseek-flash"
+    assert isinstance(status["model_spec"], dict)
+    assert status["source"] == status["model_spec"]["source"]
+    assert status["needs_verification"] == status["model_spec"]["needs_verification"]
+
+
+def test_model_status_and_config_snapshot_never_fetch_the_catalog(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """方案 §B2 验收：状态/快照/三次 chat 调用都不触发任何拉取。"""
+    calls = _stub_catalog(monkeypatch)
+    backend = _deepseek_backend(tmp_path)
+    captured: dict[str, Any] = {}
+    _stub_provider(monkeypatch, captured)
+
+    async def run() -> None:
+        await backend.handle({"id": "1", "method": "model.status", "params": {}})
+        await backend.handle({"id": "2", "method": "config.snapshot", "params": {}})
+        session = (
+            await backend.handle({"id": "3", "method": "session.create", "params": {}})
+        )[0]["result"]
+        for index in range(3):
+            await backend.handle(_chat_send(session["session_id"], f"你好 {index}"))
+
+    asyncio.run(run())
+
+    assert calls["fetch"] == 0
+
+
+def test_reasoning_summary_text_follows_the_ui_language(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """§2.7：摘要串按 `preferences.ui_language` 双语生成；目录无该模型 → null。"""
+    _stub_catalog(monkeypatch)
+    backend = _deepseek_backend(tmp_path)
+    _catalog_options(backend)
+
+    backend.config.preferences.ui_language = "zh-CN"
+    assert (
+        backend._setup_options()["model"]["slots"]["remote"]["reasoning"]
+        == "档位 low/high/max · 开关"
+    )
+    backend.config.preferences.ui_language = "en-US"
+    assert (
+        backend._setup_options()["model"]["slots"]["remote"]["reasoning"]
+        == "effort low/high/max · toggle"
+    )
+
+    # 目录里没有的模型：reasoning 是 null——离线时我们并不知道，而不是"未声明"。
+    from ai_pr_review.config import ProviderModelConfig
+
+    backend.config.provider.models["unknown-model"] = ProviderModelConfig(name="unknown-model")
+    backend.config.provider.default_model = "unknown-model"
+    backend.config._sync_runtime_sections()
+    block = backend._setup_options()["model"]["slots"]["remote"]
+    assert block["reasoning"] is None
+    assert block["reasoning_controls"] == []
+    assert block["catalog"] is None
+
+
+def test_catalog_fetch_does_not_block_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """取数在 `asyncio.to_thread` 里跑：同步 HTTP 10s 不能把 chat 流一起卡住。"""
+
+    def slow_fetch(self, *, refresh: bool = False):
+        time.sleep(0.3)
+        return None
+
+    monkeypatch.setattr(ModelCatalog, "fetch", slow_fetch)
+    ModelCatalog.reset_cache()
+
+    async def run() -> int:
+        ticks = {"count": 0}
+
+        async def ticker() -> None:
+            while True:
+                await asyncio.sleep(0.01)
+                ticks["count"] += 1
+
+        backend = JsonlBackend(tmp_path / "config.json")
+        task = asyncio.create_task(ticker())
+        try:
+            await backend.handle({"id": "1", "method": "config.options", "params": {}})
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        return ticks["count"]
+
+    # 0.3s / 10ms ≈ 30 次；断言 ≥3 只要求"事件循环没有被独占"，给 CI 留足余量。
+    assert asyncio.run(run()) >= 3
+
+
+def test_protocol_config_options_and_setup_carry_model_specs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """协议层 round trip：新键落地，既有键一个都没少（加法安全）。"""
+    _stub_catalog(monkeypatch)
+    _offline_model_provider(monkeypatch)
+    backend = _deepseek_backend(tmp_path)
+
+    async def run() -> tuple[dict[str, Any], dict[str, Any]]:
+        options = (
+            await backend.handle({"id": "1", "method": "config.options", "params": {}})
+        )[0]["result"]
+        setup = (
+            await backend.handle(
+                {
+                    "id": "2",
+                    "method": "config.setup",
+                    "params": {
+                        "runtime_profile": "cloud",
+                        "context_window": 1_000_000,
+                        "max_output": 393_216,
+                    },
+                }
+            )
+        )[0]["result"]
+        return options, setup
+
+    options, setup = asyncio.run(run())
+
+    assert options["model"]["model"] == "deepseek-flash"
+    assert options["custom_endpoint"]["name"] == "custom"
+    for key in (
+        "providers",
+        "runtime_profiles",
+        "api_formats",
+        "ui_languages",
+        "output_formats",
+        "chat_layouts",
+        "workbench_modes",
+        "local",
+        "current",
+        "routing",
+        "repo_context",
+        "symbol_locate",
+    ):
+        assert key in options
+    assert setup["model_spec"]["context_window"] == 1_000_000
+    assert setup["model_spec"]["max_output"] == 393_216
+
+
+def test_config_catalog_refresh_bypasses_the_process_memo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """"重新获取"按钮的后端：忽略进程内定档，重拉一次并立刻反映到读出口。"""
+    calls = _stub_catalog(monkeypatch)
+    backend = JsonlBackend(tmp_path / "config.json")
+    _catalog_options(backend)
+    assert calls["fetch"] == 1
+
+    refreshed = asyncio.run(
+        backend.handle({"id": "2", "method": "config.catalog.refresh", "params": {}})
+    )[0]
+
+    assert refreshed["ok"] is True
+    assert refreshed["result"]["model"]["catalog_state"]["source"] == "models.dev"
+    # refresh 走的是 `ModelCatalog.refresh`（无视缓存），所以这里数的是 HTTP 层。
+    assert calls["urlopen"] == 2
+
+
+def test_set_model_spec_touches_only_the_target_model() -> None:
+    """`ProviderConfig.set_model_spec`：只动目标条目，不动 `default_model` 与别的模型。"""
+    from ai_pr_review.config import ModelProviderConfig, ProviderConfig
+
+    provider = ProviderConfig.from_model_provider(ModelProviderConfig.from_name("deepseek"))
+    other_before = (
+        provider.models["deepseek-v4-pro"].context_window,
+        provider.models["deepseek-v4-pro"].max_output,
+    )
+
+    assert (
+        provider.set_model_spec(
+            "deepseek-flash", context_window=1_000_000, max_output=393_216
+        )
+        is True
+    )
+    assert (provider.models["deepseek-flash"].context_window) == 1_000_000
+    assert (provider.models["deepseek-flash"].max_output) == 393_216
+    assert (
+        provider.models["deepseek-v4-pro"].context_window,
+        provider.models["deepseek-v4-pro"].max_output,
+    ) == other_before
+    assert provider.default_model == "deepseek-chat"
+
+    # 同值重写不算"发生写入"；两个参数都 None 更不算。
+    assert (
+        provider.set_model_spec(
+            "deepseek-flash", context_window=1_000_000, max_output=393_216
+        )
+        is False
+    )
+    assert provider.set_model_spec("deepseek-flash") is False
+    # 中转站那种"预设表里没有"的模型名：显式提交规格会新建条目（B3）。
+    assert provider.set_model_spec("relay-model", context_window=200_000) is True
+    assert provider.models["relay-model"].context_window == 200_000
+    assert provider.models["relay-model"].max_output == 4_096
+
+
+def test_model_spec_bounds_are_sane() -> None:
+    """取值与边界只存一份：`config` 的常量就是 `jsonl_server` 校验用的那一份。"""
+    from ai_pr_review.backend import jsonl_server
+
+    assert CONTEXT_WINDOW_RANGE == (1_024, 10_000_000)
+    assert MAX_OUTPUT_RANGE == (1, 10_000_000)
+    assert jsonl_server.CONTEXT_WINDOW_RANGE is CONTEXT_WINDOW_RANGE
+    assert jsonl_server.MAX_OUTPUT_RANGE is MAX_OUTPUT_RANGE
+    assert jsonl_server.MODEL_SPEC_SOURCES is MODEL_SPEC_SOURCES
+    assert MODEL_SPEC_SOURCES == {"models.dev", "cache", "builtin", "unknown"}
+    assert jsonl_server.CATALOG_SOURCES == {"models.dev", "cache", "builtin"}
+    # 兜底规格与 `ProviderModelConfig` 的字段默认值是同一组数字。
+    assert ProviderModelConfig(name="x").context_window == DEFAULT_MODEL_CONTEXT_WINDOW
+    assert ProviderModelConfig(name="x").max_output == DEFAULT_MODEL_MAX_OUTPUT
+
+
+def test_config_show_and_export_keep_model_specs(tmp_path: Path) -> None:
+    """中转站规格能导出、能在 `config show`（脱敏）里回显——不改产品代码的回归。"""
+    from click.testing import CliRunner
+
+    from ai_pr_review.cli import main
+    from ai_pr_review.config import AIClientConfig, AppConfig, ProviderConfig
+
+    config_path = tmp_path / "config.json"
+    config = AppConfig.from_env()
+    config.ai_client = AIClientConfig(
+        provider="custom",
+        api_key="relay-key",
+        model="relay-model",
+        base_url="https://relay.example.com/v1",
+        api_format="openai",
+    )
+    config.provider = ProviderConfig.from_model_provider(config.ai_client.model_provider)
+    config.provider.set_model_spec("relay-model", context_window=200_000, max_output=16_384)
+    config._sync_runtime_sections()
+    config.save(config_path, save_key=True)
+
+    runner = CliRunner()
+    shown = runner.invoke(main, ["--config", str(config_path), "config", "show"])
+    assert shown.exit_code == 0
+    shown_payload = json.loads(shown.output)
+    assert shown_payload["provider"]["models"]["relay-model"]["context_window"] == 200_000
+    assert shown_payload["provider"]["models"]["relay-model"]["max_output"] == 16_384
+
+    export_path = tmp_path / "export.json"
+    exported = runner.invoke(
+        main, ["--config", str(config_path), "config", "export", "--output", str(export_path)]
+    )
+    assert exported.exit_code == 0
+    payload = json.loads(export_path.read_text(encoding="utf-8"))
+    assert payload["provider"]["models"]["relay-model"]["context_window"] == 200_000
+    assert payload["provider"]["models"]["relay-model"]["max_output"] == 16_384
+
+
+def test_config_import_round_trips_a_relay_spec(tmp_path: Path) -> None:
+    """导入含规格的中转站配置后落盘同值（`save` 重建 provider 的路上不能丢）。"""
+    from click.testing import CliRunner
+
+    from ai_pr_review.cli import main
+    from ai_pr_review.config import AppConfig
+
+    config_path = tmp_path / "config.json"
+    import_payload = {
+        "provider": {
+            "name": "custom",
+            "display_name": "Custom Endpoint",
+            "api_key": "relay-key",
+            "base_url": "https://relay.example.com/v1",
+            "api_format": "openai",
+            "models": {
+                "relay-model": {
+                    "name": "relay-model",
+                    "context_window": 200_000,
+                    "max_output": 16_384,
+                }
+            },
+            "default_model": "relay-model",
+        },
+        "preferences": {"output_format": "terminal", "language": "zh-CN"},
+    }
+    import_source = tmp_path / "import.json"
+    import_source.write_text(
+        json.dumps(import_payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+    result = CliRunner().invoke(
+        main, ["--config", str(config_path), "config", "import", str(import_source), "--save-key"]
+    )
+
+    assert result.exit_code == 0
+    saved = AppConfig.load(config_path)
+    assert saved.provider.models["relay-model"].context_window == 200_000
+    assert saved.provider.models["relay-model"].max_output == 16_384
+
+
+def test_config_health_reports_the_effective_spec_and_source(tmp_path: Path) -> None:
+    """§3.4：`config health` 的 JSON 多四个键；不联网时如实报 builtin/unknown。"""
+    from click.testing import CliRunner
+
+    from ai_pr_review.cli import main
+    from ai_pr_review.config import AIClientConfig, AppConfig, ProviderConfig
+
+    config_path = tmp_path / "config.json"
+    config = AppConfig.from_env()
+    config.ai_client = AIClientConfig(
+        provider="deepseek",
+        api_key="deepseek-key",
+        model="deepseek-flash",
+        base_url="https://api.deepseek.com/v1",
+        api_format="openai",
+    )
+    config.provider = ProviderConfig.from_model_provider(config.ai_client.model_provider)
+    config.save(config_path, save_key=True)
+
+    result = CliRunner().invoke(main, ["--config", str(config_path), "config", "health"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    # 预设表里有 deepseek-flash 但进程里没有目录 → builtin（不是 models.dev）。
+    assert payload["spec_source"] == "builtin"
+    assert (payload["context_window"], payload["max_output"]) == (1_048_576, 384_000)
+    assert payload["needs_verification"] is False
+
+    # 不在预设表里的模型（既有用例用的 deepseek-chat 就是这一类）→ unknown。
+    second = AppConfig.load(config_path)
+    second.provider.default_model = "deepseek-chat"
+    second.provider.ensure_default_model_present()
+    second._sync_runtime_sections()
+    second.save(config_path, save_key=True)
+    result = CliRunner().invoke(main, ["--config", str(config_path), "config", "health"])
+
+    payload = json.loads(result.output)
+    assert payload["spec_source"] == "unknown"
+    assert (payload["context_window"], payload["max_output"]) == (32_768, 4_096)

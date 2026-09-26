@@ -107,11 +107,34 @@ def _copy_reasoning_options(value: object) -> list[dict[str, object]]:
     return [dict(item) for item in value if isinstance(item, dict)]
 
 
+def lookup_in_index(
+    index: CatalogIndex | None, provider: object, model: object
+) -> ModelSpec | None:
+    """在**已经取到**的索引里查询，绝不触发取数。
+
+    给配置助手的只读出口（`config.snapshot` / `model.status`）用：那些路径必须
+    零网络，而 ``ModelCatalog.lookup`` 在冷缓存时会真的发一次请求。
+    """
+    if index is None:
+        return None
+    provider_name = _provider_key(provider)
+    if not provider_name or not str(model or "").strip():
+        return None
+    for model_key in _model_keys(model):
+        spec = index.get((provider_name, model_key))
+        if spec is not None:
+            return spec
+    return None
+
+
 class ModelCatalog:
     """按 provider + model 查询 models.dev 的进程内模型目录。"""
 
     _cache: CatalogIndex | None = None
     _cache_failed = False
+    # 上一次真正拿到数据时的来源（B2 的 `source` 判定依据）：
+    # 'network' = 本次真的发了 HTTPS；'cache' = 命中进程内缓存；None = 没有可用目录。
+    _cache_origin: str | None = None
     _cache_lock = threading.Lock()
 
     def __init__(self, *, timeout_seconds: int = MODEL_CATALOG_TIMEOUT_SECONDS):
@@ -122,6 +145,7 @@ class ModelCatalog:
         with cls._cache_lock:
             cls._cache = None
             cls._cache_failed = False
+            cls._cache_origin = None
 
     def fetch(self, *, refresh: bool = False) -> CatalogIndex | None:
         """返回索引；进程内成功结果与失败结果都只保留一份。
@@ -135,12 +159,23 @@ class ModelCatalog:
         """忽略进程内缓存，强制重拉一次。"""
         return self._load(refresh=True)
 
+    @classmethod
+    def last_load_origin(cls) -> str | None:
+        """上一次 ``_load()`` 的数据来源：``'network'`` | ``'cache'`` | ``None``。
+
+        ``None`` 表示没有可用目录（取数失败，或本进程从未取过）——调用方据此回退
+        内置预设，不得据此宣称"数据来自缓存"。
+        """
+        return cls._cache_origin
+
     def _load(self, *, refresh: bool) -> CatalogIndex | None:
         with ModelCatalog._cache_lock:
             if not refresh:
                 if ModelCatalog._cache is not None:
+                    ModelCatalog._cache_origin = "cache"
                     return ModelCatalog._cache
                 if ModelCatalog._cache_failed:
+                    ModelCatalog._cache_origin = None
                     return None
             return self._fetch_from_source()
 
@@ -167,12 +202,14 @@ class ModelCatalog:
             return None
         ModelCatalog._cache = index
         ModelCatalog._cache_failed = False
+        ModelCatalog._cache_origin = "network"
         return index
 
     @staticmethod
     def _remember_failed_fetch() -> None:
         ModelCatalog._cache = None
         ModelCatalog._cache_failed = True
+        ModelCatalog._cache_origin = None
 
     def _build_index(self, payload: object) -> CatalogIndex | None:
         if not isinstance(payload, dict):
@@ -218,19 +255,7 @@ class ModelCatalog:
 
     def lookup(self, provider: str, model: str) -> ModelSpec | None:
         """查找模型；未知 provider/model 或目录不可用时返回 ``None``。"""
-        index = self._load(refresh=False)
-        if index is None:
-            return None
-
-        provider_name = _provider_key(provider)
-        if not provider_name or not str(model or "").strip():
-            return None
-
-        for model_key in _model_keys(model):
-            spec = index.get((provider_name, model_key))
-            if spec is not None:
-                return spec
-        return None
+        return lookup_in_index(self._load(refresh=False), provider, model)
 
     def reasoning_summary(self, spec: ModelSpec) -> dict[str, object]:
         """把 models.dev 的 reasoning_options 收敛为可展示的 controls。"""

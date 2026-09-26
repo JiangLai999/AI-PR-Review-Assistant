@@ -30,8 +30,11 @@ from ai_pr_review.chat_session import (
 from ai_pr_review.config import (
     CHAT_SLOT_VALUES,
     CHAT_REASONING_EFFORTS,
+    CONTEXT_WINDOW_RANGE,
     DEFAULT_CHAT_REASONING_EFFORT,
+    MAX_OUTPUT_RANGE,
     MODEL_PROVIDER_PRESETS,
+    MODEL_SPEC_SOURCES,
     PROVIDER_MODEL_PRESETS,
     REPO_CONTEXT_MODES,
     REVIEW_SLOT_VALUES,
@@ -41,8 +44,15 @@ from ai_pr_review.config import (
     ProviderConfig,
     resolve_chat_slot,
     resolve_config_path,
+    resolve_model_spec,
     resolve_review_slot,
     sync_review_slot_to_strategy,
+)
+from ai_pr_review.services.model_catalog import (
+    CatalogIndex,
+    ModelCatalog,
+    ModelSpec,
+    lookup_in_index,
 )
 from ai_pr_review.services.model_providers.factory import create_model_provider
 from ai_pr_review.services.repo_context import SOURCE_EXTENSIONS
@@ -152,6 +162,16 @@ SYMBOL_LOCATE_CHOICES: tuple[tuple[bool, str], ...] = (
 # `tests/test_jsonl_backend.py::test_symbol_locate_vocabulary_matches_the_config_layer` 钉住。
 SYMBOL_LOCATE_TRUE_VALUES: frozenset[str] = frozenset({"true", "1", "yes", "on"})
 SYMBOL_LOCATE_FALSE_VALUES: frozenset[str] = frozenset({"false", "0", "no", "off"})
+# `config.options.model.source` 的取值口径（docs/b2b3-wiring-design.md §2.8）。
+# 判定算法唯一真源在 `config.resolve_model_spec`，这里只把取值表钉住供 TUI 对照；
+# MODEL_SPEC_SOURCES 直接复用 config 的那一份，两处不会各存一套后漂移。
+CATALOG_SOURCES: frozenset[str] = frozenset({"models.dev", "cache", "builtin"})
+# reasoning 摘要串的双语表（沿用 REVIEW_ROUTING_REASONS 的写法，§2.7）。
+REASONING_KIND_LABELS: dict[str, dict[str, str]] = {
+    "toggle": {"zh-CN": "开关", "en-US": "toggle"},
+    "effort": {"zh-CN": "档位", "en-US": "effort"},
+    "budget_tokens": {"zh-CN": "预算", "en-US": "budget"},
+}
 
 
 def _utc_now() -> str:
@@ -571,6 +591,54 @@ class _ReviewEventStream:
         self.finished = True
 
 
+def _catalog_fetched_at(index: CatalogIndex) -> str | None:
+    """目录的取数时间：索引里的记录共用同一次取数，取最大（也容忍注入的假目录）。"""
+    stamps = [spec.fetched_at for spec in index.values() if spec.fetched_at is not None]
+    return max(stamps).isoformat() if stamps else None
+
+
+@dataclass(frozen=True)
+class _CatalogState:
+    """进程内**定档一次**的模型目录状态（docs/b2b3-wiring-design.md §2.1/§3.3.3）。
+
+    `index` 为 `None` = 没有可用目录（关闭或取数失败），调用方一律回退内置预设，
+    绝不抛错。`source` 取值恒在 `CATALOG_SOURCES` 内。
+    """
+
+    index: CatalogIndex | None
+    source: str
+    reason: str
+    fetched_at: str | None
+
+    @classmethod
+    def disabled(cls) -> "_CatalogState":
+        """`preferences.model_catalog_fetch == False`：本进程一次都不取。"""
+        return cls(index=None, source="builtin", reason="disabled", fetched_at=None)
+
+    @classmethod
+    def builtin(cls) -> "_CatalogState":
+        """本进程还没取过：`config.snapshot`/`model.status` 这类零网络路径按内置预设渲染。"""
+        return cls(index=None, source="builtin", reason="", fetched_at=None)
+
+    @classmethod
+    def from_fetch(
+        cls, index: CatalogIndex | None, *, origin: str | None
+    ) -> "_CatalogState":
+        if index is None:
+            return cls(index=None, source="builtin", reason="fetch_failed", fetched_at=None)
+        return cls(
+            index=index,
+            # 本次真拉 = models.dev；命中进程内已有目录 = cache（§2.8）。
+            source="models.dev" if origin == "network" else "cache",
+            reason="",
+            fetched_at=_catalog_fetched_at(index),
+        )
+
+    def lookup(self, provider: object, model: object) -> ModelSpec | None:
+        """只读索引查询，**绝不触发取数**（状态/快照出口依赖这条保证）。"""
+        return lookup_in_index(self.index, provider, model)
+
+
 @dataclass
 class Session:
     session_id: str
@@ -594,10 +662,15 @@ class JsonlBackend:
         self,
         config_path: Path | None = None,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
+        model_catalog: ModelCatalog | None = None,
     ) -> None:
         self.config_path = config_path
         self.event_sink = event_sink
         self.config = AppConfig.load(config_path)
+        # 模型目录（B2）：默认用真目录；测试注入假目录即可完全不联网。
+        self._model_catalog = model_catalog or ModelCatalog()
+        # 进程内定档一次（§2.1）：同一个助手里两次 `config.options` 不会把 source 翻转。
+        self._catalog_state: _CatalogState | None = None
         self.sessions: dict[str, Session] = {}
         self.review_cancellations: dict[str, asyncio.Event] = {}
         self.chat_cancellations: dict[str, tuple[asyncio.Task[Any], threading.Event]] = {}
@@ -768,6 +841,10 @@ class JsonlBackend:
             # CHAT/REVIEW 双槽路由（方案 §5.4）。既有字段一个都不改名、不删除：
             # provider/model/local 仍然描述"活跃槽"，routing 才是两个槽的真相。
             "routing": self._routing_snapshot(),
+            # 模型规格来源（B2）。只读进程内已定档的目录状态，**绝不触发网络**。
+            # 键名必须是 model_spec 而不是 model：快照的 model 是字符串模型名，
+            # TUI 直接读它（§2.3/§2.4）。
+            "model_spec": self._active_spec_block(),
         }
 
     @staticmethod
@@ -809,6 +886,157 @@ class JsonlBackend:
             ],
         }
 
+    def _slot_provider(self, slot: str) -> ProviderConfig:
+        """槽位真正承载配置的 Provider（与 `_local_slot_config` 同一判定）。"""
+        return self.config.provider if slot == "remote" else self._local_slot_config()
+
+    def _reasoning_text(self, controls: list[dict[str, Any]]) -> str | None:
+        """reasoning 摘要串（§2.7）：双语表，顺序 = controls 顺序。
+
+        目录里没有该模型时返回 `None`——**不是**"未声明"：离线时我们并不知道。
+        """
+        if not controls:
+            return None
+        language = str(getattr(self.config.preferences, "ui_language", "zh-CN") or "")
+        if language not in {"zh-CN", "en-US"}:
+            language = "zh-CN"
+        parts: list[str] = []
+        for control in controls:
+            kind = str(control.get("kind", "")).strip().casefold()
+            labels = REASONING_KIND_LABELS.get(kind)
+            if labels is None:
+                continue
+            word = labels.get(language, labels["zh-CN"])
+            values = control.get("values")
+            minimum = control.get("min")
+            if kind == "effort" and isinstance(values, list) and values:
+                parts.append(f"{word} {'/'.join(str(value) for value in values)}")
+            elif kind == "budget_tokens" and isinstance(minimum, int) and not isinstance(
+                minimum, bool
+            ):
+                parts.append(f"{word} ≥{minimum}")
+            else:
+                parts.append(word)
+        return " · ".join(parts) if parts else None
+
+    def _safe_provider_name(self, provider: ProviderConfig) -> str:
+        """对外的 provider 名：非法/被忽略的覆盖**不回显原值**。
+
+        与 `_config_snapshot` 同一条红线：环境变量或配置文件里的那个值可能含密钥或
+        终端控制字符，TUI 会把快照直接渲染出来。判定规则两处刻意一致。
+        """
+        unsupported = bool(getattr(self.config, "_ignored_env_overrides", [])) and (
+            provider.name.lower() not in MODEL_PROVIDER_PRESETS
+        )
+        return "unsupported" if unsupported else provider.name
+
+    def _spec_block_for(self, provider: ProviderConfig) -> dict[str, Any]:
+        """一个槽位的模型规格块（§2.2/§2.8）：三出口同键同形的**唯一**构造点。
+
+        只读 `self._catalog_state`，绝不触发网络；目录值与生效值不一致时**永不自作主张
+        覆盖**，只标 `needs_verification` 并把两个数字都摆出来（§2.8 硬规则 1）。
+        """
+        model_name = str(provider.default_model or "")
+        state = self._catalog_state
+        catalog_spec = None if state is None else state.lookup(provider.name, model_name)
+        resolved = resolve_model_spec(
+            provider,
+            model_name,
+            catalog_spec=catalog_spec,
+            catalog_source=None if state is None else state.source,
+        )
+        controls: list[dict[str, Any]] = []
+        if catalog_spec is not None:
+            raw_controls = self._model_catalog.reasoning_summary(catalog_spec).get("controls")
+            if isinstance(raw_controls, list):
+                controls = [dict(item) for item in raw_controls if isinstance(item, dict)]
+        catalog_view = self._catalog_state or _CatalogState.builtin()
+        return {
+            **resolved,
+            # 覆盖 `resolve_model_spec` 的原样回显：非法/被忽略的覆盖不回显原值。
+            "provider": self._safe_provider_name(provider),
+            "reasoning": self._reasoning_text(controls),
+            "reasoning_controls": controls,
+            "catalog": None
+            if catalog_spec is None
+            else {
+                "context_window": catalog_spec.context_window,
+                "max_output": catalog_spec.max_output,
+                "source": catalog_view.source,
+                "fetched_at": catalog_spec.fetched_at.isoformat(),
+            },
+            "bounds": {
+                "context_window": list(CONTEXT_WINDOW_RANGE),
+                "max_output": list(MAX_OUTPUT_RANGE),
+            },
+            "catalog_state": {
+                "enabled": bool(
+                    getattr(self.config.preferences, "model_catalog_fetch", True)
+                ),
+                "source": catalog_view.source,
+                "reason": catalog_view.reason,
+                "fetched_at": catalog_view.fetched_at,
+            },
+        }
+
+    def _slot_spec_block(self, slot: str) -> dict[str, Any]:
+        return self._spec_block_for(self._slot_provider(slot))
+
+    def _active_slot_name(self) -> str:
+        """当前哪个槽在生效（`remote` | `local`）。
+
+        用 `is` 比较：主 Provider 自己就是 Ollama 时它**同时**是本地槽，与
+        `_local_slot_config` 的判定必须一致，否则规格块会指向用户没在用的那个槽。
+        """
+        active = self.config._active_provider_config()
+        return "local" if active is self._local_slot_config() else "remote"
+
+    def _active_spec_block(self) -> dict[str, Any]:
+        """活跃槽的规格块：`config.snapshot.model_spec` / `model.status.model_spec` 共用。"""
+        return self._slot_spec_block(self._active_slot_name())
+
+    def _model_spec_options(self) -> dict[str, Any]:
+        """`config.options.model`：顶层四键描述**活跃槽**，每槽明细在 `slots`（§2.2）。"""
+        block = self._slot_spec_block(self._active_slot_name())
+        block["slots"] = {
+            "remote": self._slot_spec_block("remote"),
+            "local": self._slot_spec_block("local"),
+        }
+        return block
+
+    def _custom_slot_config(self) -> ProviderConfig:
+        """承载中转站配置的槽位 Provider（主槽是 custom 就用主槽，其次本地槽）。
+
+        两个槽都不是 custom 时按内置预设造一个只读默认值：TUI 的中转站屏要预填，
+        而此时用户还没选过 custom。
+        """
+        for provider in (self.config.provider, self.config.local_provider):
+            if provider.name.lower() == "custom":
+                return provider
+        return ProviderConfig.from_model_provider(ModelProviderConfig.from_name("custom"))
+
+    def _custom_endpoint_options(self) -> dict[str, Any]:
+        """中转站的读出口（§2.6）。`providers` 列表按设计排除 custom，单独给一块。"""
+        provider = self._custom_slot_config()
+        block = self._spec_block_for(provider)
+        models = list(provider.models)
+        default_model = str(provider.default_model or "")
+        if default_model and default_model not in models:
+            models.insert(0, default_model)
+        return {
+            "name": "custom",
+            "display_name": provider.display_name or "Custom Endpoint",
+            "base_url": provider.base_url,
+            "api_format": provider.api_format,
+            "default_model": default_model,
+            "api_key_configured": bool(provider.api_key),
+            "models": models,
+            "context_window": block["context_window"],
+            "max_output": block["max_output"],
+            "source": block["source"],
+            "needs_verification": block["needs_verification"],
+        }
+
     @staticmethod
     def _coerce_symbol_locate(value: Any) -> bool:
         """把 `config.setup` 载荷里的 `symbol_locate` 解析成布尔。
@@ -830,6 +1058,31 @@ class JsonlBackend:
         raise ConfigValidationError(
             "符号定位仅支持 true 或 false。（symbol_locate accepts true or false.）"
         )
+
+    async def _ensure_model_catalog(self) -> None:
+        """配置助手打开时同步一次 models.dev（方案 §B2）；进程内一次，失败静默降级。
+
+        取数必须放在 `asyncio.to_thread` 里：`serve()` 的每个请求共享同一个事件循环，
+        同步 HTTP（超时 10s）会把正在流的 chat 一起卡住。失败（超时/形状错误/断网）
+        一律 `builtin` + `reason="fetch_failed"`，绝不抛错挡配置流程。
+        """
+        if self._catalog_state is not None:
+            return
+        if not bool(getattr(self.config.preferences, "model_catalog_fetch", True)):
+            self._catalog_state = _CatalogState.disabled()
+            return
+        index = await asyncio.to_thread(self._model_catalog.fetch)
+        self._catalog_state = _CatalogState.from_fetch(
+            index, origin=self._model_catalog.last_load_origin()
+        )
+
+    async def _refresh_model_catalog(self) -> dict[str, Any]:
+        """`config.catalog.refresh`：忽略进程内缓存重拉一次（"重新获取"按钮的后端）。"""
+        index = await asyncio.to_thread(self._model_catalog.refresh)
+        self._catalog_state = _CatalogState.from_fetch(
+            index, origin=self._model_catalog.last_load_origin()
+        )
+        return {"model": self._model_spec_options()}
 
     def _setup_options(self) -> dict[str, Any]:
         """Return provider/model choices for the TUI setup wizard.
@@ -947,6 +1200,15 @@ class JsonlBackend:
             # L2 符号定位开关（docs/mimo-l2-symbol-locator.md）：同样与 routing 同级，
             # 供前端预选并回填到 config.setup。
             "symbol_locate": self._symbol_locate_options(),
+            # 模型规格（B1/B2/B3）：与 routing 同级；三出口共用同一个 builder，
+            # 保证 config.options / config.snapshot / model.status 三份同键同形。
+            # 注意键名是 model（这里是 config.options 里的新块），快照/状态里则必须叫
+            # `model_spec`——TUI 会把 model.status 的结果整体 spread 进 runtime，
+            # 而 runtime.model 是**字符串**模型名（§2.3）。
+            "model": self._model_spec_options(),
+            # 中转站（B3）：custom 不在 providers 列表里（预设 base_url 为空，
+            # 没有"可选项"语义），单独一块给 TUI 预填它自己的那一屏。
+            "custom_endpoint": self._custom_endpoint_options(),
         }
 
     @staticmethod
@@ -974,6 +1236,157 @@ class JsonlBackend:
             )
         return value
 
+    def _coerce_spec_int(
+        self,
+        params: dict[str, Any],
+        key: str,
+        *,
+        label: str,
+        bounds: tuple[int, int],
+    ) -> int | None:
+        """读一个模型规格整数：缺失/`null` = 部分更新（返回 None）；非法 = 整单失败。
+
+        `True`/`False` **不是**整数（bool 是 int 的子类，必须先挡掉）；`"1000000"`
+        这类数字串接受（TUI 的输入框会这样提交）；`1e6`（float）拒绝。
+        校验早于任何赋值，所以非法值一个字段都不会写。
+        """
+        if key not in params or params.get(key) is None:
+            return None
+        value = params[key]
+        parsed: int | None = None
+        if isinstance(value, bool):
+            parsed = None
+        elif isinstance(value, int):
+            parsed = value
+        elif isinstance(value, str) and value.strip().lstrip("+-").isdigit():
+            parsed = int(value.strip())
+        if parsed is None:
+            raise ConfigValidationError(
+                f"模型规格的{label}需为整数。（{key} accepts an integer.）"
+            )
+        minimum, maximum = bounds
+        if not minimum <= parsed <= maximum:
+            raise ConfigValidationError(
+                f"模型规格的{label}需在 {minimum}–{maximum} 之间。"
+                f"（{key} accepts {minimum}..{maximum}.）"
+            )
+        return parsed
+
+    def _plan_model_spec_params(
+        self, params: dict[str, Any]
+    ) -> dict[str, dict[str, int | None]]:
+        """校验 `config.setup` 的四个规格参数（§2.5）。
+
+        规格是**槽位属性**，与运行模式分支无关：远端槽 `context_window`/`max_output`，
+        本地槽 `local_context_window`/`local_max_output`。这里只做"是不是整数 + 在不在
+        闭区间内"，两个值的相对关系（`max_output <= context_window`）留到写入前用
+        **提交后**的值比较（§2.5/§3.3.8）。
+        """
+        return {
+            "remote": {
+                "context_window": self._coerce_spec_int(
+                    params,
+                    "context_window",
+                    label="上下文长度",
+                    bounds=CONTEXT_WINDOW_RANGE,
+                ),
+                "max_output": self._coerce_spec_int(
+                    params, "max_output", label="最大输出", bounds=MAX_OUTPUT_RANGE
+                ),
+            },
+            "local": {
+                "context_window": self._coerce_spec_int(
+                    params,
+                    "local_context_window",
+                    label="上下文长度",
+                    bounds=CONTEXT_WINDOW_RANGE,
+                ),
+                "max_output": self._coerce_spec_int(
+                    params,
+                    "local_max_output",
+                    label="最大输出",
+                    bounds=MAX_OUTPUT_RANGE,
+                ),
+            },
+        }
+
+    @staticmethod
+    def _carry_over_spec(
+        current: ProviderConfig | None, provider: ModelProviderConfig
+    ) -> dict[str, dict[str, int | None]] | None:
+        """重建槽位时把**当前生效模型**已有的规格带过去（B1/B3）。
+
+        配置助手的两条重建路径（`config.setup` 的分支、`config.save` 的兜底）都会把
+        模型表退回预设表；不带过去的话，用户逐项填好的中转站规格会在下一次保存时被
+        预设值（或写死的 32768/4096）重置。不传 = 与改造前逐字节一致。
+        """
+        if current is None or current.name.lower() != str(provider.name or "").lower():
+            return None
+        entry = current.models.get(str(provider.model_name or ""))
+        if entry is None:
+            return None
+        return {
+            str(provider.model_name): {
+                "context_window": entry.context_window,
+                "max_output": entry.max_output,
+            }
+        }
+
+    def _apply_model_spec_params(
+        self, plan: dict[str, dict[str, int | None]]
+    ) -> None:
+        """把校验过的规格写进两个槽位（§2.5/§3.3.8）。
+
+        放在**所有 profile 分支之后**：`runtime_profile="custom"` 这种只写槽位路由的档
+        也要能改规格，写早了会被分支的重建静默吞掉。
+        """
+        remote_target = self.config.provider
+        local_target = self._local_slot_config()
+        remote_values = plan["remote"]
+        local_values = plan["local"]
+        # 两个槽指向同一个 Provider（典型：主 Provider 就是 Ollama）时，同一个模型只有
+        # 一份规格：两组都给了**不同**值就报错，只给一组照常写入（§2.5）。
+        if remote_target is local_target:
+            for field in ("context_window", "max_output"):
+                remote_value = remote_values[field]
+                local_value = local_values[field]
+                if (
+                    remote_value is not None
+                    and local_value is not None
+                    and remote_value != local_value
+                ):
+                    raise ConfigValidationError(
+                        "模型规格：同一个 Provider 的两个槽指向同一模型，只需填一处。"
+                        "（Both slots use the same provider/model; specify the spec once.）"
+                    )
+        for target, values in ((remote_target, remote_values), (local_target, local_values)):
+            if all(value is None for value in values.values()):
+                continue
+            model_name = str(target.default_model or "")
+            # `max_output <= context_window` 用**本次提交后**的两个值比较：没提交的那个
+            # 沿用该模型当前的生效值（含预设/默认兜底），不是拿 0 或 None 去比。
+            current = resolve_model_spec(target, model_name)
+            effective_context = (
+                values["context_window"]
+                if values["context_window"] is not None
+                else int(current["context_window"])
+            )
+            effective_output = (
+                values["max_output"]
+                if values["max_output"] is not None
+                else int(current["max_output"])
+            )
+            if effective_output > effective_context:
+                raise ConfigValidationError(
+                    "模型规格的最大输出不能大于上下文长度。"
+                    "（max_output must not exceed context_window.）"
+                )
+            target.set_model_spec(
+                model_name,
+                context_window=values["context_window"],
+                max_output=values["max_output"],
+            )
+
     def _apply_setup(self, params: dict[str, Any]) -> dict[str, Any]:
         """Apply the TUI wizard atomically and reload the persisted result."""
         profile = (
@@ -981,6 +1394,9 @@ class JsonlBackend:
         )
         if profile not in {"cloud", "local", "hybrid", "offline", "custom"}:
             raise ValueError(f"Unsupported runtime profile: {profile}")
+        # B1/B3：规格参数**先校验**（非法整单失败、一个字段都不写），**后写入**——
+        # 下面的分支会重建 provider 对象，写早了会被新对象吃掉（§2.5/§3.3.8）。
+        spec_plan = self._plan_model_spec_params(params)
 
         if profile in {"cloud", "hybrid"}:
             provider_name = (
@@ -1034,7 +1450,11 @@ class JsonlBackend:
                 api_format=api_format,
             )
             provider.validate()
-            self.config.provider = ProviderConfig.from_model_provider(provider)
+            # 重建会把模型表退回预设表：把当前生效模型已有的规格带过去，用户填过的
+            # 中转站规格才不会在下一次保存时被打回写死的 32_768/4_096（B3）。
+            self.config.provider = ProviderConfig.from_model_provider(
+                provider, spec_overrides=self._carry_over_spec(existing, provider)
+            )
             self.config.preferences.hybrid_strategy = (
                 "remote_only" if profile == "cloud" else "balanced"
             )
@@ -1061,7 +1481,9 @@ class JsonlBackend:
                 api_format="openai",
             )
             provider.validate()
-            self.config.local_provider = ProviderConfig.from_model_provider(provider)
+            self.config.local_provider = ProviderConfig.from_model_provider(
+                provider, spec_overrides=self._carry_over_spec(local, provider)
+            )
             self.config.preferences.hybrid_strategy = "local_only"
 
         if profile == "custom":
@@ -1140,6 +1562,10 @@ class JsonlBackend:
                 raise ConfigValidationError("auto_publish_comment 必须是布尔值。")
             preferences.auto_publish_comment = auto_publish
 
+        # B1/B3：模型规格是**槽位属性**，与上面的运行模式分支无关（`custom` 路由档也要
+        # 能改规格），因此放在所有分支之后、保存之前统一应用；写入顺序必须是
+        # 写规格 → sync → save → 重载（`save` 会重建 provider，见 `_carry_over_spec`）。
+        self._apply_model_spec_params(spec_plan)
         self.config._sync_runtime_sections()
         self.config.save(self.config_path, save_key=True)
         # Reload through the normal layered loader so the snapshot cannot claim
@@ -1270,6 +1696,9 @@ class JsonlBackend:
         # `/model chat|review <name>` 写的是槽位自己的 provider，不再由顶层字段代言。
         provider_config = self.config.ai_client.model_provider
         local = provider_config.name.lower() in {"ollama", "local"}
+        # 规格块只算一次；`_active_spec_block` 只读进程内目录状态，**不发网络请求**
+        # （状态栏是高频出口，方案 §B2 的验收要求"三次 chat 调用不触发任何拉取"）。
+        spec = self._active_spec_block()
         status: dict[str, Any] = {
             "provider": provider_config.name,
             "provider_display": provider_config.display_name,
@@ -1285,6 +1714,11 @@ class JsonlBackend:
             "repo_context": self._repo_context_options(),
             # L2 符号定位开关同理（与 config.options 同键同形），状态栏/TUI 读同一份。
             "symbol_locate": self._symbol_locate_options(),
+            # 模型规格（B2）。键名必须是 `model_spec`：`model` 已被上面的模型名占用，
+            # 而 TUI 会把本结果整体 spread 进 runtime（§2.3）。
+            "model_spec": spec,
+            "source": spec["source"],
+            "needs_verification": spec["needs_verification"],
         }
         try:
             provider = create_model_provider(provider_config)
@@ -2801,7 +3235,14 @@ class JsonlBackend:
             elif method == "config.snapshot":
                 result(self._config_snapshot())
             elif method == "config.options":
+                # 打开配置助手 = 同步一次模型目录（方案 §B2）。失败静默、进程内一次，
+                # 绝不挡配置流程；取数点必须在这里而不是 `_setup_options()` 里面，
+                # 否则直调 `_setup_options()` 的既有用例会真的去联网。
+                await self._ensure_model_catalog()
                 result(self._setup_options())
+            elif method == "config.catalog.refresh":
+                # "重新获取"按钮的后端：忽略进程内缓存重拉一次（§6 的未决项 6）。
+                result(await self._refresh_model_catalog())
             elif method == "config.setup":
                 result(self._apply_setup(params))
             elif method == "model.status":

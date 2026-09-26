@@ -287,3 +287,35 @@ def test_refresh_forces_the_next_network_fetch(monkeypatch: pytest.MonkeyPatch):
 def test_preference_controls_configuration_assistant_fetch():
     assert PreferencesConfig().model_catalog_fetch is True
     assert PreferencesConfig(model_catalog_fetch="false").model_catalog_fetch is False
+
+
+def test_last_load_origin_reports_network_then_cache(monkeypatch: pytest.MonkeyPatch):
+    """B2 的来源判定（docs/b2b3-wiring-design.md §3.1）：真拉一次，之后如实报缓存。
+
+    配置助手要靠这个把 `source` 标成 models.dev 还是 cache；翻转（"明明没发请求
+    却宣称刚拉过"或反之）会让用户对新鲜度产生错误判断。
+    """
+    install_payload(monkeypatch, REAL_MODELS_DEV_SNIPPET)
+    catalog = ModelCatalog()
+
+    assert catalog.fetch() is not None
+    assert ModelCatalog.last_load_origin() == "network"
+
+    assert catalog.fetch() is not None
+    assert ModelCatalog.last_load_origin() == "cache"
+
+    assert catalog.refresh() is not None
+    assert ModelCatalog.last_load_origin() == "network"
+
+
+def test_failed_fetch_keeps_origin_none(monkeypatch: pytest.MonkeyPatch):
+    """取数失败后 `last_load_origin()` 保持 None：绝不谎报"数据来自缓存"。"""
+    calls = install_failure(monkeypatch)
+    catalog = ModelCatalog()
+
+    assert catalog.fetch() is None
+    assert ModelCatalog.last_load_origin() is None
+    # 失败同样只发生一次（进程内不重试），来源仍然是"没有目录"。
+    assert catalog.fetch() is None
+    assert ModelCatalog.last_load_origin() is None
+    assert calls["urlopen"] == 1

@@ -486,13 +486,19 @@ class ModelProviderConfig:
         return asdict(self)
 
 
+# 模型规格的兜底值：落盘条目缺失、内置预设也没有这个模型时用它（§2.8），
+# 与 `ProviderModelConfig` 的字段默认值是同一组数字。
+DEFAULT_MODEL_CONTEXT_WINDOW = 32_768
+DEFAULT_MODEL_MAX_OUTPUT = 4_096
+
+
 @dataclass
 class ProviderModelConfig:
     """Persisted model metadata for provider configuration."""
 
     name: str
-    context_window: int = 32_768
-    max_output: int = 4_096
+    context_window: int = DEFAULT_MODEL_CONTEXT_WINDOW
+    max_output: int = DEFAULT_MODEL_MAX_OUTPUT
 
 
 @dataclass
@@ -513,17 +519,38 @@ class ProviderConfig:
     default_model: str = "deepseek-chat"
 
     @classmethod
-    def from_model_provider(cls, provider: ModelProviderConfig) -> "ProviderConfig":
+    def from_model_provider(
+        cls,
+        provider: ModelProviderConfig,
+        *,
+        spec_overrides: dict[str, dict[str, int | None]] | None = None,
+    ) -> "ProviderConfig":
+        """由 `ModelProviderConfig` 建 ProviderConfig；`spec_overrides` 是 B3 的出口。
+
+        调用方（配置助手）知道用户为**中转站自定义模型**逐项填的规格时按模型名覆盖，
+        否则下面那条写死的 32_768/4_096 就是中转站模型的"死数字"
+        （docs/b2b3-wiring-design.md §3.2）。只覆盖传入的 key，其它条目照旧；
+        不传参数 = 与改造前逐字节一致。
+        """
         models = PROVIDER_MODEL_PRESETS.get(provider.name, {})
         if provider.model_name not in models:
             models = {
                 **models,
                 provider.model_name: {
                     "name": provider.model_name,
-                    "context_window": 32_768,
-                    "max_output": 4_096,
+                    "context_window": DEFAULT_MODEL_CONTEXT_WINDOW,
+                    "max_output": DEFAULT_MODEL_MAX_OUTPUT,
                 },
             }
+        for name, override in (spec_overrides or {}).items():
+            if not name:
+                continue
+            entry = dict(models.get(name) or {"name": name})
+            entry.update(
+                {key: value for key, value in override.items() if value is not None}
+            )
+            # 重新赋值而不是原地改：`models` 可能是模块级预设表本身（浅拷贝）。
+            models = {**models, name: entry}
         return cls(
             name=provider.name,
             display_name=provider.display_name,
@@ -556,6 +583,37 @@ class ProviderConfig:
         if self.default_model not in self.models:
             self.models[self.default_model] = ProviderModelConfig(name=self.default_model)
 
+    def set_model_spec(
+        self,
+        model_name: str,
+        *,
+        context_window: int | None = None,
+        max_output: int | None = None,
+    ) -> bool:
+        """把配置助手提交的规格写到 `model_name` 的条目上；返回是否改动了条目。
+
+        两个参数都是 `None` = 不动任何东西。**不**改 `default_model`、**不**碰其它模型
+        条目：规格是"这个模型"的属性，不是 provider 的属性（docs/b2b3-wiring-design.md
+        §2.5）。条目不存在时新建（只有用户显式提交规格才会走到这里）。
+        """
+        target = str(model_name or "").strip()
+        if not target or (context_window is None and max_output is None):
+            return False
+        self.ensure_default_model_present()
+        entry = self.models.get(target)
+        created = entry is None
+        if entry is None:
+            entry = ProviderModelConfig(name=target)
+            self.models[target] = entry
+        changed = created
+        if context_window is not None and entry.context_window != context_window:
+            entry.context_window = context_window
+            changed = True
+        if max_output is not None and entry.max_output != max_output:
+            entry.max_output = max_output
+            changed = True
+        return changed
+
     def validate(self) -> None:
         provider = self.to_model_provider()
         provider.validate()
@@ -578,6 +636,102 @@ class ProviderConfig:
             name: asdict(model_config) for name, model_config in self.models.items()
         }
         return payload
+
+
+def _catalog_agrees(
+    context_window: int | None, max_output: int | None, catalog_spec: object
+) -> bool:
+    """目录值与生效值是否一致：双方都非 `None` 的字段必须全部相等（§2.8）。"""
+    compared = False
+    for attribute, effective in (
+        ("context_window", context_window),
+        ("max_output", max_output),
+    ):
+        remote = getattr(catalog_spec, attribute, None)
+        if remote is None or effective is None:
+            continue
+        compared = True
+        if int(remote) != int(effective):
+            return False
+    return compared
+
+
+def resolve_model_spec(
+    provider: ProviderConfig,
+    model_name: str | None = None,
+    *,
+    catalog_spec: object | None = None,
+    catalog_source: str | None = None,
+) -> dict[str, object]:
+    """模型规格的判定（docs/b2b3-wiring-design.md §2.8，**唯一真源**）。
+
+    生效值（`context_window`/`max_output`）永远是**落盘条目**的值（没有条目才退到预设，
+    再没有才是 `ProviderModelConfig` 的默认值）；目录值只出现在调用方另外拼的
+    `catalog` 块里，由前端决定要不要"采用目录值"——打开配置助手本身不写盘。
+
+    - `catalog_spec`：models.dev 的命中记录（鸭子类型，只读 `context_window`/
+      `max_output` 两个属性）；未命中、离线或两个字段都为空时传 `None`。
+    - `catalog_source`：该记录的来源，`"models.dev"`（本次真拉的）或 `"cache"`。
+    - 返回值里的 `source` 恒在 `MODEL_SPEC_SOURCES` 内，由本函数唯一决定，前端不自行推导。
+    """
+    name = str(model_name or provider.default_model or "").strip()
+    provider_key = provider.name.lower()
+    preset = PROVIDER_MODEL_PRESETS.get(provider_key, {}).get(name)
+    stored = provider.models.get(name)
+    context_window = (
+        stored.context_window
+        if stored is not None
+        else int(preset["context_window"])
+        if preset is not None
+        else DEFAULT_MODEL_CONTEXT_WINDOW
+    )
+    max_output = (
+        stored.max_output
+        if stored is not None
+        else int(preset["max_output"])
+        if preset is not None
+        else DEFAULT_MODEL_MAX_OUTPUT
+    )
+    # 端点是否就是官方端点（§2.8 硬规则 2）。预设 `base_url` 为空（custom）视为
+    # "无官方端点可比"，不因此置位：models.dev 本来就不区分端点。
+    preset_base_url = str(
+        MODEL_PROVIDER_PRESETS.get(provider_key, {}).get("base_url", "") or ""
+    )
+    endpoint_matches_preset = bool(preset_base_url) and (
+        str(provider.base_url or "") == preset_base_url
+    )
+
+    catalog_fields_known = catalog_spec is not None and (
+        getattr(catalog_spec, "context_window", None) is not None
+        or getattr(catalog_spec, "max_output", None) is not None
+    )
+    if not catalog_fields_known:
+        # 没有可比对的远端数据 → 不假称"需要核对"（§2.8）。
+        source = "unknown" if preset is None else "builtin"
+        needs_verification = False
+    elif _catalog_agrees(context_window, max_output, catalog_spec):
+        source = catalog_source if catalog_source in {"models.dev", "cache"} else "cache"
+        needs_verification = not endpoint_matches_preset
+    else:
+        # 生效值来自本地（预设或用户填的），与目录不一致：标出来，但绝不覆盖用户值。
+        source = "builtin"
+        needs_verification = True
+
+    return {
+        "provider": provider.name,
+        "model": name,
+        "context_window": context_window,
+        "max_output": max_output,
+        "source": source,
+        "needs_verification": needs_verification,
+        "endpoint_matches_preset": endpoint_matches_preset,
+        "preset": None
+        if preset is None
+        else {
+            "context_window": int(preset["context_window"]),
+            "max_output": int(preset["max_output"]),
+        },
+    }
 
 
 # 审查工作台显示模式（preferences.workbench_mode）：
@@ -649,6 +803,13 @@ DEFAULT_MODEL_CATALOG_FETCH = True
 REPO_CONTEXT_MAX_FILES_RANGE: tuple[int, int] = (1, 10)
 REPO_CONTEXT_BUDGET_TOKENS_RANGE: tuple[int, int] = (500, 32000)
 REPO_CACHE_MAX_MB_RANGE: tuple[int, int] = (10, 10000)
+# 模型规格（docs/b2b3-wiring-design.md §2.5）的合法闭区间：上下文窗口 / 最大输出。
+# 配置助手（jsonl_server）与诊断出口（provider_diagnostics）共用这一份，避免两处各写
+# 一套数字后漂移；越界由 `config.setup` 报错整单失败，绝不静默回退。
+CONTEXT_WINDOW_RANGE: tuple[int, int] = (1_024, 10_000_000)
+MAX_OUTPUT_RANGE: tuple[int, int] = (1, 10_000_000)
+# 模型规格的来源标注（§2.8 的判定算法是唯一真源，前端只渲染不推导）。
+MODEL_SPEC_SOURCES: frozenset[str] = frozenset({"models.dev", "cache", "builtin", "unknown"})
 
 
 def _warn_invalid_preference(field: str, detail: str) -> None:
@@ -1387,7 +1548,24 @@ class AppConfig:
         # silently replaced the cloud endpoint, model list and key with the
         # Ollama preset, permanently destroying the user's configuration.
         if active is self.provider:
-            self.provider = ProviderConfig.from_model_provider(self.ai_client.model_provider)
+            # B1/B3：这次重建会把模型表退回预设表（写死的 32_768/4_096 也在这条路上），
+            # 用户刚在配置助手里填的规格会当场丢失。把**当前生效模型**的规格带过去；
+            # 其它条目仍按预设重建，与改造前逐字节一致（docs/b2b3-wiring-design.md §3.3.8）。
+            rebuilt_model = str(self.ai_client.model or self.provider.default_model)
+            current_entry = self.provider.models.get(self.provider.default_model)
+            spec_overrides = (
+                None
+                if current_entry is None
+                else {
+                    rebuilt_model: {
+                        "context_window": current_entry.context_window,
+                        "max_output": current_entry.max_output,
+                    }
+                }
+            )
+            self.provider = ProviderConfig.from_model_provider(
+                self.ai_client.model_provider, spec_overrides=spec_overrides
+            )
         self._sync_runtime_sections()
         if not save_key:
             payload_api_key = ""
