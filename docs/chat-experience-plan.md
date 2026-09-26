@@ -150,6 +150,13 @@ reasoning 长度**单调**：`disabled(0) < low(2.6k) < high(4.5k) < max(6.8k)`�
 **其它供应商**：沿用同一套"**先实测再开放**"的规矩（MiMo `variant`、
 OpenAI 推理系），不支持者 UI 置灰、`/think` 明确说明、请求体不带该参数。
 
+**各供应商差异已实测成表**（`docs/reasoning-effort-matrix.md`）：思考控制分成
+**四种参数模型**——枚举档位（DeepSeek / OpenAI）、预算制（Anthropic）、
+变体名（MiMo）、开关（Ollama 原生）。统一四档 `off/low/high/max` 由后端映射：
+OpenAI 无 `max` → 就近用 `high`；Anthropic 用 `budget_tokens`（2k/16k/64k）。
+**Ollama 当前走的 OpenAI 兼容端点会忽略 `think`**（实测），因此本地模型默认
+**置灰并说明**，除非改走原生端点。
+
 - **验收**：① 四档在支持模型上产出**单调差异**且命令生效并持久化；
   ② **答案不为空**（预算预留生效）；③ 不支持的供应商得到明确说明而非假选项。
 
