@@ -207,6 +207,14 @@ def _review_completed_fields(report: dict[str, Any]) -> dict[str, Any]:
     filtered = run.get("filtered")
     if isinstance(filtered, dict) and filtered:
         fields["filtered"] = dict(filtered)
+    # The live TUI used to render "发现 N 个问题" for every run, which reads as
+    # a contradiction next to a failure summary (PR #31: 14 files all failed,
+    # static analysis still produced 4 findings). Pass the summary through so
+    # the client can prefer it when the run failed. Additive: absent for
+    # reports without one, and existing fields keep their meaning.
+    summary = report.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        fields["summary"] = summary.strip()
     return fields
 
 
@@ -777,8 +785,13 @@ class JsonlBackend:
             if not api_key and provider_name != "custom":
                 env_var = str(preset.get("env_var", "")).strip()
                 hint = f"，或设置 {env_var} 环境变量" if env_var else ""
+                # 实测反馈（用户配过 provider 却每次保存都被弹回 API Key 屏）：
+                # 只说"请填写"没告诉用户"你现在为什么没有"以及"填了会不会保存"。
+                # 明确三件事：两边都没检测到、返回上一屏填写、填写后会落盘。
                 raise ConfigValidationError(
-                    f"请填写 {preset.get('display_name', provider_name)} API Key{hint}。"
+                    f"未检测到 {preset.get('display_name', provider_name)} API Key"
+                    f"（配置文件与环境变量都没有）。"
+                    f"请返回上一屏填写{hint}；填写后会保存到配置文件，下次无需重填。"
                 )
 
             model_name = str(
@@ -1544,8 +1557,19 @@ class JsonlBackend:
         summary = str(payload.get("summary", "审查已完成"))
         payload = self._bound_report(payload)
         self.current_report = payload
+        # "发现 N 个问题" 在失败 run 上会与 "审查失败" 的 summary 直接矛盾
+        # （PR #31 实测：14 个文件模型调用全失败，静态分析仍给出 4 条）。
+        # 失败时只回 summary（它已说明来源），成功时保留原有的计数行。
+        if summary.startswith("审查失败"):
+            text = f"PR 审查完成：{summary}\nRun: {artifacts.run_id}"
+        else:
+            text = (
+                f"PR 审查完成：{summary}\n"
+                f"发现 {finding_count} 个问题\n"
+                f"Run: {artifacts.run_id}"
+            )
         return {
-            "text": f"PR 审查完成：{summary}\n发现 {finding_count} 个问题\nRun: {artifacts.run_id}",
+            "text": text,
             "run_id": artifacts.run_id,
             "summary": summary,
             "finding_count": finding_count,

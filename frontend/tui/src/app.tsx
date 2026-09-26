@@ -223,6 +223,8 @@ function QuickStartPanel(props: { language?: string }) {
 
 type ChatMessage = { role: "user" | "assistant"; content: string }
 type ReviewFinding = {
+  /** Backend finding id; `/feedback` matches on this, never on the list index. */
+  finding_id?: string
   severity?: string
   category?: string
   title?: string
@@ -3414,6 +3416,12 @@ export function App() {
       )
       return
     }
+    if (!findingId) {
+      setReviewActionMessage(
+        "该条 Finding 没有可用的 ID（历史记录可能缺少标识），无法记录反馈。",
+      )
+      return
+    }
     const response = await backend.request("command.execute", {
       name: "feedback",
       args: [runId, findingId, status, note],
@@ -3675,7 +3683,15 @@ export function App() {
           setReviewProgress(100)
           setBackendStatus("READY")
           setReviewStage("审查完成")
-          setReviewDetail(`发现 ${String(event.finding_count ?? 0)} 个问题 · Run ${String(event.run_id ?? "")}`)
+          // A failed run must not read as "发现 N 个问题": the summary already
+          // explains the failure (and any static-analysis findings it carries),
+          // so prefer it verbatim when it reports a failure.
+          const completedSummary = typeof event.summary === "string" ? event.summary.trim() : ""
+          setReviewDetail(
+            completedSummary.startsWith("审查失败")
+              ? completedSummary
+              : `发现 ${String(event.finding_count ?? 0)} 个问题 · Run ${String(event.run_id ?? "")}`,
+          )
           setReviewFile("")
           if (typeof event.duration_seconds === "number") {
             setReviewElapsedMs(Math.max(0, event.duration_seconds * 1000))
@@ -4009,7 +4025,14 @@ export function App() {
           language={runtime().ui_language}
           onSelect={(status, note) => {
             setFeedbackOpen(false)
-            void submitFindingFeedback(String(activeFindingIndex()), status, note)
+            // The backend matches on the finding's own id (`/feedback`
+            // validates it against the stored run); passing the list index
+            // made every submission fail with "未找到 Finding：0".
+            void submitFindingFeedback(
+              String(reviewFindings()[activeFindingIndex()]?.finding_id ?? ""),
+              status,
+              note,
+            )
           }}
           onClose={() => setFeedbackOpen(false)}
         />

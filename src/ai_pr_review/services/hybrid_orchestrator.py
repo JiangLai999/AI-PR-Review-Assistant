@@ -465,10 +465,16 @@ class HybridReviewOrchestrator:
         elif failed_files and reviewed_count == 0:
             # 全部文件都失败时绝不能报"审查完成，发现 0 个问题"：那会把一把
             # 失效的 API Key 伪装成一次干净的审查（真实事故场景）。
-            summary = (
-                f"审查失败：{len(failed_files)} 个文件均未能完成模型审查"
-                f"（首个错误：{failed_files[0]['error']}）"
+            # 但确定性静态分析仍可能产出 finding（rule_id 非空）：必须在同一句
+            # 里说清来源，否则用户会看到"审查失败"与"发现 N 个问题"并列却不知
+            # 道 N 从哪来（PR #31 实测：14 个文件模型调用全失败，静态分析给出 4 条）。
+            static_count = sum(
+                1 for finding in review_result.findings if getattr(finding, "rule_id", "")
             )
+            detail = f"（首个错误：{failed_files[0]['error']}）"
+            if static_count:
+                detail += f"；附带 {static_count} 条确定性静态分析结论（非模型结论，仅供参考）"
+            summary = f"审查失败：{len(failed_files)} 个文件均未能完成模型审查{detail}"
         elif failed_files:
             summary = (
                 f"审查完成（部分失败）：{reviewed_count} 个文件已审查，"
