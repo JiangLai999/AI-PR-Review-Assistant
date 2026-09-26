@@ -4437,10 +4437,37 @@ def test_chat_without_a_reference_never_silently_binds(
     asyncio.run(run())
 
 
-def test_chat_keeps_an_existing_binding_when_a_new_pr_is_mentioned(
+def test_chat_switches_binding_when_another_pr_is_named(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """已绑定的会话不被后续消息悄悄改写（要换必须显式 /context <run_id>）。"""
+    """显式指代换 PR 时必须切过去。
+
+    实测反馈：绑定 #31 之后问「那 PR29 呢」，旧实现直接返回（已绑定就不再
+    解析），模型只能回"我看不到 #29"。显式说了 PR 号就是在换对象。
+    """
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        first = _seed_run(backend, 27, "第一次")
+        second = _seed_run(backend, 31, "第二次")
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = first
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        await backend.handle(_chat_send(session_id, "那 PR #31 呢"))
+
+        assert backend.sessions[session_id].current_run_id == second
+        assert "第二次" in captured["options"]["system_prompt"]
+
+    asyncio.run(run())
+
+
+def test_chat_lists_other_runs_even_when_one_is_already_bound(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """已绑定时也要把"还有哪些审查"告诉模型，用户续问别的 PR 才切得动。"""
 
     async def run() -> None:
         backend = _chat_ready_backend(tmp_path)
@@ -4452,8 +4479,12 @@ def test_chat_keeps_an_existing_binding_when_a_new_pr_is_mentioned(
         captured: dict[str, Any] = {}
         _stub_provider(monkeypatch, captured)
 
-        await backend.handle(_chat_send(session_id, "换个话题，PR #31 那个呢"))
+        await backend.handle(_chat_send(session_id, "还有什么审查"))
 
-        assert backend.sessions[session_id].current_run_id == first
+        prompt = captured["options"]["system_prompt"]
+        assert "历史里还有这些审查" in prompt
+        assert "PR #31" in prompt
+        # 序号选择针对这份清单
+        assert backend.sessions[session_id].context_candidates
 
     asyncio.run(run())

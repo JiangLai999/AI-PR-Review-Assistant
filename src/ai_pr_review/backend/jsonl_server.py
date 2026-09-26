@@ -194,6 +194,27 @@ def _extract_ordinal(text: str) -> int | None:
         return None
 
 
+def _failed_run_suffix(store: Any, run_id: str) -> str:
+    """失败 run 的标注（取自 metadata.failed_file_count）；读不到就返回空串。
+
+    实测反馈：匹配到的"最新一次"恰好是 14 个文件全失败的 run——候选清单里
+    应当直接写明，别让用户点进去才发现那是一次失败的审查。
+    """
+    try:
+        metadata = store.get_run_metadata(run_id)
+    except Exception:
+        return ""
+    if not isinstance(metadata, dict):
+        return ""
+    try:
+        failed = int(metadata.get("failed_file_count") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if failed <= 0:
+        return ""
+    return f"（{failed} 个文件审查失败）"
+
+
 def _review_completed_fields(report: dict[str, Any]) -> dict[str, Any]:
     """Summary fields for `review.completed`, read from the report payload.
 
@@ -1286,7 +1307,42 @@ class JsonlBackend:
         context = self._review_context_for_chat(run_id)
         if context is None:
             return language_instruction
-        return f"{language_instruction}\n\n{wrap_review_context(run_id, context)}"
+        sections = [language_instruction, wrap_review_context(run_id, context)]
+        # 已绑定也要让模型知道"历史里还有别的审查可选"：用户续问
+        # "那 PR29 呢"时，模型才能切过去，而不是回答"我看不到 #29"
+        # （实测反馈：绑定 #31 后问 #29，模型只能说自己拿不到）。
+        others = self._other_runs_note(session, run_id)
+        if others:
+            sections.append(others)
+        return "\n\n".join(sections)
+
+    def _other_runs_note(self, session: Session, run_id: str, limit: int = 3) -> str:
+        """已绑定时列出"其它可切换的审查"（含失败标注），供模型识别用户改问别的 PR。"""
+        try:
+            from ai_pr_review.services.result_store import ResultStore
+
+            store = ResultStore(self.config.result_store)
+            runs = store.list_runs(limit=limit + 1)
+        except Exception:
+            return ""
+        others = [
+            run
+            for run in runs
+            if str(run.get("id") or "").strip() and str(run.get("id") or "").strip() != run_id
+        ][:limit]
+        if not others:
+            return ""
+        # 供下一轮解析「第 N 个」——序号针对的就是这份清单。
+        session.context_candidates = [str(run.get("id") or "").strip() for run in others]
+        lines = ["（历史里还有这些审查；用户说「PR #N」或「第 N 个」时切换过去：）"]
+        for index, run in enumerate(others, 1):
+            candidate_id = str(run.get("id") or "").strip()
+            lines.append(
+                f"{index}. PR #{run.get('pr_number')} · {run.get('created_at')} · "
+                f"{run.get('total_findings')} 条 findings"
+                f"{_failed_run_suffix(store, candidate_id)}"
+            )
+        return "\n".join(lines)
 
     def _review_context_for_chat(self, run_id: str) -> str | None:
         """渲染注入用的审查上下文；失败或无记录返回 None（降级，§9.2 C）。"""
@@ -1460,28 +1516,26 @@ class JsonlBackend:
     def _resolve_context(self, session: Session, text: str) -> str | None:
         """按消息内容决定这一轮绑定的审查 run；返回"本轮新绑定"的 run_id。
 
-        解析顺序（**永不静默绑定"最近一次"**：用户问别的 PR 时会张冠李戴，
-        而带着错上下文回答比"我无法访问"更糟）：
-          ① 已绑定 → 沿用（返回 None，不重复提示）
-          ② 消息里出现 PR 号 / PR URL → 匹配该 PR 的最新 run
-          ③ 消息形如「第 N 个 / 选 N」→ 从上一轮给出的候选清单里取
-          ④ 都不命中 → 不绑定；调用方改用候选清单引导用户选
+        **显式指代优先于已有绑定**：用户说「那 PR29 呢」就是在换对象，
+        旧实现"已绑定就不再解析"会让人卡在 #31 上（实测反馈）。
+        但仍然**永不静默绑定"最近一次"**：没有指代时不换对象。
+
+        顺序：
+          ① 消息里出现 PR 号 / PR URL → 切到该 PR 的最新 run
+          ② 消息形如「第 N 个 / 选 N」→ 从上一轮候选清单里取
+          ③ 都不命中 → 沿用已绑定（返回 None）；未绑定时由调用方注入候选清单
 
         全程不需要用户复制 run id（工作台里选中复制并不方便）。
         """
-        if session.current_run_id:
-            return None
         try:
             from ai_pr_review.services.result_store import ResultStore
 
             runs = ResultStore(self.config.result_store).list_runs(limit=50)
         except Exception:
-            return None
-        if not runs:
-            return None
+            runs = []
 
         pr_number = _extract_pr_number(text)
-        if pr_number is not None:
+        if pr_number is not None and runs:
             for run in runs:
                 try:
                     run_pr = int(run.get("pr_number") or 0)
@@ -1489,15 +1543,16 @@ class JsonlBackend:
                     continue
                 if run_pr == pr_number:
                     run_id = str(run.get("id") or "").strip()
-                    if run_id:
+                    if run_id and run_id != session.current_run_id:
                         session.current_run_id = run_id
                         return run_id
+                    return None  # 已经是它（不重复提示）
 
         ordinal = _extract_ordinal(text)
         if ordinal is not None and session.context_candidates:
             if 1 <= ordinal <= len(session.context_candidates):
                 run_id = session.context_candidates[ordinal - 1]
-                if run_id:
+                if run_id and run_id != session.current_run_id:
                     session.current_run_id = run_id
                     return run_id
         return None
@@ -1507,7 +1562,8 @@ class JsonlBackend:
         try:
             from ai_pr_review.services.result_store import ResultStore
 
-            runs = ResultStore(self.config.result_store).list_runs(limit=limit)
+            store = ResultStore(self.config.result_store)
+            runs = store.list_runs(limit=limit)
         except Exception:
             return ""
         if not runs:
@@ -1522,9 +1578,11 @@ class JsonlBackend:
             "用户可以直接说「第 N 个」或「PR #N」来选择，不需要提供 run id：）"
         ]
         for index, run in enumerate(runs, 1):
+            candidate_id = str(run.get("id") or "").strip()
             note_lines.append(
                 f"{index}. PR #{run.get('pr_number')} · {run.get('created_at')} · "
                 f"{run.get('total_findings')} 条 findings"
+                f"{_failed_run_suffix(store, candidate_id)}"
             )
         note_lines.append(
             "如果用户问的是别的审查，请让他说明 PR 编号；不要替他猜是哪一次。"
