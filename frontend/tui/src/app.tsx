@@ -12,10 +12,12 @@ import {
   parseCustomEndpointOptions,
   parseModelSpecBlock,
   parseReasoningDelta,
+  parseReviewReasoningOptions,
   parseThinkCommandResult,
   type CustomEndpointOptions,
   type ModelSpecBlock,
   type ModelSpecOptions,
+  type ReviewReasoningOptions,
 } from "./protocol"
 import { sendWithSessionRecovery } from "./session-recovery"
 import { commandArgumentLabel, commandCompletion, commandDescription, commandEnterAction, commandMatches } from "./command-menu"
@@ -36,6 +38,8 @@ import {
   formatDurationSeconds,
   formatModelHeadline,
   formatNeedsVerification,
+  formatReviewEffortCost,
+  formatReviewEffortDisabled,
   formatSourceBadge,
   formatSpecBoundHint,
   formatThinkLevel,
@@ -43,6 +47,7 @@ import {
   formatThinkUnsupported,
   type MarkdownSegment,
   overBudgetTip,
+  reviewEffortBilingualLabel,
   splitFoldableMarkdown,
   thinkingPlaceholder,
   truncateMiddle,
@@ -99,11 +104,18 @@ import {
   presetDescription,
   presetIndexOf,
   presetLabel,
+  reviewEffortChoices,
+  reviewEffortIndexOf,
+  reviewEffortIsDisabled,
+  reviewEffortStoredValue,
+  reviewEffortSummary,
+  reviewEffortValue,
   routeBoxes,
   routeSummary,
   routingStatusText,
   setupCustomEndpointFields,
   setupModelSpecFields,
+  setupReviewEffortField,
   setupSlotFields,
   slotIndexOf,
   validateSpecInput,
@@ -264,6 +276,12 @@ type RuntimeSnapshot = {
    * `config.options.repo_context.value`，这里只是快照侧的兜底。
    */
   repo_context?: string | RepoContextOptions
+  /**
+   * review 思考档位（docs/mimo-review-effort-ui.md）。同名键后端有两种形状：
+   * `config.snapshot` 给纯字符串，`model.status` / `config.options` 给
+   * `{value, options, state?, reason?}`。读取方一律走 `reviewEffortValue()` 归一化。
+   */
+  review_reasoning_effort?: string | ReviewReasoningOptions
   /** B2 模型规格块（config.snapshot / model.status 同键同形）。 */
   model_spec?: ModelSpecBlock
   /** model.status 顶层 source 角标（= model_spec.source，状态栏一行读取）。 */
@@ -1191,6 +1209,8 @@ type SetupOptions = {
   workbench_modes?: ChoiceOption[]
   /** `{value, options}`：仓库上下文当前值与可选值（后端 REPO_CONTEXT_MODES）。 */
   repo_context?: RepoContextOptions
+  /** `{value, options, state?, reason?}`：review 思考档位（后端 REVIEW_REASONING_EFFORTS）。 */
+  review_reasoning_effort?: ReviewReasoningOptions
   local: LocalSetupOption
   current: {
     runtime_profile?: string
@@ -1566,6 +1586,7 @@ type SetupScreen =
   | "chat_layout"
   | "workbench"
   | "repo_context"
+  | "review_effort"
   | "summary"
 
 const screenStages: Record<SetupScreen, number> = {
@@ -1594,6 +1615,8 @@ const screenStages: Record<SetupScreen, number> = {
   workbench: 5,
   // 仓库上下文三选一（方案 §4.6）：与 workbench 同属第 5 阶段"界面与输出"。
   repo_context: 5,
+  // review 思考档位（docs/mimo-review-effort-ui.md）：同属第 5 阶段，紧跟仓库上下文。
+  review_effort: 5,
   summary: 6,
 }
 
@@ -1627,6 +1650,7 @@ const screenTitles: Record<SetupScreen, string> = {
   chat_layout: "选择 Chat 布局",
   workbench: "选择审查工作台模式",
   repo_context: "选择仓库上下文",
+  review_effort: "选择审查思考档位",
   summary: "确认并保存",
 }
 
@@ -1642,6 +1666,9 @@ const bilingualScreenTitle = (value: SetupScreen, en: boolean, fallback: string)
   if (value === "route_review") return en ? "Route detail · review model" : "路由细化 · 审查模型"
   if (value === "repo_context") {
     return en ? "Repository context · review prefetch" : "仓库上下文 · 审查预取"
+  }
+  if (value === "review_effort") {
+    return en ? "Review reasoning effort" : "审查思考档位"
   }
   if (value === "model_spec") return en ? "Model spec" : "模型规格"
   if (value === "custom_endpoint") return en ? "Custom endpoint" : "中转站配置"
@@ -1702,6 +1729,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
   const [chatLayoutIndex, setChatLayoutIndex] = createSignal(0)
   const [workbenchIndex, setWorkbenchIndex] = createSignal(0)
   const [repoContextIndex, setRepoContextIndex] = createSignal(0)
+  const [reviewEffortIndex, setReviewEffortIndex] = createSignal(0)
   const [baseUrl, setBaseUrl] = createSignal("")
   const [apiKey, setApiKey] = createSignal("")
   const [localBaseUrl, setLocalBaseUrl] = createSignal("")
@@ -1753,6 +1781,11 @@ export function SetupWizardDialog(props: SetupDialogProps) {
     ]
   /** 仓库上下文选项：`config.options.repo_context.options` 优先（兜底表在 setup-repo-context.ts）。 */
   const repoContexts = () => repoContextChoices(options()?.repo_context)
+  /** review 思考档位选项：`config.options.review_reasoning_effort.options` 优先（兜底表在 setup-routing.ts）。 */
+  const reviewEfforts = () => reviewEffortChoices(options()?.review_reasoning_effort)
+  /** review 档位的 state/reason 块（置灰判定用；缺字段 = 不置灰）。 */
+  const reviewEffortBlock = (): ReviewReasoningOptions | undefined =>
+    options()?.review_reasoning_effort
   const local = () => options()?.local
   const selectedRuntime = () =>
     runtimeProfiles()[Math.min(runtimeIndex(), Math.max(0, runtimeProfiles().length - 1))]?.value ??
@@ -1772,6 +1805,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
   const selectedChatLayout = () => chatLayouts()[chatLayoutIndex()]?.value ?? "compact"
   const selectedWorkbenchMode = () => workbenchModes()[workbenchIndex()]?.value ?? "auto"
   const selectedRepoContext = () => repoContextValue(repoContexts(), repoContextIndex())
+  const selectedReviewEffort = () => reviewEffortValue(reviewEfforts(), reviewEffortIndex())
   const autoPublish = () => autoPublishIndex() === 0
   const remoteKeyConfigured = () =>
     options()?.current.remote_api_key_configured ?? options()?.current.api_key_configured ?? false
@@ -1898,6 +1932,8 @@ export function SetupWizardDialog(props: SetupDialogProps) {
   /** 确认页「仓库上下文」行的显示值（双语 label，取自后端选项清单）。 */
   const repoContextPreview = () =>
     repoContextSummary(repoContexts(), selectedRepoContext(), uiLanguage())
+  const reviewEffortPreview = () =>
+    reviewEffortSummary(reviewEfforts(), selectedReviewEffort(), uiLanguage())
 
   const indexOfValue = (items: ChoiceOption[], value?: string) => {
     const index = items.findIndex((item) => item.value === value)
@@ -1924,6 +1960,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
     "chat_layout",
     "workbench",
     "repo_context",
+    "review_effort",
     "summary",
   ]
   const localOrder: SetupScreen[] = [
@@ -1939,6 +1976,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
     "chat_layout",
     "workbench",
     "repo_context",
+    "review_effort",
     "summary",
   ]
   /**
@@ -1961,9 +1999,15 @@ export function SetupWizardDialog(props: SetupDialogProps) {
     "chat_layout",
     "workbench",
     "repo_context",
+    "review_effort",
     "summary",
   ]
-  const order = () => (isCustom() ? customOrder : needsCloud() ? cloudOrder : localOrder)
+  const order = () => {
+    const base = isCustom() ? customOrder : needsCloud() ? cloudOrder : localOrder
+    // 旧后端缺 `config.options.review_reasoning_effort` 时跳过该屏（缺字段不显示）。
+    if (!options()?.review_reasoning_effort) return base.filter((s) => s !== "review_effort")
+    return base
+  }
 
   const inputDefault = (target: SetupScreen): string => {
     if (target === "base_url") return baseUrl() || selectedProvider()?.base_url || ""
@@ -2127,6 +2171,9 @@ export function SetupWizardDialog(props: SetupDialogProps) {
         // 仓库上下文（方案 §4.6）：显式发送屏幕上这一档；未改动时它就是后端当前值，
         // 全新配置的当前值 = tests+imports（与后端 DEFAULT_REPO_CONTEXT 一致）。
         ...setupRepoContextField(selectedRepoContext()),
+        // review 思考档位（docs/mimo-review-effort-ui.md）：显式发送屏幕上这一档；
+        // 未改动时它就是后端当前值，全新配置的当前值 = off（= 现状）。
+        ...setupReviewEffortField(selectedReviewEffort()),
       }
       if (isCustom()) {
         // 只有 custom 才附带两个槽位（`setupSlotFields` 保证其它预设返回空对象，
@@ -2283,6 +2330,15 @@ export function SetupWizardDialog(props: SetupDialogProps) {
           repoContextStoredValue(payload.repo_context?.value ?? props.runtime.repo_context),
         ),
       )
+      // review 思考档位：预选后端落盘值；值缺失/未知时回落到默认档 off。
+      setReviewEffortIndex(
+        reviewEffortIndexOf(
+          reviewEffortChoices(payload.review_reasoning_effort),
+          reviewEffortStoredValue(
+            payload.review_reasoning_effort?.value ?? props.runtime.review_reasoning_effort,
+          ),
+        ),
+      )
       setAutoPublishIndex(payload.current.auto_publish_comment ? 0 : 1)
       // B2/B3：预填规格编辑框与中转站五项表单。
       primeSpecFields(parseModelSpecBlock(payload.model))
@@ -2296,6 +2352,12 @@ export function SetupWizardDialog(props: SetupDialogProps) {
         repoContextIndexOf(
           repoContextChoices(options()?.repo_context),
           repoContextStoredValue(props.runtime.repo_context),
+        ),
+      )
+      setReviewEffortIndex(
+        reviewEffortIndexOf(
+          reviewEffortChoices(options()?.review_reasoning_effort),
+          reviewEffortStoredValue(props.runtime.review_reasoning_effort),
         ),
       )
     } finally {
@@ -2784,6 +2846,48 @@ export function SetupWizardDialog(props: SetupDialogProps) {
         </box>
       </Show>
       {/*
+        review 思考档位（docs/mimo-review-effort-ui.md）。选项清单/label 来自后端
+        `config.options.review_reasoning_effort`（缺字段用兜底表）；成本提示独立一行，
+        用户选哪一档就看到哪一档的代价。后端 state=unsupported 时置灰 + 原因。
+      */}
+      <Show when={!loading() && screen() === "review_effort"}>
+        <box marginTop={1} flexGrow={1}>
+          <Show when={reviewEffortIsDisabled(reviewEffortBlock())}>
+            <text fg="#ff6b6b">
+              {`⚠ ${formatReviewEffortDisabled(reviewEffortBlock()?.reason, uiLanguage())}`}
+            </text>
+          </Show>
+          <select
+            options={reviewEfforts().map((item) => ({
+              name: reviewEffortBilingualLabel(item.label, uiLanguage()),
+              description: formatReviewEffortCost(item.value, uiLanguage()),
+              value: item.value,
+            }))}
+            selectedIndex={reviewEffortIndex()}
+            focused
+            showDescription
+            width="100%"
+            height={reviewEffortIsDisabled(reviewEffortBlock()) ? 9 : 10}
+            selectedBackgroundColor={reviewEffortIsDisabled(reviewEffortBlock()) ? "#3a3a3a" : "#5a2e1c"}
+            selectedTextColor="#ffffff"
+            descriptionColor={reviewEffortIsDisabled(reviewEffortBlock()) ? "#555555" : muted}
+            selectedDescriptionColor={reviewEffortIsDisabled(reviewEffortBlock()) ? "#777777" : "#ffd0bb"}
+            onChange={(index) => setReviewEffortIndex(index)}
+          />
+          <text
+            fg={
+              reviewEffortIsDisabled(reviewEffortBlock())
+                ? "#555555"
+                : selectedReviewEffort() === "off"
+                  ? muted
+                  : "#ffd0bb"
+            }
+          >
+            {formatReviewEffortCost(selectedReviewEffort(), uiLanguage())}
+          </text>
+        </box>
+      </Show>
+      {/*
         B2 模型规格屏（docs/mimo-config-wizard-ui.md）。数据来自 config.options.model，
         缺字段不显示（兼容旧后端）。context_window / max_output 可编辑；needs_verification
         时两个数字都摆出来，不覆盖用户值。source 徽标 + R 重新获取按钮。
@@ -3030,6 +3134,10 @@ export function SetupWizardDialog(props: SetupDialogProps) {
             一个（`"Repo ctx  "` 会退成 `"Repo ctx "`），字面量才保得住对齐用的填充。
           */}
           <text><span style={{ fg: orange }}>{isEn(uiLanguage()) ? "Repo ctx  " : "仓库上下文 "}</span><span style={{ fg: "#eeeeee" }}>{repoContextPreview()}</span></text>
+          {/* review 思考档位行（docs/mimo-review-effort-ui.md）：缺字段时不显示（旧后端兼容）。 */}
+          <Show when={options()?.review_reasoning_effort}>
+            <text><span style={{ fg: orange }}>{isEn(uiLanguage()) ? "Review th " : "审查思考  "}</span><span style={{ fg: "#eeeeee" }}>{reviewEffortPreview()}</span></text>
+          </Show>
           {/* 一行写完：这行原本会长到换行，多出的一行会把确认页挤出高度预算。 */}
           <text fg={muted}>Enter 保存到私有配置；高级项用 pr-review config --advanced。</text>
           {/* B2 模型规格摘要：只在有值时显示，缺字段整行不出现。 */}

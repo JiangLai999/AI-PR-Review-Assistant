@@ -2,15 +2,23 @@ import { expect, test } from "bun:test"
 import {
   CHAT_SLOT_VALUES,
   REVIEW_SLOT_VALUES,
+  FALLBACK_REVIEW_EFFORT_OPTIONS,
   interpretApiKeyInput,
   presetDescription,
   presetIndexOf,
   presetLabel,
+  reviewEffortChoices,
+  reviewEffortIndexOf,
+  reviewEffortIsDisabled,
+  reviewEffortStoredValue,
+  reviewEffortSummary,
+  reviewEffortValue,
   routeBoxes,
   routeSummary,
   routingStatusText,
   setupCustomEndpointFields,
   setupModelSpecFields,
+  setupReviewEffortField,
   setupSlotFields,
   slotDetail,
   slotIndexOf,
@@ -242,4 +250,73 @@ test("setupModelSpecFields only sends provided numeric fields", () => {
   expect(full.max_output).toBe(8192)
   expect(full.local_context_window).toBe(32768)
   expect(full.local_max_output).toBe(4096)
+})
+
+// ---------------------------------------------------------------------
+// review 思考档位（docs/mimo-review-effort-ui.md）
+// ---------------------------------------------------------------------
+
+test("review effort choices prefer the backend list and fall back when absent", () => {
+  const backendList = [
+    { value: "off", label: "关闭 / Off" },
+    { value: "low", label: "低 / Low" },
+  ]
+  expect(reviewEffortChoices({ options: backendList })).toEqual(backendList)
+  expect(reviewEffortChoices(undefined)).toEqual(FALLBACK_REVIEW_EFFORT_OPTIONS)
+  expect(reviewEffortChoices({ options: [] })).toEqual(FALLBACK_REVIEW_EFFORT_OPTIONS)
+  // The fallback list mirrors the backend vocabulary: off|low|high|max|auto.
+  expect(FALLBACK_REVIEW_EFFORT_OPTIONS.map((item) => item.value)).toEqual([
+    "off",
+    "low",
+    "high",
+    "max",
+    "auto",
+  ])
+})
+
+test("review effort preselect falls back to off (the backend default), never out of bounds", () => {
+  const list = FALLBACK_REVIEW_EFFORT_OPTIONS
+  expect(reviewEffortIndexOf(list, "high")).toBe(2)
+  expect(reviewEffortIndexOf(list, "off")).toBe(0)
+  expect(reviewEffortIndexOf(list, "unknown")).toBe(0)
+  expect(reviewEffortIndexOf(list, undefined)).toBe(0)
+  expect(reviewEffortIndexOf([], "off")).toBe(0)
+})
+
+test("review effort value clamps the index and falls back to off", () => {
+  const list = FALLBACK_REVIEW_EFFORT_OPTIONS
+  expect(reviewEffortValue(list, 3)).toBe("max")
+  expect(reviewEffortValue(list, -5)).toBe("off")
+  expect(reviewEffortValue(list, 99)).toBe("auto")
+  expect(reviewEffortValue([], 0)).toBe("off")
+})
+
+test("review effort stored value normalizes both backend shapes", () => {
+  expect(reviewEffortStoredValue("HIGH")).toBe("high")
+  expect(reviewEffortStoredValue({ value: "max", options: [] })).toBe("max")
+  expect(reviewEffortStoredValue({ options: [] })).toBe("")
+  expect(reviewEffortStoredValue(undefined)).toBe("")
+})
+
+test("review effort setup field always sends the visible level", () => {
+  expect(setupReviewEffortField("high")).toEqual({ review_reasoning_effort: "high" })
+  expect(setupReviewEffortField("  MAX  ")).toEqual({ review_reasoning_effort: "max" })
+  // Empty string = don't send (backend treats missing as "keep the stored value").
+  expect(setupReviewEffortField("")).toEqual({})
+})
+
+test("review effort greys out only when the backend says unsupported", () => {
+  expect(reviewEffortIsDisabled({ state: "unsupported", reason: "local" })).toBe(true)
+  expect(reviewEffortIsDisabled({ state: "set" })).toBe(false)
+  expect(reviewEffortIsDisabled({ state: "transparent" })).toBe(false)
+  // No state field at all → never grey out (front-end must not infer provider capability).
+  expect(reviewEffortIsDisabled({})).toBe(false)
+  expect(reviewEffortIsDisabled(undefined)).toBe(false)
+})
+
+test("review effort summary shows the bilingual label side chosen by ui_language", () => {
+  const list = FALLBACK_REVIEW_EFFORT_OPTIONS
+  expect(reviewEffortSummary(list, "off", "zh-CN")).toBe("关闭")
+  expect(reviewEffortSummary(list, "off", "en-US")).toContain("Off")
+  expect(reviewEffortSummary(list, "unknown", "zh-CN")).toBe("unknown")
 })

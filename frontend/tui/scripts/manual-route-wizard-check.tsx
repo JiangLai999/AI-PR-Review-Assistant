@@ -790,6 +790,133 @@ async function customEndpointForm() {
   }
 }
 
+/**
+ * `config.options.review_reasoning_effort` 的 fixture（`_review_reasoning_options` 同形）。
+ * `extra` 可叠加 `state`/`reason` 做置灰态。
+ */
+function reviewEffortFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    value: "off",
+    options: [
+      { value: "off", label: "关闭 / Off（不思考，默认）" },
+      { value: "low", label: "低 / Low（预留 4000 思考 tokens）" },
+      { value: "high", label: "高 / High（预留 8000 思考 tokens）" },
+      { value: "max", label: "最高 / Max（预留 12000；实测约 3.6× 输出 tokens、2.9× 耗时）" },
+      { value: "auto", label: "自动 / Auto（不干预，由供应商默认决定）" },
+    ],
+    ...overrides,
+  }
+}
+
+/**
+ * review 思考档位屏的帧证据（docs/mimo-review-effort-ui.md）。
+ * 120×30 + 209×51 双尺寸；成本提示、默认 off 高亮、置灰态。
+ */
+async function reviewEffortScreen() {
+  console.log("\n[H] review 思考档位（fixture: review_reasoning_effort 满值；120×30, zh-CN）")
+  const { view } = await openWizard("zh-CN", {
+    review_reasoning_effort: reviewEffortFixture(),
+  })
+  try {
+    // cloud 顺序：runtime → provider → base_url → api_format → api_key → model →
+    // model_spec → custom_endpoint → github → ui_language → response_language →
+    // output_format → auto_publish → chat_layout → workbench → repo_context →
+    // review_effort。一路 Enter 到审查思考档位屏。
+    const frame = await advance(view, /审查思考档位/, 20)
+    console.log(dumpFrame(frame, "review-effort-zh"))
+    check(/审查思考档位/.test(frame), "cloud 顺序：repo_context 之后进入审查思考档位屏")
+    check(/5\/6 · 界面与输出 · 审查思考档位/.test(frame), "进度条显示第 5 阶段")
+    // 五个档位都在（label 来自后端 fixture）。
+    check(/关闭/.test(frame), "选项屏列出 off 档")
+    check(/低/.test(frame), "选项屏列出 low 档")
+    check(/高/.test(frame), "选项屏列出 high 档")
+    check(/最高/.test(frame), "选项屏列出 max 档")
+    check(/自动/.test(frame), "选项屏列出 auto 档")
+    // 成本提示可见：off 基线 + 思考档倍率。
+    check(/与现状相同/.test(frame), "成本提示：off = 与现状相同（基线）")
+    // 默认 off 高亮：选择器的 selectedBackgroundColor 应让 off 行成为选中态。
+    // 帧里选中行由 select 组件渲染；断言 cost 行显示 off 的基线文案即证明预选 = off。
+    check(/与现状相同（基线）/.test(frame), "默认 off 高亮（成本行 = off 基线）")
+
+    // ↓ 切到 max：成本提示跟着变。
+    for (let i = 0; i < 3; i += 1) view.mockInput.pressArrow("down")
+    await settle(view)
+    const maxFrame = view.captureCharFrame()
+    console.log(dumpFrame(maxFrame, "review-effort-max-zh"))
+    check(/×3\.6/.test(maxFrame) && /×2\.9/.test(maxFrame), "max 档成本提示显示 ×3.6 / ×2.9")
+
+    // 确认页有审查思考行。
+    const summaryFrame = await advance(view, /确认并保存/, 4)
+    console.log(dumpFrame(summaryFrame, "review-effort-summary-zh"))
+    check(/审查思考/.test(summaryFrame), "确认页显示审查思考行")
+
+    // Esc 从确认页退回 review_effort。
+    view.mockInput.pressArrow("left")
+    await settle(view, 4)
+    check(/审查思考档位/.test(view.captureCharFrame()), "← 从确认页退回审查思考档位屏")
+  } finally {
+    view.renderer.destroy()
+  }
+
+  // 209×51 大尺寸。
+  console.log("\n[H2] review 思考档位（120×30 之外，209×51）")
+  const large = await openWizard("zh-CN", {
+    review_reasoning_effort: reviewEffortFixture(),
+  }, { width: 209, height: 51 })
+  try {
+    const frame = await advance(large.view, /审查思考档位/, 20)
+    console.log(dumpFrame(frame, "review-effort-zh-large"))
+    check(/审查思考档位/.test(frame), "209×51 同样能渲染审查思考档位屏")
+    check(/与现状相同/.test(frame), "209×51 成本提示可见")
+    check(/关闭/.test(frame) && /最高/.test(frame), "209×51 五档都列出")
+  } finally {
+    large.view.renderer.destroy()
+  }
+
+  // en-US 文案。
+  console.log("\n[H3] review 思考档位（en-US）")
+  const en = await openWizard("en-US", {
+    review_reasoning_effort: reviewEffortFixture(),
+  })
+  try {
+    const frame = await advance(en.view, /Review reasoning/, 20)
+    console.log(dumpFrame(frame, "review-effort-en"))
+    check(/Review reasoning/.test(frame), "en-US 标题切换为英文")
+    check(/baseline|same as today/.test(frame), "en-US 成本提示为英文")
+  } finally {
+    en.view.renderer.destroy()
+  }
+
+  // 置灰态：后端 state=unsupported。
+  console.log("\n[H4] review 思考档位置灰态（state=unsupported）")
+  const greyed = await openWizard("zh-CN", {
+    review_reasoning_effort: reviewEffortFixture({
+      state: "unsupported",
+      reason: "本地模型固定使用快速模式（不展示思考），档位不可调",
+    }),
+  })
+  try {
+    const frame = await advance(greyed.view, /审查思考档位|档位不可调/, 20)
+    console.log(dumpFrame(frame, "review-effort-disabled-zh"))
+    check(/档位不可调/.test(frame), "置灰态显示后端 reason")
+    check(/⚠/.test(frame), "置灰态显示警告标记")
+  } finally {
+    greyed.view.renderer.destroy()
+  }
+
+  // 旧后端缺字段：不显示该屏。
+  console.log("\n[H5] 旧后端缺 review_reasoning_effort → 跳过该屏")
+  const legacy = await openWizard("zh-CN")
+  try {
+    const summaryFrame = await advance(legacy.view, /确认并保存/, 20)
+    console.log(dumpFrame(summaryFrame, "review-effort-legacy-summary"))
+    check(!/审查思考档位/.test(summaryFrame), "缺字段时确认页没有审查思考行")
+    check(!/审查思考/.test(summaryFrame), "缺字段时确认页没有审查思考标签")
+  } finally {
+    legacy.view.renderer.destroy()
+  }
+}
+
 async function main() {
   await customRouteFlow()
   await presetFlow()
@@ -798,6 +925,7 @@ async function main() {
   await specScreenFrames()
   await customEndpointForm()
   await statusLineCases()
+  await reviewEffortScreen()
   console.log(`\n${failures.length === 0 ? "ALL PASS" : `${failures.length} FAIL`} · frames: ${outDir}`)
   if (failures.length > 0) {
     for (const failure of failures) console.log(`  - ${failure}`)

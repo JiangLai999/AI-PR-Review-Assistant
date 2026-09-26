@@ -422,3 +422,56 @@ export function parseCatalogRefreshResult(raw: unknown): ModelSpecOptions | unde
   const record = raw as Record<string, unknown>
   return parseModelSpecBlock(record.model)
 }
+
+// ---------------------------------------------------------------------
+// review 思考档位（docs/mimo-review-effort-ui.md）
+// `config.options.review_reasoning_effort` / `config.setup` / `model.status` 三出口同键同形。
+// ---------------------------------------------------------------------
+
+/** review 档位取值（= chat 词表 `REVIEW_REASONING_EFFORTS`，默认 `off`）。 */
+export type ReviewEffortLevel = "off" | "low" | "high" | "max" | "auto"
+
+/** 选项单项（后端 `REVIEW_REASONING_LABELS` 的 value + 双语 label）。 */
+export type ReviewEffortOption = {
+  value: string
+  label: string
+}
+
+/**
+ * `config.options.review_reasoning_effort` 的形状（`_review_reasoning_options`）。
+ *
+ * `state` / `reason` **仅在** review 槽供应商不注入思考参数时出现（`unsupported`）；
+ * 正常注入（`set` / `transparent` 且无 delivery block）时没有这两个键——
+ * 前端只在看到 `state === "unsupported"` 时置灰，绝不自行推导供应商能力。
+ */
+export type ReviewReasoningOptions = {
+  value?: string
+  options?: ReviewEffortOption[]
+  state?: string
+  reason?: string
+}
+
+/**
+ * 解析 `config.options.review_reasoning_effort` / `model.status.review_reasoning_effort`。
+ *
+ * 旧后端缺这一块时返回 undefined（调用方不显示该屏），字段缺失时对应键为 undefined。
+ */
+export function parseReviewReasoningOptions(raw: unknown): ReviewReasoningOptions | undefined {
+  if (!raw || typeof raw !== "object") return undefined
+  const record = raw as Record<string, unknown>
+  const options: ReviewEffortOption[] = Array.isArray(record.options)
+    ? record.options.flatMap((item): ReviewEffortOption[] => {
+        if (!item || typeof item !== "object") return []
+        const entry = item as Record<string, unknown>
+        const value = asOptionalString(entry.value)
+        if (!value) return []
+        return [{ value, label: typeof entry.label === "string" ? entry.label : value }]
+      })
+    : []
+  return {
+    value: asOptionalString(record.value),
+    options,
+    state: asOptionalString(record.state),
+    reason: asOptionalString(record.reason),
+  }
+}

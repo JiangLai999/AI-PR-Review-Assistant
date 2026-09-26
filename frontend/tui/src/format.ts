@@ -566,3 +566,71 @@ export function customEndpointFieldLabels(language?: string): Array<{
         { key: "max_output", label: "最大输出" },
       ]
 }
+
+// ---------------------------------------------------------------------
+// review 思考档位展示（docs/mimo-review-effort-ui.md）
+// 纯函数；app.tsx 只负责取数与排版。
+// ---------------------------------------------------------------------
+
+/**
+ * 后端双语 label 取一侧：`"关闭 / Off（不思考，默认）"` → 中文侧 / 英文侧。
+ *
+ * 与 `setup-repo-context.ts` 的 `bilingualLabel` 同口径（那个文件不在本任务 write_scope，
+ * 这里重列一份）；没有 `" / "` 分隔符时原样返回，绝不拼出空串。
+ */
+export function reviewEffortBilingualLabel(label: string, language?: string): string {
+  const parts = String(label ?? "").split(" / ")
+  if (parts.length < 2) return String(label ?? "")
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  return (en ? parts[parts.length - 1] : parts[0]).trim()
+}
+
+/**
+ * 档位的成本提示（docs/review-reasoning-assessment.md §0.3 真机实测，max 档）。
+ *
+ * `off` = 与现状相同（基线）；`low/high/max` = 思考会放大输出 tokens 与耗时；
+ * `auto` = 不干预，由供应商默认决定。数字取 max 档实测（约 3.6× 输出 tokens、
+ * 2.9× 单文件耗时），低档实际介于基线与 max 之间——如实标注测量条件，不编造分档数字。
+ */
+export function formatReviewEffortCost(level: string | undefined, language?: string): string {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  const key = String(level ?? "").trim().toLowerCase()
+  if (key === "off") return en ? "same as today (baseline)" : "与现状相同（基线）"
+  if (key === "low" || key === "high" || key === "max") {
+    return en
+      ? "≈×3.6 output tokens, ≈×2.9 latency (measured at max)"
+      : "输出 tokens 约 ×3.6、耗时约 ×2.9（真机实测，max 档）"
+  }
+  if (key === "auto") {
+    return en ? "up to the provider default" : "不干预，由供应商默认决定"
+  }
+  return ""
+}
+
+/**
+ * review 档位被置灰时的说明（后端 `reason` 优先，缺省给通用文案）。
+ *
+ * 只在后端显式给出 `state === "unsupported"` 时调用；没有字段就不置灰（不推导能力）。
+ */
+export function formatReviewEffortDisabled(
+  reason: string | undefined,
+  language?: string,
+): string {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  const fallback = en
+    ? "The review-slot provider does not accept thinking parameters; the level will not take effect"
+    : "审查槽供应商不接受思考参数，档位不会生效"
+  return reason || fallback
+}
+
+/**
+ * 确认页的 review 档位行：`off` 显示基线说明，思考档显示成本短语。
+ * 裸值不在确认页出现——用户要看到的是"代价"，不是枚举名。
+ */
+export function formatReviewEffortSummary(level: string | undefined, language?: string): string {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  const key = String(level ?? "").trim().toLowerCase()
+  const name = key || "off"
+  const cost = formatReviewEffortCost(name, language)
+  return cost ? `${name} · ${cost}` : name
+}

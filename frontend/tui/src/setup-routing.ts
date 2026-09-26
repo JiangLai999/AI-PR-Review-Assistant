@@ -14,6 +14,8 @@
  * 语言：`ui_language` 以 `en-US` 开头走英文，其余一律中文，与 app.tsx 的 `isEn` 一致。
  */
 
+import type { ReviewEffortOption, ReviewReasoningOptions } from "./protocol"
+
 export type RouteSlotValue = "remote" | "local" | "hybrid"
 
 /** `routing.chat` / `routing.review` 的形状（方案 §5.4）。 */
@@ -372,4 +374,109 @@ export function validateSpecInput(
       : `需在 ${bounds[0]}–${bounds[1]} 之间`
   }
   return ""
+}
+
+// ---------------------------------------------------------------------
+// review 思考档位（docs/mimo-review-effort-ui.md）
+// 与 repo_context 同惯例：取值清单 owner 是后端，这里只做投影 / 预选 / 载荷。
+// ---------------------------------------------------------------------
+
+/** 默认档 = `off`（`config.DEFAULT_REVIEW_REASONING_EFFORT`，= 现状）。 */
+export const DEFAULT_REVIEW_EFFORT = "off"
+
+/**
+ * 后端 `REVIEW_REASONING_EFFORTS` 的兜底副本（含与 `REVIEW_REASONING_LABELS`
+ * 逐字一致的 label）。
+ *
+ * 仅用于 `config.options` 缺这一块时（旧后端）不让这一屏空掉；正常情况永远以后端为准。
+ */
+export const FALLBACK_REVIEW_EFFORT_OPTIONS: ReviewEffortOption[] = [
+  { value: "off", label: "关闭 / Off（不思考，默认）" },
+  { value: "low", label: "低 / Low（预留 4000 思考 tokens）" },
+  { value: "high", label: "高 / High（预留 8000 思考 tokens）" },
+  { value: "max", label: "最高 / Max（预留 12000；实测约 3.6× 输出 tokens、2.9× 耗时）" },
+  { value: "auto", label: "自动 / Auto（不干预，由供应商默认决定）" },
+]
+
+/** 这一屏要渲染的选项清单：后端优先，缺了才用兜底表。 */
+export function reviewEffortChoices(
+  source?: ReviewReasoningOptions,
+): ReviewEffortOption[] {
+  const fromBackend = source?.options ?? []
+  return fromBackend.length > 0 ? fromBackend : FALLBACK_REVIEW_EFFORT_OPTIONS
+}
+
+/**
+ * 预选序号：精确匹配 → 默认档 `off` → 第一项，绝不越界。
+ *
+ * 与 `repoContextIndexOf` 的"回落到推荐档"同一惯例——`off` 就是后端
+ * `DEFAULT_REVIEW_REASONING_EFFORT`，用户不动这一屏就等于提交 `off`。
+ */
+export function reviewEffortIndexOf(
+  list: readonly ReviewEffortOption[],
+  value?: string,
+): number {
+  const exact = list.findIndex((option) => option.value === String(value ?? "").trim().toLowerCase())
+  if (exact >= 0) return exact
+  const fallback = list.findIndex((option) => option.value === DEFAULT_REVIEW_EFFORT)
+  return fallback >= 0 ? fallback : 0
+}
+
+/** 选中项的取值；清单为空时回落到默认档（不返回空串）。 */
+export function reviewEffortValue(
+  list: readonly ReviewEffortOption[],
+  index: number,
+): string {
+  const bounded = Math.min(Math.max(index, 0), Math.max(0, list.length - 1))
+  return list[bounded]?.value ?? DEFAULT_REVIEW_EFFORT
+}
+
+/**
+ * 快照侧当前值的归一化（同 `repoContextStoredValue`）。
+ *
+ * 同名键在后端有两种形状：`config.snapshot` 是纯字符串，`model.status` /
+ * `config.options` 是 `{value, options, state?, reason?}`。统一收敛成字符串。
+ */
+export function reviewEffortStoredValue(source: unknown): string {
+  if (typeof source === "string") return source.trim().toLowerCase()
+  if (source && typeof source === "object") {
+    const value = (source as ReviewReasoningOptions).value
+    return typeof value === "string" ? value.trim().toLowerCase() : ""
+  }
+  return ""
+}
+
+/** 确认页那一行的显示值：清单里的双语 label，不在清单里就退回该值本身。 */
+export function reviewEffortSummary(
+  list: readonly ReviewEffortOption[],
+  value: string,
+  language?: string,
+): string {
+  const option = list.find((item) => item.value === value)
+  const label = option?.label ?? FALLBACK_REVIEW_EFFORT_OPTIONS.find((item) => item.value === value)?.label
+  if (!label) return value
+  const parts = String(label).split(" / ")
+  if (parts.length < 2) return label
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  return (en ? parts[parts.length - 1] : parts[0]).trim()
+}
+
+/**
+ * `config.setup` 载荷里的 `review_reasoning_effort`。
+ *
+ * 显式发送屏幕上这一档（与 `repo_context` / `ui_language` 一致）；空串返回空对象
+ * = 不发送，把语义交回后端的"保持不变"。
+ */
+export function setupReviewEffortField(value: string): Record<string, string> {
+  const normalized = String(value ?? "").trim().toLowerCase()
+  return normalized ? { review_reasoning_effort: normalized } : {}
+}
+
+/**
+ * 该屏是否置灰：**只认后端显式给出的 `state === "unsupported"`**。
+ *
+ * 没有 `state` 字段（正常注入 / 旧后端）一律不置灰——前端不得自行推导供应商能力。
+ */
+export function reviewEffortIsDisabled(source?: ReviewReasoningOptions): boolean {
+  return String(source?.state ?? "").trim().toLowerCase() === "unsupported"
 }

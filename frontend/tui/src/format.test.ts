@@ -12,11 +12,14 @@ import {
   formatCompactSummary,
   formatContextUsage,
   formatDurationSeconds,
+  formatReviewEffortCost,
+  formatReviewEffortDisabled,
   formatThinkLevel,
   formatThinkTransparent,
   formatThinkUnsupported,
   formatTokenCount,
   overBudgetTip,
+  reviewEffortBilingualLabel,
   spinnerFrame,
   splitFoldableMarkdown,
   thinkingPlaceholder,
@@ -294,4 +297,34 @@ test("splitFoldableMarkdown handles leading and consecutive foldable blocks", ()
   const kinds = double.map((s) => s.kind)
   expect(kinds).toEqual(["markdown", "foldBadge", "markdown", "foldBadge"])
   expect(double.filter((s) => s.kind === "foldBadge").map((s) => (s.kind === "foldBadge" ? s.blockIndex : -1))).toEqual([0, 1])
+})
+
+// ---------------------------------------------------------------------
+// review 思考档位（docs/mimo-review-effort-ui.md）
+// ---------------------------------------------------------------------
+
+test("review effort cost hint shows baseline for off and measured multiplier for thinking levels", () => {
+  expect(formatReviewEffortCost("off", "zh-CN")).toContain("与现状相同")
+  expect(formatReviewEffortCost("off", "en-US")).toContain("baseline")
+  expect(formatReviewEffortCost("low", "zh-CN")).toContain("×3.6")
+  expect(formatReviewEffortCost("high", "zh-CN")).toContain("×2.9")
+  expect(formatReviewEffortCost("max", "zh-CN")).toContain("max 档")
+  expect(formatReviewEffortCost("max", "en-US")).toContain("×3.6")
+  expect(formatReviewEffortCost("auto", "zh-CN")).toContain("供应商默认")
+  expect(formatReviewEffortCost("auto", "en-US")).toContain("provider default")
+})
+
+test("review effort disabled reason prefers the backend reason", () => {
+  expect(formatReviewEffortDisabled("本地模型固定使用快速模式", "zh-CN")).toBe(
+    "本地模型固定使用快速模式",
+  )
+  expect(formatReviewEffortDisabled(undefined, "zh-CN")).toContain("不接受思考参数")
+  expect(formatReviewEffortDisabled(undefined, "en-US")).toContain("will not take effect")
+})
+
+test("review effort bilingual label splits on the backend's zh / en separator", () => {
+  expect(reviewEffortBilingualLabel("关闭 / Off（不思考，默认）", "zh-CN")).toBe("关闭")
+  expect(reviewEffortBilingualLabel("关闭 / Off（不思考，默认）", "en-US")).toBe("Off（不思考，默认）")
+  expect(reviewEffortBilingualLabel("NoSeparator", "zh-CN")).toBe("NoSeparator")
+  expect(reviewEffortBilingualLabel("", "zh-CN")).toBe("")
 })

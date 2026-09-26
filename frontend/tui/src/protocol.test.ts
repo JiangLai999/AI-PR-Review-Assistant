@@ -7,6 +7,7 @@ import {
   parseCustomEndpointOptions,
   parseModelSpecBlock,
   parseReasoningDelta,
+  parseReviewReasoningOptions,
   parseThinkCommandResult,
 } from "./protocol"
 
@@ -227,4 +228,55 @@ test("catalog refresh result extracts the model block", () => {
   expect(spec?.source).toBe("models.dev")
   expect(parseCatalogRefreshResult({})).toBeUndefined()
   expect(parseCatalogRefreshResult(undefined)).toBeUndefined()
+})
+
+// ---------------------------------------------------------------------
+// review 思考档位（docs/mimo-review-effort-ui.md）
+// ---------------------------------------------------------------------
+
+test("review reasoning options parses value, options, state and reason", () => {
+  const parsed = parseReviewReasoningOptions({
+    value: "high",
+    options: [
+      { value: "off", label: "关闭 / Off（不思考，默认）" },
+      { value: "low", label: "低 / Low" },
+      { value: "high", label: "高 / High" },
+      { value: "max", label: "最高 / Max" },
+      { value: "auto", label: "自动 / Auto" },
+    ],
+    state: "unsupported",
+    reason: "本地模型固定使用快速模式",
+  })
+  expect(parsed?.value).toBe("high")
+  expect(parsed?.options).toHaveLength(5)
+  expect(parsed?.options?.[2]).toEqual({ value: "high", label: "高 / High" })
+  expect(parsed?.state).toBe("unsupported")
+  expect(parsed?.reason).toBe("本地模型固定使用快速模式")
+})
+
+test("review reasoning options omits state/reason when the provider injects params", () => {
+  const parsed = parseReviewReasoningOptions({
+    value: "off",
+    options: [{ value: "off", label: "关闭 / Off" }],
+  })
+  expect(parsed?.state).toBeUndefined()
+  expect(parsed?.reason).toBeUndefined()
+})
+
+test("review reasoning options tolerates missing fields from an older backend", () => {
+  expect(parseReviewReasoningOptions(undefined)).toBeUndefined()
+  expect(parseReviewReasoningOptions(null)).toBeUndefined()
+  expect(parseReviewReasoningOptions("not-an-object")).toBeUndefined()
+  const bare = parseReviewReasoningOptions({})
+  expect(bare?.value).toBeUndefined()
+  expect(bare?.options).toEqual([])
+})
+
+test("review reasoning options drops malformed option entries", () => {
+  const parsed = parseReviewReasoningOptions({
+    value: "off",
+    options: [null, "junk", { label: "no value" }, { value: "off", label: "关闭 / Off" }],
+  })
+  expect(parsed?.options).toHaveLength(1)
+  expect(parsed?.options?.[0].value).toBe("off")
 })
