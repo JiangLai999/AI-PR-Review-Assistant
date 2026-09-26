@@ -18,7 +18,7 @@
 | A2 | 会话落盘（`chat_session.json`，重启可续，`/new` 清空） | `src/ai_pr_review/chat_session.py:13,22,58,64`；`jsonl_server.py:2837`（`_restore_session_messages`）、`:2853`（`_persist_session`） | pytest 往返用例 | `a26e88f`；`tests/test_jsonl_backend.py:5385`（落盘字段集/恢复/绑定不恢复）；脚本 [D][E] | ✅ 已验证 |
 | A3 | 历史窗口 80 条 + 裁剪明示 + `chat_context_budget` 可配 | `jsonl_server.py:291`（`CHAT_HISTORY_MESSAGE_LIMIT=80`）、`:2761`（`_trim_history`）、`:2055`（`_chat_context_budget`） | pytest + 离线实测 | `a26e88f`；`test_jsonl_backend.py`（80 条窗口/后缀提示/预算 1200 回退 8000）；脚本 [F][G] | ✅ 已验证 |
 | A4 | 上下文超额 tips（`warning:"over_budget"` + 前端 zh/en 文案） | 后端 `jsonl_server.py`（`finished.warning`，`fa04897`）；前端 `frontend/tui/src/app.tsx:423,4915` | 契约 stub + manual 帧 | `fa04897`+`1c1a829`；`tests/test_chat_contract_events.py` 10 条；帧 `frame-over-budget-tip-en.txt`、`frame-contract-120x30.txt` | ✅ 已验证 |
-| A5 | 上下文长度提示（优先 usage，缺失估算）`上下文 12% · 2.4k/20k` | 后端 `jsonl_server.py:2772`（`_chat_usage_payload`）；前端 `app.tsx:433`（`ContextUsageLine`）、`format.ts:70`（`formatContextUsage`） | 契约 stub + manual 帧 | `fa04897`+`1c1a829`；契约测试含 `context` 五键；帧 `frame-contract-120x30.txt`/`frame-contract-209x51.txt` | ✅ 已验证 |
+| A5 | 上下文长度提示（优先 usage，缺失估算）`上下文 12% · 2.4k/20k` | 后端 `jsonl_server.py:2772`（`_chat_usage_payload`）；前端 `app.tsx:433`（`ContextUsageLine`）、`format.ts:70`（`formatContextUsage`） | 契约 stub + manual 帧 | `fa04897`+`1c1a829`；契约测试含 `context` **六键**（2026-09-26 扩展 `budget_source`）；帧 `frame-contract-120x30.txt`/`frame-contract-209x51.txt` | ✅ 已验证 |
 | A6 | `/compact`（保留最近 10 轮原文 → 摘要替换；失败原历史不动） | `jsonl_server.py:292`（`CHAT_COMPACT_KEPT_TURNS=10`）、`:2897`（`_compact_chat_history`） | pytest 成功/失败两路径 + 契约 | `fa04897`；`test_jsonl_backend.py:5969`；契约 `test_contract_compact_*`（shape + failure） | ✅ 已验证 |
 | A7 | `/history` 三模式（对话消息 / `--runs` / `<run_id>` 绑定） | `jsonl_server.py:2864`（`_chat_history_payload`）、命令分发 ~`:4011` 区 | pytest 三分支 + 契约 | `fa04897`；契约 `test_contract_history_*` 三条；`84b739e` 收尾修复（`effort` 字段） | ✅ 已验证 |
 
@@ -73,7 +73,7 @@
 |---|---|---|---|---|---|
 | Contract-v1 | 契约 v1 端到端（事件序列/字段完整性/隔离/错误路径/命令结构） | `tests/test_chat_contract_events.py:140` 起 10 条 | pytest stub | `35f54c1`；10 passed；`docs/chat-contract-verification.md`（含前后端字段对照 25 行） | ✅ 已验证 |
 | Contract-v1-fix | `/think` 字段名 `effort`↔`level` 不一致修复 | `84b739e`（后端读 `effort`） | 契约回归 | `docs/chat-contract-verification.md` §5.2 → `84b739e` | ✅ 已验证 |
-| Contract-gap | 契约 `context` 是否含 `budget_source` | `jsonl_server.py:2552,2580,2597`（仅 `/context` 输出） | — | `docs/claude-backend-followup.md` §6.1：契约未定义，属契约版本变更 | ❌ 未验证 |
+| Contract-gap | 契约 `context` 是否含 `budget_source` | `jsonl_server.py` `_chat_context_payload`（**已扩键**：`context` 六键） | 契约 stub 十用例 + 全量 pytest | **已修复（主控）**：`assistant.finished.context.budget_source` 随事件下发（config\|model_spec\|fallback）；`tests/test_chat_contract_events.py` 与 `test_jsonl_backend.py` 同步为六键；文档 `codex-chat-backend-c1.md` §2 / `chat-contract-verification.md` 已更新 | ✅ 已验证 |
 
 ---
 
@@ -86,7 +86,7 @@
 | 3 | **`/context` 的 `budget_source` TUI 展示** | 后端已输出（`/context` 与 `config.snapshot`），前端**无消费方** | TUI 状态栏或 `/context` 回显加上 `budget_source`；补 manual 帧断言 |
 | 4 | **Ollama usage 全 0** | 行为链路正常，但数值不可用于精确预算；本地占比提示是估算 | 改走 Ollama 原生 `/api/chat` 的 `prompt_eval_count`（另开任务），或接受"本地估算"并在 UI 标注 |
 | 5 | **本地 reasoning 为空真** | `OllamaProvider.stream_chat` 强制 `think=False`（`docs/chat-live-verification.md` §3 差异②）；隔离断言不具区分力 | 产品决策已定"本地不开放思考"（`13b8a08`）；若未来开放，需真机验证 reasoning 隔离 |
-| 6 | **契约 `context.budget_source`** | 不在契约 v1；`docs/chat-contract-verification.md` 与 `tests/test_chat_contract_events.py` 都未覆盖 | 先改契约文档与 10 条验收测试（契约版本变更），再接前端 |
+| 6 | ~~**契约 `context.budget_source`**~~ | ~~不在契约 v1~~ | **已完成（主控，2026-09-26）**：契约扩为六键并同步文档与两处测试；TUI 消费见第 3 条（mimo 进行中） |
 | 7 | **`max_output < 思考预留` 的档位降级** | 只封顶总额度，不自动降档；可能答案被思考挤空 | 产品决策是否自动降档（`docs/claude-backend-followup.md` §6.6）；补 `/think` 反馈文案 |
 | 8 | **manual-route-wizard-check 首测 flaky** | 一次测量 `PASS=104 FAIL=2`，随后三次复跑均 `PASS=107 FAIL=0` | 若 `claude-config-wizard-fix` 收尾后仍偶发，需查焦点/时序；当前以 107/0 为准并记录波动 |
 

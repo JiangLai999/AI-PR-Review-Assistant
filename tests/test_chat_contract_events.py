@@ -207,6 +207,14 @@ def test_contract_event_sequence_is_legal_and_reasoning_is_isolated(
             "used_percent",
             "trimmed_messages",
             "compacted",
+            # 2026-09-26 契约扩展：预算来源（config|model_spec|fallback）。
+            # 见 docs/codex-chat-backend-c1.md §2 与 docs/chat-contract-verification.md。
+            "budget_source",
+        }
+        assert finished["context"]["budget_source"] in {
+            "config",
+            "model_spec",
+            "fallback",
         }
         assert finished["warning"] is None
         assert finished["reasoning"] == "思考第一步。思考第二步。"

@@ -59,7 +59,8 @@ assistant.finished: {
   text, session_id, request_id,
   duration_seconds: float,
   usage: {prompt_tokens, completion_tokens, total_tokens} | null,   # 优先真实 usage
-  context: {used_tokens, budget_tokens, used_percent, trimmed_messages, compacted} | null,
+  context: {used_tokens, budget_tokens, used_percent, trimmed_messages, compacted,
+            budget_source} | null,   # budget_source: config|model_spec|fallback（2026-09-26 扩键）
   reasoning: string | null,
   warning: "over_budget" | null
 }

@@ -2833,17 +2833,19 @@ class JsonlBackend:
                 )
             )
         )
-        # 只读数字，**不加键**：`assistant.finished.context` 是契约 v1 冻结的五键
-        # （docs/chat-contract-verification.md，"finished.context 五键齐全"），
-        # 精确键集被 tests/test_chat_contract_events.py 钉死，加键就会撕契约。
-        # 预算**来源**走 `/context` 与 `config.snapshot.chat_context_budget_source`（§4.5）。
-        budget = self._chat_context_budget()
+        # 契约 v1 扩展（2026-09-26）：`context` 由五键增至六键，新增 `budget_source`
+        # （`config | model_spec | fallback`，见 `_chat_context_budget_plan`）。
+        # TUI 的 `/context` 与 `config.snapshot.chat_context_budget_source` 早已输出
+        # 同一枚举；这里补齐，让**只订阅事件的消费方**也能一次拿到来源，不必再发命令。
+        # 加键向后兼容：旧消费方按已知键读取，多余键被忽略（契约文档已同步）。
+        budget, budget_source = self._chat_context_budget_plan()
         return {
             "used_tokens": used_tokens,
             "budget_tokens": budget,
             "used_percent": round((used_tokens / budget) * 100, 1),
             "trimmed_messages": trimmed_messages,
             "compacted": compacted,
+            "budget_source": budget_source,
         }
 
     def _restore_session_messages(self) -> list[dict[str, Any]]:

@@ -5682,14 +5682,15 @@ def test_chat_reasoning_stream_is_separated_from_answer_and_history(
             "total_tokens": 30,
         }
         assert finished["context"]["used_tokens"] == 20
-        # 契约 v1：`assistant.finished.context` 恰好五键（docs/chat-contract-verification.md），
-        # 预算来源不在其中，走 `/context` 与 `config.snapshot`（§4.5）。
+        # 契约 v1 扩展（2026-09-26）：`context` 六键，新增 `budget_source`
+        # （config|model_spec|fallback）；订阅事件的消费方不必再发 `/context`。
         assert set(finished["context"]) == {
             "used_tokens",
             "budget_tokens",
             "used_percent",
             "trimmed_messages",
             "compacted",
+            "budget_source",
         }
         assert finished["context"]["budget_tokens"] == DEFAULT_CHAT_BUDGET
         assert finished["warning"] is None
@@ -5939,8 +5940,8 @@ def test_chat_usage_falls_back_to_estimated_context() -> None:
     assert context["used_tokens"] == 10
     assert context["budget_tokens"] == DEFAULT_CHAT_BUDGET
     assert context["trimmed_messages"] == 2
-    # 契约 v1 冻结五键：预算来源不在 `context` 里（走 `/context` 与快照，§4.5）。
-    assert "budget_source" not in context
+    # 契约 v1 扩展后：预算来源随 `context` 一起下发给事件消费方（§4.5 枚举不变）。
+    assert context["budget_source"] in {"config", "model_spec", "fallback"}
 
 
 def test_history_defaults_to_chat_and_runs_stay_available(tmp_path: Path) -> None:

@@ -35,7 +35,7 @@
 | b | 累积 delta == finished.text（一致） | 同上 | ✅ PASS |
 | c | finished.duration_seconds > 0 | 同上 | ✅ PASS（0.016） |
 | c | finished.usage 三键齐全（prompt/completion/total_tokens） | 同上 | ✅ PASS |
-| c | finished.context 五键齐全（used/budget/percent/trimmed/compacted） | 同上 | ✅ PASS |
+| c | finished.context 六键齐全（used/budget/percent/trimmed/compacted/**budget_source**；2026-09-26 契约扩展） | 同上 | ✅ PASS |
 | c | finished.warning 为 null | 同上 | ✅ PASS |
 | d | 无 usage 时 context 走估算：used_tokens > 0 且 < budget | `test_contract_context_estimated_when_provider_omits_usage` | ✅ PASS |
 | d | 无 usage 时 finished.usage 为 null | 同上 | ✅ PASS |
