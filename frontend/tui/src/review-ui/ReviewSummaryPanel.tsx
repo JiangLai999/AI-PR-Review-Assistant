@@ -18,6 +18,8 @@ import {
 export type ReviewSummaryPanelProps = {
   repository?: string
   prNumber?: number
+  /** PR 网址：与 PR 号一起作为"这次审查是谁"的关键指标（历史框同步显示）。 */
+  url?: string
   title?: string
   severity: SeverityCounts
   evidence: EvidenceCounts
@@ -95,6 +97,10 @@ export function ReviewSummaryPanel(props: ReviewSummaryPanelProps) {
       <box flexGrow={1} minHeight={0} overflow="hidden" flexDirection="column">
       <text height={1} fg="#fb8147">{title()}</text>
       <text height={1} fg="#eeeeee">{identityLine()}</text>
+      {/* PR 网址作为关键指标常显：报告/历史/对话都以它为准，而不是 run id。 */}
+      <Show when={props.url}>
+        <text height={1} fg="#808080">{String(props.url)}</text>
+      </Show>
 
       <text height={1} marginTop={1}>
         <span style={{ fg: "#f3c742" }}>{en() ? "Severity " : "严重级别 "}</span>

@@ -314,7 +314,7 @@ const stageIdFromEvent = (stageId: unknown, stage: unknown): string => {
   const match = REVIEW_STAGE_ORDER.find((item) => item.label === label || item.id === label)
   return match?.id ?? label
 }
-type HistoryRun = { id?: string; repo_owner?: string; repo_name?: string; pr_url?: string; total_findings?: number; duration_seconds?: number; total_cost?: number; created_at?: string; model?: string }
+type HistoryRun = { id?: string; pr_number?: number; repo_owner?: string; repo_name?: string; pr_url?: string; total_findings?: number; duration_seconds?: number; total_cost?: number; created_at?: string; model?: string }
 type HistoryStats = { total_runs?: number; unique_prs?: number; total_findings?: number; total_cost?: number; latest_run_at?: string }
 
 const isGithubPrUrl = (value: string) => /^https?:\/\/github\.com\/[^\s/]+\/[^\s/]+\/pull\/\d+(?:\/[^\s]*)?$/i.test(value.trim())
@@ -2484,8 +2484,12 @@ function HistoryDialog(props: { runs: HistoryRun[]; statistics?: HistoryStats; f
       <box marginTop={1} flexGrow={1}>
         <select
           options={props.runs.map((run) => ({
-            name: `${run.id ?? "?"} · ${run.repo_owner ?? "?"}/${run.repo_name ?? "?"}`,
-            description: `findings=${run.total_findings ?? 0} · ${run.created_at ?? ""}`,
+            // PR 号与 PR 网址是用户真正用来"认领"一次审查的指标；run id 是
+            // UUID，只作为最后兜底显示（实测：复制 run id 很不方便）。
+            name: `${
+              typeof run.pr_number === "number" ? `PR #${run.pr_number}` : (run.id ?? "?")
+            } · ${run.repo_owner ?? "?"}/${run.repo_name ?? "?"}`,
+            description: `${run.pr_url ?? "（无 PR 网址）"} · findings=${run.total_findings ?? 0} · ${run.created_at ?? ""}`,
             value: run.id,
           }))}
           selectedIndex={selectedIndex()}
@@ -2500,7 +2504,7 @@ function HistoryDialog(props: { runs: HistoryRun[]; statistics?: HistoryStats; f
           onChange={(index) => setSelectedIndex(index)}
         />
       </box>
-      <text fg={muted}>↑↓ 选择 · Enter 查看 Run · Esc 返回</text>
+      <text fg={muted}>↑↓ 选择 · Enter 打开详情（载入工作台并绑定对话） · Esc 返回</text>
     </box>
   )
 }
@@ -3484,6 +3488,8 @@ export function App() {
     return {
       repository: reviewWorkspace().repository,
       prNumber: reviewWorkspace().prNumber,
+      // 工作台与历史框用同一组关键指标：PR 号 + PR 网址（run id 只是兜底）。
+      url: reviewReport().pr?.url,
       title: reviewWorkspace().title,
       severity: reviewWorkspace().severity,
       evidence: reviewWorkspace().evidence,
