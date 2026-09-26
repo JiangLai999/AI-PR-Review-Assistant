@@ -18,21 +18,24 @@
 | A6 `/compact`（保留 10 轮 + 摘要替换） | ✅ 完成 | `fa04897`：成功替换 2 条 → 21 条；失败原历史不动（两条用例） |
 | A7 `/history` 对话历史 + `--runs` 兼容 + `<run_id>` 绑定 | ✅ 完成 | `fa04897`：三分支重排（主控修复分支顺序缺陷） |
 | B1 规格字段与服务层 | ✅ 完成 | `3a0a694`（`services/model_catalog.py`） |
-| B2 目录接进配置助手（source/规格三出口） | ✅ 完成 | `6a87fad`：`config.options` 打开即取数（to_thread + 进程内定档）、三出口同键同形 `model_spec`、断网回退 builtin 无 traceback |
-| B3 中转站逐项自定义 | ✅ 完成 | `6a87fad`：`config.setup` 四个规格参数先校验后写、`from_model_provider` 支持 spec_overrides、custom 不套官方预设 |
+| B2 目录接进配置助手（source/规格三出口） | ✅ 完成 | 后端 `6a87fad`（打开即取数/三出口同键/断网回退 builtin）+ TUI `9f27a3c`（规格屏、source 徽标、needs_verification 双数字） |
+| B3 中转站逐项自定义 | ✅ 完成 | 后端 `6a87fad`（spec_overrides、非法整单失败）+ TUI `9f27a3c`（base_url/key/模型名/上下文/输出五项表单，Key 掩码） |
 | C1 表格按渲染宽度分档 | ✅ 完成 | `357e10f`（120×30→content/36 列；209×51→full/132 列） |
-| C2 长代码块折叠（15 行 + 角标） | ✅ 完成 | `357e10f`；角标鼠标点击在 `mimo-chat-render-c3` 收尾 |
+| C2 长代码块折叠（15 行 + 角标） | ✅ 完成 | `357e10f`（折叠）+ `bd1d358`（角标拆为独立 onMouseDown 元素，可点击） |
 | C3 流式动画（光标/spinner） | ✅ 完成 | `1c1a829` |
 | C4 回复耗时 | ✅ 完成 | 后端 `fa04897` + 前端 `1c1a829`（`· 3.2s`） |
 | C5 思考内容独立展示 | ✅ 完成 | 后端 `fa04897`（`assistant.reasoning_delta`）+ 前端 `1c1a829`（独立折叠思考区） |
 | C6 思考强度可选 | ✅ 完成 | `fa04897`（`/think` + 档位预算 + 本地置灰，依据 `docs/model-reasoning-probe.md`） |
 | D 思考档位探测工具（opencode） | ✅ 完成 | `85d5552`（脚本 + `docs/model-reasoning-probe.md`，本机 Ollama 16/16 实测） |
 | 契约 v1 端到端验收（stub） | ✅ 完成 | `35f54c1`：10 条验收测试；**发现 3 处前后端差异**，其中 `/think` 字段名不符（后端 `effort` vs 前端 `level`）已在 `84b739e` 修复 |
-| 真实链路验收（Ollama / DeepSeek） | 🔄 进行中 | `codex-chat-live-verify`、`codex-deepseek-live-verify` |
+| 真实链路验收（Ollama / DeepSeek） | ✅ 完成 | `7a5acae`（Ollama：usage=0 走估算；本地思考经用户裁定**不开放**，文案与口径已统一）+ `c398808`（DeepSeek：off=0、low/high/max 单调、6/6 断言） |
+| TUI 配置助手（组 B · UI 侧） | ✅ 完成 | `9f27a3c`：修复 Enter 失效回归（切屏读已销毁输入框的异常被全局处理器吞掉）+ 规格屏/中转站表单；manual 111 PASS / 0 FAIL |
+| 全项目验收矩阵 | ✅ 完成 | `d5529a5`：约 40 项功能点 × 实现位置 × 验收方式 × 证据 × 状态，如实标注 8 条未验证（review 思考档位未真机、budget_source 未进 TUI 等） |
 
-> 验收口径：每组由调度方独立复跑（Python 全量 `1057 passed / 1 skipped`；前端
-> `bun test src` 156 通过 + 两个 manual 帧检查全 PASS）。codex 后端组的 4 处缺陷
-> 由主控修复并记录在 `docs/codex-chat-backend-c1.md` §0。
+> 验收口径：每组由调度方独立复跑（最终基线：Python 全量 **1144 passed / 1 skipped**；
+> 前端 `bun test src` **171 pass / 0 fail** + `manual-route-wizard-check` **111 PASS** +
+> `manual-chat-markdown-check` **75 PASS**）。codex 后端组的 4 处缺陷由主控修复
+> （`docs/codex-chat-backend-c1.md` §0）；未验证项与复跑指引见 `docs/verification-matrix.md`。
 
 ---
 
