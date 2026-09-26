@@ -1298,16 +1298,25 @@ class JsonlBackend:
             if self.config.preferences.language.lower().startswith("en")
             else "请默认使用中文回答，除非用户明确要求使用其他语言。"
         )
+        # 实测反馈：用户说"那你重新审查一下 pr31"时，模型只能回"我没法重新审查"，
+        # 而它其实知道正确出路。把能力边界和做法一起写进提示词。
+        capability_note = (
+            "你可以解读已绑定的审查结果，但不能自己执行审查。"
+            "当用户要求重新审查或重跑时，请告诉他在工作台载入该 PR 后按 /retry，"
+            "或直接粘贴 GitHub PR URL 触发，不要只回答做不到。"
+        )
         run_id = session.current_run_id
         if not run_id:
             # 未绑定：给出候选清单，让模型引导用户用「第 N 个」或「PR #N」
             # 选择。实测：工作台里的 run id 复制很不方便，不该让用户去抄。
             note = self._recent_runs_note(session)
-            return f"{language_instruction}\n\n{note}" if note else language_instruction
+            if note:
+                return f"{language_instruction}\n\n{capability_note}\n\n{note}"
+            return f"{language_instruction}\n\n{capability_note}"
         context = self._review_context_for_chat(run_id)
         if context is None:
-            return language_instruction
-        sections = [language_instruction, wrap_review_context(run_id, context)]
+            return f"{language_instruction}\n\n{capability_note}"
+        sections = [language_instruction, capability_note, wrap_review_context(run_id, context)]
         # 已绑定也要让模型知道"历史里还有别的审查可选"：用户续问
         # "那 PR29 呢"时，模型才能切过去，而不是回答"我看不到 #29"
         # （实测反馈：绑定 #31 后问 #29，模型只能说自己拿不到）。

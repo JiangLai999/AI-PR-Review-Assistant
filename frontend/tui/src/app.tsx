@@ -3163,7 +3163,16 @@ export function App() {
   }
 
   const retryLastReview = () => {
-    const url = reviewUrl()
+    // 本会话跑过的 URL 优先；没有再退回工作台里当前载入报告的目标 PR。
+    // 实测反馈：从历史打开 #31 后按 /retry，却被告知"当前会话还没有可
+    // 重试的审查"——屏幕上的报告明明就是可重试的对象。
+    const workspaceReport = reviewReport() as Record<string, unknown>
+    const workspacePr = (workspaceReport.pr ?? {}) as Record<string, unknown>
+    const workspaceUrl =
+      typeof workspacePr.url === "string" && workspacePr.url.trim()
+        ? workspacePr.url.trim()
+        : ""
+    const url = reviewUrl() || workspaceUrl
     if (!url) {
       appendMessage({
         role: "assistant",
