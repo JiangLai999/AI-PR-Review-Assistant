@@ -1269,7 +1269,13 @@ input[type='checkbox']:checked { outline: 2px solid rgba(103, 153, 254, 0.35); o
 
 .ask-panel-question { display:flex; align-items:flex-start; gap:var(--ds-space-3); }
 .ask-panel-role { flex:none; display:grid; place-items:center; width:20px; height:20px; border-radius:var(--ds-radius-xs); background:var(--ds-color-brand-soft); color:var(--ds-color-brand); font-family:var(--ds-font-mono); font-size:var(--ds-text-3xs); }
-.ask-panel-question p { min-width:0; color:var(--ds-color-text-primary); font-size:var(--ds-text-xs); line-height:1.6; white-space:pre-wrap; overflow-wrap:anywhere; }
+.ask-panel-question p { flex:1 1 auto; min-width:0; color:var(--ds-color-text-primary); font-size:var(--ds-text-xs); line-height:1.6; white-space:pre-wrap; overflow-wrap:anywhere; }
+
+/* 整轮折叠标：钉在问题行最右侧（收起后整轮只剩这一行）。 */
+.ask-panel-turn-toggle { flex:none; display:grid; place-items:center; width:24px; height:24px; margin-left:auto; padding:0; border:1px solid var(--ds-color-border-subtle); border-radius:var(--ds-radius-xs); background:transparent; color:var(--ds-color-text-description); font-size:var(--ds-text-3xs); line-height:1; cursor:pointer; transition:color .15s ease, border-color .15s ease; }
+.ask-panel-turn-toggle:hover { color:var(--ds-color-brand); border-color:var(--ds-color-brand); }
+.ask-panel-turn-toggle:focus-visible { outline:2px solid var(--ds-color-brand); outline-offset:1px; }
+.ask-panel-turn[data-collapsed='true'] { background:var(--ds-color-bg-surface-4); }
 
 /* 回答：MarkdownLite 负责排版，这里只给外框与滚动上限。 */
 .ask-panel-answer { max-height:420px; padding:var(--ds-space-3) var(--ds-space-4); border-radius:var(--ds-radius-code); border:1px solid var(--ds-color-border-default); background:var(--ds-color-bg-code); overflow:auto; }

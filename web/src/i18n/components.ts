@@ -84,6 +84,9 @@ export const components: Namespace = {
     'ask.empty': '还没有追问。回答由模型生成，可能出错 —— 关键结论请回到上面的发现列表核对证据。',
     'ask.role.q': '问',
     'ask.role.a': '答',
+    // 整轮折叠（问题行右侧的折叠标，收起后只留问题）
+    'ask.turn.collapse': '收起这一轮',
+    'ask.turn.expand': '展开这一轮',
     'ask.gotoSettings': '前往设置',
     'ask.retry': '重试',
     'ask.truncatedFallback': '上下文被裁剪后才发给模型，这条回答可能漏掉部分发现。',
@@ -292,6 +295,9 @@ export const components: Namespace = {
     'ask.empty': 'No questions yet. Answers are model-generated and can be wrong — verify key conclusions against the findings above.',
     'ask.role.q': 'Q',
     'ask.role.a': 'A',
+    // Whole-turn collapse (the marker at the right of the question row)
+    'ask.turn.collapse': 'Collapse this turn',
+    'ask.turn.expand': 'Expand this turn',
     'ask.gotoSettings': 'Go to settings',
     'ask.retry': 'Retry',
     'ask.truncatedFallback': 'The context was trimmed before it reached the model; this answer may miss some findings.',

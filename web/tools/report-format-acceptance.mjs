@@ -73,6 +73,33 @@ try {
     const toggle = page.locator('.ask-panel button[aria-expanded]').first()
     check((await toggle.count()) > 0, 'zh: 追问回答有折叠控件（长短都有）')
 
+    // 4b) 整轮折叠：问题行右侧的折叠标，收起后只剩问题
+    const turn = page.locator('.ask-panel-turn').first()
+    const turnToggle = turn.locator('.ask-panel-turn-toggle')
+    check((await turnToggle.count()) === 1, 'zh: 问题行右侧有整轮折叠标')
+    const boxes = [
+      await turnToggle.boundingBox(),
+      await turn.locator('.ask-panel-question p').boundingBox(),
+    ]
+    check(
+      boxes[0] && boxes[1] && boxes[0].x > boxes[1].x + boxes[1].width - 40,
+      'zh: 折叠标位于问题文本右侧',
+    )
+    const expandedTurn = await turn.innerText()
+    await turnToggle.click()
+    await page.waitForTimeout(400)
+    const collapsedTurn = await turn.innerText()
+    check((await turnToggle.getAttribute('aria-expanded')) === 'false', 'zh: 收起后 aria-expanded=false')
+    check(collapsedTurn.includes('这次审查'), 'zh: 收起后仍保留问题')
+    check(
+      !/tokens|上下文：/.test(collapsedTurn) && (await turn.locator('.ask-panel-answer').count()) === 0,
+      'zh: 收起后回答与元信息一起隐藏',
+      collapsedTurn.replace(/\n/g, ' | ').slice(0, 60),
+    )
+    await turnToggle.click()
+    await page.waitForTimeout(400)
+    check((await turn.innerText()).length === expandedTurn.length, 'zh: 再点恢复原状')
+
     // 5) 差异动作
     const diff = page.locator('.finding-meta-row a[href*="/files#diff-"]').first()
     if ((await diff.count()) > 0) {

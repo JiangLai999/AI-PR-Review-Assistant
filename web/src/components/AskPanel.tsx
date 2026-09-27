@@ -417,36 +417,82 @@ export function AskPanel({
         )}
 
         {turns.map((turn) => (
-          <article key={turn.id} className="ask-panel-turn" data-error={turn.error ? 'true' : undefined}>
-            <div className="ask-panel-question">
-              <span className="ask-panel-role" aria-hidden="true">
-                {t('ask.role.q')}
-              </span>
-              <p>{turn.question}</p>
-            </div>
+          <TurnCard key={turn.id} turn={turn} busy={busy} onRetry={ask} />
+        ))}
+      </div>
+    </Card>
+  )
+}
 
-            {turn.error ? (
-              <div className="ask-panel-error">
-                <Notice kind="error">
-                  <strong>{turn.error.title}</strong>
-                  <span className="ask-panel-error-detail">{turn.error.detail}</span>
-                </Notice>
-                <div className="row row-wrap">
-                  {turn.error.toSettings && (
-                    <a className="btn btn-ghost btn-sm" href="#/settings">
-                      {t('ask.gotoSettings')}
-                    </a>
-                  )}
-                  <button
-                    type="button"
-                    className="btn btn-ghost btn-sm"
-                    disabled={busy}
-                    onClick={() => void ask(turn.question)}
-                  >
-                    {t('ask.retry')}
-                  </button>
-                </div>
+/**
+ * 一轮追问。
+ *
+ * 两层折叠各管各的：
+ * - **整轮**：问题行右侧的折叠标，收起后只剩问题（回答、错误、元信息一起收）——
+ *   用户要求「在每个问题的右边加一个折叠，整体只留问题」；
+ * - **回答正文**：`CollapsibleText` 负责长回答的展开/收起，与整轮折叠互不干扰。
+ *
+ * 默认展开：折叠是"我不想现在看"，不是"默认藏起来"，所以不记忆状态。
+ */
+function TurnCard({
+  turn,
+  busy,
+  onRetry,
+}: {
+  turn: Turn
+  busy: boolean
+  onRetry: (question: string) => void
+}) {
+  const t = useT()
+  const [collapsed, setCollapsed] = useState(false)
+
+  return (
+    <article
+      className="ask-panel-turn"
+      data-error={turn.error ? 'true' : undefined}
+      data-collapsed={collapsed ? 'true' : undefined}
+    >
+      <div className="ask-panel-question">
+        <span className="ask-panel-role" aria-hidden="true">
+          {t('ask.role.q')}
+        </span>
+        <p>{turn.question}</p>
+        <button
+          type="button"
+          className="ask-panel-turn-toggle"
+          aria-expanded={!collapsed}
+          aria-label={collapsed ? t('ask.turn.expand') : t('ask.turn.collapse')}
+          title={collapsed ? t('ask.turn.expand') : t('ask.turn.collapse')}
+          onClick={() => setCollapsed((value) => !value)}
+        >
+          <span aria-hidden="true">{collapsed ? '▸' : '▾'}</span>
+        </button>
+      </div>
+
+      {!collapsed && (
+        <>
+          {turn.error ? (
+            <div className="ask-panel-error">
+              <Notice kind="error">
+                <strong>{turn.error.title}</strong>
+                <span className="ask-panel-error-detail">{turn.error.detail}</span>
+              </Notice>
+              <div className="row row-wrap">
+                {turn.error.toSettings && (
+                  <a className="btn btn-ghost btn-sm" href="#/settings">
+                    {t('ask.gotoSettings')}
+                  </a>
+                )}
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  disabled={busy}
+                  onClick={() => onRetry(turn.question)}
+                >
+                  {t('ask.retry')}
+                </button>
               </div>
+            </div>
             ) : (
               <>
                 {/* 上下文被裁剪时，警告条必须在回答**上方** —— 先说明这份回答的局限，再给结论。 */}
@@ -484,9 +530,8 @@ export function AskPanel({
                 </div>
               </>
             )}
-          </article>
-        ))}
-      </div>
-    </Card>
+        </>
+      )}
+    </article>
   )
 }

@@ -252,6 +252,30 @@ def test_severity_labels_are_not_hardcoded_in_components():
     assert not offenders, offenders
 
 
+def test_every_literal_t_key_used_in_components_exists():
+    """组件里写的字面量 key 必须在词典里存在。
+
+    回归点：`t('ask.turn.expand')` 这类**漏加词条/拼错 key** 不会报任何错 —— `t()`
+    找不到 key 时会把 key 本身当文案显示，界面上直接出现 `ask.turn.expand`。
+    这条守卫把"引用"和"定义"对齐。动态 key（模板串拼接，例如
+    t(`ask.failure.${status}.title`)）不参与扫描。
+    """
+    literal = re.compile(r"\bt\(\s*'([A-Za-z][\w.]*)'\s*[,)]")
+    known = set(_frontend_dict()["zh-CN"])
+    missing: list[str] = []
+    scanned = 0
+    for path in sorted((_REPO_ROOT / "web" / "src").rglob("*.ts*")):
+        if _I18N_DIR in path.parents:  # 词典自身不是"引用方"
+            continue
+        for key in literal.findall(path.read_text(encoding="utf-8")):
+            scanned += 1
+            if key not in known:
+                missing.append(f"{path.name}: {key}")
+    # 守住用例本身：正则或目录结构一变，"一个都没扫到"会变成永远绿。
+    assert scanned > 100, f"扫描到的字面量 key 太少（{scanned}），守卫可能已失效"
+    assert not missing, missing
+
+
 def test_provider_placeholder_values_match_the_branches(monkeypatch):
     """词条里的每个 `{占位符}` 都必须真有值，且中英词条占位符一致。
 
