@@ -95,7 +95,14 @@ export const chatCommands: readonly ChatCommandI18n[] = [
     description_en: "Open the session list (switch / rename / delete)",
   },
   { name: "/new", description: "开始新会话", description_en: "Start a new session" },
-]
+  {
+    name: "/rename",
+    description: "重命名当前会话",
+    description_en: "Rename the current session",
+    argument: "<新标题>",
+    argument_en: "<new title>",
+  },
+] 
 
 /** 按界面语言取描述/参数提示；缺英文时回落中文。 */
 export function commandDescription(command: ChatCommandI18n, language?: string): string {

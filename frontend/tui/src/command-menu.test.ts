@@ -107,7 +107,8 @@ test("an exact no-argument command runs immediately", () => {
 
 test("ambiguous /re completes instead of running the first command", () => {
   const options = commandMatches("/re")
-  expect(options.map((item) => item.name)).toEqual(["/review", "/retry", "/report"])
+  // /rename 也是 /re 前缀（2026-09-27 新增，用户反馈"改名入口太难发现"）。
+  expect(options.map((item) => item.name)).toEqual(["/review", "/retry", "/report", "/rename"])
   expect(commandEnterAction("/re", options[0], options.length)).toEqual({
     kind: "complete",
     draft: "/review ",

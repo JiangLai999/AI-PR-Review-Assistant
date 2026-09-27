@@ -765,6 +765,8 @@ function Composer(props: {
   onToggleThinking: () => void
   /** A-P2 · Open the session list dialog (`Alt+S`, `/sessions`). */
   onOpenSessions: () => void
+  /** A-P2 · Rename the **current** session (`/rename <标题>`). */
+  onRenameSession: (title: string) => void
   /** Show the `Alt+L 代码块` hint only when a foldable block exists. */
   codeFoldActive?: boolean
   /** Show the `Alt+W 工作台` hint only when a workbench exists. */
@@ -932,6 +934,22 @@ function Composer(props: {
     // A-P2 · /sessions 前端拦截 → session.list；Alt+S 同效（见 useKeyboard）。
     if (text === "/sessions") {
       props.onOpenSessions()
+      submitLock = false
+      return
+    }
+    // 契约 v1 · /rename <标题> → 重命名**当前会话**（显式入口；会话弹窗里按 `r`
+    // 是另一入口——用户反馈"想改名但不知道怎么改"，光靠弹窗快捷键发现性不够）。
+    if (text === "/rename" || text.startsWith("/rename ")) {
+      const title = text.slice("/rename".length).trim()
+      props.onMessage({ role: "user", content: text })
+      if (!title) {
+        props.onMessage({
+          role: "assistant",
+          content: "用法：/rename <新标题>（或在会话弹窗 /sessions 里按 r 改名）",
+        })
+      } else {
+        props.onRenameSession(title)
+      }
       submitLock = false
       return
     }
@@ -5145,6 +5163,45 @@ export function App() {
     }
   }
 
+  /** `/rename <标题>`：重命名**当前会话**。
+   *
+   * 弹窗里的 `r` 键需要一个被选中的 `SessionSummary`，而命令入口只有标题文本——
+   * 所以这里直接用 `sessionId()` 调协议（用户反馈"想改名但入口太难发现"）。
+   */
+  const renameCurrentSession = async (title: string) => {
+    const current = sessionId()
+    if (!current) {
+      appendMessage({
+        role: "assistant",
+        content: "还没有会话可重命名——先发一条消息建立会话，再用 /rename 改标题。",
+      })
+      return
+    }
+    try {
+      const response = await backend.request(
+        "session.rename",
+        { session_id: current, title },
+        { timeoutMs: PROBE_TIMEOUT_MS },
+      )
+      if (!response.ok) {
+        appendMessage({
+          role: "assistant",
+          content: response.error?.message ?? "重命名会话失败",
+        })
+        return
+      }
+      const parsed = parseSessionRenameResult(response.result)
+      const nextTitle = parsed?.title ?? title
+      setSessionTitle(nextTitle)
+      setSessionList((list) =>
+        list.map((item) => (item.id === current ? { ...item, title: nextTitle } : item)),
+      )
+      appendMessage({ role: "assistant", content: `会话已重命名为「${nextTitle}」。` })
+    } catch (error) {
+      appendMessage({ role: "assistant", content: String(error) })
+    }
+  }
+
   const deleteSession = async (session: SessionSummary) => {
     try {
       const response = await backend.request(
@@ -5808,6 +5865,7 @@ export function App() {
         onToggleCodeFold={toggleCodeFold}
         onToggleThinking={toggleThinking}
         onOpenSessions={openSessions}
+        onRenameSession={(title) => void renameCurrentSession(title)}
         codeFoldActive={codeFoldTargets().length > 0}
         workbenchActive={workbenchVisible()}
         onDraftChange={setComposerDraft}
@@ -6022,4 +6080,3 @@ export function App() {
     </box>
   )
 }
-
