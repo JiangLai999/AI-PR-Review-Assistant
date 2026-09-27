@@ -88,6 +88,10 @@
 | `frame-sessions-209x51.txt` | 宽档同上 + 无行宽溢出 |
 | `frame-sessions-rename.txt` | 重命名态：输入框预填 + Enter/Esc 提示 |
 | `frame-sessions-empty.txt` | 空态「当前后端不支持会话列表」+ Esc 关闭 |
+| `frame-sessions-loading.txt` | 首次打开：`正在读取会话列表…`（**不再**冒充"后端不支持"） |
+| `frame-sessions-no-sessions.txt` | 支持但暂无会话：`暂无会话：发送一条消息即可创建` |
+| `frame-sessions-late-arrival.txt` | **回归**：列表晚于弹窗创建到达 → 列表项必须渲染出来 |
+| `frame-sessions-refresh-failed.txt` | 刷新失败：`会话列表读取失败：<原因>`（不冒充"后端不支持"） |
 | `frame-status-session-120.txt` | 状态栏会话名段（≥100 列） |
 | `frame-status-session-80.txt` | <100 列隐藏会话名段 |
 | `frame-pressure-high.txt` | pressure=high 黄段 + 「可用 /compact」提示 |
@@ -98,8 +102,8 @@
 | 命令 | 结果 |
 |---|---|
 | `cd frontend/tui && bun run typecheck` | **exit 0** |
-| `cd frontend/tui && bun test src` | **219 pass / 1 fail**（220 tests · 13 files） |
-| `bun --preload @opentui/solid/preload scripts/manual-chat-markdown-check.tsx` | **114 PASS / 0 FAIL（ALL PASS）** |
+| `cd frontend/tui && bun test src` | **222 pass / 0 fail**（222 tests · 13 files） |
+| `bun --preload @opentui/solid/preload scripts/manual-chat-markdown-check.tsx` | **ALL PASS**（新增 §N2 首次 `/sessions` 回归 10 条断言） |
 | `bun --preload @opentui/solid/preload scripts/manual-route-wizard-check.tsx` | **145 PASS / 0 FAIL（ALL PASS）** |
 
 ### 未决项（blocker）
@@ -109,3 +113,59 @@
   持久化到 `sessions/` 目录（`jsonl_server.py` 的 `session.get` 从磁盘恢复），重启后
   仍能命中。该文件**不在 write_scope** 内，本任务未改动；需后端/验收线确认语义后
   由其更新断言（或改为断言「重启后会话可恢复」）。
+
+## 8. 修复记录 · 第一次 `/sessions` 看不到列表（2026-09-27 用户实测）
+
+### 现象
+
+打开 chat 后**第一次** `/sessions`，弹窗只有「共 0 个会话 / 当前后端不支持会话列表」；
+`Esc` 关掉再敲一次（第二次）才列出会话。用户原话：
+「chat 使用 `/sessions` 后第一次打开还是当前后端不支持展示会话列表，我第二次使用
+`/sessions` 后才显示会话列表。」
+
+### 定位过程（证据优先）
+
+1. **请求级探针**（新建临时脚本，复用真实 `BackendClient` + 真实 `%APPDATA%` 配置，
+   按 `onMount → ensureSession → /sessions` 的顺序发请求）：第一次 `session.list`
+   就 `ok=true / 2ms`，内容正确 → **排除后端、协议、超时、并发竞态**。
+2. **真实 TUI 复现**（PTY 里跑 `pr-review chat`，直接敲 `/sessions`）：第一帧只有空态，
+   列表项不出现；同一帧里副标题的会话数却从 `0` 变成 `2`。
+   在 `BackendClient` 里挂临时请求日志（`request/settled/rejectPending/stdout closed`）
+   再跑一次：整轮只有 **1 个** `session.list` 请求，且 `settled … ok=true`——
+   说明**数据到了、界面没渲染**。
+3. **代码级**：`SessionsDialog` 里
+   ```tsx
+   const empty = !props.supported || props.sessions.length === 0   // ← 一次性快照
+   ```
+   Solid 的 `props` 是响应式 getter，但这行只在**组件创建那一刻**求值一次；弹窗打开时
+   `sessions` 还是 `[]`，于是 `empty` 永久为 `true`，列表的 `<Show when={!empty}>`
+   永远不挂载 → 关掉再开（新组件实例）才会用新的快照值 `false`。
+
+### 根因
+
+**派生状态写成了常量而不是取值函数**（同一文件里 `selected` / `label` 都是
+`() => …`，只有 `empty` 漏了）。它同时解释了上一轮用户报的「共 6 个会话 +
+当前后端不支持会话列表」自相矛盾：副标题 `props.sessions.length` 是响应式的，
+列表与空态却卡在首帧快照上。
+
+### 修复
+
+| 项 | 改动 |
+|---|---|
+| 反应性（根因） | `const empty = () => …`；列表/空态两处 `Show` 改用 `empty()` |
+| 文案分家 | 新增 `formatSessionListNoSessions`（支持但暂无会话）与 `formatSessionListLoading`（读取中）——「不支持」只在**确实没有失败原因**时出现 |
+| 失败可见 | 新增 `formatSessionListError`：刷新失败时把后端原因（超时/报错）显示出来，不再冒充"后端不支持"（`supported=false` 同时覆盖两种语义） |
+| 读取中态 | `App` 新增 `sessionListLoading`（带 request token 守卫），首次打开显示「正在读取会话列表…」 |
+| 选中项钳位 | `activeIndex()`：列表晚到/删除变短时不会取到 `undefined`（高亮、Enter 仍正确） |
+
+### 回归验证
+
+- 新断言（`manual-chat-markdown-check.tsx` §N2）：
+  `首帧：读取中文案可见`、`首帧：不再把「读取中」说成「后端不支持」`、
+  `空列表：提示「暂无会话」`、**`迟到列表：列表项渲染（首次打开也能看到会话）`**、
+  `迟到列表：空态文案已撤下`、`刷新失败：显示失败原因` 等 10 条。
+- **反证**：把 `empty` 临时改回快照写法 → `迟到列表：列表项渲染` 与
+  `迟到列表：空态文案已撤下` **双双 FAIL**（`FAILURES: 2`）；改回取值函数 → `ALL PASS`。
+- 真机验收（PTY）：第一帧 `共 0 个会话 / 正在读取会话列表…`，数据到达后同一弹窗
+  直接渲染 `● 新会话 · 13:40 · 11 分钟前 · 0 条` / `▸ 你好 · 39 分钟前 · 4 条`，
+  `↓` 键高亮可移动——**首次打开即可用**。

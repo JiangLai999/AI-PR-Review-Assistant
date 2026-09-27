@@ -831,6 +831,35 @@ export function formatSessionListEmpty(language?: string): string {
     : "当前后端不支持会话列表"
 }
 
+/**
+ * 后端**支持**会话列表、但这一次还没有数据可显示时的文案。
+ *
+ * 与 `formatSessionListEmpty` 严格区分：把「列表还在读 / 会话确实为空」说成
+ * 「后端不支持」是错的——用户实测到的矛盾（2026-09-27）就是这两句话被同一
+ * 个空态分支复用。
+ */
+export function formatSessionListNoSessions(language?: string): string {
+  return String(language ?? "zh-CN").toLowerCase().startsWith("en")
+    ? "No saved sessions yet — send a message to create one"
+    : "暂无会话：发送一条消息即可创建"
+}
+
+/** 首次打开弹窗、`session.list` 还在飞的时候的占位文案。 */
+export function formatSessionListLoading(language?: string): string {
+  return String(language ?? "zh-CN").toLowerCase().startsWith("en")
+    ? "Loading sessions…"
+    : "正在读取会话列表…"
+}
+
+/** 刷新失败时的说明行（保留上一份结果时也用它，别再说成"不支持"）。 */
+export function formatSessionListError(reason: string | undefined, language?: string): string {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  const detail = (reason ?? "").trim() || (en ? "unknown reason" : "未知原因")
+  return en
+    ? `Could not refresh the session list: ${detail}`
+    : `会话列表读取失败：${detail}`
+}
+
 /** 弹窗页脚键位提示（中英双语，契约固定键位）。 */
 export function formatSessionListFooter(language?: string): string {
   return String(language ?? "zh-CN").toLowerCase().startsWith("en")

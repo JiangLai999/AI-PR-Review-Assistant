@@ -24,8 +24,11 @@ import {
   formatSessionBadge,
   formatSessionDeleteConfirm,
   formatSessionListEmpty,
+  formatSessionListError,
   formatSessionListFooter,
   formatSessionListItem,
+  formatSessionListLoading,
+  formatSessionListNoSessions,
   formatSessionSwitched,
   formatSessionTitle,
   formatThinkLevel,
@@ -557,6 +560,30 @@ test("formatSessionListEmpty / footer / switched / deleteConfirm are bilingual",
   expect(formatSessionSwitched("fix", "en-US")).toContain("Switched to")
   expect(formatSessionDeleteConfirm("旧会话")).toContain("删除《旧会话》？")
   expect(formatSessionDeleteConfirm("old", "en-US")).toContain("Delete")
+})
+
+test("会话弹窗空态三种来源文案互不复用（用户实测：空列表被说成后端不支持）", () => {
+  // 旧后端缺方法 → "不支持"；支持但没数据 → "暂无会话"；第一次还在飞 → "读取中"。
+  expect(formatSessionListEmpty()).toContain("当前后端不支持会话列表")
+  expect(formatSessionListNoSessions()).toContain("暂无会话")
+  expect(formatSessionListLoading()).toContain("正在读取会话列表")
+  // 三种文案必须彼此可区分：任何两种都不该同时出现同一句话。
+  expect(formatSessionListNoSessions()).not.toContain("不支持")
+  expect(formatSessionListLoading()).not.toContain("不支持")
+  expect(formatSessionListEmpty("en-US")).toContain("does not support")
+  expect(formatSessionListNoSessions("en-US")).toContain("No saved sessions")
+  expect(formatSessionListLoading("en-US")).toContain("Loading sessions")
+})
+
+test("刷新失败不再冒充「后端不支持」，并把后端给的原因带出来", () => {
+  const message = formatSessionListError("后端请求超时（30s）：session.list")
+  expect(message).toContain("会话列表读取失败")
+  expect(message).toContain("超时")
+  expect(message).not.toContain("不支持")
+  // 没给原因也不能显示空尾巴（英文侧同理）。
+  expect(formatSessionListError("")).toContain("未知原因")
+  expect(formatSessionListError(undefined, "en-US")).toContain("unknown reason")
+  expect(formatSessionListError("boom", "en-US")).toContain("boom")
 })
 
 test("formatSessionBadge hides empty titles and truncates long ones", () => {

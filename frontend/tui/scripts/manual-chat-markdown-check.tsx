@@ -846,6 +846,86 @@ console.log(emptyFrame)
 check(emptyFrame.includes("当前后端不支持会话列表"), "空态：「当前后端不支持会话列表」文案可见")
 check(emptyFrame.includes("Esc"), "空态：仍可 Esc 关闭")
 
+// ---------------------------------------------------------------
+// N2. 【首次 /sessions 回归】弹窗挂载时列表还没回来（真实时序）
+//
+// 用户实测 bug（2026-09-27）：`/sessions` 第一次打开只看到"当前后端不支持会话列表"，
+// 关掉再开才出列表——副标题里的会话数却已经是 2。根因是 `const empty = ...` 把
+// 派生状态**只算了一次**，列表的 `<Show when={!empty}>` 被永久禁用。
+// 本段用信号驱动的 props 复现"先空、后到"的时序，断言列表随后渲染出来。
+// ---------------------------------------------------------------
+const [lateSessions, setLateSessions] = createSignal<typeof SESSIONS_FIXTURE>([])
+const [lateLoading, setLateLoading] = createSignal(true)
+const lateView = await testRender(
+  () => (
+    <box width={96} height={24} flexDirection="column">
+      <SessionsDialog
+        sessions={lateSessions()}
+        currentId="s2"
+        supported
+        loading={lateLoading()}
+        onSwitch={() => {}}
+        onRename={() => {}}
+        onDelete={() => {}}
+        onClose={() => {}}
+      />
+    </box>
+  ),
+  { width: 96, height: 24 },
+)
+await settle(lateView)
+const loadingFrame = lateView.captureCharFrame()
+dumpFrame(loadingFrame, "sessions-loading")
+console.log("\n---- sessions loading frame (first /sessions) ----")
+console.log(loadingFrame)
+check(loadingFrame.includes("正在读取会话列表"), "首帧：读取中文案可见")
+check(!loadingFrame.includes("当前后端不支持会话列表"), "首帧：不再把「读取中」说成「后端不支持」")
+
+// 请求落地：空列表 + 非 loading → "暂无会话"，不是"后端不支持"。
+setLateLoading(false)
+await settle(lateView)
+const noSessionsFrame = lateView.captureCharFrame()
+dumpFrame(noSessionsFrame, "sessions-no-sessions")
+check(noSessionsFrame.includes("暂无会话"), "空列表：提示「暂无会话」")
+check(!noSessionsFrame.includes("当前后端不支持会话列表"), "空列表：不再误报「后端不支持」")
+
+// **核心回归**：列表晚于组件创建到达，必须渲染出来（此前永远为空态）。
+setLateSessions(SESSIONS_FIXTURE)
+await settle(lateView)
+const lateFrame = lateView.captureCharFrame()
+dumpFrame(lateFrame, "sessions-late-arrival")
+console.log("\n---- sessions frame after list arrives ----")
+console.log(lateFrame)
+check(lateFrame.includes("共 3 个会话"), "迟到列表：副标题计数更新")
+check(lateFrame.includes("修复 XSS 与 CSRF"), "迟到列表：列表项渲染（首次打开也能看到会话）")
+check(!lateFrame.includes("暂无会话"), "迟到列表：空态文案已撤下")
+
+// 刷新失败：给出原因，不再冒充"后端不支持"。
+const failedView = await testRender(
+  () => (
+    <box width={96} height={20} flexDirection="column">
+      <SessionsDialog
+        sessions={[]}
+        supported={false}
+        error="后端请求超时（30s）：session.list"
+        onSwitch={() => {}}
+        onRename={() => {}}
+        onDelete={() => {}}
+        onClose={() => {}}
+      />
+    </box>
+  ),
+  { width: 96, height: 20 },
+)
+await settle(failedView)
+const failedFrame = failedView.captureCharFrame()
+dumpFrame(failedFrame, "sessions-refresh-failed")
+console.log("\n---- sessions refresh-failed frame ----")
+console.log(failedFrame)
+check(failedFrame.includes("会话列表读取失败"), "刷新失败：显示失败原因")
+check(failedFrame.includes("超时"), "刷新失败：带上后端给的细节")
+check(!failedFrame.includes("当前后端不支持会话列表"), "刷新失败：不再冒充「后端不支持」")
+
 // 状态栏会话名（A-P3）：120 列显示、80 列（<100）隐藏。
 const statusRuntime = {
   runtime_profile: "CLOUD",

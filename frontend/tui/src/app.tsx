@@ -55,8 +55,11 @@ import {
   formatSessionBadge,
   formatSessionDeleteConfirm,
   formatSessionListEmpty,
+  formatSessionListError,
   formatSessionListFooter,
   formatSessionListItem,
+  formatSessionListLoading,
+  formatSessionListNoSessions,
   formatSessionRenamePrompt,
   formatSessionSwitched,
   formatSessionTitle,
@@ -4002,6 +4005,10 @@ export function SessionsDialog(props: {
   currentId?: string
   /** session.list 是否可用；false = 旧后端 → 空态。 */
   supported: boolean
+  /** 首次 `session.list` 还在飞：空态显示"读取中"而不是"没有会话"。 */
+  loading?: boolean
+  /** 上一次刷新失败的原因；仅在保留旧结果/空结果时提示，不再冒充"后端不支持"。 */
+  error?: string
   language?: string
   onSwitch: (session: SessionSummary) => void
   onRename: (session: SessionSummary, title: string) => void
@@ -4015,7 +4022,10 @@ export function SessionsDialog(props: {
   const [notice, setNotice] = createSignal("")
   let renameInput: InputRenderable | undefined
 
-  const selected = () => props.sessions[selectedIndex()]
+  // 选中项用**钳位**下标：列表可能晚于组件创建才到，或删除后变短，
+  // 直接索引会取到 undefined（高亮消失、Enter 无反应）。
+  const activeIndex = () => Math.min(selectedIndex(), Math.max(0, props.sessions.length - 1))
+  const selected = () => props.sessions[activeIndex()]
   const listLabel = (): string[] =>
     props.sessions.map((session) =>
       formatSessionListItem(
@@ -4116,7 +4126,12 @@ export function SessionsDialog(props: {
     }
   })
 
-  const empty = !props.supported || props.sessions.length === 0
+  // 派生状态必须是**取值函数**：Solid 的 props 是响应式 getter，写成
+  // `const empty = !props.supported || ...` 只在组件创建那一刻求值一次——
+  // 之后 `session.list` 回来也不会重算，列表的 `<Show when={!empty}>` 被永久
+  // 禁用，于是「第一次 /sessions 只能看到空态、关掉再开才出列表」（用户实测
+  // 2026-09-27，会话数在副标题里明明已经变成 2）。
+  const empty = () => !props.supported || props.sessions.length === 0
   return (
     <box
       position="absolute"
@@ -4136,14 +4151,20 @@ export function SessionsDialog(props: {
       <Show when={props.supported || props.sessions.length > 0}>
         <text fg={muted}>共 {props.sessions.length} 个会话</text>
       </Show>
-      <Show when={!props.supported && props.sessions.length === 0}>
+      {/* 「不支持」只在**确实没有失败原因**时出现：刷新失败（超时/后端报错）和旧后端
+          缺方法都置 supported=false，但两者对用户是完全不同的信息。 */}
+      <Show when={!props.supported && props.sessions.length === 0 && !props.error}>
         <text fg="#f3c742">{formatSessionListEmpty(props.language)}</text>
       </Show>
-      <Show when={!empty}>
+      {/* 刷新失败但手里还有上一份结果：说明失败原因，别把旧数据说成"不支持"。 */}
+      <Show when={Boolean(props.error)}>
+        <text fg="#f3c742">{formatSessionListError(props.error, props.language)}</text>
+      </Show>
+      <Show when={!empty()}>
         <box marginTop={1} flexDirection="column" flexGrow={1}>
           <For each={listLabel()}>{(line, index) =>
             <text
-              bg={index() === selectedIndex() && mode() === "list" ? "#5a2e1c" : undefined}
+              bg={index() === activeIndex() && mode() === "list" ? "#5a2e1c" : undefined}
               fg={props.sessions[index()]?.id === props.currentId ? "#ffd0bb" : "#eeeeee"}
             >
               {line}
@@ -4151,11 +4172,15 @@ export function SessionsDialog(props: {
           }</For>
         </box>
       </Show>
-      <Show when={empty}>
+      <Show when={empty()}>
         <box marginTop={1} flexGrow={1} flexDirection="column">
-          {/* 空态文案在 !supported 时已由副标题给出，这里只在「支持但列表为空」时再补一行。 */}
-          <Show when={props.supported}>
-            <text fg="#f3c742">{formatSessionListEmpty(props.language)}</text>
+          {/* 空态有两种来源，文案必须分开：读取中 / 确实还没有会话。
+              （旧后端「不支持」的情况由上面的副标题给出，这里不重复。） */}
+          <Show when={props.supported && props.loading}>
+            <text fg={muted}>{formatSessionListLoading(props.language)}</text>
+          </Show>
+          <Show when={props.supported && !props.loading}>
+            <text fg="#f3c742">{formatSessionListNoSessions(props.language)}</text>
           </Show>
           <text fg={muted}>
             {isEn(props.language)
@@ -4223,6 +4248,10 @@ export function App() {
   const [sessionsOpen, setSessionsOpen] = createSignal(false)
   const [sessionList, setSessionList] = createSignal<SessionSummary[]>([])
   const [sessionListSupported, setSessionListSupported] = createSignal(true)
+  /** `session.list` 是否在飞（首次打开弹窗时的"读取中"态，见 SessionsDialog）。 */
+  const [sessionListLoading, setSessionListLoading] = createSignal(false)
+  /** 上一次刷新失败的原因；空串 = 最近一次成功。 */
+  const [sessionListError, setSessionListError] = createSignal("")
   const [sessionTitle, setSessionTitle] = createSignal("")
   const [activeChatRequestId, setActiveChatRequestId] = createSignal<string>()
   // Request ids whose reply already reached the transcript through
@@ -5070,15 +5099,17 @@ export function App() {
   // ---------------------------------------------------------------------
   /** 会话列表刷新的请求序号（防乱序竞态，见 `refreshSessionList`）。 */
   let sessionListRequest = 0
-  const applySessionList = (list: ReturnType<typeof parseSessionListResult>) => {
+  const applySessionList = (list: ReturnType<typeof parseSessionListResult>, error = "") => {
     if (!list) {
       setSessionListSupported(false)
+      setSessionListError(error)
       // 刷新失败**不清空已有列表**：清空会让「共 N 个会话」与"看不到会话"自相矛盾
       // （用户实测：弹窗同时显示 6 个会话与"当前后端不支持"）。失败只用 supported
       // 标志表达，旧数据保留到下一次成功刷新。
       return
     }
     setSessionListSupported(true)
+    setSessionListError("")
     setSessionList(list.sessions)
     const current =
       list.sessions.find((item) => (list.current ? item.id === list.current : item.current)) ??
@@ -5090,17 +5121,21 @@ export function App() {
     // 防乱序：并发刷新时旧响应不得覆盖新状态（用户实测到的"6 个会话 + 不支持"
     // 矛盾显示，根因就是两次 refresh 竞态：失败方最后写入 supported=false）。
     const token = (sessionListRequest += 1)
+    setSessionListLoading(true)
     try {
       const response = await backend.request("session.list", {}, { timeoutMs: PROBE_TIMEOUT_MS })
       if (token !== sessionListRequest) return
       if (!response.ok) {
-        applySessionList(undefined)
+        applySessionList(undefined, response.error?.message ?? `后端错误（${response.error?.code ?? "unknown"}）`)
         return
       }
       applySessionList(parseSessionListResult(response.result))
-    } catch {
+    } catch (error) {
       if (token !== sessionListRequest) return
-      applySessionList(undefined)
+      applySessionList(undefined, String(error))
+    } finally {
+      // 只有最新一次刷新才能清掉 loading，否则慢响应会把新请求的"读取中"提前关掉。
+      if (token === sessionListRequest) setSessionListLoading(false)
     }
   }
 
@@ -5291,7 +5326,12 @@ export function App() {
           const listed = await backend.request("session.list", {}, { timeoutMs: PROBE_TIMEOUT_MS })
           if (listed.ok) {
             const parsedList = parseSessionListResult(listed.result)
-            const target = parsedList?.current || parsedList?.sessions[0]?.id
+            // 2026-09-27 用户反馈：**不要自动跳到上次的对话**——打开 chat 应该是空白的
+            // 新会话（旧对话通过 `/sessions` 显式切换）。复用策略只认**最近的空会话**
+            // （message_count 0）：连续打开不会堆积空会话，也永远不会把有历史的会话
+            // 悄悄拉回屏幕。
+            const latest = parsedList?.sessions[0]
+            const target = latest && (latest.message_count ?? 0) === 0 ? latest.id : ""
             if (target) {
               const switched = await backend.request(
                 "session.switch",
@@ -5366,7 +5406,7 @@ export function App() {
           content:
             restored.length > 0
               ? `后端已重启，已恢复会话「${restoredTitle || "未命名"}」的历史记录；当前报告已重置，可用 /report 或 /history 重新载入。`
-              : "后端已重启，未找到可恢复的历史会话；已建立新会话。历史审查可使用 /history 查看。",
+              : "后端已重启，已回到空白会话；旧对话可用 /sessions 切换，历史审查可用 /history 查看。",
         })
       }
       return next
@@ -5970,6 +6010,8 @@ export function App() {
           sessions={sessionList()}
           currentId={sessionId()}
           supported={sessionListSupported()}
+          loading={sessionListLoading()}
+          error={sessionListError()}
           language={runtime().ui_language}
           onSwitch={(session) => void switchToSession(session)}
           onRename={(session, title) => void renameSession(session, title)}
