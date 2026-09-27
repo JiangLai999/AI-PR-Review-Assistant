@@ -2564,6 +2564,9 @@ def _seed_web_config(explicit_path: Path | None, web_config_path: Path) -> bool:
     if not any(path.exists() for path in source_paths):
         return False
     seed = AppConfig.load(explicit_path)
+    # 设置隔离 ≠ 数据隔离：历史/报告/追问记录必须与 CLI 共用一份 SQLite，
+    # 否则第一个 `pr-review serve` 就会把历史页换成另一个空库。
+    seed.pin_result_store_path()
     persist_secrets = any(_config_file_stores_plaintext_secret(path) for path in source_paths)
     if not persist_secrets and (
         seed.ai_client.api_key or seed.provider.api_key or seed.github_token

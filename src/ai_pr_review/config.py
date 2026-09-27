@@ -1792,3 +1792,15 @@ class AppConfig:
         ):
             payload.pop("db_path", None)
         return payload
+
+    def pin_result_store_path(self) -> str:
+        """把当前生效的库路径钉成"显式选择"，让 `save()` 一定写进配置文件。
+
+        用途：`pr-review serve` 派生 Web 独立配置时，**设置隔离 ≠ 数据隔离** ——
+        历史、报告与追问记录必须与 CLI 共用一份 SQLite。不钉住的话，Web 配置不在
+        默认位置会触发 `_derived_result_store_default()`，把库换成 `config.web.json`
+        旁边的另一个文件，用户会看到历史页突然"清空"。
+        """
+        self.result_store.db_path = str(self.result_store.db_path)
+        self._explicit_result_store_db_path = True
+        return self.result_store.db_path

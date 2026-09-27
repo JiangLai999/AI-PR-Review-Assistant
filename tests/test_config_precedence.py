@@ -210,3 +210,21 @@ class TestServeConfigIsolation:
 
         payload = json.loads(Path(web_path).read_text(encoding="utf-8"))
         assert payload.get("provider", {}).get("api_key") == "sk-stored-in-file"
+
+    def test_web_config_shares_the_cli_result_store(self, tmp_path: Path, monkeypatch) -> None:
+        """设置隔离 ≠ 数据隔离：派生出的 Web 配置必须指向 CLI 那份 results.db。
+
+        回归点：Web 配置不在默认位置会触发 `_derived_result_store_default()`，
+        把库改成 `config.web.json` 旁边的另一个文件 —— 历史页会突然"清空"。
+        """
+        cli_config = tmp_path / "config.json"
+        seed = AppConfig.load(cli_config)
+        seed.preferences.ui_language = "en-US"
+        seed.save(cli_config, save_key=False)
+
+        web_path, config, _ = self._invoke_serve(monkeypatch, tmp_path, cli_config)
+
+        cli_db = AppConfig.load(cli_config).result_store.db_path
+        assert str(config.result_store.db_path) == str(cli_db)
+        persisted = json.loads(Path(web_path).read_text(encoding="utf-8"))
+        assert persisted["result_store"]["db_path"] == str(cli_db)
