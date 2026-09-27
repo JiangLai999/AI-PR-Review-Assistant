@@ -7,6 +7,8 @@ from ai_pr_review.services.repo_context import (
     TEST_MAX_LINES,
     RepoContextProvider,
     RelatedFile,
+    render_pr_file_list,
+    render_repo_tree,
 )
 
 
@@ -409,3 +411,123 @@ class TestRelatedFileShape:
         assert item.content == "def t():\n    pass\n"
         assert item.truncated is False
         assert item.from_cache is False
+
+
+class TestRenderPrFileList:
+    """B（docs/claude-repo-structure-context.md）：PR 变更清单的注入格式。"""
+
+    def test_header_counts_paths_and_review_skips(self):
+        text = render_pr_file_list(["src/a.py", "src/b.ts"], skipped=4)
+
+        assert text.splitlines()[0] == "## 本次 PR 变更文件（共 2 个，另有 4 个被本次审查跳过）"
+        assert "- src/a.py" in text
+        assert "- src/b.ts" in text
+        assert "不得臆测" in text
+
+    def test_skip_clause_is_omitted_when_unknown_or_zero(self):
+        assert "## 本次 PR 变更文件（共 2 个）" in render_pr_file_list(["a.py", "b.py"])
+        assert "## 本次 PR 变更文件（共 2 个）" in render_pr_file_list(
+            ["a.py", "b.py"], skipped=0
+        )
+        assert "跳过" not in render_pr_file_list(["a.py"], skipped=0)
+
+    def test_truncates_over_the_limit_and_says_how_many_are_hidden(self):
+        paths = [f"src/f{index:03d}.py" for index in range(60)]
+
+        text = render_pr_file_list(paths, limit=50)
+
+        assert "- src/f049.py" in text
+        assert "- src/f050.py" not in text
+        assert "…（另有 10 个未列出，仅列出前 50 个）" in text
+
+    def test_unavailable_renders_the_reason_without_inventing_paths(self):
+        text = render_pr_file_list(None, unavailable="RuntimeError")
+
+        assert text == "## 本次 PR 变更文件\n（未能读取变更文件清单：RuntimeError）"
+
+    def test_paths_with_control_characters_are_dropped(self):
+        text = render_pr_file_list(["src/ok.py", "src/evil\n- 注入行.py", "src/tab\t.py"])
+
+        assert "（共 1 个）" in text
+        assert "注入行" not in text
+        assert "- src/ok.py" in text
+
+
+class TestRenderRepoTree:
+    """C（docs/claude-repo-structure-context.md）：目录树的注入格式与三种折叠。"""
+
+    def test_renders_directories_first_then_files(self):
+        text = render_repo_tree(["src/app.py", "src/pkg/mod.py", "README.md"])
+
+        assert text.splitlines()[0].startswith("## 仓库目录树（head 提交")
+        # 第 3 行起是树本体，最后一行是规则
+        assert text.splitlines()[2:-1] == [
+            "src/",
+            "  pkg/",
+            "    mod.py",
+            "  app.py",
+            "README.md",
+        ]
+
+    def test_sha_is_trimmed_into_the_header(self):
+        text = render_repo_tree(["a.py"], sha="b" * 40)
+
+        assert "## 仓库目录树（head 提交 bbbbbbbb · 深度 ≤3 · 最多 200 行）" in text
+
+    def test_directory_beyond_max_depth_is_folded_with_a_count(self):
+        text = render_repo_tree(["a/b/c/d/e.py"], max_depth=3)
+
+        assert "    c/ …（2 项未展开）" in text
+
+    def test_siblings_share_the_line_budget(self):
+        paths = [f"big/f{index:03d}.py" for index in range(120)] + [
+            "small/a.py",
+            "small/b.py",
+        ]
+
+        text = render_repo_tree(paths, max_entries=30, max_children=25)
+
+        # 大目录吃不到小目录的份额：两个都露面，小的完整、大的折叠
+        assert "small/" in text
+        assert "  b.py" in text
+        assert "…（另有" in text
+
+    def test_per_directory_child_cap_folds_the_rest(self):
+        paths = [f"src/f{index:03d}.py" for index in range(40)]
+
+        text = render_repo_tree(paths, max_children=10, max_entries=200)
+
+        assert "  f009.py" in text
+        assert "f010.py" not in text
+        assert "…（另有 30 项未列出）" in text
+
+    def test_noise_directories_and_files_are_excluded(self):
+        paths = [
+            "src/app.py",
+            "node_modules/pkg/index.js",
+            "src/__pycache__/app.pyc",
+            ".venv313/lib/site.py",
+            "docs/.DS_Store",
+            "web/dist/bundle.js",
+            "pkg.egg-info/PKG-INFO",
+            ".github/workflows/ci.yml",
+        ]
+
+        text = render_repo_tree(paths)
+
+        # 只看树本体：第 2 行的说明里本来就写着"已排除 node_modules 等"，不能拿全文判
+        body = "\n".join(text.splitlines()[2:-1])
+        for noise in ("node_modules", "__pycache__", ".venv313", ".DS_Store", "dist", "egg-info"):
+            assert noise not in body, f"{noise} 是噪声，不该进注入"
+        # 点目录只放行少数几个（.github 在）
+        assert ".github/" in body
+        assert "ci.yml" in body
+        assert "src/" in body and "app.py" in body
+
+    def test_empty_and_unavailable_trees_are_distinct(self):
+        empty = render_repo_tree([])
+        missing = render_repo_tree(None, unavailable="NetworkError")
+
+        assert "（该提交下没有可列出的文件）" in empty
+        assert missing == "## 仓库目录树\n（未能读取仓库目录树：NetworkError）"
+        assert "NetworkError" not in empty

@@ -74,7 +74,15 @@ from ai_pr_review.services.reasoning_specs import (
     reasoning_delivery_blocked_reason,
     reasoning_support,
 )
-from ai_pr_review.services.repo_context import SOURCE_EXTENSIONS
+from ai_pr_review.services.repo_context import (
+    PR_FILE_LIST_LIMIT,
+    REPO_TREE_MAX_CHILDREN_PER_DIR,
+    REPO_TREE_MAX_DEPTH,
+    REPO_TREE_MAX_ENTRIES,
+    SOURCE_EXTENSIONS,
+    render_pr_file_list,
+    render_repo_tree,
+)
 from ai_pr_review.services.review_context import (
     DEFAULT_TOKEN_BUDGET,
     build_review_context,
@@ -310,6 +318,27 @@ def _budget_literal(value: Any) -> int | None:
 CHAT_REPO_FILE_MAX_CHARS = 8000
 CHAT_REPO_FILES_TOTAL_CHARS = 12000
 CHAT_REPO_FILES_LIMIT = 2
+# A2（docs/claude-repo-structure-context.md）：findings 兜底读文件的**条数**上限。
+# 原来是写死的 2；实测 12 条 finding 涉及 3 个文件时，第三个文件从未进入注入，
+# 模型只能回"我没有那个文件的内容"。这里放宽到 8；真正的闸门仍是
+# CHAT_REPO_FILES_TOTAL_CHARS——超预算的条目会被逐条标注"本轮注入已达上限"，
+# 而不是静默消失。
+CHAT_FINDINGS_FILES_LIMIT = 8
+# B：本次 PR 变更文件清单（绑定 run 的每一轮都注入，条数上限+折叠计数保证它足够小）。
+CHAT_PR_FILES_LIMIT = PR_FILE_LIST_LIMIT
+# C：仓库目录树（深度 / 行数 / 单目录子项上限沿用 services.repo_context 的默认值）。
+CHAT_REPO_TREE_MAX_DEPTH = REPO_TREE_MAX_DEPTH
+CHAT_REPO_TREE_MAX_ENTRIES = REPO_TREE_MAX_ENTRIES
+CHAT_REPO_TREE_MAX_CHILDREN_PER_DIR = REPO_TREE_MAX_CHILDREN_PER_DIR
+# C 的触发词：只在用户问到"仓库长什么样"时才注入目录树。每轮全量注入会持续吃
+# token（一棵拉满的树 ≈ 1.5k token），而结构类问题只占对话的少数轮次。
+CHAT_REPO_STRUCTURE_INTENT = (
+    "结构", "目录", "树", "哪些文件", "文件列表",
+    "structure", "directory", "folder", "tree", "layout",
+)
+# 清单 / 目录树拉取失败后的进程内冷却（秒）：同一 run 在冷却期内不再重试——
+# 网络长时间不通时，不该每一轮对话都付一次"带重试的网络等待"。
+CHAT_INVENTORY_RETRY_SECONDS = 60.0
 # A1（docs/chat-experience-plan.md §A1）：被本次 run 的 finding 点名的文件不再从文件头
 # 截断——头部截断会让 finding 行（实测 index.html:237，而文件只给到 ~200 行）根本不在
 # 注入内容里，模型于是把整轮输出花在"数行号"上。改成取 finding 行号 ± 该值行的窗口。
@@ -374,6 +403,18 @@ def _mentioned_repo_paths(text: str) -> list[str]:
         if len(paths) >= CHAT_REPO_FILES_LIMIT:
             break
     return paths
+
+
+def _wants_repo_structure(text: str) -> bool:
+    """用户是否在问"仓库结构 / 目录树"（C 段的注入开关）。
+
+    按子串匹配：中文没有词边界，`目录结构` / `有哪些文件` 这类说法必须命中；
+    英文词同样按子串（`structure` 命中 `repo structure`）。宁可偶发多注入一次
+    （一次 git tree 调用，且有进程内缓存），也不要让"这个仓库有哪些文件"这类
+    问题因为换个说法就退化成"我看不到仓库结构"。
+    """
+    lowered = (text or "").lower()
+    return any(token in lowered for token in CHAT_REPO_STRUCTURE_INTENT)
 
 
 def _normalized_repo_path(path: str) -> str:
@@ -755,6 +796,10 @@ class JsonlBackend:
         # 进程内定档一次（§2.1）：同一个助手里两次 `config.options` 不会把 source 翻转。
         self._catalog_state: _CatalogState | None = None
         self.sessions: dict[str, Session] = {}
+        # 仓库结构注入（B/C）的进程内缓存：run_id → {kind: (文本, 时间戳, 是否成功)}。
+        # 同一 run 的 head 提交固定，清单/目录树只拉一次；失败条目在冷却期内复用（见
+        # CHAT_INVENTORY_RETRY_SECONDS），不会每一轮都付一次带重试的网络等待。
+        self.chat_inventory: dict[str, dict[str, tuple[str, float, bool]]] = {}
         self.review_cancellations: dict[str, asyncio.Event] = {}
         self.chat_cancellations: dict[str, tuple[asyncio.Task[Any], threading.Event]] = {}
         self.current_report: dict[str, Any] | None = None
@@ -2289,13 +2334,19 @@ class JsonlBackend:
                 value = preferences[field]
         return value
 
-    def _chat_system_prompt(self, session: Session, repo_files: str = "") -> str:
-        """语言指令 + （绑定了 Run 时的）审查上下文（§9.2 C）+ 本轮提到的仓库文件。
+    def _chat_system_prompt(
+        self, session: Session, repo_files: str = "", repo_inventory: str = ""
+    ) -> str:
+        """语言指令 + （绑定了 Run 时的）审查上下文（§9.2 C）+ 仓库结构 + 本轮提到的仓库文件。
 
-        `repo_files` 由 `_repo_files_for_chat` 现算，**只进本轮 system prompt**，
-        不写 `session.messages`：否则历史会随每一轮对话重复膨胀并重复计费。
-        构建失败/run 读不到时降级为普通聊天并记 warning，绝不因为"解读不了这次
-        审查"而让对话失败。
+        `repo_files` / `repo_inventory` 由 `_repo_files_for_chat` 与
+        `_chat_repo_inventory` 现算，**只进本轮 system prompt**，不写 `session.messages`：
+        否则历史会随每一轮对话重复膨胀并重复计费。构建失败/run 读不到时降级为普通聊天
+        并记 warning，绝不因为"解读不了这次审查"而让对话失败。
+
+        段落顺序（docs/claude-repo-structure-context.md §3）：审查上下文 → 仓库结构
+        （PR 变更清单 + 目录树）→ 用户点名的源码。结构段比源码更"外围"，放在源码之前；
+        源码放最后，最贴近本轮要回答的那个文件。
         """
         language_instruction = (
             "Respond in English unless the user explicitly asks for another language."
@@ -2320,12 +2371,14 @@ class JsonlBackend:
         context = self._review_context_for_chat(run_id)
         if context is None:
             return self._join_prompt_sections(
-                language_instruction, capability_note, repo_files
+                language_instruction, capability_note, repo_inventory, repo_files
             )
         sections = [
             language_instruction,
             capability_note,
             wrap_review_context(run_id, context),
+            # B/C（docs/claude-repo-structure-context.md）：PR 变更清单 + 目录树。
+            repo_inventory,
             # 审查上下文之后才是源码：后者直接回答"这个文件是干嘛的"，
             # 放在最后也能让"其它可切换的审查"这类元信息保持在最外层。
             repo_files,
@@ -2463,8 +2516,15 @@ class JsonlBackend:
             )
             return ""
 
-    def _findings_file_paths(self, run_id: str, limit: int = 2) -> list[str]:
-        """这次审查点名的文件（按出现顺序去重，最多 ``limit`` 条）。"""
+    def _findings_file_paths(self, run_id: str, limit: int | None = None) -> list[str]:
+        """这次审查点名的文件（按出现顺序去重，最多 ``limit`` 条）。
+
+        ``limit`` 为 ``None`` 时用 ``CHAT_FINDINGS_FILES_LIMIT``（8）：条数上限只是
+        防病态 run 的宽松兜底，真正的闸门是 ``CHAT_REPO_FILES_TOTAL_CHARS``——超预算的
+        条目会在 `_collect_repo_files` 里逐条标注"本轮注入已达上限"。
+        """
+        if limit is None:
+            limit = CHAT_FINDINGS_FILES_LIMIT
         try:
             from ai_pr_review.services.result_store import ResultStore
 
@@ -2694,6 +2754,120 @@ class JsonlBackend:
             "不要再自己数行号；标注范围之外的代码不得臆测。"
         )
 
+    # ── 仓库结构注入：PR 变更清单（B）+ 目录树（C）──────────────────────────
+    # docs/claude-repo-structure-context.md：绑定 run 之后，模型不只要读得到 finding
+    # 点名的文件，还得知道"这个 PR 动了哪些文件、仓库长什么样"——用户实测里它两样都没有。
+
+    async def _chat_repo_inventory(self, session: Session, text: str) -> str:
+        """B+C 的异步入口：返回本轮可注入的仓库结构段（可能为空串）。
+
+        降级策略与 `_repo_files_for_chat` 一致：网络与磁盘 I/O 走线程；任何异常只向
+        stderr 记一行并返回空串——读结构是增益，不能让整轮对话失败。
+        """
+        run_id = session.current_run_id
+        if not run_id:
+            return ""
+        want_tree = _wants_repo_structure(text)
+        try:
+            return await asyncio.to_thread(self._collect_repo_inventory, run_id, want_tree)
+        except Exception as exc:
+            print(
+                f"repo inventory unavailable for run {run_id} "
+                f"({exc.__class__.__name__}: {exc}); continuing without it",
+                file=sys.stderr,
+                flush=True,
+            )
+            return ""
+
+    def _collect_repo_inventory(self, run_id: str, want_tree: bool) -> str:
+        """`_chat_repo_inventory` 的同步主体（在线程里跑，见上）。
+
+        run 读不到（被清理、库读不了）时返回空串："读不到这次审查"已经由审查上下文
+        那一段说明，这里再写一遍只是重复。
+        """
+        from ai_pr_review.services.result_store import ResultStore
+
+        try:
+            run = ResultStore(self.config.result_store).get_run_summary(run_id)
+        except Exception:
+            run = None
+        if not run:
+            return ""
+        sections = [self._pr_files_section(run_id, run)]
+        if want_tree:
+            sections.append(self._repo_tree_section(run_id, run))
+        return self._join_prompt_sections(*sections)
+
+    def _pr_files_section(self, run_id: str, run: dict[str, Any]) -> str:
+        """B：本次 PR 变更文件清单（绑定 run 的每一轮都注入，进程内缓存）。"""
+
+        def load() -> tuple[str, bool]:
+            pr_url = str(run.get("pr_url") or "").strip()
+            if not pr_url:
+                return render_pr_file_list(None, unavailable="该 Run 未记录 PR 链接"), False
+            try:
+                paths = self._chat_pr_fetcher().fetch_changed_file_paths(pr_url)
+            except Exception as exc:
+                # 只带异常类名：PRFetcher 的异常文案里可能夹 URL / token 片段。
+                return render_pr_file_list(None, unavailable=exc.__class__.__name__), False
+            return (
+                render_pr_file_list(
+                    paths,
+                    limit=CHAT_PR_FILES_LIMIT,
+                    skipped=_optional_int(run.get("excluded_files")),
+                ),
+                True,
+            )
+
+        return self._chat_inventory_cached(run_id, "pr_files", load)
+
+    def _repo_tree_section(self, run_id: str, run: dict[str, Any]) -> str:
+        """C：head 提交的仓库目录树（只在用户问到结构时注入，进程内缓存）。"""
+
+        def load() -> tuple[str, bool]:
+            owner = str(run.get("repo_owner") or "").strip()
+            repo = str(run.get("repo_name") or "").strip()
+            sha = str(run.get("head_sha") or "").strip()
+            if not (owner and repo and sha):
+                return (
+                    render_repo_tree(None, unavailable="该 Run 未记录仓库 / head 提交"),
+                    False,
+                )
+            try:
+                paths = self._chat_pr_fetcher().fetch_repo_tree_paths(owner, repo, sha)
+            except Exception as exc:
+                return render_repo_tree(None, unavailable=exc.__class__.__name__), False
+            return (
+                render_repo_tree(
+                    paths,
+                    sha=sha,
+                    max_depth=CHAT_REPO_TREE_MAX_DEPTH,
+                    max_entries=CHAT_REPO_TREE_MAX_ENTRIES,
+                    max_children=CHAT_REPO_TREE_MAX_CHILDREN_PER_DIR,
+                ),
+                True,
+            )
+
+        return self._chat_inventory_cached(run_id, "repo_tree", load)
+
+    def _chat_inventory_cached(
+        self, run_id: str, kind: str, load: Callable[[], tuple[str, bool]]
+    ) -> str:
+        """同一 run 的同一段只拉一次；失败条目在冷却期内直接复用。
+
+        成功结果进程内长期缓存（绑定的是不可变的 head 提交）；失败结果只在
+        ``CHAT_INVENTORY_RETRY_SECONDS`` 内复用——网络长时间不通时不用每轮都付一次
+        带重试的网络等待，一次抖动也不会锁死整个会话（冷却过后下一轮自动重试）。
+        """
+        entry = self.chat_inventory.get(run_id, {}).get(kind)
+        if entry is not None:
+            text, fetched_at, ok = entry
+            if ok or (time.monotonic() - fetched_at) < CHAT_INVENTORY_RETRY_SECONDS:
+                return text
+        text, ok = load()
+        self.chat_inventory.setdefault(run_id, {})[kind] = (text, time.monotonic(), ok)
+        return text
+
     def _bind_session_run(self, session_id: str | None, run_id: str) -> bool:
         """把会话绑定到某个 Run（§9.2 A）。
 
@@ -2817,6 +2991,9 @@ class JsonlBackend:
         # 从哪来"，模型只答得出"需要查看源码"，因为它手上只有 findings 记录）。
         # 必须在 `_resolve_context` 之后算：这一轮刚切换的绑定就是要去读的那个 run。
         repo_files = await self._repo_files_for_chat(session, text)
+        # B/C：绑定 run 时再注入"本次 PR 变更文件清单"（每轮）与"仓库目录树"（用户问到
+        # 结构时才注入）。两段都小、都有进程内缓存，且与上面那段互不影响。
+        repo_inventory = await self._chat_repo_inventory(session, text)
         # 落盘的消息带 timestamp/duration_seconds（沿用 CLI 既有格式），但**上线路的**
         # 只保留协议需要的 role/content：部分 OpenAI 兼容端点对消息里的未知字段直接报错。
         transcript = [
@@ -2828,7 +3005,7 @@ class JsonlBackend:
             {"role": message["role"], "content": message["content"]} for message in transcript
         ]
         chat_options: dict[str, Any] = {
-            "system_prompt": self._chat_system_prompt(session, repo_files),
+            "system_prompt": self._chat_system_prompt(session, repo_files, repo_inventory),
             "timeout_seconds": self.config.ai_client.timeout_seconds,
         }
         reasoning_effort = self._chat_reasoning_effort()

@@ -159,6 +159,39 @@ class PRFetcher:
         pr = self._get_pull_request(parsed.owner, parsed.repo, parsed.pr_number)
         return self._fetch_diff(pr)
 
+    def fetch_changed_file_paths(self, pr_url: str) -> list[str]:
+        """仅取本次 PR 的变更文件**路径**清单（不拉 diff）。
+
+        聊天侧"本次 PR 变更文件"段落需要它（docs/claude-repo-structure-context.md
+        §B）；大 PR 上 ``fetch()`` 会把 diff 一并拉下来（几十万字符的浪费），这里
+        只做 URL 解析 → PR → files 分页，复用同一套速率控制与重试。
+        """
+        parsed = parse_pr_url(pr_url)
+        pr = self._get_pull_request(parsed.owner, parsed.repo, parsed.pr_number)
+        return [file.filename for file in self._fetch_files(pr)]
+
+    def fetch_repo_tree_paths(self, owner: str, repo: str, ref: str) -> list[str]:
+        """列出 ``ref`` 下全部 blob 路径（git tree, recursive）。
+
+        与审查阶段的符号定位（`ReviewOrchestrator._list_repo_tree_paths`）同一份
+        数据；失败**不在这里吞**：调用方按"注入是增益"决定降级文案。目录项
+        （``type != "blob"``）不返回——注入给模型的是文件清单。
+        """
+        repo_obj = self._get_repo(owner, repo)
+        self._rate_limiter.acquire()
+        tree = self._execute_with_retry(
+            lambda: repo_obj.get_git_tree(ref, recursive=True),
+            error_context=f"获取仓库目录树 {owner}/{repo} @ {ref}",
+        )
+        paths: list[str] = []
+        for entry in getattr(tree, "tree", None) or []:
+            if getattr(entry, "type", "") != "blob":
+                continue
+            path = str(getattr(entry, "path", "") or "")
+            if path:
+                paths.append(path)
+        return paths
+
     # ── 内部方法 ────────────────────────────────────────────────
 
     def _get_pull_request(self, owner: str, repo: str, pr_number: int) -> PullRequest.PullRequest:

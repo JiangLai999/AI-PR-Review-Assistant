@@ -11,6 +11,10 @@ L1-b 接入 `PRFetcher` / 磁盘缓存。
 
 收集结果按优先级排序、去重，受 ``max_files`` 与 ``budget_tokens`` 约束；
 超长文件截断到「符号定义附近」片段。
+
+文件末尾另有一组**纯渲染**函数（``render_pr_file_list`` / ``render_repo_tree``），
+供聊天侧注入"本次 PR 变更文件清单"与"仓库目录树"（见
+docs/claude-repo-structure-context.md）：同样不碰网络，路径由调用方取好传进来。
 """
 
 from __future__ import annotations
@@ -353,3 +357,202 @@ class FileSystemRepoCache:
                     os.unlink(tmp_name)
                 except OSError:
                     pass
+
+
+# ── 聊天侧注入：PR 变更清单 / 仓库目录树（docs/claude-repo-structure-context.md）──
+#
+# 与上面的预取不同，这里只有**纯渲染**：路径从哪来（`PRFetcher` 的变更分页 /
+# git tree）、失败怎么降级、什么时候注入，全部由调用方（`backend/jsonl_server.py`）
+# 决定。放在本模块是为了跟 `SOURCE_EXTENSIONS` / `FileSystemRepoCache` 一起维护
+# "仓库内容怎么给模型看"的口径，也便于在 tests/test_repo_context.py 里不碰网络
+# 直接钉住格式。
+
+# 变更清单**每一轮**都会随 system prompt 注入，必须小：单次最多列出这么多路径，
+# 其余折叠成一行计数（绝不静默丢弃）。
+PR_FILE_LIST_LIMIT = 50
+# 目录树的深度与行数上限；超出的部分一律折叠成计数。
+REPO_TREE_MAX_DEPTH = 3
+REPO_TREE_MAX_ENTRIES = 200
+# 单个目录最多列出多少个子项（目录+文件合计）。只有全局行数上限是不够的：实测本仓库
+# 的 `.agent-bus/locks/`（深度 2、几十个文件）会吃光整棵树的行数预算，`src/` 一个
+# 字都进不了注入——一棵只看得见产物目录的树等于没给。超出的子项折叠成一行计数。
+REPO_TREE_MAX_CHILDREN_PER_DIR = 25
+# 目录树里不进注入的噪声目录 / 文件（对"仓库结构"没有信息量，只会吃 token）。
+TREE_NOISE_DIRS = frozenset(
+    {
+        ".git", ".hg", ".svn", ".idea", ".vscode", ".cache", ".eggs",
+        ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox", ".venv",
+        ".next", ".nuxt", ".svelte-kit", "__pycache__", "build", "coverage",
+        "dist", "env", "htmlcov", "node_modules", "out", "site-packages",
+        "target", "venv", "vendor",
+    }
+)
+TREE_NOISE_FILES = frozenset({".DS_Store", "Thumbs.db"})
+TREE_NOISE_SUFFIXES = (".pyc", ".pyo", ".pyd")
+# 点目录按噪声处理（`.venv313` / `.idea` / `.pytest_c1` 这类本机产物名字枚举不完），
+# 只放行确实描述仓库结构的少数几个；文件不在此列（`.gitignore` 这类配置仍有信息量）。
+TREE_KEEP_DOT_DIRS = frozenset({".github", ".devcontainer"})
+
+
+def _clean_repo_path(path: str) -> str:
+    """规范化仓库相对路径；带控制字符（换行、制表……）的路径返回 ``""``。
+
+    路径会逐行进提示词，一个带换行的文件名就等于往提示词里插了一行——宁可漏掉
+    这种病态路径，也不让它改变注入段的结构。
+    """
+    cleaned = _normalize(str(path))
+    if not cleaned:
+        return ""
+    if any(character < " " or character == "\x7f" for character in cleaned):
+        return ""
+    return cleaned
+
+
+def render_pr_file_list(
+    paths: list[str] | None,
+    *,
+    limit: int = PR_FILE_LIST_LIMIT,
+    skipped: int | None = None,
+    unavailable: str = "",
+) -> str:
+    """渲染「本次 PR 变更文件」注入段（B）。
+
+    ``paths`` 为 ``None`` 表示清单没读到（``unavailable`` 只放原因短语，调用方
+    传异常类名——绝不把网络细节或凭据带进提示词）；``skipped`` 是本次审查按规则
+    跳过的文件数（run 记录里的数字，未知/为 0 就不写这一句）；``limit`` 之外的
+    路径折叠成一行计数。
+    """
+    header = "## 本次 PR 变更文件"
+    if paths is None:
+        return f"{header}\n（未能读取变更文件清单：{unavailable or '未知原因'}）"
+    listed = [cleaned for cleaned in map(_clean_repo_path, paths) if cleaned]
+    summary = f"（共 {len(listed)} 个"
+    if skipped:
+        summary += f"，另有 {skipped} 个被本次审查跳过"
+    summary += "）"
+    lines = [f"{header}{summary}"]
+    shown = listed[: max(0, limit)]
+    lines.extend(f"- {path}" for path in shown)
+    hidden = len(listed) - len(shown)
+    if hidden > 0:
+        lines.append(f"…（另有 {hidden} 个未列出，仅列出前 {len(shown)} 个）")
+    lines.append("规则：只依据上面的路径回答「改了哪些文件」；上面没列出的路径不得臆测。")
+    return "\n".join(lines)
+
+
+def _is_noise_dir(name: str) -> bool:
+    if name in TREE_NOISE_DIRS or name.endswith(".egg-info"):
+        return True
+    return name.startswith(".") and name not in TREE_KEEP_DOT_DIRS
+
+
+def _is_noise_file(name: str) -> bool:
+    return name in TREE_NOISE_FILES or name.lower().endswith(TREE_NOISE_SUFFIXES)
+
+
+def _tree_index(paths: list[str]) -> dict[str, dict]:
+    """把扁平路径列表折成嵌套字典（叶子是空 dict）；噪声与非法路径在这里剔除。"""
+    root: dict[str, dict] = {}
+    for raw in paths:
+        path = _clean_repo_path(raw)
+        if not path:
+            continue
+        parts = [part for part in path.split("/") if part and part != "."]
+        if not parts or _is_noise_file(parts[-1]):
+            continue
+        if any(_is_noise_dir(part) for part in parts[:-1]):
+            continue
+        node = root
+        for part in parts:
+            node = node.setdefault(part, {})
+    return root
+
+
+def _count_tree_entries(node: dict[str, dict]) -> int:
+    return sum(1 + _count_tree_entries(child) for child in node.values())
+
+
+def _tree_lines(
+    node: dict[str, dict],
+    depth: int,
+    max_depth: int,
+    prefix: str,
+    budget: int,
+    max_children: int,
+) -> list[str]:
+    """在 ``budget`` 行以内渲染 ``node`` 的子项（深度受限）。
+
+    同一层目录在前、文件在后；子项超过 ``max_children`` 的部分折叠成一行计数。
+    行数按**兄弟均分**（``剩余预算 // 剩余子项``）：否则深度优先会把预算全喂给
+    第一个大目录，后面的 `src/`、`tests/` 一个字都进不了注入——实测本仓库的
+    `.agent-bus/` 正是这样吃光整棵树的。均分后每个兄弟至少露一次面，用不完的
+    份额自然回流给后面的兄弟。
+    """
+    if budget <= 0:
+        return []
+    directories = sorted((name, child) for name, child in node.items() if child)
+    files = sorted(name for name, child in node.items() if not child)
+    children: list[tuple[str, dict | None]] = [*directories, *((name, None) for name in files)]
+    shown = children[: max(0, max_children)]
+    hidden = len(children) - len(shown)
+    lines: list[str] = []
+    for index, (name, child) in enumerate(shown):
+        remaining = budget - len(lines)
+        if remaining <= 0:
+            hidden += len(shown) - index
+            break
+        if child is None:
+            lines.append(f"{prefix}{name}")
+            continue
+        if depth >= max_depth:
+            lines.append(f"{prefix}{name}/ …（{_count_tree_entries(child)} 项未展开）")
+            continue
+        share = max(1, remaining // (len(shown) - index))
+        lines.append(f"{prefix}{name}/")
+        lines.extend(
+            _tree_lines(child, depth + 1, max_depth, prefix + "  ", share - 1, max_children)
+        )
+    if hidden > 0:
+        lines.append(f"{prefix}…（另有 {hidden} 项未列出）")
+    return lines
+
+
+def render_repo_tree(
+    paths: list[str] | None,
+    *,
+    sha: str = "",
+    max_depth: int = REPO_TREE_MAX_DEPTH,
+    max_entries: int = REPO_TREE_MAX_ENTRIES,
+    max_children: int = REPO_TREE_MAX_CHILDREN_PER_DIR,
+    unavailable: str = "",
+) -> str:
+    """渲染「仓库目录树」注入段（C）。
+
+    ``paths`` 为 ``None`` 表示树没读到（与"读到了但为空"的 ``[]`` 分开）。行数预算
+    在兄弟之间均分（见 `_tree_lines`），三种折叠都给数字，模型因此知道"还有内容"，
+    不会把"没列出来"当成"不存在"：
+
+    - 到达 ``max_depth`` 的目录：`name/ …（N 项未展开）`；
+    - 同层子项超过 ``max_children``、或预算耗尽：`…（另有 N 项未列出）`；
+    - 总行数仍超过 ``max_entries``（硬兜底）：末尾 `…（另有 N 行未列出）`。
+    """
+    header = "## 仓库目录树"
+    if paths is None:
+        return f"{header}\n（未能读取仓库目录树：{unavailable or '未知原因'}）"
+    scope = f"head 提交 {sha[:8]}" if sha else "head 提交"
+    lines = [
+        f"{header}（{scope} · 深度 ≤{max_depth} · 最多 {max_entries} 行）",
+        "（已排除 .git / node_modules / __pycache__ 等噪声与点目录；.github 等少数几个保留）",
+    ]
+    index = _tree_index(paths)
+    if not index:
+        lines.append("（该提交下没有可列出的文件）")
+        return "\n".join(lines)
+    body = _tree_lines(index, 1, max_depth, "", max_entries, max_children)
+    shown = body[: max(0, max_entries)]
+    lines.extend(shown)
+    hidden = len(body) - len(shown)
+    if hidden > 0:
+        lines.append(f"…（另有 {hidden} 行未列出）")
+    lines.append("规则：只依据上面的目录树回答结构问题；未展开/未列出的部分不得臆测。")
+    return "\n".join(lines)

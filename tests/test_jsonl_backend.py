@@ -4849,8 +4849,12 @@ def _seed_run_with_head(
     head_sha: str = "b" * 40,
     owner: str = "example",
     repo: str = "repo",
+    excluded_files: int | None = None,
 ) -> str:
-    """落库一条带 head_sha 的 run（读源码要靠它定位文件版本）。"""
+    """落库一条带 head_sha 的 run（读源码要靠它定位文件版本）。
+
+    ``excluded_files`` 是审查阶段按规则跳过的文件数（B 段的"另有 N 个被跳过"）。
+    """
     from ai_pr_review.services.prompt_assembler import ReviewResult
     from ai_pr_review.services.result_store import ResultStore
 
@@ -4858,20 +4862,34 @@ def _seed_run_with_head(
         f"https://github.com/{owner}/{repo}/pull/{pr_number}",
         ReviewResult(summary="审查完成", findings=[]),
         head_sha=head_sha,
+        excluded_files=excluded_files,
     )
 
 
 class _StubRepoFetcher:
-    """`PRFetcher` 替身：记录 (owner, repo, path, ref) 并按路径返回内容。"""
+    """`PRFetcher` 替身：记录 (owner, repo, path, ref) 并按路径返回内容。
+
+    B/C（docs/claude-repo-structure-context.md）另走两个方法：变更清单与目录树。
+    三者各自记录调用、各自可注入失败——"文件内容没被拉"与"清单没被拉"才分得开。
+    """
 
     def __init__(
         self,
         contents: dict[str, str | None] | None = None,
         error: Exception | None = None,
+        *,
+        changed_files: list[str] | None = None,
+        tree_paths: list[str] | None = None,
+        inventory_error: Exception | None = None,
     ) -> None:
         self.contents = contents or {}
         self.error = error
+        self.changed_files = changed_files or []
+        self.tree_paths = tree_paths or []
+        self.inventory_error = inventory_error
         self.calls: list[tuple[str, str, str, str]] = []
+        self.changed_files_calls: list[str] = []
+        self.tree_calls: list[tuple[str, str, str]] = []
 
     def fetch_file_content(
         self, owner: str, repo: str, file_path: str, ref: str
@@ -4880,6 +4898,18 @@ class _StubRepoFetcher:
         if self.error is not None:
             raise self.error
         return self.contents.get(file_path)
+
+    def fetch_changed_file_paths(self, pr_url: str) -> list[str]:
+        self.changed_files_calls.append(pr_url)
+        if self.inventory_error is not None:
+            raise self.inventory_error
+        return list(self.changed_files)
+
+    def fetch_repo_tree_paths(self, owner: str, repo: str, ref: str) -> list[str]:
+        self.tree_calls.append((owner, repo, ref))
+        if self.inventory_error is not None:
+            raise self.inventory_error
+        return list(self.tree_paths)
 
 
 def _point_repo_cache_at(
@@ -4970,10 +5000,15 @@ def test_chat_injects_the_mentioned_repo_file_from_the_run_head(
     asyncio.run(run())
 
 
-def test_chat_without_a_mentioned_path_never_asks_github(
+def test_chat_without_a_mentioned_path_never_fetches_repo_file_content(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """没点名文件就不该有额外请求（未绑定同理）：普通聊天零成本。"""
+    """没点名文件就不拉文件内容（未绑定同理）：不为源码多付一次请求。
+
+    B（docs/claude-repo-structure-context.md）之后，**绑定 run 本身**会带来一次变更
+    清单拉取（只在首轮，之后命中进程内缓存）。这里把"文件内容"与"清单"分开断言，
+    别让两种请求混进同一个 `calls` 计数里。
+    """
 
     async def run() -> None:
         backend = _chat_ready_backend(tmp_path)
@@ -4986,12 +5021,15 @@ def test_chat_without_a_mentioned_path_never_asks_github(
         captured: dict[str, Any] = {}
         _stub_provider(monkeypatch, captured)
 
-        # (1) 已绑定但消息里没有路径
+        # (1) 已绑定但消息里没有路径：只注入 B 的变更清单，不读任何文件内容
         backend.sessions[session_id].current_run_id = run_id
         assert (
             await backend.handle(_chat_send(session_id, "这次审查结论是什么"))
         )[0]["ok"] is True
-        # (2) 有路径但没绑定 run
+        prompt = captured["options"]["system_prompt"]
+        assert "## 本次 PR 变更文件" in prompt
+        assert fetcher.changed_files_calls == ["https://github.com/example/repo/pull/31"]
+        # (2) 有路径但没绑定 run：什么都不注入、什么都不拉
         backend.sessions[session_id].current_run_id = None
         assert (
             await backend.handle(_chat_send(session_id, "src/a.py 是干嘛的"))
@@ -4999,6 +5037,8 @@ def test_chat_without_a_mentioned_path_never_asks_github(
 
         assert fetcher.calls == []
         assert "## 用户提到的仓库文件" not in captured["options"]["system_prompt"]
+        assert "## 本次 PR 变更文件" not in captured["options"]["system_prompt"]
+        assert fetcher.changed_files_calls == ["https://github.com/example/repo/pull/31"]
 
     asyncio.run(run())
 
@@ -5419,6 +5459,303 @@ def test_chat_keeps_the_finding_line_when_the_window_overflows_the_budget(
         note = re.search(r"（显示第 (\d+)-(\d+) 行，文件共 412 行；窗口 157-317", prompt)
         assert note is not None
         assert 157 <= int(note.group(1)) <= 237 <= int(note.group(2)) <= 317
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# A2/B/C（docs/claude-repo-structure-context.md）：
+# finding 文件放开 / PR 变更清单 / 仓库目录树
+# ---------------------------------------------------------------------------
+
+
+def test_chat_findings_fallback_covers_every_named_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A2：12 条 finding 涉及 3 个文件 → 三个文件全部进入注入（旧实现写死 limit=2）。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        run_id = _seed_run_with_findings(
+            backend,
+            [("src/a.py", line, line) for line in range(1, 6)]
+            + [("src/b.py", line, line) for line in range(10, 15)]
+            + [("src/c.py", line, line) for line in range(1, 3)],
+        )
+        assert backend._findings_file_paths(run_id) == ["src/a.py", "src/b.py", "src/c.py"]
+
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = run_id
+        fetcher = _StubRepoFetcher(
+            {path: f"print('{path}')\n" for path in ("src/a.py", "src/b.py", "src/c.py")}
+        )
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        # 消息里没有文件名：走"对应的仓库代码"兜底到 findings 点名的文件
+        response = await backend.handle(_chat_send(session_id, "对应的仓库代码"))
+
+        assert response[0]["ok"] is True
+        prompt = captured["options"]["system_prompt"]
+        for path in ("src/a.py", "src/b.py", "src/c.py"):
+            assert f"### {path}" in prompt, f"{path} 被本次 finding 点名，必须进入注入"
+
+    asyncio.run(run())
+
+
+def test_chat_findings_fallback_flags_the_file_over_the_char_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A2：三个文件都被点名，但 12000 字符预算只装得下前两个——第三个必须被**如实标注**
+    "本轮注入已达上限"，而不是静默消失（否则模型会以为这个文件"没什么可看的"）。"""
+
+    async def run() -> None:
+        from ai_pr_review.backend.jsonl_server import CHAT_REPO_FILES_TOTAL_CHARS
+
+        backend = _chat_ready_backend(tmp_path)
+        run_id = _seed_run_with_findings(
+            backend, [("src/a.py", 1, 1), ("src/b.py", 1, 1), ("src/c.py", 1, 1)]
+        )
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = run_id
+        # 单行超长文件：第一个占满 8000 的单文件上限，第二个吃掉剩余总量预算
+        huge = "A" * 9000
+        fetcher = _StubRepoFetcher({"src/a.py": huge, "src/b.py": huge, "src/c.py": huge})
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(_chat_send(session_id, "对应的仓库代码"))
+
+        assert response[0]["ok"] is True
+        prompt = captured["options"]["system_prompt"]
+        assert "### src/a.py" in prompt
+        assert "… [内容已截断" in prompt
+        assert (
+            f"(未能读取 src/c.py：本轮注入已达 {CHAT_REPO_FILES_TOTAL_CHARS} 字符上限)" in prompt
+        )
+
+    asyncio.run(run())
+
+
+def test_chat_injects_the_pr_changed_file_list_every_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """B：绑定 run 后每轮注入变更清单（含"另有 N 个被审查跳过"）；首轮拉一次，
+    之后命中进程内缓存——同一 run 的 head 提交不会变。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        run_id = _seed_run_with_head(backend, excluded_files=12)
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = run_id
+        fetcher = _StubRepoFetcher(changed_files=["src/a.py", "src/b.ts", "docs/design.md"])
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        for text in ("这次审查结论是什么", "再说说这次审查的结论"):
+            response = await backend.handle(_chat_send(session_id, text))
+
+            assert response[0]["ok"] is True
+            prompt = captured["options"]["system_prompt"]
+            assert "## 本次 PR 变更文件（共 3 个，另有 12 个被本次审查跳过）" in prompt
+            assert "- src/a.py" in prompt
+            assert "- docs/design.md" in prompt
+            assert "不得臆测" in prompt
+
+        assert fetcher.changed_files_calls == ["https://github.com/example/repo/pull/31"]
+
+    asyncio.run(run())
+
+
+def test_chat_cools_down_and_recovers_when_the_changed_list_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """B：拉清单失败 → 标注「未能读取变更文件清单」，对话照常、不泄漏异常文案；
+    冷却期内不重复打网络，冷却过后自动重试（一次网络抖动不该锁死整个会话）。"""
+
+    async def run() -> None:
+        import ai_pr_review.backend.jsonl_server as jsonl
+
+        backend = _chat_ready_backend(tmp_path)
+        run_id = _seed_run_with_head(backend)
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = run_id
+        fetcher = _StubRepoFetcher(inventory_error=RuntimeError("token=ghp_should_not_leak"))
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        for _ in range(2):
+            response = await backend.handle(_chat_send(session_id, "这次审查结论是什么"))
+            assert response[0]["ok"] is True
+        prompt = captured["options"]["system_prompt"]
+        assert "（未能读取变更文件清单：RuntimeError）" in prompt
+        assert "ghp_should_not_leak" not in prompt
+        assert len(fetcher.changed_files_calls) == 1, "冷却期内不该重复打网络"
+
+        # 冷却过后网络恢复：下一轮自动重试并注入
+        monkeypatch.setattr(jsonl, "CHAT_INVENTORY_RETRY_SECONDS", 0.0)
+        fetcher.inventory_error = None
+        fetcher.changed_files = ["src/a.py"]
+        response = await backend.handle(_chat_send(session_id, "这次审查结论是什么"))
+
+        assert response[0]["ok"] is True
+        assert "## 本次 PR 变更文件（共 1 个）" in captured["options"]["system_prompt"]
+        assert len(fetcher.changed_files_calls) == 2
+
+    asyncio.run(run())
+
+
+def test_chat_truncates_the_changed_file_list_over_the_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """B：变更文件超过上限时只列前 N 个，其余折叠成一行计数（不静默丢弃）。"""
+
+    async def run() -> None:
+        from ai_pr_review.backend.jsonl_server import CHAT_PR_FILES_LIMIT
+
+        backend = _chat_ready_backend(tmp_path)
+        run_id = _seed_run_with_head(backend)
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = run_id
+        fetcher = _StubRepoFetcher(
+            changed_files=[f"src/f{index:03d}.py" for index in range(CHAT_PR_FILES_LIMIT + 10)]
+        )
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(_chat_send(session_id, "这次审查结论是什么"))
+
+        assert response[0]["ok"] is True
+        prompt = captured["options"]["system_prompt"]
+        assert f"- src/f{CHAT_PR_FILES_LIMIT - 1:03d}.py" in prompt
+        assert f"- src/f{CHAT_PR_FILES_LIMIT:03d}.py" not in prompt
+        assert f"…（另有 10 个未列出，仅列出前 {CHAT_PR_FILES_LIMIT} 个）" in prompt
+
+    asyncio.run(run())
+
+
+def test_chat_never_fetches_inventory_without_a_bound_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """未绑定 run：变更清单与目录树都不注入、都不打 GitHub（哪怕消息里全是结构关键词）。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        fetcher = _StubRepoFetcher(changed_files=["a.py"], tree_paths=["a.py"])
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(
+            _chat_send(session_id, "这个仓库的目录结构、文件列表给我看看")
+        )
+
+        assert response[0]["ok"] is True
+        prompt = captured["options"]["system_prompt"]
+        assert "## 本次 PR 变更文件" not in prompt
+        assert "## 仓库目录树" not in prompt
+        assert fetcher.changed_files_calls == []
+        assert fetcher.tree_calls == []
+
+    asyncio.run(run())
+
+
+def test_chat_injects_the_repo_tree_only_when_the_user_asks_about_structure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """C：目录树按意图触发——普通问题不注入（也不打 GitHub），问到结构才注入（且只拉一次）。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        run_id = _seed_run_with_head(backend)
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = run_id
+        fetcher = _StubRepoFetcher(tree_paths=["src/app.py", "src/pkg/mod.py", "README.md"])
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        # (1) 普通问题：不注入、不打 GitHub
+        response = await backend.handle(_chat_send(session_id, "这次审查的结论是什么"))
+        assert response[0]["ok"] is True
+        assert fetcher.tree_calls == []
+        assert "## 仓库目录树" not in captured["options"]["system_prompt"]
+
+        # (2) 问到结构：注入目录树（head 提交 + 嵌套格式）
+        response = await backend.handle(_chat_send(session_id, "这个仓库的目录结构是怎样的？"))
+        assert response[0]["ok"] is True
+        prompt = captured["options"]["system_prompt"]
+        assert "## 仓库目录树（head 提交 bbbbbbbb · 深度 ≤3 · 最多 200 行）" in prompt
+        assert "src/" in prompt
+        assert "  pkg/" in prompt
+        assert "    mod.py" in prompt
+        assert "README.md" in prompt
+        assert fetcher.tree_calls == [("example", "repo", "b" * 40)]
+
+        # (3) 再问一次结构：命中进程内缓存，不再拉
+        response = await backend.handle(_chat_send(session_id, "还有哪些文件"))
+        assert response[0]["ok"] is True
+        assert len(fetcher.tree_calls) == 1
+
+    asyncio.run(run())
+
+
+def test_chat_reports_a_repo_tree_it_could_not_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """C：tree 拉取失败 / 老 run 没记 head_sha → 各自的降级文案，对话照常。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        run_id = _seed_run_with_head(backend)
+        session = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        session_id = session["session_id"]
+        backend.sessions[session_id].current_run_id = run_id
+        fetcher = _StubRepoFetcher(inventory_error=RuntimeError("boom-detail-should-not-leak"))
+        monkeypatch.setattr(backend, "_chat_pr_fetcher", lambda: fetcher)
+        _point_repo_cache_at(monkeypatch, backend, tmp_path / "cache")
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+
+        response = await backend.handle(_chat_send(session_id, "仓库目录结构是什么"))
+
+        assert response[0]["ok"] is True
+        prompt = captured["options"]["system_prompt"]
+        assert "（未能读取仓库目录树：RuntimeError）" in prompt
+        assert "boom-detail-should-not-leak" not in prompt
+
+        # 老 run 没记 head_sha：写明原因，且不再打 GitHub
+        old_run = _seed_run(backend, 29, "旧审查")
+        backend.sessions[session_id].current_run_id = old_run
+        fetcher.tree_calls.clear()
+        response = await backend.handle(_chat_send(session_id, "仓库目录结构是什么"))
+
+        assert response[0]["ok"] is True
+        assert (
+            "（未能读取仓库目录树：该 Run 未记录仓库 / head 提交）"
+            in captured["options"]["system_prompt"]
+        )
+        assert fetcher.tree_calls == []
 
     asyncio.run(run())
 
