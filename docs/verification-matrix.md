@@ -21,6 +21,8 @@
 | A5 | 上下文长度提示（优先 usage，缺失估算）`上下文 12% · 2.4k/20k` | 后端 `jsonl_server.py:2772`（`_chat_usage_payload`）；前端 `app.tsx:433`（`ContextUsageLine`）、`format.ts:70`（`formatContextUsage`） | 契约 stub + manual 帧 | `fa04897`+`1c1a829`；契约测试含 `context` **六键**（2026-09-26 扩展 `budget_source`）；帧 `frame-contract-120x30.txt`/`frame-contract-209x51.txt` | ✅ 已验证 |
 | A6 | `/compact`（保留最近 10 轮原文 → 摘要替换；失败原历史不动） | `jsonl_server.py:292`（`CHAT_COMPACT_KEPT_TURNS=10`）、`:2897`（`_compact_chat_history`） | pytest 成功/失败两路径 + 契约 | `fa04897`；`test_jsonl_backend.py:5969`；契约 `test_contract_compact_*`（shape + failure） | ✅ 已验证 |
 | A7 | `/history` 三模式（对话消息 / `--runs` / `<run_id>` 绑定） | `jsonl_server.py:2864`（`_chat_history_payload`）、命令分发 ~`:4011` 区 | pytest 三分支 + 契约 | `fa04897`；契约 `test_contract_history_*` 三条；`84b739e` 收尾修复（`effort` 字段） | ✅ 已验证 |
+| A8 | **仓库结构注入**（用户实测缺口：模型读不到变更清单/目录树） | `jsonl_server.py`（`_repo_files_for_chat` / `_findings_file_paths` / 新增变更清单与目录树段） | 任务 `claude-repo-structure-context`：A 放开 finding 文件 fallback（`limit=2`）；B 注入 PR 变更文件清单（缓存/降级/截断）；C 注入仓库目录树（深度≤3、按意图触发） | 任务进行中（claude，2026-09-27）；L3 全覆盖修复见 `41092eb` | 🔄 进行中 |
+| A9 | **思考可见性 UI**（状态栏档位 / 思考区可展开 / 消息指标行） | `app.tsx`（`ThinkingBlock` header `onMouseDown`、`Alt+T`、指标行）、`jsonl_server.py` `finished.model` | 单测 + manual 帧 + 契约 | `153bbfc`（transparent 渲染）+ `983f2c7`（per-turn model）+ `5ecee9c`（三项 UI + 命令回显去重）；201 pass / 87+140 manual PASS | ✅ 已验证 |
 
 ### 组 B · 模型配置（Codex 主责 + 后端收尾 + TUI 侧）
 
@@ -83,12 +85,12 @@
 | # | 项 | 现状 | 需补什么才能验证 |
 |---|---|---|---|
 | 1 | **review 链路思考档位** | **产品已拍板 (c)：(c) 两步走已全部落地，且第二步已真机复验**——第一步 wire 加锁（`tests/test_review_wire.py` 4 条）、第二步 `preferences.review_reasoning_effort`（默认 `off` = 现状）含请求注入/预算预留/三个出口（`docs/review-reasoning-assessment.md` §9）。**真机（2026-09-26，§10）**：产品入口四档 — 短/长 diff 下 `off` = 显式 `thinking: disabled` + reasoning 0 字符；长 diff 上 `low/high/max` reasoning 1931/7310/9828 字符（476/1877/2693 tok），耗时 6.0/13.9/20.7s；**长 diff × max 预算边界已收口**：completion 5139/20192 tok（余量 15053）、`finish_reason=stop`、答案 6393 字符、JSON 可解析，预留 +12000 只用了 22.4% | 剩余：① TUI 未接入该档位（前端另行排期）；② `deepseek-chat`/中转端点/其它供应商未测、`thinking: enabled` 不带 effort 未测（§10.5）；③ 小输出模型（`max_output ≤ 8192`）的"预留被吃光"缺提示文案（§10.7 建议，另开任务）；④ 既有向导丢字段问题（§9.4 #4，非本任务引入） |
-| 2 | **组 B 的 TUI 侧合并** | `mimo-config-wizard-ui` = blocked（11 条 manual 回归）；`claude-config-wizard-fix` = claimed/**进行中** | 11 条断言全绿 + 补规格屏/source 徽标/中转站五项 manual 帧 + `docs/mimo-config-wizard-ui.md` 交付 |
-| 3 | **`/context` 的 `budget_source` TUI 展示** | 后端已输出（`/context` 与 `config.snapshot`），前端**无消费方** | TUI 状态栏或 `/context` 回显加上 `budget_source`；补 manual 帧断言 |
+| 2 | ~~**组 B 的 TUI 侧合并**~~ | **已完成（2026-09-26）**：`claude-config-wizard-fix`（`9f27a3c`）——根因是切屏后读已销毁输入框导致异常被全局处理器吞掉、Enter 失效；修复 + 补规格屏/徽标/中转站帧 + `docs/mimo-config-wizard-ui.md`；111 manual PASS | — |
+| 3 | ~~**`/context` 的 `budget_source` TUI 展示**~~ | **已完成**：契约扩为六键（`eb0de10`）+ TUI 展示（`2bfbce4`，规格屏与 `/context` 回显） | — |
 | 4 | **Ollama usage 全 0** | 行为链路正常，但数值不可用于精确预算；本地占比提示是估算 | 改走 Ollama 原生 `/api/chat` 的 `prompt_eval_count`（另开任务），或接受"本地估算"并在 UI 标注 |
 | 5 | **本地 reasoning 为空真** | `OllamaProvider.stream_chat` 强制 `think=False`（`docs/chat-live-verification.md` §3 差异②）；隔离断言不具区分力 | 产品决策已定"本地不开放思考"（`13b8a08`）；若未来开放，需真机验证 reasoning 隔离 |
 | 6 | ~~**契约 `context.budget_source`**~~ | ~~不在契约 v1~~ | **已完成（主控，2026-09-26）**：契约扩为六键并同步文档与两处测试；TUI 消费见第 3 条（mimo 进行中） |
-| 7 | **`max_output < 思考预留` 的档位降级** | 只封顶总额度，不自动降档；可能答案被思考挤空 | 产品决策是否自动降档（`docs/claude-backend-followup.md` §6.6）；补 `/think` 反馈文案 |
+| 7 | **`max_output < 思考预留` 的档位降级** | 只封顶总额度，不自动降档；可能答案被思考挤空。**前端提示进行中**：`mimo-review-budget-hint`（review 档位屏提示"该模型输出上限 N，高档位预算会被封顶"） | 产品决策是否自动降档（`docs/claude-backend-followup.md` §6.6）；提示文案随 mimo 任务落地 |
 | 8 | **manual-route-wizard-check 首测 flaky** | 一次测量 `PASS=104 FAIL=2`，随后三次复跑均 `PASS=107 FAIL=0` | 若 `claude-config-wizard-fix` 收尾后仍偶发，需查焦点/时序；当前以 107/0 为准并记录波动 |
 | 9 | **`/think` 的 `transparent` 态在 TUI 未渲染提示** | 后端已返回 `state:"transparent"` + `reason`（"是否生效取决于上游"）+ `form`/`doc_url`，但 TUI 只区分 `unsupported` 与"其它"（`app.tsx:887`），`transparent` 仍渲染成档位行 | 本次任务明确"不改前端"；前端排期后按 `state === "transparent"` 走一条提示文案（后端字段已就绪，无需再改后端） |
 
