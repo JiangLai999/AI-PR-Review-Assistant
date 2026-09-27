@@ -6824,25 +6824,33 @@ def test_chat_usage_falls_back_to_estimated_context() -> None:
     assert context["budget_source"] in {"config", "model_spec", "fallback"}
 
 
-def test_history_defaults_to_chat_and_runs_stay_available(tmp_path: Path) -> None:
-    """A7：默认 `/history` 列对话；`--runs` 保留旧审查列表。"""
+def test_history_defaults_to_review_runs_and_chat_mode_stays_available(tmp_path: Path) -> None:
+    """2026-09-27 用户反馈后调整：默认 `/history` 列**审查列表**（"history" 的直觉
+    含义）；`--chat` 看对话消息；`--runs` 保留为兼容别名（既有习惯/脚本不受影响）。"""
 
     async def run() -> None:
         backend = _chat_ready_backend(tmp_path)
         session_id = await _new_session_async(backend)
-        from ai_pr_review.services.model_providers.base import ProviderResponse
         backend.sessions[session_id].messages = [
             {"role": "user", "content": "x" * 80, "timestamp": "2026-01-01T00:00:00+00:00"},
             {"role": "assistant", "content": "answer", "timestamp": "2026-01-01T00:00:01+00:00"},
         ]
-        chat_history = await _execute_async(backend, "history", [], session_id)
+
+        # 默认：审查列表（不带对话载荷的 kind 字段）
+        runs_default = await _execute_async(backend, "history", [])
+        assert "runs" in runs_default["result"]
+        assert "kind" not in runs_default["result"]
+
+        # --runs：兼容别名，与默认一致
+        runs_alias = await _execute_async(backend, "history", ["--runs"])
+        assert "runs" in runs_alias["result"]
+        assert "kind" not in runs_alias["result"]
+
+        # --chat：对话消息列表（A7 能力保留，改由显式参数打开）
+        chat_history = await _execute_async(backend, "history", ["--chat"], session_id)
         assert chat_history["result"]["kind"] == "history"
         assert chat_history["result"]["items"][0]["excerpt"].endswith("…")
         assert chat_history["result"]["items"][0]["in_window"] is True
-
-        runs_history = await _execute_async(backend, "history", ["--runs"])
-        assert "runs" in runs_history["result"]
-        assert "kind" not in runs_history["result"]
 
     asyncio.run(run())
 

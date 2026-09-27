@@ -70,9 +70,9 @@ Multi-session (contract v1):
 | `/usage` | 显示消息/字符统计 / Show message & character counts | `/usage` | `/usage` | **仅 CLI** / CLI only |
 | `/config` | 显示当前会话配置（JSON）/ Show session config as JSON | `/config` | `/config` | **仅 CLI**；TUI 用 `Ctrl+P` 打开配置助手 / **CLI only**; TUI uses `Ctrl+P` |
 | `/session` | 显示当前 chat 会话信息（JSON）/ Show session info as JSON | `/session` | `/session` | **仅 CLI** / CLI only |
-| `/stats` | 显示审查统计（run 数、PR 数、findings、成本）/ Show review statistics | `/stats` | `/stats` | **仅 CLI**；TUI 用 `/history --runs` 看列表 / **CLI only** |
+| `/stats` | 显示审查统计（run 数、PR 数、findings、成本）/ Show review statistics | `/stats` | `/stats` | **仅 CLI**；TUI 用 `/history` 看列表 / **CLI only** |
 | `/exit` | 退出聊天 / Quit the chat | `/exit`（也接受 `exit`/`quit`/`q`） | `/exit` | **仅 CLI**；TUI 不支持 `/exit`，用 `Ctrl+C` 连按两次退出 / **CLI only**; TUI quits with `Ctrl+C` twice |
-| `/history` | 查看历史列表 / List history | 见 §2 的三种形态 / see the three forms in §2 | `/history` | CLI 中只有一种形态：列审查历史（默认 5 条）/ In the CLI there is a single form: review runs (default 5) |
+| `/history` | 查看历史列表 / List history | 见 §2 / see §2 | `/history` | CLI 中只有一种形态：列审查历史（默认 5 条）/ In the CLI there is a single form: review runs (default 5) |
 
 ---
 
@@ -83,10 +83,12 @@ Multi-session (contract v1):
 Chat 把消息发给模型前会按上下文预算裁剪（窗口 80 条消息，超出部分以提示注入）。
 状态栏用 `上下文 12% · 2.4k/20k` 汇报占用；接近上限时给出 `/compact`、`/new` 提示。
 
-`/history` 有三种形态，是本节最容易混淆的点：
+`/history` 默认列**审查历史**（2026-09-27 按用户反馈调整——"history" 的直觉含义就是这个
+工具的核心记录；会话级管理的主入口是 `/sessions`）：
 
-- `/history [N]`：列**当前会话**最近 N 条对话消息（省略 N 则列全部；超出 80 条窗口的条目标注"已在窗口外"）。
-- `/history --runs [N]`：列**审查历史**（Run 列表：Run ID / PR / 模型 / findings 数），默认 10 条，1–50 条，附统计。
+- `/history [N]`：**审查历史**（Run 列表：Run ID / PR / 模型 / findings 数），默认 10 条，1–50 条，附统计。
+- `/history --runs [N]`：与默认等价（**兼容别名**，既有习惯与脚本不受影响）。
+- `/history --chat [N]`：列**当前会话**最近 N 条对话消息（省略 N 则列全部；超出 80 条窗口的条目标注"已在窗口外"）。
 - `/history <run_id>`：**载入**该 Run 的报告并**绑定**为当前对话上下文——之后的提问都在解读这次审查。
 
 `/compact` 在两套界面的行为不同：
@@ -111,12 +113,13 @@ Before sending messages, Chat trims the transcript to a context budget (an 80-me
 anything older is injected as a note). The status line reports usage as `上下文 12% · 2.4k/20k`,
 and near the limit you get a `/compact` / `/new` tip.
 
-`/history` has three forms:
+`/history` lists **review runs** by default (adjusted 2026-09-27 per user feedback — "history"
+intuitively means this tool's core record; session-level management lives in `/sessions`):
 
-- `/history [N]` — list the last N messages of the **current session** (all of them if N is omitted;
+- `/history [N]` — list the **review runs** (Run ID / PR / model / findings), default 10, range 1–50, plus statistics.
+- `/history --runs [N]` — equivalent to the default (**compatibility alias**).
+- `/history --chat [N]` — list the last N messages of the **current session** (all of them if N is omitted;
   entries outside the 80-message window are marked).
-- `/history --runs [N]` — list the **review runs** (Run ID / PR / model / findings), default 10,
-  range 1–50, plus statistics.
 - `/history <run_id>` — **load** that run's report and **bind** it as the active review context, so
   the following questions are answered against that review.
 

@@ -4392,7 +4392,7 @@ class JsonlBackend:
                 elif command == "help":
                     result(
                         {
-                            "text": "/help 显示此帮助信息\n/status 查看运行状态\n/setup 打开配置助手\n/model status|chat|review <模型ID>|local|cloud|hybrid 查看/切换模型与运行时\n/think off|low|high|max|auto 设置思考档位（本地端点置灰）\n/review <PR URL> 开始 PR 审查\n/cancel 取消当前对话或审查\n/retry 重试上一次审查\n/report 查看当前报告\n/export json|markdown [路径] 导出当前报告\n/history [N] 查看最近 N 条对话消息\n/history --runs 查看审查历史\n/history <run_id> 载入该 Run 并绑定为当前上下文\n/context [run_id|off] 查看/切换/解除审查上下文绑定\n/explain <run_id> 解释 Finding 与证据\n/feedback <run_id> <finding_id> <status> [note] 记录 Finding 反馈\n/publish [run_id] [--confirm] 预览并发布审查评论到 GitHub\n/new 新建会话（旧会话保留，可在会话列表里切回）\n/compact [指令] 压缩会话历史（按 token 预算保留最近若干轮原文）\n/demo [case_key|list] 运行离线 Demo\n/showcase 查看参赛演示路径\n/workbench 展开/收起审查工作台"
+                            "text": "/help 显示此帮助信息\n/status 查看运行状态\n/setup 打开配置助手\n/model status|chat|review <模型ID>|local|cloud|hybrid 查看/切换模型与运行时\n/think off|low|high|max|auto 设置思考档位（本地端点置灰）\n/review <PR URL> 开始 PR 审查\n/cancel 取消当前对话或审查\n/retry 重试上一次审查\n/report 查看当前报告\n/export json|markdown [路径] 导出当前报告\n/history [N] 查看审查历史\n/history <run_id> 载入该 Run 并绑定为当前上下文\n/history --chat [N] 查看最近的对话消息\n/context [run_id|off] 查看/切换/解除审查上下文绑定\n/explain <run_id> 解释 Finding 与证据\n/feedback <run_id> <finding_id> <status> [note] 记录 Finding 反馈\n/publish [run_id] [--confirm] 预览并发布审查评论到 GitHub\n/new 新建会话（旧会话保留，可在会话列表里切回）\n/compact [指令] 压缩会话历史（按 token 预算保留最近若干轮原文）\n/demo [case_key|list] 运行离线 Demo\n/showcase 查看参赛演示路径\n/workbench 展开/收起审查工作台"
                         }
                     )
                 elif command == "setup":
@@ -4468,6 +4468,13 @@ class JsonlBackend:
                     raw_args = params.get("args", [])
                     args = [str(item) for item in raw_args] if isinstance(raw_args, list) else []
                     session_id = str(params.get("session_id", ""))
+                    # 2026-09-27 用户反馈后调整：**默认 = 审查列表**——"history" 的直觉
+                    # 含义就是这个工具的核心记录；`--runs` 保留为兼容别名（既有习惯与
+                    # 脚本不受影响）；对话消息列表改由 `--chat` 打开（TUI 侧主入口是
+                    # `/sessions` 会话管理）。
+                    chat_only = bool(args) and args[0] == "--chat"
+                    if chat_only:
+                        args = args[1:]
                     runs_only = bool(args) and args[0] == "--runs"
                     if runs_only:
                         args = args[1:]
@@ -4484,15 +4491,18 @@ class JsonlBackend:
                     else:
                         limit = int(args[0]) if args and args[0].isdigit() else 10
                         history_session = self.sessions.get(session_id)
-                        # A7：默认列对话消息；`--runs` 明确要审查历史；无会话直调
-                        # （CLI/测试）时降级为审查历史，避免 "Session not found" 死路。
-                        if not runs_only and history_session is not None:
-                            result(
-                                self._chat_history_payload(
-                                    history_session,
-                                    limit=int(args[0]) if args and args[0].isdigit() else None,
+                        if chat_only:
+                            # 明确要对话消息：没有会话就如实报错——不再悄悄换成审查列表
+                            # （那会让"我明明要看对话"变成看到审查记录，属误导）。
+                            if history_session is None:
+                                error("Session not found", "not_found")
+                            else:
+                                result(
+                                    self._chat_history_payload(
+                                        history_session,
+                                        limit=int(args[0]) if args and args[0].isdigit() else None,
+                                    )
                                 )
-                            )
                         else:
                             store = ResultStore(self.config.result_store)
                             runs = store.list_runs(limit=max(1, min(limit, 50)))

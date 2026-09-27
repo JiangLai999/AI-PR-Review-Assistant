@@ -903,14 +903,22 @@ function Composer(props: {
       submitLock = false
       return
     }
-    // /history 分流：对话消息列表（默认）vs 审查列表（--runs）vs 单条 Run（后端）。
+    // /history 分流（2026-09-27 用户反馈后调整）：**默认 = 审查列表**——"history"
+    // 的直觉含义就是这个工具的核心记录；对话消息列表改由 `/history --chat` 打开，
+    // 会话级管理仍在 `/sessions`。`--runs` 保留为兼容别名（既有习惯/脚本不受影响）。
     if (text === "/history") {
-      props.onOpenChatHistory()
+      props.onOpenHistory()
       submitLock = false
       return
     }
     if (text === "/history --runs" || text === "/history --runs ") {
+      // 兼容别名：语义已并入默认（历史审查列表）。
       props.onOpenHistory()
+      submitLock = false
+      return
+    }
+    if (text === "/history --chat" || text === "/history --chat ") {
+      props.onOpenChatHistory()
       submitLock = false
       return
     }

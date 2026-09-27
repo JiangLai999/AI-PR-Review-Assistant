@@ -453,7 +453,10 @@ def test_contract_compact_failure_is_protocol_error(
 
 
 def test_contract_history_chat_messages_mode(tmp_path: Path) -> None:
-    """/history（有 session）→ {kind:"history", items}，列对话消息。"""
+    """/history --chat（有 session）→ {kind:"history", items}，列对话消息。
+
+    2026-09-27 用户反馈后：对话消息改由显式 `--chat` 打开（默认 `/history` 已是审查列表）。
+    """
 
     async def run() -> None:
         backend = _chat_ready_backend(tmp_path)
@@ -470,7 +473,7 @@ def test_contract_history_chat_messages_mode(tmp_path: Path) -> None:
                 "timestamp": "2026-01-01T00:00:01+00:00",
             },
         ]
-        reply = await _execute_async(backend, "history", [], session_id)
+        reply = await _execute_async(backend, "history", ["--chat"], session_id)
         assert reply["ok"] is True
         result = reply["result"]
         assert result["kind"] == "history"
