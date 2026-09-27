@@ -4575,13 +4575,18 @@ class JsonlBackend:
                             "invalid_request",
                         )
                     else:
-                        outcome = self._record_feedback(
+                        # 独立命名：同函数里 `outcome` 已被 session.delete 分支用作
+                        # tuple（`deleted, next_id = outcome`），复用会让 mypy 报冲突。
+                        feedback_outcome = self._record_feedback(
                             run_id, finding_id, feedback_status, note
                         )
-                        if outcome["ok"]:
-                            result(outcome)
+                        if feedback_outcome["ok"]:
+                            result(feedback_outcome)
                         else:
-                            error(str(outcome["message"]), str(outcome["code"]))
+                            error(
+                                str(feedback_outcome["message"]),
+                                str(feedback_outcome["code"]),
+                            )
                 elif command == "publish":
                     from ai_pr_review.services.publish_service import (
                         PublishError,
