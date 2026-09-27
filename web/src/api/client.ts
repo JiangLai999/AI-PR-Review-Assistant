@@ -54,10 +54,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!response.ok) {
-    const message =
-      payload && typeof payload === 'object' && 'error' in payload
-        ? String((payload as { error: unknown }).error)
-        : `HTTP ${response.status}`
+    // 后端两种失败形状都要认：`/api/publish` 用 `{error, code}`，
+    // `/api/config` 的 `ok=false` 用 `{ok:false, message}`——只读 `error` 会把
+    // 设置页的 400 原因吞成 "HTTP 400"（claude 复核时指出）。
+    const detail =
+      payload && typeof payload === 'object'
+        ? ((payload as { error?: unknown; message?: unknown }).error ??
+          (payload as { message?: unknown }).message)
+        : undefined
+    const message = detail === undefined || detail === null || detail === ''
+      ? `HTTP ${response.status}`
+      : String(detail)
     throw new ApiError(message, response.status)
   }
   return payload as T

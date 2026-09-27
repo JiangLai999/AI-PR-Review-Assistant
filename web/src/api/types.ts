@@ -200,6 +200,43 @@ export interface ProviderPreset {
   default_model: string
 }
 
+/** 下拉选项：值与展示名都来自后端（前端不硬编码词表），label 为中英双语。 */
+export interface OptionItem {
+  value: string
+  label: string
+}
+
+/** 数值输入范围（`options.numeric_ranges`）；缺字段时前端退回本地默认 step。 */
+export interface NumericRange {
+  min?: number
+  max?: number
+  step?: number
+}
+
+/** 设置页可写的 6 个界面/审查偏好，与 CLI 助手的 `preferences` 是同一份。 */
+export interface PreferenceView {
+  ui_language?: string
+  output_format?: string
+  chat_layout?: string
+  workbench_mode?: string
+  repo_context?: string
+  review_reasoning_effort?: string
+}
+
+/**
+ * 下拉清单 + 数值范围。Phase 2 新增；**旧后端不返回这一块**，
+ * 设置页据此把对应控件置为禁用（显示"当前后端不支持这一项"），而不是渲染空下拉。
+ */
+export interface ConfigOptions {
+  ui_languages?: OptionItem[]
+  output_formats?: OptionItem[]
+  chat_layouts?: OptionItem[]
+  workbench_modes?: OptionItem[]
+  repo_contexts?: OptionItem[]
+  review_efforts?: OptionItem[]
+  numeric_ranges?: Record<string, NumericRange>
+}
+
 export interface ConfigView {
   config_path: string
   github_token_set: boolean
@@ -212,6 +249,12 @@ export interface ConfigView {
   api_key_masked: string
   settings: Record<string, string | number | boolean>
   available_providers: ProviderPreset[]
+  /** 当前生效的偏好值（Phase 2）；旧后端没有这个键。 */
+  preferences?: PreferenceView
+  /** 可选项清单（Phase 2）；旧后端没有这个键 → 6 个下拉禁用。 */
+  options?: ConfigOptions
+  /** 运行档位（cloud / local / hybrid / custom…），只读展示，不接受提交。 */
+  runtime_profile?: string
 }
 
 export interface SaveConfigResponse {

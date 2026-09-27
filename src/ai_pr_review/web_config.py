@@ -70,6 +70,64 @@ PREFERENCE_VOCABULARIES: dict[str, tuple[str, ...]] = {
     "review_reasoning_effort": REVIEW_REASONING_EFFORTS,
 }
 
+# 偏好键 → 设置页下拉清单键。**键名是冻结契约**（web/src/api/types.ts:230-238 的
+# `ConfigOptions`），前端按下拉清单是否存在决定"禁用 + 当前后端不支持这一项"，
+# 改名会让 6 个下拉集体退回禁用态。
+PREFERENCE_OPTION_KEYS: dict[str, str] = {
+    "ui_language": "ui_languages",
+    "output_format": "output_formats",
+    "chat_layout": "chat_layouts",
+    "workbench_mode": "workbench_modes",
+    "repo_context": "repo_contexts",
+    "review_reasoning_effort": "review_efforts",
+}
+
+# 下拉展示文案（`{"value","label"}` 里的 label）。**取值的真相源仍是 config.py 的
+# 词表**（PREFERENCE_VOCABULARIES），这里只补中文/英文说明：前 4 项抄
+# `jsonl_server._setup_options()`（backend/jsonl_server.py:1329-1347），后 2 项抄
+# 同文件的 `REPO_CONTEXT_LABELS`（:171-175）/ `REVIEW_REASONING_LABELS`（:187-193）。
+# 与 TUI 的文案差异由 tests/test_web_config_writes.py 的漂移用例锁住：
+# `workbench_mode` 刻意用短文案（冻结契约的示例值），TUI 那份多带的是 TUI 专属
+# 快捷键提示（「Alt+W 收起」），照搬到 Web 设置页只会误导鼠标用户。
+PREFERENCE_OPTION_LABELS: dict[str, dict[str, str]] = {
+    "ui_language": {"zh-CN": "中文 / Chinese", "en-US": "English"},
+    "output_format": {"terminal": "Terminal", "markdown": "Markdown", "json": "JSON"},
+    "chat_layout": {
+        "compact": "紧凑 / Compact",
+        "split": "分栏 / Split",
+        "plain": "纯文本 / Plain",
+    },
+    "workbench_mode": {"auto": "自动 / Auto", "always": "常驻 / Always", "off": "关闭 / Off"},
+    "repo_context": {
+        "off": "关闭 / Off",
+        "tests": "仅测试文件 / Tests only",
+        "tests+imports": "测试与依赖 / Tests + imports",
+    },
+    "review_reasoning_effort": {
+        "off": "关闭 / Off（不思考，默认）",
+        "low": "低 / Low（预留 4000 思考 tokens）",
+        "high": "高 / High（预留 8000 思考 tokens）",
+        "max": "最高 / Max（预留 12000；实测约 3.6× 输出 tokens、2.9× 耗时）",
+        "auto": "自动 / Auto（不干预，由供应商默认决定）",
+    },
+}
+
+# 数值项的合法闭区间。**后端校验与 `options.numeric_ranges` 共用这一张表**：
+# 校验逻辑读它（apply_config_update），`GET /api/config` 也原样发出去，
+# 前端据此渲染 input 的 min/max/step（web/src/pages/SettingsPage.tsx:677-689）——
+# 前端不再各存一份数字，"前端允许、后端拒绝"的分叉因此不存在。
+# `step` 只服务 UI（不参与后端判定：0.1 步进的浮点用 == 判对齐会踩二进制误差）。
+# 取值口径与前端离线契约一致（docs/claude-web-settings-parity.md §5 [5]）；
+# 要放宽只能改这张表一处。
+NUMERIC_FIELD_RANGES: dict[str, dict[str, float]] = {
+    "max_tokens": {"min": 1, "max": 128000, "step": 1},
+    "timeout_seconds": {"min": 5, "max": 600, "step": 5},
+    "review_concurrency": {"min": 1, "max": 16, "step": 1},
+    "cross_file_max_files": {"min": 1, "max": 10, "step": 1},
+    "max_cost_per_run": {"min": 0, "max": 100, "step": 0.1},
+    "max_cost_per_24h": {"min": 0, "max": 1000, "step": 0.5},
+}
+
 # 载荷里的控制键：不是配置字段，但设置页合法地会带上。
 CONTROL_PAYLOAD_KEYS = (
     "provider_name",
@@ -92,6 +150,61 @@ ACCEPTED_PAYLOAD_KEYS = (
 ENDPOINT_FIELDS = ("base_url", "api_format", "model")
 
 
+class _RuntimeProfileProbe:
+    """`JsonlBackend._infer_runtime_profile` 的最小 ``self``。
+
+    那个折算函数（backend/jsonl_server.py:827-837）只读 ``self.config``，而
+    `JsonlBackend.__init__` 会建会话存储、事件计数、审查超时等一整套运行态 ——
+    设置页只是想问一句"当前哪一档在生效"，不该为它实例化整个 TUI 后端。
+    """
+
+    __slots__ = ("config",)
+
+    def __init__(self, config: AppConfig) -> None:
+        self.config = config
+
+
+def resolve_runtime_profile(config: AppConfig) -> str:
+    """当前运行档位（cloud / local / hybrid / custom）。
+
+    **复用** `JsonlBackend._infer_runtime_profile`（backend/jsonl_server.py:827-837）
+    的折算规则：生效槽位是 Ollama/local → `local`；环境变量覆盖 → `cloud`；
+    否则 `ROUTE_PROFILE_BY_STRATEGY[preferences.hybrid_strategy]`（同文件 :156-160）。
+    这里不另写一份，也不自己推导 chat_slot / review_slot —— 槽位路由归后端，
+    设置页只读展示（`runtime_profile` 是只读 Chip，不接受提交）。
+    """
+    from ai_pr_review.backend.jsonl_server import JsonlBackend
+
+    return str(JsonlBackend._infer_runtime_profile(_RuntimeProfileProbe(config)))
+
+
+def preference_values(config: AppConfig) -> dict[str, str]:
+    """设置页 6 个可编辑偏好的当前生效值（与 CLI 助手读同一份 `config.preferences`）。"""
+    return {
+        name: str(getattr(config.preferences, name, "") or "")
+        for name in EDITABLE_PREFERENCE_FIELDS
+    }
+
+
+def preference_options() -> dict[str, Any]:
+    """6 个下拉的 `{value, label}` 清单 + `numeric_ranges`。
+
+    value 的顺序 = `config.py` 词表顺序（单一真相源），label 见
+    `PREFERENCE_OPTION_LABELS`；数值范围原样透出 `NUMERIC_FIELD_RANGES`。
+    """
+    options: dict[str, Any] = {}
+    for name, key in PREFERENCE_OPTION_KEYS.items():
+        labels = PREFERENCE_OPTION_LABELS.get(name, {})
+        options[key] = [
+            {"value": value, "label": labels.get(value, value)}
+            for value in PREFERENCE_VOCABULARIES[name]
+        ]
+    options["numeric_ranges"] = {
+        name: dict(bounds) for name, bounds in NUMERIC_FIELD_RANGES.items()
+    }
+    return options
+
+
 @dataclass(slots=True)
 class ConfigView:
     """脱敏后的配置视图。"""
@@ -107,6 +220,11 @@ class ConfigView:
     api_key_masked: str
     settings: dict[str, Any] = field(default_factory=dict)
     available_providers: list[dict[str, str]] = field(default_factory=list)
+    # Phase 2 读侧三键（键名冻结，web/src/api/types.ts:240-258）：既有键一个不动，
+    # 老前端忽略新键即可；缺这三块时设置页整组降级为"当前后端不支持这一项"。
+    preferences: dict[str, Any] = field(default_factory=dict)
+    options: dict[str, Any] = field(default_factory=dict)
+    runtime_profile: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -121,6 +239,9 @@ class ConfigView:
             "api_key_masked": self.api_key_masked,
             "settings": self.settings,
             "available_providers": self.available_providers,
+            "preferences": self.preferences,
+            "options": self.options,
+            "runtime_profile": self.runtime_profile,
         }
 
 
@@ -140,6 +261,8 @@ def build_config_view(config: AppConfig, *, config_path: Path | None = None) -> 
         for name, preset in sorted(MODEL_PROVIDER_PRESETS.items())
     ]
 
+    options = preference_options()
+
     return ConfigView(
         config_path=str(config_path or DEFAULT_CONFIG_PATH),
         github_token_set=bool((config.github_token or "").strip()),
@@ -152,6 +275,9 @@ def build_config_view(config: AppConfig, *, config_path: Path | None = None) -> 
         api_key_masked=mask_secret(ai.api_key),
         settings={name: getattr(ai, name) for name in EDITABLE_AI_FIELDS},
         available_providers=presets,
+        preferences=preference_values(config),
+        options=options,
+        runtime_profile=resolve_runtime_profile(config),
     )
 
 
@@ -217,8 +343,10 @@ def apply_config_update(
       ``SaveResult(ok=False, message="unsupported key: <k>")``，
       **不改内存、不落盘**（调用方按 ``ok`` 映射 HTTP 400）。
     - **取值**：preferences 键按 ``PREFERENCE_VOCABULARIES`` 校验，数值键必须
-      能转成数字；非法值 ``ok=False, message="invalid value for <k>"``
-      （不回显原值）。校验全部通过后才开始写，``ok=False`` 即"什么都没发生"。
+      能转成数字且落在 ``NUMERIC_FIELD_RANGES``（与 ``options.numeric_ranges``
+      同一张表，见该常量的注释）内；非法值 ``ok=False, message="invalid value
+      for <k>"``（范围外再补一句允许区间，**不回显原值**）。校验全部通过后才
+      开始写，``ok=False`` 即"什么都没发生"。
     - ``changed`` 语义 = **被接受（``ACCEPTED_PAYLOAD_KEYS``）且经落盘读回
       校验确实写进去**的键名；``ok=False`` 时恒为空列表。
     - ``base_url``/``model``/``api_format`` 写进**当前生效槽位**：
@@ -278,6 +406,22 @@ def apply_config_update(
                 return SaveResult(ok=False, message=f"invalid value for {name}")
         else:
             value = str(value)
+        bounds = NUMERIC_FIELD_RANGES.get(name)
+        if bounds is not None:
+            # 范围判定用与 UI 同一张表：前端渲染的 min/max 就是后端拒收的边界，
+            # 不会出现"界面能填、保存被拒"却没人说得清为什么的分叉。
+            try:
+                in_range = float(bounds["min"]) <= float(value) <= float(bounds["max"])
+            except (TypeError, ValueError):
+                in_range = False
+            if not in_range:
+                return SaveResult(
+                    ok=False,
+                    message=(
+                        f"invalid value for {name}：超出允许范围 "
+                        f"{bounds['min']}~{bounds['max']}"
+                    ),
+                )
         if current != value:
             coerced_ai.append((name, value))
 

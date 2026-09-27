@@ -17,8 +17,22 @@ from pathlib import Path
 
 import pytest
 
-from ai_pr_review.config import AppConfig, ResultStoreConfig
-from ai_pr_review.web_config import PREFERENCE_VOCABULARIES, apply_config_update
+from ai_pr_review.config import (
+    REPO_CONTEXT_MODES,
+    REVIEW_REASONING_EFFORTS,
+    AppConfig,
+    ResultStoreConfig,
+)
+from ai_pr_review.web_config import (
+    EDITABLE_AI_FIELDS,
+    EDITABLE_PREFERENCE_FIELDS,
+    NUMERIC_FIELD_RANGES,
+    PREFERENCE_OPTION_KEYS,
+    PREFERENCE_OPTION_LABELS,
+    PREFERENCE_VOCABULARIES,
+    apply_config_update,
+    build_config_view,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -204,3 +218,156 @@ def test_preference_vocabularies_do_not_drift_from_the_tui(tmp_path: Path) -> No
     }
     for key, items in blocks.items():
         assert {item["value"] for item in items} == set(PREFERENCE_VOCABULARIES[key]), key
+
+
+# ----------------------------------------------------------- Phase 2 读侧（ConfigView）
+
+
+def test_config_view_exposes_preferences_and_options(tmp_path: Path) -> None:
+    """冻结契约：`to_dict()` 新增 preferences / options / runtime_profile 三键。
+
+    既有键一个不少（老前端只认这些），偏好的**当前值**来自 `config.preferences`。
+    """
+    from ai_pr_review.backend.jsonl_server import JsonlBackend
+
+    config = _config()
+    # 初值刻意不是各清单的第一项，这样"初值来自 preferences"才可证伪。
+    config.preferences.ui_language = "en-US"
+    config.preferences.review_reasoning_effort = "high"
+    config.preferences.repo_context = "tests"
+    target = tmp_path / "config.json"
+
+    view = build_config_view(config, config_path=target).to_dict()
+
+    for key in (
+        "config_path",
+        "github_token_set",
+        "github_token_masked",
+        "provider_name",
+        "base_url",
+        "model",
+        "api_format",
+        "api_key_set",
+        "api_key_masked",
+        "settings",
+        "available_providers",
+    ):
+        assert key in view, key
+
+    assert set(view["preferences"]) == set(EDITABLE_PREFERENCE_FIELDS)
+    assert view["preferences"] == {
+        name: getattr(config.preferences, name) for name in EDITABLE_PREFERENCE_FIELDS
+    }
+    assert view["preferences"]["ui_language"] == "en-US"
+    assert view["preferences"]["review_reasoning_effort"] == "high"
+
+    options = view["options"]
+    assert set(options) == set(PREFERENCE_OPTION_KEYS.values()) | {"numeric_ranges"}
+    for list_key in PREFERENCE_OPTION_KEYS.values():
+        items = options[list_key]
+        assert items, list_key
+        for item in items:
+            assert set(item) == {"value", "label"}
+            assert item["value"] and item["label"]
+
+    # 档位不自己推导：与 TUI 后端同一份折算结果（默认 balanced → hybrid）。
+    assert view["runtime_profile"] in {"cloud", "local", "hybrid", "custom"}
+    config.save(target, save_key=False)
+    assert view["runtime_profile"] == JsonlBackend(target).runtime_profile
+
+    config.preferences.hybrid_strategy = "local_only"
+    assert build_config_view(config).runtime_profile == "local"
+
+
+def test_options_values_match_config_constants(tmp_path: Path) -> None:
+    """清单的 value 逐项等于 config.py 词表（含顺序），label 不与 TUI 漂移。"""
+    from ai_pr_review.backend.jsonl_server import JsonlBackend
+
+    view = build_config_view(_config()).to_dict()
+    options = view["options"]
+
+    for name, list_key in PREFERENCE_OPTION_KEYS.items():
+        assert [item["value"] for item in options[list_key]] == list(
+            PREFERENCE_VOCABULARIES[name]
+        ), list_key
+    # 顺序敏感的两项：config.py 是唯一真相源，改顺序必须原样透传给前端。
+    assert [item["value"] for item in options["repo_contexts"]] == list(REPO_CONTEXT_MODES)
+    assert [item["value"] for item in options["review_efforts"]] == list(REVIEW_REASONING_EFFORTS)
+
+    tui = JsonlBackend(tmp_path / "config.json")._setup_options()
+    tui_blocks = {
+        "ui_languages": tui["ui_languages"],
+        "output_formats": tui["output_formats"],
+        "chat_layouts": tui["chat_layouts"],
+        "workbench_modes": tui["workbench_modes"],
+        "repo_contexts": tui["repo_context"]["options"],
+        "review_efforts": tui["review_reasoning_effort"]["options"],
+    }
+    for list_key, items in tui_blocks.items():
+        tui_labels = {item["value"]: item["label"] for item in items}
+        web_labels = {item["value"]: item["label"] for item in options[list_key]}
+        assert set(web_labels) == set(tui_labels), list_key
+        for value, label in web_labels.items():
+            if list_key == "workbench_modes":
+                # Web 用冻结契约的短文案；TUI 那份多带 TUI 专属快捷键提示
+                # （「Alt+W 收起」），照搬进设置页只会误导鼠标用户。
+                assert tui_labels[value].startswith(label), value
+            else:
+                assert label == tui_labels[value], (list_key, value)
+
+
+def test_numeric_ranges_are_exposed_and_enforced(tmp_path: Path) -> None:
+    """数值范围：同一张表既发给前端渲染 min/max/step，也在后端拒收越界值。"""
+    config = _config()
+    target = tmp_path / "config.json"
+
+    ranges = build_config_view(config).to_dict()["options"]["numeric_ranges"]
+
+    assert set(ranges) == set(NUMERIC_FIELD_RANGES)
+    # 范围表 = 设置页的 6 个数值项（EDITABLE_AI_FIELDS 里的 int/float，
+    # 布尔开关与 base_url/model/api_format 这类文本项不进范围表）。
+    numeric_fields = {
+        name
+        for name in EDITABLE_AI_FIELDS
+        if isinstance(getattr(config.ai_client, name), (int, float))
+        and not isinstance(getattr(config.ai_client, name), bool)
+    }
+    assert set(NUMERIC_FIELD_RANGES) == numeric_fields
+    assert ranges["max_tokens"] == {"min": 1, "max": 128000, "step": 1}
+    for name, bounds in ranges.items():
+        assert bounds["min"] <= bounds["max"], name
+        assert bounds["step"] > 0, name
+
+    out_of_range = (
+        ("max_tokens", 0),
+        ("timeout_seconds", 4),
+        ("review_concurrency", 99),
+        ("cross_file_max_files", 0),
+        ("max_cost_per_run", -1),
+        ("max_cost_per_24h", 1001),
+    )
+    for name, bad in out_of_range:
+        bounds = NUMERIC_FIELD_RANGES[name]
+        result = apply_config_update(config, {name: bad}, config_path=target)
+
+        assert result.ok is False, (name, bad, result.message)
+        assert result.message.startswith(f"invalid value for {name}"), result.message
+        assert f"{bounds['min']}~{bounds['max']}" in result.message
+        assert result.changed == []
+        assert not target.exists(), (name, bad)
+    assert config.ai_client.max_tokens == 4096, "被拒的载荷不许改内存"
+
+    for payload in (
+        {"max_tokens": 1},
+        {"max_tokens": 128000},
+        {"timeout_seconds": "30"},
+        {"max_cost_per_24h": 1000},
+    ):
+        result = apply_config_update(config, payload, config_path=target)
+
+        assert result.ok is True, (payload, result.message)
+        assert set(payload) <= set(result.changed), (payload, result.changed)
+
+    saved = json.loads(target.read_text(encoding="utf-8"))
+    assert saved["ai_client"]["max_tokens"] == 128000
+    assert saved["ai_client"]["max_cost_per_24h"] == 1000

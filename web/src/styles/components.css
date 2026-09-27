@@ -1172,3 +1172,154 @@ input[type='checkbox']:checked { outline: 2px solid rgba(103, 153, 254, 0.35); o
 .report-actions-footnote { color:var(--ds-color-text-placeholder); font-size:var(--ds-text-3xs); line-height:1.6; }
 .report-actions-footnote code { font-family:var(--ds-font-mono); }
 @media (max-width:620px){ .report-actions-head{flex-direction:column} }
+
+
+/* ========================= U1 · 键盘焦点可见（p2-ux） =========================
+   统一 button / select / input / [role=button] / a 的 :focus-visible 描边：
+   2px outline + 2px offset，颜色走 design token；鼠标点击（:focus:not(:focus-visible)）
+   不显示描边。选择器带 .input/.select 以盖过既有 .input:focus/.select:focus 的 outline:none。 */
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+.input:focus-visible,
+.select:focus-visible,
+[role='button']:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--ds-color-brand);
+  outline-offset: 2px;
+}
+button:focus:not(:focus-visible),
+select:focus:not(:focus-visible),
+input:focus:not(:focus-visible),
+.input:focus:not(:focus-visible),
+.select:focus:not(:focus-visible),
+[role='button']:focus:not(:focus-visible),
+a:focus:not(:focus-visible) {
+  outline: none;
+}
+
+
+/* ========================= U3 · 窄屏（390px）导航不截断（p2-ux） =========================
+   只改 CSS：≤720px 时侧栏变顶部横向条（品牌 + 图标 + 可横滑导航），状态栏可换行且
+   不截断文字；根/壳层防横向溢出，保证 390px 下 scrollWidth ≤ 视口宽。 */
+@media (max-width: 720px) {
+  html, body {
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+  .workspace-shell {
+    display: block;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+  .workspace-content {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    padding-left: 0;
+  }
+
+  /* 侧栏 → 顶部横向条 */
+  .workspace-sidebar {
+    position: sticky;
+    top: 0;
+    inset: auto;
+    width: 100%;
+    max-width: 100%;
+    max-height: none;
+    height: auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    overflow: hidden;
+    border-right: 0;
+    border-bottom: 1px solid var(--ds-color-border-subtle);
+  }
+  .sidebar-brand {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 0;
+    padding: 0 8px 0 0;
+    align-self: center;
+  }
+  .sidebar-brand-text small,
+  .sidebar-section-label,
+  .sidebar-bottom {
+    display: none;
+  }
+  .sidebar-nav {
+    flex: 1 1 auto;
+    display: flex;
+    gap: 4px;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .sidebar-nav::-webkit-scrollbar { display: none; }
+  .sidebar-nav-item {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    min-height: 34px;
+    padding: 0 10px;
+  }
+  /* 图标保留（品牌 + 图标 + 可横滑） */
+  .sidebar-icon {
+    display: inline-flex;
+    flex: none;
+    width: 16px;
+    height: 16px;
+    margin-right: 2px;
+  }
+
+  /* 状态栏：允许换行，不截断文字 */
+  .workspace-statusbar {
+    position: sticky;
+    left: auto;
+    right: auto;
+    top: 0;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 8px 12px;
+    min-height: 0;
+    padding: 8px 12px;
+    max-width: 100%;
+  }
+  .statusbar-left,
+  .statusbar-right {
+    flex-wrap: wrap;
+    min-width: 0;
+    max-width: 100%;
+    gap: 8px 10px;
+  }
+  .statusbar-kicker { display: none; }
+  .statusbar-title {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+  .statusbar-model {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+  .statusbar-health {
+    white-space: nowrap;
+    flex: 0 0 auto;
+  }
+
+  /* 内容区防横向溢出 */
+  .workspace-content .main {
+    padding-top: 28px;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+  .workspace-content .container {
+    max-width: 100%;
+    min-width: 0;
+  }
+}
