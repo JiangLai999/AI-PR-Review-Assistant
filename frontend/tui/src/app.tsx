@@ -5197,12 +5197,65 @@ export function App() {
       const previous = sessionId()
       const snapshot = await backend.request("config.snapshot", {}, { timeoutMs: PROBE_TIMEOUT_MS })
       if (!snapshot.ok) throw new Error(snapshot.error?.message ?? "无法读取后端配置")
-      const created = await backend.request("session.create", {}, { timeoutMs: PROBE_TIMEOUT_MS })
-      if (!created.ok) throw new Error(created.error?.message ?? "无法恢复 Chat 会话")
-      const next = String(created.result.session_id)
+      // A-P1 契约 v1：`session.create` 已是「**新建并切换**」——不再是无条件的
+      // "确保有一个"。非强制路径先查已有会话：有就 `switch` 回最近一个（会话已
+      // 持久化，重启也能接上），没有才新建；否则每次打开 chat 都会多出一个空
+      // 会话，列表越堆越多（用户实测反馈）。
+      // `force=true` 仅由 `sendWithSessionRecovery` 在 `not_found` 时使用——那时
+      // 会话真的没了，强制新建才是对的行为。
+      let next = ""
+      let restored: Array<{
+        role?: string
+        content?: string
+        thinking?: string
+        timestamp?: string
+      }> = []
+      let restoredTitle = ""
+      if (!force) {
+        try {
+          const listed = await backend.request("session.list", {}, { timeoutMs: PROBE_TIMEOUT_MS })
+          if (listed.ok) {
+            const parsedList = parseSessionListResult(listed.result)
+            const target = parsedList?.current || parsedList?.sessions[0]?.id
+            if (target) {
+              const switched = await backend.request(
+                "session.switch",
+                { session_id: target },
+                { timeoutMs: PROBE_TIMEOUT_MS },
+              )
+              if (switched.ok) {
+                const parsedSwitch = parseSessionSwitchResult(switched.result)
+                next = target
+                restored = parsedSwitch?.messages ?? []
+                restoredTitle = parsedSwitch?.session?.title ?? ""
+              }
+            }
+          }
+        } catch {
+          // 旧后端没有 session.list/switch：回落到下面的 create（保持兼容）。
+        }
+      }
+      if (!next) {
+        const created = await backend.request("session.create", {}, { timeoutMs: PROBE_TIMEOUT_MS })
+        if (!created.ok) throw new Error(created.error?.message ?? "无法恢复 Chat 会话")
+        next = String(created.result.session_id)
+      }
       const configuration = snapshot.result as RuntimeSnapshot
       setRuntime(configuration)
       setSessionId(next)
+      if (restoredTitle) setSessionTitle(restoredTitle)
+      if (restored.length > 0) {
+        // 恢复的会话要把历史渲染回消息区（与 switchToSession 同一套重建规则）。
+        setMessages(
+          restored.map((message, index) => ({
+            id: `rs-${index + 1}`,
+            role: message.role === "user" ? ("user" as const) : ("assistant" as const),
+            content: message.content ?? "",
+            thinking: message.thinking,
+            timestamp: message.timestamp ?? localHHMM(),
+          })),
+        )
+      }
       for (const warning of configuration.configuration_warnings ?? []) {
         appendMessage({ role: "assistant", content: `配置提示：${warning}` })
       }
@@ -5231,7 +5284,15 @@ export function App() {
         setReviewReport({})
         setFindingsOpen(false)
         setErrorMessage("")
-        appendMessage({ role: "assistant", content: "后端已重启，旧会话上下文和当前报告无法自动恢复；已建立新会话。历史审查可使用 /history 查看。" })
+        // 会话已持久化（A-P1）：能恢复就说恢复，恢复不了才说新建——文案不再
+        // 一律宣称"无法自动恢复"（那会让用户以为历史丢了）。
+        appendMessage({
+          role: "assistant",
+          content:
+            restored.length > 0
+              ? `后端已重启，已恢复会话「${restoredTitle || "未命名"}」的历史记录；当前报告已重置，可用 /report 或 /history 重新载入。`
+              : "后端已重启，未找到可恢复的历史会话；已建立新会话。历史审查可使用 /history 查看。",
+        })
       }
       return next
     })()
@@ -5961,7 +6022,4 @@ export function App() {
     </box>
   )
 }
-
-
-
 
