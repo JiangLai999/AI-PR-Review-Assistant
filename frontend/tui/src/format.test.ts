@@ -15,6 +15,7 @@ import {
   formatEffortBadge,
   formatMessageMetrics,
   formatOutputLength,
+  formatReviewBudgetCapHint,
   formatReviewEffortCost,
   formatReviewEffortDisabled,
   formatThinkLevel,
@@ -22,7 +23,9 @@ import {
   formatThinkUnsupported,
   formatTokenCount,
   overBudgetTip,
+  REVIEW_BUDGET_CAP_MAX_OUTPUT,
   reviewEffortBilingualLabel,
+  reviewSlotMaxOutput,
   spinnerFrame,
   splitFoldableMarkdown,
   thinkingPlaceholder,
@@ -413,4 +416,69 @@ test("review effort bilingual label splits on the backend's zh / en separator", 
   expect(reviewEffortBilingualLabel("关闭 / Off（不思考，默认）", "en-US")).toBe("Off（不思考，默认）")
   expect(reviewEffortBilingualLabel("NoSeparator", "zh-CN")).toBe("NoSeparator")
   expect(reviewEffortBilingualLabel("", "zh-CN")).toBe("")
+})
+
+// ---------------------------------------------------------------------
+// 小 max_output × high/max 封顶提示（docs/mimo-review-budget-hint.md）
+// ---------------------------------------------------------------------
+
+test("review budget cap hint triggers only on high/max with a small max_output", () => {
+  // 阈值内 + high/max → 有提示
+  expect(formatReviewBudgetCapHint(8192, "high", "zh-CN")).toContain("封顶")
+  expect(formatReviewBudgetCapHint(8192, "max", "zh-CN")).toContain("封顶")
+  expect(formatReviewBudgetCapHint(4096, "high", "zh-CN")).toContain("4096")
+  expect(formatReviewBudgetCapHint(REVIEW_BUDGET_CAP_MAX_OUTPUT, "max", "zh-CN")).toContain("封顶")
+  // 阈值外 → 无提示
+  expect(formatReviewBudgetCapHint(384000, "max", "zh-CN")).toBe("")
+  expect(formatReviewBudgetCapHint(32768, "high", "zh-CN")).toBe("")
+  expect(formatReviewBudgetCapHint(REVIEW_BUDGET_CAP_MAX_OUTPUT + 1, "max", "zh-CN")).toBe("")
+})
+
+test("review budget cap hint is silent for off/low/auto and missing max_output", () => {
+  expect(formatReviewBudgetCapHint(8192, "off", "zh-CN")).toBe("")
+  expect(formatReviewBudgetCapHint(8192, "low", "zh-CN")).toBe("")
+  expect(formatReviewBudgetCapHint(8192, "auto", "zh-CN")).toBe("")
+  expect(formatReviewBudgetCapHint(8192, undefined, "zh-CN")).toBe("")
+  expect(formatReviewBudgetCapHint(8192, "", "zh-CN")).toBe("")
+  expect(formatReviewBudgetCapHint(undefined, "high", "zh-CN")).toBe("")
+  expect(formatReviewBudgetCapHint(undefined, "max", "zh-CN")).toBe("")
+  expect(formatReviewBudgetCapHint(NaN, "high", "zh-CN")).toBe("")
+  expect(formatReviewBudgetCapHint(Infinity, "max", "zh-CN")).toBe("")
+})
+
+test("review budget cap hint copy is bilingual and names the actual limit", () => {
+  const zh = formatReviewBudgetCapHint(8192, "high", "zh-CN")
+  expect(zh).toContain("8192")
+  expect(zh).toContain("封顶")
+  expect(zh).toContain("low")
+  const en = formatReviewBudgetCapHint(4096, "max", "en-US")
+  expect(en).toContain("4096")
+  expect(en).toContain("capped")
+  expect(en).toContain("low")
+  // 默认语言 = 中文
+  expect(formatReviewBudgetCapHint(8192, "max")).toContain("封顶")
+})
+
+test("reviewSlotMaxOutput reads the review slot's max_output from model spec slots", () => {
+  const spec = {
+    max_output: 384000,
+    slots: {
+      remote: { max_output: 8192 },
+      local: { max_output: 4096 },
+    },
+  }
+  expect(reviewSlotMaxOutput("remote", spec)).toBe(8192)
+  expect(reviewSlotMaxOutput("local", spec)).toBe(4096)
+  expect(reviewSlotMaxOutput("REMOTE", spec)).toBe(8192)
+  // hybrid / 未知 / 缺槽 → undefined（不显示提示）
+  expect(reviewSlotMaxOutput("hybrid", spec)).toBeUndefined()
+  expect(reviewSlotMaxOutput("unknown", spec)).toBeUndefined()
+  expect(reviewSlotMaxOutput(undefined, spec)).toBeUndefined()
+  expect(reviewSlotMaxOutput("", spec)).toBeUndefined()
+  // 缺 slots（旧后端）→ undefined，绝不回落到顶层 max_output
+  expect(reviewSlotMaxOutput("remote", { max_output: 384000 })).toBeUndefined()
+  expect(reviewSlotMaxOutput("local", { max_output: 384000 })).toBeUndefined()
+  expect(reviewSlotMaxOutput("remote", undefined)).toBeUndefined()
+  // 槽块缺 max_output 字段 → undefined
+  expect(reviewSlotMaxOutput("remote", { slots: { remote: {} } })).toBeUndefined()
 })

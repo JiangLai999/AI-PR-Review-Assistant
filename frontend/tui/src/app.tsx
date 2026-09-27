@@ -41,6 +41,7 @@ import {
   formatMessageMetrics,
   formatModelHeadline,
   formatNeedsVerification,
+  formatReviewBudgetCapHint,
   formatReviewEffortCost,
   formatReviewEffortDisabled,
   formatSourceBadge,
@@ -51,6 +52,7 @@ import {
   type MarkdownSegment,
   overBudgetTip,
   reviewEffortBilingualLabel,
+  reviewSlotMaxOutput,
   splitFoldableMarkdown,
   thinkingPlaceholder,
   truncateMiddle,
@@ -1852,6 +1854,15 @@ export function SetupWizardDialog(props: SetupDialogProps) {
   const selectedWorkbenchMode = () => workbenchModes()[workbenchIndex()]?.value ?? "auto"
   const selectedRepoContext = () => repoContextValue(repoContexts(), repoContextIndex())
   const selectedReviewEffort = () => reviewEffortValue(reviewEfforts(), reviewEffortIndex())
+  /**
+   * review 槽模型的 `max_output`（`config.options.model.slots[routing.review.slot].max_output`）。
+   * hybrid / 旧后端缺字段时为 undefined —— 提示不显示（兼容 + 不打扰）。
+   */
+  const reviewSlotOutputLimit = () =>
+    reviewSlotMaxOutput(options()?.routing?.review?.slot, modelSpec())
+  /** 小 max_output × high/max 的封顶提示；空串 = 不显示。 */
+  const reviewBudgetCapHint = () =>
+    formatReviewBudgetCapHint(reviewSlotOutputLimit(), selectedReviewEffort(), uiLanguage())
   const autoPublish = () => autoPublishIndex() === 0
   const remoteKeyConfigured = () =>
     options()?.current.remote_api_key_configured ?? options()?.current.api_key_configured ?? false
@@ -2895,6 +2906,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
         review 思考档位（docs/mimo-review-effort-ui.md）。选项清单/label 来自后端
         `config.options.review_reasoning_effort`（缺字段用兜底表）；成本提示独立一行，
         用户选哪一档就看到哪一档的代价。后端 state=unsupported 时置灰 + 原因。
+        小 max_output × high/max 时追加封顶提示（docs/mimo-review-budget-hint.md）。
       */}
       <Show when={!loading() && screen() === "review_effort"}>
         <box marginTop={1} flexGrow={1}>
@@ -2931,6 +2943,9 @@ export function SetupWizardDialog(props: SetupDialogProps) {
           >
             {formatReviewEffortCost(selectedReviewEffort(), uiLanguage())}
           </text>
+          <Show when={!reviewEffortIsDisabled(reviewEffortBlock()) && reviewBudgetCapHint()}>
+            <text fg="#ffd0bb">{reviewBudgetCapHint()}</text>
+          </Show>
         </box>
       </Show>
       {/*

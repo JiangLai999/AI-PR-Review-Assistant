@@ -694,3 +694,65 @@ export function formatReviewEffortSummary(level: string | undefined, language?: 
   const cost = formatReviewEffortCost(name, language)
   return cost ? `${name} · ${cost}` : name
 }
+
+// ---------------------------------------------------------------------
+// 小 max_output 模型上高档位思考预算被封顶的提示（docs/mimo-review-budget-hint.md）
+// ---------------------------------------------------------------------
+
+/**
+ * 「高档位思考预算被封顶」提示的 `max_output` 阈值（**含**）。
+ *
+ * 理由（docs/review-reasoning-assessment.md §10.7 #3）：max 档预留 +12000、high +8000，
+ * 加上答案基础额度（4096–8192），总需求约 16k–20k。16384 是业界常见的小输出上限档
+ * （anthropic claude-sonnet 8192、glm 系 4096、gpt-4o-mini 16384），落在这个区间内
+ * high/max 的预留几乎必然被 `max_output` 封顶吃掉。比 8192 更保守：8192 以下 high
+ * 也会被封顶，但 12288–16384 之间 max 仍会被吃掉——用 16384 一并覆盖。
+ */
+export const REVIEW_BUDGET_CAP_MAX_OUTPUT = 16384
+
+/**
+ * 小 `max_output` 模型上 high/max 档思考预算被封顶的提示（docs/mimo-review-budget-hint.md）。
+ *
+ * 只在**同时**满足两条时返回非空文案：
+ * 1. `max_output` 是有限数字且 ≤ `REVIEW_BUDGET_CAP_MAX_OUTPUT`；
+ * 2. 当前档位是 `high` 或 `max`（off/low/auto 不预留或预留较小，不打扰）。
+ *
+ * 缺字段（旧后端 / 不可知）返回空串——兼容 + 不打扰。
+ */
+export function formatReviewBudgetCapHint(
+  maxOutput: number | undefined,
+  level: string | undefined,
+  language?: string,
+): string {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  const key = String(level ?? "").trim().toLowerCase()
+  if (key !== "high" && key !== "max") return ""
+  if (typeof maxOutput !== "number" || !Number.isFinite(maxOutput)) return ""
+  if (maxOutput > REVIEW_BUDGET_CAP_MAX_OUTPUT) return ""
+  const n = String(maxOutput)
+  return en
+    ? `This model caps output at ${n}; the thinking budget for high tiers will be capped. Prefer low or switch models.`
+    : `该模型输出上限 ${n}，高档位的思考预算会被封顶；建议 low 或更换模型`
+}
+
+/**
+ * review 槽模型的 `max_output`（`config.options.model.slots[slot].max_output`）。
+ *
+ * `slot` 来自 `config.options.routing.review.slot`（`remote` | `local` | `hybrid`）。
+ * hybrid / 未知槽无法指向单一模型，返回 undefined（不显示提示）；`slots` 缺字段
+ * （旧后端）同样返回 undefined——缺字段不显示，绝不回落到活跃槽的值。
+ */
+export function reviewSlotMaxOutput(
+  slot: string | undefined,
+  spec:
+    | {
+        max_output?: number
+        slots?: { remote?: { max_output?: number }; local?: { max_output?: number } }
+      }
+    | undefined,
+): number | undefined {
+  const key = String(slot ?? "").trim().toLowerCase()
+  if (key === "remote") return spec?.slots?.remote?.max_output
+  if (key === "local") return spec?.slots?.local?.max_output
+  return undefined
+}

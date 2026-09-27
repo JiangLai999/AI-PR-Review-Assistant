@@ -975,6 +975,63 @@ async function reviewEffortScreen() {
   } finally {
     legacy.view.renderer.destroy()
   }
+
+  // 小 max_output × high/max：封顶提示出现。
+  console.log("\n[H6] 小 max_output（8192）× max → 封顶提示出现")
+  const capped = await openWizard("zh-CN", {
+    review_reasoning_effort: reviewEffortFixture(),
+    model: modelSpecFixture(),
+  })
+  try {
+    await advance(capped.view, /审查思考档位/, 20)
+    // ↓×3 到 max
+    for (let i = 0; i < 3; i += 1) capped.view.mockInput.pressArrow("down")
+    await settle(capped.view)
+    const frame = capped.view.captureCharFrame()
+    console.log(dumpFrame(frame, "review-budget-cap-hint-zh"))
+    check(/封顶/.test(frame), "小 max_output × max：显示封顶提示")
+    check(/8192/.test(frame), "提示里带出实际输出上限 8192")
+    check(/low 或更换模型/.test(frame), "提示给出 low 或更换模型的建议")
+  } finally {
+    capped.view.renderer.destroy()
+  }
+
+  // 小 max_output × off：不提示（不打扰）。
+  console.log("\n[H7] 小 max_output × off → 不显示封顶提示")
+  const smallOff = await openWizard("zh-CN", {
+    review_reasoning_effort: reviewEffortFixture(),
+    model: modelSpecFixture(),
+  })
+  try {
+    const frame = await advance(smallOff.view, /审查思考档位/, 20)
+    console.log(dumpFrame(frame, "review-budget-cap-off-zh"))
+    check(!/封顶/.test(frame), "off 档不显示封顶提示")
+  } finally {
+    smallOff.view.renderer.destroy()
+  }
+
+  // 大 max_output × max：不提示。
+  console.log("\n[H8] 大 max_output（384000）× max → 不显示封顶提示")
+  const roomy = await openWizard("zh-CN", {
+    review_reasoning_effort: reviewEffortFixture(),
+    model: modelSpecFixture({
+      max_output: 384000,
+      slots: {
+        remote: { provider: "deepseek", model: "deepseek-flash", max_output: 384000 },
+        local: { provider: "ollama", model: "qwen3.5:4b", max_output: 4096 },
+      },
+    }),
+  })
+  try {
+    await advance(roomy.view, /审查思考档位/, 20)
+    for (let i = 0; i < 3; i += 1) roomy.view.mockInput.pressArrow("down")
+    await settle(roomy.view)
+    const frame = roomy.view.captureCharFrame()
+    console.log(dumpFrame(frame, "review-budget-cap-roomy-zh"))
+    check(!/封顶/.test(frame), "大 max_output × max 不显示封顶提示")
+  } finally {
+    roomy.view.renderer.destroy()
+  }
 }
 
 async function main() {
