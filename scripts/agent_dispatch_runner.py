@@ -57,7 +57,7 @@ POLL_SECONDS = 5
 # "the log has not grown for N seconds" — a real one was found this way at
 # 21:44-21:52 (0% CPU, no output, no file changes).
 # 这些 CLI 会持续往 stdout 打进度，因此"日志 N 秒没长"可以判为卡住
-VERBOSE_AGENTS = {"mimo", "codex", "opencode"}
+VERBOSE_AGENTS = {"mimo", "codex", "opencode", "workbuddy"}
 STALL_SECONDS = 600
 # 每 N 秒打印一次"日志多久没长"的心跳，便于事后判断卡住检测到底有没有跑
 HEARTBEAT_SECONDS = 120
@@ -78,6 +78,21 @@ CODEX_CANDIDATES = (
 OPENCODE_CANDIDATES = (
     pathlib.Path(os.environ.get("APPDATA", ""))
     / "npm/node_modules/opencode-ai/bin/opencode.exe",
+)
+# WorkBuddy 自带 headless agent CLI（Electron 应用 resources 下的 codebuddy）。
+# 入口是 Node 脚本，所以命令行是 `node <cli>/bin/codebuddy ...`。
+# 可用 WORKBUDDY_CLI 覆盖入口路径、WORKBUDDY_MODEL 覆盖模型（例如 deepseek 系）。
+WORKBUDDY_CANDIDATES = (
+    pathlib.Path(os.environ.get("WORKBUDDY_CLI", ""))
+    if os.environ.get("WORKBUDDY_CLI")
+    else pathlib.Path(r"G:\workbuddy\resources\app.asar.unpacked\cli\bin\codebuddy"),
+    pathlib.Path(os.environ.get("APPDATA", "")) / "npm/node_modules/@genie/agent-cli/bin/codebuddy",
+    pathlib.Path(os.environ.get("APPDATA", "")) / "npm/codebuddy.cmd",
+)
+# 该 CLI 是 Node 脚本；_find_exe 找不到候选时会回落到 PATH 上的 node。
+NODE_CANDIDATES = (
+    pathlib.Path(os.environ.get("ProgramFiles", "")) / "nodejs/node.exe",
+    pathlib.Path(os.environ.get("LOCALAPPDATA", "")) / "Programs/nodejs/node.exe",
 )
 # 用户指定的协作模型（provider/model 形式，opencode 必须显式给 -m，否则用默认模型）
 OPENCODE_MODEL = "opencode/mimo-v2.6-flash-free"
@@ -193,6 +208,28 @@ def _agent_command(
             OPENCODE_MODEL,
             prompt,
         ], env
+    if agent == "workbuddy":
+        # WorkBuddy（腾讯 CodeBuddy 系）自带的 headless CLI：`-p` 非交互输出、
+        # `-y` 跳过权限确认（本地受控环境 + 任务 write_scope 约束）、
+        # `--output-format stream-json` 让日志持续增长，从而启用失速检测。
+        # 模型默认走账号配置；需要固定模型时设 WORKBUDDY_MODEL（如 deepseek 系）。
+        cli = _find_exe(WORKBUDDY_CANDIDATES, "codebuddy")
+        node = _find_exe(NODE_CANDIDATES, "node")
+        if cli is None or node is None:
+            return None
+        command = [
+            node,
+            cli,
+            "-p",
+            prompt,
+            "--dangerously-skip-permissions",
+            "--output-format",
+            "stream-json",
+        ]
+        model = os.environ.get("WORKBUDDY_MODEL", "").strip()
+        if model:
+            command += ["--model", model]
+        return command, env
     return None
 
 

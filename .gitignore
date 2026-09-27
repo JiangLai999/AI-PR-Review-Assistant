@@ -72,3 +72,4 @@ _p5_verify/
 
 # Raw transcripts from delegated agent CLIs
 _agent_out/
+.pytest_workbuddy/

@@ -302,9 +302,13 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init")
     d = sub.add_parser("dispatch")
-    # 协作执行器：claude / mimo / codex(GLM) / opencode(MiMo-V2.6-Flash-Free)
+    # 协作执行器：claude / mimo / codex(GLM) / opencode(MiMo-V2.6-Flash-Free) /
+    # workbuddy（WorkBuddy 自带 codebuddy headless CLI；模型走账号默认，可用
+    # WORKBUDDY_MODEL 环境变量覆盖）
     d.add_argument(
-        "--agent", choices=("claude", "mimo", "codex", "opencode"), required=True
+        "--agent",
+        choices=("claude", "mimo", "codex", "opencode", "workbuddy"),
+        required=True,
     )
     d.add_argument("--task-id", default=None)
     d.add_argument("--objective", required=True)
