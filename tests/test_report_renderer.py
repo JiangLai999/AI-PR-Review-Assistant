@@ -931,3 +931,199 @@ def test_cli_comment_report_reads_the_filter_audit_from_the_run_artifacts():
     body = render_github_comment_report(artifacts, config)
 
     assert "已审查 2/2 个文件 · 置信度门槛 0.60 · 低于门槛过滤 1 条 · 去重 0 条" in body
+
+
+# --- Follow-up Q&A section (p5b): optional, appended last, questions never lose
+# their verbatim Markdown because the report is the only place a run's follow-ups
+# are archived alongside the review they belong to. ---
+
+_CHAT_TURNS = [
+    {
+        "turn_id": 1,
+        "turn_index": 1,
+        "role": "user",
+        "content": "第 45 行的注入是真的吗？",
+        "model": "",
+        "usage": {},
+        "context_meta": {},
+        "duration_ms": None,
+        "created_at": "2026-09-20 09:12:03",
+    },
+    {
+        "turn_id": 2,
+        "turn_index": 2,
+        "role": "assistant",
+        "content": "是真的，**user_id** 直接拼进了 SQL。",
+        "model": "deepseek-flash",
+        "usage": {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150},
+        "context_meta": {"bound_run": "run-12345678"},
+        "duration_ms": 1820,
+        "created_at": "2026-09-20 09:12:05",
+    },
+    {
+        "turn_id": 3,
+        "turn_index": 3,
+        "role": "user",
+        "content": "那第二个问题呢？",
+        "model": "",
+        "usage": {},
+        "context_meta": {},
+        "duration_ms": None,
+        "created_at": "2026-09-20 09:13:01",
+    },
+    {
+        "turn_id": 4,
+        "turn_index": 4,
+        "role": "assistant",
+        "content": "错误处理缺失是次要问题。",
+        "model": "deepseek-flash",
+        "usage": {"prompt_tokens": 90, "completion_tokens": 12},
+        "context_meta": {},
+        "duration_ms": 640,
+        "created_at": "2026-09-20 09:13:02",
+    },
+]
+
+
+def test_render_markdown_omits_the_follow_up_section_by_default():
+    """回归保护：默认调用不传 chat_turns，报告里不得凭空出现追问小节。"""
+    output = ReportRenderer().render_markdown(build_review_result(), build_pr_data())
+
+    assert "Follow-up Q&A" not in output
+    assert "追问记录" not in output
+    assert "Q1." not in output
+    assert output == ReportRenderer().render_markdown(
+        build_review_result(), build_pr_data(), chat_turns=[]
+    )
+
+
+def test_render_markdown_appends_one_section_per_run_with_role_prefixes():
+    output = ReportRenderer().render_markdown(
+        build_review_result(), build_pr_data(), chat_turns=_CHAT_TURNS
+    )
+
+    assert "## Follow-up Q&A" in output
+    assert "**Q1.** Question" in output and "**A1.** Answer" in output
+    assert "第 45 行的注入是真的吗？" in output
+    assert "是真的，**user_id** 直接拼进了 SQL。" in output
+    assert "**Q2.** Question" in output and "**A2.** Answer" in output
+    assert "错误处理缺失是次要问题。" in output
+    # 小节在报告末尾，且一轮与下一轮之间用 `---` 分隔。
+    assert output.index("## Follow-up Q&A") > output.index("## High Findings")
+    assert output.index("---") > output.index("## Follow-up Q&A")
+    assert output.rstrip().endswith("错误处理缺失是次要问题。")
+
+
+def test_render_markdown_chat_meta_line_carries_turn_model_duration_tokens_and_time():
+    output = ReportRenderer().render_markdown(
+        build_review_result(), build_pr_data(), chat_turns=_CHAT_TURNS
+    )
+
+    assert (
+        "- **Turn 1** · **Model** `deepseek-flash` · **Duration** 1.82s · "
+        "**Tokens** 150 · **Asked at** 2026-09-20 09:12:05"
+    ) in output
+    # 没有 total_tokens 时用 prompt+completion 求和，而不是显示空括号。
+    assert (
+        "- **Turn 2** · **Model** `deepseek-flash` · **Duration** 0.64s · **Tokens** 102" in output
+    )
+
+
+def test_render_markdown_chat_meta_line_omits_every_absent_field():
+    """缺 duration_ms / usage 的轮次不崩、不填 0，也不留下空括号。"""
+    output = ReportRenderer().render_markdown(
+        build_review_result(),
+        build_pr_data(),
+        chat_turns=[{"role": "assistant", "content": "没有元信息的回答。"}],
+    )
+
+    assert "- **Turn 1**" in output
+    assert "Duration" not in output
+    assert "Tokens" not in output
+    assert "Asked at" not in output
+    assert "0.00s" not in output
+    assert "()" not in output
+    assert "没有元信息的回答。" in output
+
+
+def test_render_markdown_skips_turns_whose_content_is_empty():
+    output = ReportRenderer().render_markdown(
+        build_review_result(),
+        build_pr_data(),
+        chat_turns=[
+            {"role": "user", "content": "有效提问", "model": "deepseek-flash"},
+            {"role": "assistant", "content": "   "},
+            {"role": "assistant", "content": "有效回答。"},
+        ],
+    )
+
+    assert "**Q1.** Question" in output and "**A1.** Answer" in output
+    assert "Q2." not in output
+    assert "## Follow-up Q&A" in output
+
+
+def test_render_markdown_omits_the_follow_up_section_when_every_turn_is_empty():
+    output = ReportRenderer().render_markdown(
+        build_review_result(),
+        build_pr_data(),
+        chat_turns=[{"role": "user", "content": ""}, {"role": "assistant", "content": ""}],
+    )
+
+    assert "Follow-up Q&A" not in output
+    assert "追问记录" not in output
+
+
+def test_render_markdown_follow_up_section_follows_the_interface_language():
+    output = ReportRenderer().render_markdown(
+        build_review_result(),
+        build_pr_data(),
+        chat_turns=_CHAT_TURNS,
+        language="zh-CN",
+    )
+
+    assert "## 追问记录" in output
+    assert "Follow-up Q&A" not in output
+    assert "**Q1.** 问题" in output and "**A1.** 回答" in output
+    assert (
+        "- **轮次 1** · **模型** `deepseek-flash` · **耗时** 1.82s · "
+        "**Token** 150 · **时间** 2026-09-20 09:12:05"
+    ) in output
+
+
+def test_render_markdown_keeps_answer_markdown_verbatim():
+    answer = '改法：\n\n```python\nquery = "..."\n```\n\n- [x] 加上 `**` 转义检查\n- 1. 重跑'
+    output = ReportRenderer().render_markdown(
+        build_review_result(),
+        build_pr_data(),
+        chat_turns=[{"role": "assistant", "content": answer}],
+    )
+
+    assert answer in output
+    assert "\\*\\*" not in output
+    assert "```python" in output
+
+
+def test_render_markdown_keeps_the_follow_up_section_when_there_are_no_findings():
+    result = build_review_result()
+    result.findings = []
+
+    output = ReportRenderer().render_markdown(result, build_pr_data(), chat_turns=_CHAT_TURNS)
+
+    assert "## Findings\n\nNo findings." in output
+    assert "## Follow-up Q&A" in output
+    assert output.index("## Follow-up Q&A") > output.index("No findings.")
+
+
+def test_render_markdown_template_path_ignores_follow_up_turns():
+    """自定义模板代表整份报告，配置了它就不追加追问小节（避免模板被截断）。"""
+    renderer = ReportRenderer(
+        ReportRendererConfig(markdown_template="# {title}\n\n{findings_markdown}")
+    )
+
+    output = renderer.render_markdown(
+        build_review_result(), build_pr_data(), chat_turns=_CHAT_TURNS
+    )
+
+    assert output == renderer.render_markdown(build_review_result(), build_pr_data())
+    assert "Follow-up Q&A" not in output
+    assert "追问记录" not in output

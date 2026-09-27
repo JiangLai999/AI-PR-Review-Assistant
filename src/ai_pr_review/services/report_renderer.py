@@ -217,6 +217,69 @@ class RenderedReportContext:
     findings_markdown: str
 
 
+#: 追问记录小节的标题。追问是「问题 + 回答」的业务数据，正文原样透传，
+#: 只有小节标题与角色标签跟随 `render_markdown(language=...)`。
+_CHAT_SECTION_TITLE = ("追问记录", "Follow-up Q&A")
+_CHAT_QUESTION_LABELS = ("问题", "Question")
+_CHAT_ANSWER_LABELS = ("回答", "Answer")
+
+
+def _chat_duration(value: object) -> str | None:
+    """把 `duration_ms` 写成 `1.82s`；缺失或非正数返回 None（不显示 0.00s）。"""
+    try:
+        milliseconds = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if milliseconds <= 0:
+        return None
+    return f"{milliseconds / 1000:.2f}s"
+
+
+def _chat_total_tokens(usage: object) -> int | None:
+    """追问这一轮的总 token；`usage` 缺失/为空/为 0 时返回 None（不显示 Token 0）。"""
+    if not isinstance(usage, dict):
+        return None
+    total = usage.get("total_tokens")
+    if total is None:
+        prompt = usage.get("prompt_tokens")
+        completion = usage.get("completion_tokens")
+        if prompt is None and completion is None:
+            return None
+        total = (prompt or 0) + (completion or 0)
+    try:
+        tokens = int(total)
+    except (TypeError, ValueError):
+        return None
+    return tokens if tokens > 0 else None
+
+
+def _chat_rounds(chat_turns: object) -> list[tuple[dict | None, dict | None]]:
+    """把按 `turn_index` 升序的追问记录配成「一轮 = 1 问（可缺） + 1 答（可缺）」。
+
+    每个 user 记录开启新一轮，紧随其后的 assistant 记录作为该轮回答；多余
+    的回答各自成轮，开头的回答也各自成轮。内容为空的记录整条跳过——一条
+    没落库成功的追问不该在报告里留下一个空壳轮次。
+    """
+    if not chat_turns:
+        return []
+    rounds: list[tuple[dict | None, dict | None]] = []
+    for raw in chat_turns:
+        if not isinstance(raw, dict):
+            continue
+        content = str(raw.get("content") or "")
+        if not content.strip():
+            continue
+        turn = dict(raw)
+        turn["content"] = content.strip("\n")
+        if str(turn.get("role") or "") == "user":
+            rounds.append((turn, None))
+        elif rounds and rounds[-1][1] is None:
+            rounds[-1] = (rounds[-1][0], turn)
+        else:
+            rounds.append((None, turn))
+    return rounds
+
+
 class ReportRenderer:
     """将 ReviewResult 渲染为多种报告格式。"""
 
@@ -365,8 +428,17 @@ class ReportRenderer:
         pr_data: PRData,
         *,
         files_changed: int | None = None,
+        chat_turns: list[dict] | None = None,
+        language: str = "en",
     ) -> str:
-        """渲染 Markdown 报告。"""
+        """渲染 Markdown 报告。
+
+        `chat_turns` 取 `ResultStore.list_chat_turns(run_id)` 的行（可选）：
+        非空时在报告末尾追加一节追问记录，`None` / `[]` 时输出与之前逐字一致。
+        `language` 只影响这一节的中英文（其余小节沿用既有英文表述）。
+
+        `markdown_template` 仍然是整份报告，配置了模板时不追加追问小节。
+        """
         context = self._build_context(
             result,
             pr_data,
@@ -399,18 +471,68 @@ class ReportRenderer:
         findings_by_severity = self._group_findings(result.findings)
         if not any(findings_by_severity.values()):
             lines.extend(["## Findings", "", "No findings."])
-            return "\n".join(lines)
+        else:
+            for severity in SEVERITY_ORDER:
+                findings = findings_by_severity[severity]
+                if not findings:
+                    continue
 
-        for severity in SEVERITY_ORDER:
-            findings = findings_by_severity[severity]
-            if not findings:
-                continue
+                lines.extend([f"## {SEVERITY_LABELS[severity]} Findings", ""])
+                for finding in findings:
+                    lines.extend(self._render_markdown_finding(finding, include_code_snippet=True))
 
-            lines.extend([f"## {SEVERITY_LABELS[severity]} Findings", ""])
-            for finding in findings:
-                lines.extend(self._render_markdown_finding(finding, include_code_snippet=True))
-
+        lines.extend(self._render_markdown_chat_turns(chat_turns, language=language))
         return "\n".join(lines)
+
+    def _render_markdown_chat_turns(self, chat_turns: object, *, language: str) -> list[str]:
+        """追问记录小节的行；无追问时返回空列表，调用方因此多一行都不加。"""
+        rounds = _chat_rounds(chat_turns)
+        if not rounds:
+            return []
+        zh = str(language or "").lower().startswith("zh")
+        title, question_label, answer_label = (
+            (_CHAT_SECTION_TITLE[0], _CHAT_QUESTION_LABELS[0], _CHAT_ANSWER_LABELS[0])
+            if zh
+            else (_CHAT_SECTION_TITLE[1], _CHAT_QUESTION_LABELS[1], _CHAT_ANSWER_LABELS[1])
+        )
+        lines = ["", f"## {title}", ""]
+        for index, (question, answer) in enumerate(rounds, start=1):
+            if index > 1:
+                lines.extend(["---", ""])
+            lines.extend([self._chat_meta_line(index, answer or question or {}, zh), ""])
+            if question:
+                lines.extend([f"**Q{index}.** {question_label}", "", str(question["content"]), ""])
+            if answer:
+                lines.extend([f"**A{index}.** {answer_label}", "", str(answer["content"]), ""])
+        return lines
+
+    @staticmethod
+    def _chat_meta_line(index: int, turn: dict, zh: bool) -> str:
+        """回答前的业务元信息行：轮次 / 模型 / 耗时 / 总 token / 时间。
+
+        每一段各自站在自己的字段上：字段缺失就少一段，不留空括号，也不填 0。
+        """
+        labels = {
+            "turn": "轮次" if zh else "Turn",
+            "model": "模型" if zh else "Model",
+            "duration": "耗时" if zh else "Duration",
+            "tokens": "Token" if zh else "Tokens",
+            "time": "时间" if zh else "Asked at",
+        }
+        bits = [f"**{labels['turn']} {index}**"]
+        model = str(turn.get("model") or "").strip()
+        if model:
+            bits.append(f"**{labels['model']}** `{model}`")
+        duration = _chat_duration(turn.get("duration_ms"))
+        if duration:
+            bits.append(f"**{labels['duration']}** {duration}")
+        tokens = _chat_total_tokens(turn.get("usage"))
+        if tokens is not None:
+            bits.append(f"**{labels['tokens']}** {tokens}")
+        created_at = str(turn.get("created_at") or "").strip()
+        if created_at:
+            bits.append(f"**{labels['time']}** {created_at}")
+        return "- " + " · ".join(bits)
 
     def render_json(self, result: ReviewResult, pr_data: PRData) -> str:
         """渲染 JSON 报告。"""

@@ -624,6 +624,11 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
                 result,
                 pr_data,
                 files_changed=files_changed or None,
+                # 追问记录随报告导出（用户已拍板：独立小节）。不传 language =
+                # 沿用默认英文，与报告其余小节一致——整份文档只有一种语言。
+                # GitHub 评论那条路径（render_markdown_report）刻意不传，
+                # 追问内容属于本地审查记录，不对外发布。
+                chat_turns=store.list_chat_turns(run_id),
             )
             filename = f"pr{parsed.pr_number}-{run_id[:8]}.md"
             self._send_download(

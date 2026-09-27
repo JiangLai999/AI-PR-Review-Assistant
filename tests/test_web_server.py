@@ -331,6 +331,33 @@ class TestChatHistory:
         assert status == 200, body
         assert [turn["role"] for turn in payload["chat_turns"]] == ["user", "assistant"]
 
+    def test_markdown_export_includes_the_chat_section(self, server):
+        """用户拍板：追问记录随报告导出（独立小节）。"""
+        self._seed(server)
+
+        status, body = call(
+            server["base"],
+            "GET",
+            f"/api/report/export?run_id={server['run_id']}&format=markdown",
+        )
+
+        assert status == 200, body
+        assert "## Follow-up Q&A" in body
+        assert "这次审查有几个问题？" in body
+        assert "两个。" in body
+
+    def test_markdown_export_without_asks_has_no_chat_section(self, server):
+        """没追问过的 run：导出必须与改造前逐字一致（不出现空小节）。"""
+        status, body = call(
+            server["base"],
+            "GET",
+            f"/api/report/export?run_id={server['run_id']}&format=markdown",
+        )
+
+        assert status == 200, body
+        assert "Follow-up Q&A" not in body
+        assert "追问记录" not in body
+
 
 class TestFeedback:
     def test_feedback_is_recorded(self, server):
