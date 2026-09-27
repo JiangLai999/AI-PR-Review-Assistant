@@ -221,6 +221,10 @@ export function HistoryPage({ onNavigate }: { onNavigate: (page: string) => void
                     key={finding.finding_id || `h-${index}`}
                     finding={finding}
                     runId={report.run_id}
+                    // 历史 run 记录里本来就有这两个字段（list_runs 的 SELECT 带
+                    // head_sha / pr_url），一并传下去，「文件:行」才在历史弹窗里也能点。
+                    prUrl={report.run.pr_url || undefined}
+                    headSha={report.run.head_sha || undefined}
                     index={index}
                     initialFeedback={
                       finding.finding_id ? feedbackMap.get(finding.finding_id) : undefined

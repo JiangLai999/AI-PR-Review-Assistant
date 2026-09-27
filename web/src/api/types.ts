@@ -121,6 +121,8 @@ export interface HistoryRun {
   pr_number?: number
   repo_owner?: string
   repo_name?: string
+  /** `ResultStore.list_runs` 的 SELECT 带这一列；历史弹窗据此拼 GitHub 行锚。 */
+  head_sha?: string
   total_findings?: number
   critical_findings?: number
   high_findings?: number
