@@ -1,10 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import type { ChatContextMeta, ChatTurn } from '../api/types'
-// 同目录有 `markdownLite.ts`（解析器）与 `MarkdownLite.tsx`（组件），大小写不敏感
-// 文件系统上裸写 `./MarkdownLite` 会解析到前者。`.js` 后缀与 MarkdownLite.tsx
-// 锁定解析器的做法对称：这里用 `.jsx` 锁定组件文件本身。
-import { MarkdownLite } from './MarkdownLite.jsx'
+import { CollapsibleText } from './ReviewPanels'
 import { Card, Notice, Spinner, cx } from './ui'
 import { t, useT } from '../i18n'
 
@@ -16,8 +13,10 @@ import { t, useT } from '../i18n'
  * 请求体严格是 `{run_id?, text}`（契约见 docs/claude-web-ask-panel.md），所以
  * `language` 只落到容器的 `lang` 属性上，不会混进请求体。
  *
- * 回答用受限 Markdown 渲染器 `<MarkdownLite>`（无 dangerouslySetInnerHTML，
- * 模型里的 HTML 只会当纯文本），错误分支/截断警告/焦点归还逻辑保持不变。
+ * 回答用受限 Markdown 渲染器（`<CollapsibleText>` 内是 `<MarkdownLite>`，无
+ * dangerouslySetInnerHTML，模型里的 HTML 只会当纯文本）且**每条都能折叠**：
+ * 长回答默认折起，短回答默认展开但也留折叠控件。错误分支/截断警告/焦点归还
+ * 逻辑保持不变。
  */
 type Phase = 'idle' | 'asking' | 'answered' | 'failed'
 
@@ -457,7 +456,9 @@ export function AskPanel({
                   </Notice>
                 )}
                 <div className="ask-panel-answer">
-                  <MarkdownLite text={turn.answer} />
+                  {/* 每条回答都可折叠（用户明确要求「无论文本大小均可折叠」）；
+                      历史回填的轮次与现场提问走的是同一个分支，行为一致。 */}
+                  <CollapsibleText text={turn.answer} />
                 </div>
                 <div className="ask-panel-meta">
                   <span>

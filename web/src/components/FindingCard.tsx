@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useGSAP } from '@gsap/react'
 import gsap from 'gsap'
 import type { FeedbackStatus, Finding } from '../api/types'
@@ -6,6 +6,7 @@ import { api } from '../api/client'
 // `.jsx` 后缀是**必须的**：同目录下 `markdownLite.ts` 与 `MarkdownLite.tsx` 只差大小写，
 // 在大小写不敏感的文件系统（Windows）上写 `./MarkdownLite` 会解析到前者。与 AskPanel 一致。
 import { MarkdownLite } from './MarkdownLite.jsx'
+import { blobUrl, diffAnchorUrl } from './findingLinks'
 import { Chip, EvidenceBadge, SeverityBadge, cx } from './ui'
 import { useT } from '../i18n'
 
@@ -36,45 +37,9 @@ const LANG_BY_EXT: Record<string, string> = {
   markdown: 'markdown',
 }
 
-/** GitHub commit SHA：只认十六进制（7~40 位）。`unknown` 之类一律不拼链接。 */
-const SHA_RE = /^[0-9a-f]{7,40}$/i
-
 function sourceLabel(sources?: string[]): string {
   if (!sources?.length) return 'ai_analysis'
   return sources.join(' + ')
-}
-
-/** `https://github.com/o/r/pull/12` → `https://github.com/o/r`；不是 PR 链接则返回 null。 */
-function repoRoot(prUrl?: string): string | null {
-  const match = /^(https?:\/\/[^/]+\/[^/]+\/[^/]+)\/pull\/\d+/.exec(prUrl?.trim() ?? '')
-  return match ? match[1] : null
-}
-
-/**
- * 拼 GitHub blob 行锚；**要么给出完整链接、要么 null**（调用方降级成纯文本）。
- *
- * prUrl / headSha / 文件名 / 起始行任一缺失或不可信，就不拼半个链接 —— 半个链接比
- * 没有链接更糟（点了 404 还不知道是页面错了还是行号错了）。`runId` 不参与拼接
- * （URL 里没有它），因此不作为可点条件：计划模式的 demo 结果没有 run 也应该能跳。
- */
-function blobUrl(
-  prUrl: string | undefined,
-  headSha: string | undefined,
-  file: string,
-  lineStart: number,
-  lineEnd: number,
-): string | null {
-  const root = repoRoot(prUrl)
-  const sha = headSha?.trim() ?? ''
-  if (!root || !SHA_RE.test(sha)) return null
-  if (!file.trim() || !Number.isInteger(lineStart) || lineStart <= 0) return null
-  const path = file
-    .split('/')
-    .map((segment) => encodeURIComponent(segment))
-    .join('/')
-  const anchor =
-    Number.isInteger(lineEnd) && lineEnd > lineStart ? `#L${lineStart}-L${lineEnd}` : `#L${lineStart}`
-  return `${root}/blob/${sha.toLowerCase()}/${path}${anchor}`
 }
 
 function codeLang(file: string): string {
@@ -107,6 +72,7 @@ export function FindingCard({
   initialFeedback,
   prUrl,
   headSha,
+  prNumber,
 }: {
   finding: Finding
   runId?: string | null
@@ -115,13 +81,33 @@ export function FindingCard({
   /** PR 页面链接；与 `headSha` 一起才能把「文件:行」变成可点的 GitHub 行锚。 */
   prUrl?: string
   headSha?: string
+  /** PR 编号；与 `prUrl` 一起才能拼出「在 Files changed 里定位」的 diff 锚。 */
+  prNumber?: number
 }) {
   const t = useT()
   const [open, setOpen] = useState(index === 0)
   const [feedback, setFeedback] = useState<string | undefined>(initialFeedback)
   const [saving, setSaving] = useState<FeedbackStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [diffHref, setDiffHref] = useState<string | null>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
+
+  /**
+   * 「打开 diff」的链接要算 sha256(path)，是异步的；拿不到就保持 null → 该动作**不渲染**
+   * （宁可不给，也不给错链接）。哈希按路径在模块级缓存，一屏多条 finding 不会重复算。
+   */
+  useEffect(() => {
+    let alive = true
+    setDiffHref(null)
+    void diffAnchorUrl(prUrl, prNumber, finding.file, finding.line_start, finding.line_end).then(
+      (href) => {
+        if (alive) setDiffHref(href)
+      },
+    )
+    return () => {
+      alive = false
+    }
+  }, [prUrl, prNumber, finding.file, finding.line_start, finding.line_end])
 
   // 展开时轻微淡入下滑；收起直接隐藏（高度动画在 React 条件渲染下收益低）。
   useGSAP(
@@ -201,11 +187,26 @@ export function FindingCard({
             rel="noreferrer noopener"
             title={t('finding.location.open', { location: locationLabel })}
           >
+            <span className="chip-label">{t('finding.location.file')}</span>
             <span className="mono">{locationLabel}</span>
             <span aria-hidden="true">↗</span>
           </a>
         ) : (
           <Chip>{locationLabel}</Chip>
+        )}
+        {/* 第二个动作：跳到 PR 的 Files changed 并定位到该文件那一段。
+            算不出 sha256（或拿不到 pr_number）时整条不渲染 —— 见上面的 useEffect。 */}
+        {diffHref && (
+          <a
+            className="chip chip-link"
+            href={diffHref}
+            target="_blank"
+            rel="noreferrer noopener"
+            title={t('finding.location.diffOpen', { location: locationLabel })}
+          >
+            <span className="chip-label">{t('finding.location.diff')}</span>
+            <span aria-hidden="true">↗</span>
+          </a>
         )}
         <Chip>{finding.category}</Chip>
         <Chip>{t('finding.confidence', { value: finding.confidence.toFixed(2) })}</Chip>
@@ -217,13 +218,15 @@ export function FindingCard({
 
       {open && (
         <div ref={bodyRef} className="finding-body">
+          {/* 问题/建议走 MarkdownLite：模型常在这两段里写 `code`、**加粗**、列表，
+              纯文本渲染会把反引号、星号原样露出来（用户样例里就有 `raw.get(...)`）。 */}
           <div className="finding-field">
             <span className="finding-field-label">{t('finding.field.problem')}</span>
-            <p className="finding-text">{finding.problem}</p>
+            <MarkdownLite text={finding.problem} className="finding-text" />
           </div>
           <div className="finding-field">
             <span className="finding-field-label">{t('finding.field.suggestion')}</span>
-            <p className="finding-text">{finding.suggestion}</p>
+            <MarkdownLite text={finding.suggestion} className="finding-text" />
           </div>
 
           {snippet && (

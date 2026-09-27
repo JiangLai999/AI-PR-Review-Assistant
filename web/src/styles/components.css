@@ -583,7 +583,12 @@
   text-transform: uppercase;
   color: var(--ds-color-text-placeholder);
 }
-.finding-text { font-size: var(--ds-text-xs); line-height: 1.65; color: var(--ds-color-text-secondary); }
+/* P5d：问题/建议改走 MarkdownLite（段落内联字号就是 --ds-text-body），证据说明列表
+   跟随同一字号，免得同一张卡里 13px/15px 两种正文字号打架。 */
+.finding-text { font-size: var(--ds-text-body); line-height: 1.7; color: var(--ds-color-text-secondary); }
+
+/* P5d：审查摘要（历史弹窗 + 审查工作台）——与上方标签留一点间距。 */
+.summary-text { margin-top: 6px; }
 .finding-actions { display: flex; gap: var(--ds-space-2); flex-wrap: wrap; align-items: center; }
 
 /* P5c：元信息 chip 行（含 GitHub 位置链接）。放在展开按钮之外，交互元素不嵌 role="button"。 */
@@ -597,6 +602,38 @@
   text-decoration: none;
 }
 .chip-link:hover { border-color: var(--ds-color-brand); }
+
+/* P5d：两个并列动作的「动作名」（文件 / 差异）。chip 主体是等宽路径，标签用无衬线
+   小字 + 占位色，扫一眼就能分清哪个是 blob、哪个是 diff。 */
+.chip-label {
+  font-family: var(--ds-font-sans);
+  letter-spacing: 0.04em;
+  color: var(--ds-color-text-placeholder);
+}
+
+/* ── P5d：可折叠正文（追问回答 / 审查意图）────────────────────────
+   控件对**任何**长度的文本都渲染（用户明确要求「无论文本大小均可折叠」）；
+   折叠是按源码截断的（见 CollapsibleText），所以这里只负责排版，不用 overflow 裁剪。 */
+.collapsible-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--ds-space-2);
+  min-width: 0;
+  max-width: 100%;
+}
+.collapsible-text > .markdown-lite { width: 100%; }
+/* btn-ghost 的边框是透明的；折叠控件要一眼看出是控件，补上细描边与底色。 */
+.collapsible-toggle {
+  padding: 1px 10px;
+  font-size: var(--ds-text-3xs);
+  border-color: var(--ds-color-border-subtle);
+  background: var(--ds-color-bg-surface-3);
+}
+.collapsible-toggle:hover:not(:disabled) {
+  border-color: var(--ds-color-border-hover);
+  background: var(--ds-color-bg-surface-4);
+}
 
 /* P5c：反馈动作条与详情分离（虚线分隔 + 独立成块）。 */
 .finding-actions-bar {

@@ -3,6 +3,7 @@ import { api } from '../api/client'
 import type { HistoryResponse, ReportResponse } from '../api/types'
 import { AskPanel } from '../components/AskPanel'
 import { FindingCard } from '../components/FindingCard'
+import { MarkdownLite } from '../components/MarkdownLite.jsx'
 import { ReportActions } from '../components/ReportActions'
 import { InterfaceImpactCard, PlanCard, ValidationCard } from '../components/ReviewPanels'
 import {
@@ -197,9 +198,8 @@ export function HistoryPage({ onNavigate }: { onNavigate: (page: string) => void
                 {report.review.summary && (
                   <div style={{ marginTop: 'var(--ds-space-4)' }}>
                     <span className="finding-field-label">{t('history.report.summary')}</span>
-                    <p className="finding-text" style={{ marginTop: 6, whiteSpace: 'pre-wrap' }}>
-                      {report.review.summary}
-                    </p>
+                    {/* 摘要是模型生成的自然语言（可能带列表/加粗），走 MarkdownLite。 */}
+                    <MarkdownLite text={report.review.summary} className="summary-text" />
                   </div>
                 )}
               </div>
@@ -225,6 +225,7 @@ export function HistoryPage({ onNavigate }: { onNavigate: (page: string) => void
                     // head_sha / pr_url），一并传下去，「文件:行」才在历史弹窗里也能点。
                     prUrl={report.run.pr_url || undefined}
                     headSha={report.run.head_sha || undefined}
+                    prNumber={report.run.pr_number}
                     index={index}
                     initialFeedback={
                       finding.finding_id ? feedbackMap.get(finding.finding_id) : undefined

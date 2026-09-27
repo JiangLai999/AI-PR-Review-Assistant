@@ -5,6 +5,7 @@ import { api, ApiError } from '../api/client'
 import type { EvidenceStatus, JobEvent, JobSnapshot, ReviewResponse, Severity } from '../api/types'
 import { AskPanel } from '../components/AskPanel'
 import { FindingCard } from '../components/FindingCard'
+import { MarkdownLite } from '../components/MarkdownLite.jsx'
 import { ReportActions } from '../components/ReportActions'
 import {
   FilterCard,
@@ -12,6 +13,7 @@ import {
   NoFindings,
   PlanCard,
   ValidationCard,
+  idText,
 } from '../components/ReviewPanels'
 import {
   Card,
@@ -593,7 +595,10 @@ export function ReviewPage({
             extra={
               riskLevel ? (
                 <span className={`chip chip-risk-${riskLevel}`}>
-                  {t('review.overview.riskLevel', { level: riskLevel })}
+                  {/* 风险等级是规范 id（low|medium|high|critical），走词典：`高` / `High`。 */}
+                  {t('review.overview.riskLevel', {
+                    level: idText('panels.risk.level.', riskLevel),
+                  })}
                 </span>
               ) : undefined
             }
@@ -697,6 +702,15 @@ export function ReviewPage({
               <InterfaceImpactCard impacts={result.interface_impacts ?? []} />
             </div>
           </Section>
+
+          {/* 审查摘要：以前只在历史弹窗里出现，工作台里看不到「这次审查说了什么」。 */}
+          {result.review?.summary && (
+            <Section eyebrow="SUMMARY" title={t('panels.summary.title')}>
+              <Card>
+                <MarkdownLite text={result.review.summary} className="summary-text" />
+              </Card>
+            </Section>
+          )}
 
           {result.review && (
             <Section
@@ -816,6 +830,7 @@ export function ReviewPage({
                             index={index}
                             prUrl={result.pr.url}
                             headSha={result.pr.head_sha}
+                            prNumber={result.pr.pr_number}
                           />
                         </div>
                       ))
