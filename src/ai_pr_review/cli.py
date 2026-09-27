@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import time
+import warnings
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,6 +61,7 @@ from ai_pr_review.config import (
     ProviderModelConfig,
     mask_api_key,
     resolve_config_path,
+    resolve_web_config_path,
 )
 from ai_pr_review.config_commands import (
     run_config_health,
@@ -2523,6 +2525,61 @@ def _active_config_has_saved_api_key(config_path: Path | None) -> bool:
     )
 
 
+def _config_file_stores_plaintext_secret(path: Path) -> bool:
+    """这个配置文件里是否**真的**存了明文凭据（决定派生 Web 配置时要否连带复制）。
+
+    只认"写在文件里的"：密钥若来自环境变量（`AI_PR_REVIEW_API_KEY` 等），派生时
+    不落盘 —— 把密钥留在 env 是用户刻意的选择，不该被我们复制成文件。
+    """
+    if not path.exists():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    provider = payload.get("provider")
+    ai_client = payload.get("ai_client")
+    return bool(
+        (isinstance(provider, dict) and str(provider.get("api_key") or "").strip())
+        or (isinstance(ai_client, dict) and str(ai_client.get("api_key") or "").strip())
+        or str(payload.get("github_token") or "").strip()
+    )
+
+
+def _seed_web_config(explicit_path: Path | None, web_config_path: Path) -> bool:
+    """首次为 Web 工作台派生独立配置；返回"是否刚刚创建"。
+
+    为什么要派生而不是继续共用一份：用户要求"Web 设置不得影响 CLI"。派生时复制的是
+    CLI **实际生效**的合并结果（用户级 + 项目级覆盖），不是只复制用户级文件 —— 否则
+    在带 `.ai_pr_review/config.json` 的项目里，Web 会少看到一层。
+
+    没有可读的 CLI 配置文件（纯 env / 全新机器）时不创建文件：Web 直接用默认值 +
+    环境变量覆盖，既不必凭空造一份配置，也不会把 env 里的密钥写进磁盘。
+    """
+    if web_config_path.exists():
+        return False
+    source_paths = AppConfig.active_config_paths(resolve_config_path(explicit_path))
+    if not any(path.exists() for path in source_paths):
+        return False
+    seed = AppConfig.load(explicit_path)
+    persist_secrets = any(_config_file_stores_plaintext_secret(path) for path in source_paths)
+    if not persist_secrets and (
+        seed.ai_client.api_key or seed.provider.api_key or seed.github_token
+    ):
+        # 密钥来自 env 且我们**刻意**不落盘 —— 这与 `save()` 那条"调用方忘了
+        # save_key=True"的警告不是一回事，压掉以免误导，并换成一句明确的说明。
+        click.echo(
+            "Note: your API key comes from the environment, so it is not written into "
+            f"{web_config_path.name}."
+        )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        seed.save(web_config_path, save_key=persist_secrets)
+    return True
+
+
 def _extract_github_pr_url(text: str) -> str | None:
     """Extract a GitHub PR URL from plain text or Markdown link syntax."""
     match = re.search(
@@ -4257,14 +4314,24 @@ def feedback_command(
 @click.option("--port", default=8787, show_default=True, type=int, help="Web server port.")
 @click.pass_context
 def serve_command(ctx: click.Context, host: str, port: int) -> None:
-    """Start the local browser workbench."""
+    """Start the local browser workbench.
+
+    设置页读写的是**独立**的 `*.web.json`（见 `resolve_web_config_path`）：在 Web 里
+    换供应商/模型/界面语言不会改掉 CLI 的行为。首次启动时从 CLI 侧派生一份初值。
+    """
     from ai_pr_review.web_server import serve
 
     explicit_path = _config_path_from_context(ctx)
-    config = AppConfig.load(explicit_path)
-    # 把解析后的落盘目标交给 Web 设置页（--config > AI_PR_REVIEW_CONFIG > 默认路径），
-    # 否则设置页会静默读写默认用户配置。
-    serve(config, host=host, port=port, config_path=resolve_config_path(explicit_path))
+    web_config_path = resolve_web_config_path(explicit_path)
+    if _seed_web_config(explicit_path, web_config_path):
+        click.echo(f"Web workbench config created: {web_config_path}")
+        click.echo(
+            "It is independent from the CLI config — changing settings in the workbench "
+            "no longer affects `pr-review` on the command line."
+        )
+    config = AppConfig.load(web_config_path)
+    # 把派生出的落盘目标交给 Web 设置页，否则设置页会静默读写默认用户配置。
+    serve(config, host=host, port=port, config_path=web_config_path)
 
 
 @main.command("stats")

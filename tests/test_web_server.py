@@ -652,7 +652,11 @@ class TestPrPayload:
 def test_serve_command_hands_the_resolved_config_path_to_the_web_layer(
     monkeypatch, tmp_path: Path
 ) -> None:
-    """F19：`pr-review --config X serve` 的设置页必须读写 X，而不是默认用户配置。"""
+    """F19 + 配置隔离：`pr-review --config X serve` 的设置页读写 **X.web.json**。
+
+    原断言是"读写 X"（Web 与 CLI 共用一份）。用户要求"Web 设置不得影响 CLI"之后，
+    契约改成派生路径：CLI 那份 X 保持不变，Web 用 X.web.json。
+    """
     from click.testing import CliRunner
 
     from ai_pr_review.cli import main
@@ -665,11 +669,12 @@ def test_serve_command_hands_the_resolved_config_path_to_the_web_layer(
 
     monkeypatch.setattr("ai_pr_review.web_server.serve", fake_serve)
     config_path = tmp_path / "workspace-config.json"
+    expected_web_path = tmp_path / "workspace-config.web.json"
 
     result = CliRunner().invoke(main, ["--config", str(config_path), "serve", "--port", "9123"])
 
     assert result.exit_code == 0, result.output
-    assert captured["config_path"] == config_path
+    assert captured["config_path"] == expected_web_path
     assert captured["port"] == 9123
 
 

@@ -92,6 +92,21 @@ def resolve_config_path(path: Path | None = None) -> Path:
     return DEFAULT_CONFIG_PATH
 
 
+#: Web 工作台独立配置的后缀：`config.json` → `config.web.json`。
+#: 目的只有一个 —— 在 Web 设置页里改供应商/模型不得改掉 CLI 的行为（见 docs/api-*.md）。
+WEB_CONFIG_SUFFIX = ".web"
+
+
+def resolve_web_config_path(path: Path | None = None) -> Path:
+    """解析 Web 工作台的**独立**配置文件路径（与 CLI 配置同目录、按后缀派生）。
+
+    `pr-review serve` 用它作为设置页的读写目标：Web 与 CLI 各自持有一份配置，
+    互不覆盖；首次启动时由 CLI 侧派生一份初值（见 `cli.serve_command`）。
+    """
+    base = resolve_config_path(path).expanduser()
+    return base.with_name(f"{base.stem}{WEB_CONFIG_SUFFIX}{base.suffix}")
+
+
 def resolve_save_path(path: Path | None = None, *, source_path: Path | None = None) -> Path:
     """Resolve the highest-precedence writable config path.
 
@@ -103,6 +118,11 @@ def resolve_save_path(path: Path | None = None, *, source_path: Path | None = No
     """
     if path is not None:
         return path
+    # 显式 `path` 必须压过环境变量：与 `resolve_config_path` 的优先级一致
+    # （显式 > env > 默认）。此前这里先看 env，导致"指定了目标却写到别处"——
+    # `pr-review serve` 派生 Web 配置时就踩过：env 有值时初值会被写回 CLI 配置。
+    if path is not None:
+        return Path(path).expanduser()
     override = os.getenv(CONFIG_PATH_ENV_VAR, "").strip()
     if override:
         return Path(override).expanduser()
