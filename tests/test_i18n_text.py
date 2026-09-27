@@ -29,6 +29,10 @@ from ai_pr_review.web_config import apply_config_update
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SETTINGS_TS = _REPO_ROOT / "web" / "src" / "i18n" / "settings.ts"
+# 词条按命名空间分成多个文件（components / settings / overview / review / shell）。
+# 守卫必须扫**全部**命名空间：只看 settings.ts 会漏掉 ask.* / panels.* 这类词条，
+# 后端一旦把 key 挪到另一命名空间，守卫就会静默失效。
+_I18N_DIR = _REPO_ROOT / "web" / "src" / "i18n"
 # 后端会把这些前缀的 key 交给前端渲染：key 必须能在词典里查到。
 _I18N_KEY_PATTERN = re.compile(r'"((?:credentials|config\.save)\.[A-Za-z0-9_.]+)"')
 
@@ -162,24 +166,27 @@ def test_credential_status_carries_i18n_keys():
 
 
 def _frontend_dict() -> dict[str, dict[str, str]]:
-    """把 `settings.ts` 的两个语言块解析成 `{lang: {key: 原文模板}}`。
+    """把 `web/src/i18n/*.ts` 的语言块合并成 `{lang: {key: 原文模板}}`。
 
     只做词法级解析（不引 TS 运行时）：key 是 `'a.b.c':`，值是该行或紧随其后的
     第一个单引号字面量。对"值换行写"的条目（本项目常见）同样成立。
+    合并所有命名空间，避免"后端 key 与词条不在同一个文件"时守卫失效。
     """
-    text = _SETTINGS_TS.read_text(encoding="utf-8")
-    split_at = text.index("'en-US': {")
-    blocks = {"zh-CN": text[:split_at], "en-US": text[split_at:]}
-    parsed: dict[str, dict[str, str]] = {}
-    for lang, block in blocks.items():
-        entries: dict[str, str] = {}
-        matches = list(re.finditer(r"'([A-Za-z][\w.]*)':", block))
-        for index, match in enumerate(matches):
-            end = matches[index + 1].start() if index + 1 < len(matches) else len(block)
-            value = re.search(r"'((?:[^'\\]|\\.)*)'", block[match.end() : end])
-            if value is not None:
-                entries[match.group(1)] = value.group(1)
-        parsed[lang] = entries
+    parsed: dict[str, dict[str, str]] = {"zh-CN": {}, "en-US": {}}
+    for path in sorted(_I18N_DIR.glob("*.ts")):
+        if path.name == "index.ts":
+            continue  # 合并器，本身不含词条
+        text = path.read_text(encoding="utf-8")
+        if "'en-US': {" not in text:
+            continue
+        zh_block, _, en_block = text.partition("'en-US': {")
+        for lang, block in (("zh-CN", zh_block), ("en-US", en_block)):
+            matches = list(re.finditer(r"'([A-Za-z][\w.]*)':", block))
+            for index, match in enumerate(matches):
+                end = matches[index + 1].start() if index + 1 < len(matches) else len(block)
+                value = re.search(r"'((?:[^'\\]|\\.)*)'", block[match.end() : end])
+                if value is not None:
+                    parsed[lang][match.group(1)] = value.group(1)
     return parsed
 
 
@@ -208,6 +215,24 @@ def test_every_backend_key_exists_in_the_frontend_dictionary():
         for lang in ("zh-CN", "en-US")
     }
     assert missing == {"zh-CN": [], "en-US": []}, missing
+
+
+def test_all_i18n_namespaces_keep_identical_language_key_sets():
+    """中英两侧的 key 集合必须逐字一致（跨 components/settings/overview/review/shell）。
+
+    "中英文各自统一"的前提是两边**同构**：少一条英文词条，英文界面就会回落到中文
+    （`t()` 找不到 key 时按 shell.ts 的规则回落）。这条用例把整个词典的对称性锁住，
+    不再只盯后端发出来的那几个 key。
+    """
+    dictionary = _frontend_dict()
+    zh, en = set(dictionary["zh-CN"]), set(dictionary["en-US"])
+
+    # 守住用例本身：解析器若因文件结构变化而扫不到词条，会变成"空集等于空集"。
+    assert len(zh) > 500, f"词典解析疑似失效，只读到 {len(zh)} 条"
+    assert zh == en, {
+        "only_in_zh": sorted(zh - en)[:10],
+        "only_in_en": sorted(en - zh)[:10],
+    }
 
 
 def test_provider_placeholder_values_match_the_branches(monkeypatch):
