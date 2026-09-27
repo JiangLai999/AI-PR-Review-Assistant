@@ -287,6 +287,10 @@ class SaveResult:
     changed: list[str] = field(default_factory=list)
     message: str = ""
     save_key_used: bool = False
+    # 结构化文案键（契约见 docs/opencode-backend-i18n.md）：前端按当前语言渲染，
+    # `message` 保留原文给 CLI / 旧前端 / 未收录 key 时回落。
+    message_key: str = ""
+    message_params: dict[str, Any] = field(default_factory=dict)
 
 
 def _safe_token(value: object, *, limit: int = 64) -> str:
@@ -368,9 +372,12 @@ def apply_config_update(
     # ---- 校验：全部通过之前不改内存、不落盘 ----
     unsupported = sorted(str(key) for key in payload if key not in ACCEPTED_PAYLOAD_KEYS)
     if unsupported:
+        joined = ", ".join(_safe_token(key) for key in unsupported)
         return SaveResult(
             ok=False,
-            message="unsupported key: " + ", ".join(_safe_token(key) for key in unsupported),
+            message="unsupported key: " + joined,
+            message_key="config.save.unsupported_key",
+            message_params={"keys": joined},
         )
 
     provider_name = str(payload.get("provider_name", "") or "").strip()
@@ -380,8 +387,12 @@ def apply_config_update(
 
         preset = MODEL_PROVIDER_PRESETS.get(provider_name.lower())
         if preset is None:
+            safe_provider = _safe_token(provider_name)
             return SaveResult(
-                ok=False, message=f"unsupported provider: {_safe_token(provider_name)}"
+                ok=False,
+                message=f"unsupported provider: {safe_provider}",
+                message_key="config.save.unsupported_provider",
+                message_params={"provider": safe_provider},
             )
 
     coerced_ai: list[tuple[str, Any]] = []
@@ -398,12 +409,22 @@ def apply_config_update(
             try:
                 value = int(value)
             except (TypeError, ValueError):
-                return SaveResult(ok=False, message=f"invalid value for {name}")
+                return SaveResult(
+                    ok=False,
+                    message=f"invalid value for {name}",
+                    message_key="config.save.invalid_value",
+                    message_params={"name": name},
+                )
         elif isinstance(current, float):
             try:
                 value = float(value)
             except (TypeError, ValueError):
-                return SaveResult(ok=False, message=f"invalid value for {name}")
+                return SaveResult(
+                    ok=False,
+                    message=f"invalid value for {name}",
+                    message_key="config.save.invalid_value",
+                    message_params={"name": name},
+                )
         else:
             value = str(value)
         bounds = NUMERIC_FIELD_RANGES.get(name)
@@ -421,6 +442,8 @@ def apply_config_update(
                         f"invalid value for {name}：超出允许范围 "
                         f"{bounds['min']}~{bounds['max']}"
                     ),
+                    message_key="config.save.invalid_value",
+                    message_params={"name": name},
                 )
         if current != value:
             coerced_ai.append((name, value))
@@ -437,7 +460,12 @@ def apply_config_update(
             candidate = candidate.lower()
         if candidate not in PREFERENCE_VOCABULARIES[name]:
             options = "、".join(PREFERENCE_VOCABULARIES[name])
-            return SaveResult(ok=False, message=f"invalid value for {name}（可选值：{options}）")
+            return SaveResult(
+                ok=False,
+                message=f"invalid value for {name}（可选值：{options}）",
+                message_key="config.save.invalid_value_options",
+                message_params={"name": name, "options": options},
+            )
         if str(getattr(config.preferences, name, "") or "") != candidate:
             coerced_prefs.append((name, candidate))
 
@@ -499,7 +527,11 @@ def apply_config_update(
         changed.append("api_key")
 
     if not changed:
-        return SaveResult(ok=True, message="没有需要保存的改动。")
+        return SaveResult(
+            ok=True,
+            message="没有需要保存的改动。",
+            message_key="config.save.noop",
+        )
 
     path = config.save(target_path, save_key=persist_secrets)
 
@@ -508,6 +540,8 @@ def apply_config_update(
         return SaveResult(
             ok=False,
             message="落盘校验失败：" + "、".join(mismatches) + "（磁盘值与提交值不一致）",
+            message_key="config.save.verify_failed",
+            message_params={"fields": ", ".join(mismatches)},
         )
 
     return SaveResult(
@@ -516,4 +550,6 @@ def apply_config_update(
         message=f"已保存 {len(changed)} 项到 {path.name}。"
         + ("" if persist_secrets else "（未持久化密钥）"),
         save_key_used=persist_secrets,
+        message_key="config.save.saved",
+        message_params={"count": len(changed), "path": path.name},
     )

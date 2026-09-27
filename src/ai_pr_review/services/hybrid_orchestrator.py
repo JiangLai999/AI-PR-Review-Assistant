@@ -17,6 +17,7 @@ from ai_pr_review.services.context_builder import FileContext
 from ai_pr_review.services.evidence.finding_validator import FindingValidator
 from ai_pr_review.services.filter_pipeline import FilterPipeline
 from ai_pr_review.services.finding_localizer import localize_deterministic_finding
+from ai_pr_review.services.i18n_text import review_summary
 from ai_pr_review.services.model_selector import ModelSelector, TaskComplexity
 from ai_pr_review.services.post_processor import PostProcessor
 from ai_pr_review.services.prompt_assembler import (
@@ -45,7 +46,9 @@ class HybridReviewOrchestrator:
         self.config = config
         self.model_selector = ModelSelector(config)
         self.pr_fetcher = standard_review.PRFetcher(config=config.pr_fetcher)
-        self.filter_pipeline = standard_review.FilterPipeline()
+        self.filter_pipeline = standard_review.FilterPipeline(
+            language=getattr(config.preferences, "ui_language", "zh-CN")
+        )
         self.context_builder = standard_review.ContextBuilder()
         self.static_analyzer = StaticAnalyzer()
         self.ast_analyzer = PythonAstAnalyzer()
@@ -481,7 +484,12 @@ class HybridReviewOrchestrator:
                 f"{len(failed_files)} 个文件未能审查，发现 {len(review_result.findings)} 个问题"
             )
         else:
-            summary = f"审查完成，发现 {len(review_result.findings)} 个问题"
+            # 生成时本地化：这条摘要随 run 落库，按当时的 ui_language 冻结。
+            summary = review_summary(
+                getattr(self.config.preferences, "ui_language", "zh-CN"),
+                len(review_result.findings),
+            )
+
         review_result = review_result.model_copy(update={"summary": summary})
 
         artifacts = ReviewArtifacts(

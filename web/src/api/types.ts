@@ -185,6 +185,12 @@ export interface CredentialItem {
   detail: string
   fix_hint: string
   configured: boolean
+  /** 结构化词条键；空串/缺失 → 前端回落 `label` 原文。 */
+  label_key?: string
+  detail_key?: string
+  fix_hint_key?: string
+  /** 上述 key 的插值参数（如 `{login}`）。 */
+  params?: Record<string, string | number>
 }
 
 export interface CredentialReport {
@@ -263,6 +269,9 @@ export interface SaveConfigResponse {
   message: string
   save_key_used: boolean
   config: ConfigView
+  /** 结构化词条键；空串/缺失 → 前端回落 `message` 原文。 */
+  message_key?: string
+  message_params?: Record<string, string | number>
 }
 
 export type JobStatus = 'queued' | 'running' | 'cancelling' | 'done' | 'failed' | 'cancelled'

@@ -53,7 +53,12 @@ def detect_endpoint_owner(base_url: str | None) -> str | None:
 
 @dataclass(slots=True)
 class CredentialStatus:
-    """单项凭证的健康状态。"""
+    """单项凭证的健康状态。
+
+    ``label`` / ``detail`` / ``fix_hint`` 是**原文**（中文），供 CLI 与旧前端使用；
+    ``*_key`` + ``params`` 是结构化键（契约见 docs/opencode-backend-i18n.md），
+    前端按当前语言渲染，``to_dict()`` 一并输出；key 为空串时前端回落原文。
+    """
 
     key: str
     label: str
@@ -61,6 +66,10 @@ class CredentialStatus:
     detail: str
     fix_hint: str = ""
     configured: bool = True
+    label_key: str = ""
+    detail_key: str = ""
+    fix_hint_key: str = ""
+    params: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -113,6 +122,9 @@ def check_github(token: str | None) -> CredentialStatus:
             configured=False,
             detail="未配置 GitHub Token，无法读取 PR。",
             fix_hint="在设置页填入具有 repo 权限的 Token。",
+            label_key="credentials.github",
+            detail_key="credentials.github.missing",
+            fix_hint_key="credentials.github.fix_token",
         )
 
     status, data = _http_json(
@@ -124,11 +136,15 @@ def check_github(token: str | None) -> CredentialStatus:
         },
     )
     if status == 200:
+        login = str(data.get("login", "未知账号"))
         return CredentialStatus(
             key="github",
             label="GitHub",
             ok=True,
-            detail=f"已认证为 {data.get('login', '未知账号')}。",
+            detail=f"已认证为 {login}。",
+            label_key="credentials.github",
+            detail_key="credentials.github.ok",
+            params={"login": login},
         )
     if status == 401:
         return CredentialStatus(
@@ -137,6 +153,9 @@ def check_github(token: str | None) -> CredentialStatus:
             ok=False,
             detail="Token 无效或已被撤销（401 Bad credentials）。",
             fix_hint="到 GitHub Settings → Developer settings 重新签发，并更新设置页。",
+            label_key="credentials.github",
+            detail_key="credentials.github.invalid",
+            fix_hint_key="credentials.github.fix_reissue",
         )
     if status == 403:
         return CredentialStatus(
@@ -145,13 +164,21 @@ def check_github(token: str | None) -> CredentialStatus:
             ok=False,
             detail="GitHub 拒绝访问（403），可能是配额耗尽或权限不足。",
             fix_hint="稍后重试，或确认 Token 具备 repo 权限。",
+            label_key="credentials.github",
+            detail_key="credentials.github.forbidden",
+            fix_hint_key="credentials.github.fix_retry",
         )
+    body = str(data)[:120]
     return CredentialStatus(
         key="github",
         label="GitHub",
         ok=False,
-        detail=f"无法确认 Token 状态（HTTP {status}）：{str(data)[:120]}",
+        detail=f"无法确认 Token 状态（HTTP {status}）：{body}",
         fix_hint="检查网络连通性后重试。",
+        label_key="credentials.github",
+        detail_key="credentials.github.other",
+        fix_hint_key="credentials.github.fix_network",
+        params={"status": status, "body": body},
     )
 
 
@@ -170,6 +197,9 @@ def check_model(base_url: str | None, api_key: str | None, model: str | None) ->
             configured=False,
             detail="未配置模型 API Key，完整审查无法执行。",
             fix_hint="在设置页选择供应商并填入 API Key；计划模式不需要密钥。",
+            label_key="credentials.provider",
+            detail_key="credentials.provider.missing",
+            fix_hint_key="credentials.provider.fix_key",
         )
 
     status, data = _http_json(
@@ -193,6 +223,12 @@ def check_model(base_url: str | None, api_key: str | None, model: str | None) ->
                     f"该端点可用模型：{', '.join(available[:6])}"
                 ),
                 fix_hint="在设置页把模型名改成该端点实际提供的名称。",
+                label_key="credentials.provider",
+                detail_key="credentials.provider.model_missing",
+                fix_hint_key="credentials.provider.fix_model",
+                # 词典条目里两个占位符都必须有值：前端 `interpolate` 只在 param 存在时
+                # 替换，缺一个就会把 `{models}` 原样显示在页面上。
+                params={"model": model_name, "models": ", ".join(available[:6])},
             )
         suffix = f"，可用模型 {len(available)} 个" if available else ""
         return CredentialStatus(
@@ -200,6 +236,11 @@ def check_model(base_url: str | None, api_key: str | None, model: str | None) ->
             label="模型供应商",
             ok=True,
             detail=f"已连接 {owner or '自定义端点'}{suffix}。",
+            label_key="credentials.provider",
+            # 端点归属（owner）与可用模型数都可能为空，4 种组合各有一条词条：
+            # 宁可多几条词条，也不让英文界面出现「Connected to .」这种半截句子。
+            detail_key=_provider_ok_key(owner, available),
+            params=_provider_ok_params(owner, available),
         )
 
     if status == 401:
@@ -217,6 +258,13 @@ def check_model(base_url: str | None, api_key: str | None, model: str | None) ->
                 "核对 base_url 与 API Key 是否来自同一供应商。"
                 "例如 DeepSeek 的密钥应配 https://api.deepseek.com/v1。"
             ),
+            label_key="credentials.provider",
+            detail_key=(
+                "credentials.provider.invalid_mismatch"
+                if mismatched
+                else "credentials.provider.invalid"
+            ),
+            fix_hint_key="credentials.provider.fix_mismatch",
         )
     if status == 404:
         return CredentialStatus(
@@ -225,6 +273,10 @@ def check_model(base_url: str | None, api_key: str | None, model: str | None) ->
             ok=False,
             detail=f"端点不存在（404）：{url}",
             fix_hint="检查 base_url 是否为 OpenAI 兼容端点（通常以 /v1 结尾）。",
+            label_key="credentials.provider",
+            detail_key="credentials.provider.not_found",
+            fix_hint_key="credentials.provider.fix_endpoint",
+            params={"url": url},
         )
     if status is None:
         return CredentialStatus(
@@ -233,6 +285,11 @@ def check_model(base_url: str | None, api_key: str | None, model: str | None) ->
             ok=False,
             detail=f"无法连接端点：{data.get('error', '未知网络错误')}",
             fix_hint="确认 base_url 可达，且本机网络允许访问。",
+            label_key="credentials.provider",
+            detail_key="credentials.provider.unreachable",
+            fix_hint_key="credentials.provider.fix_network",
+            # 拿不到 error 时给一个语言无关的占位，避免英文词条里剩 `{reason}`。
+            params={"reason": str(data.get("error") or "—")},
         )
     return CredentialStatus(
         key="model",
@@ -240,7 +297,35 @@ def check_model(base_url: str | None, api_key: str | None, model: str | None) ->
         ok=False,
         detail=f"端点返回 HTTP {status}：{str(data)[:140]}",
         fix_hint="根据报错核对端点地址与密钥。",
+        label_key="credentials.provider",
+        detail_key="credentials.provider.error",
+        fix_hint_key="credentials.provider.fix_endpoint",
+        params={"status": status},
     )
+
+
+def _provider_ok_key(owner: str | None, available: list[str]) -> str:
+    """200 分支的词条选择：端点归属与可用模型数各自可能为空。
+
+    四种组合各有一条词条，这样中英文都不会拼出「已连接 。」/「Connected to .」。
+    """
+    if available:
+        return (
+            "credentials.provider.ok_named_models"
+            if owner
+            else "credentials.provider.ok_models"
+        )
+    return "credentials.provider.ok_named" if owner else "credentials.provider.ok"
+
+
+def _provider_ok_params(owner: str | None, available: list[str]) -> dict[str, object]:
+    """`_provider_ok_key` 选出的词条**必须**拿到的占位符值（缺一个就会露出 `{...}`）。"""
+    params: dict[str, object] = {}
+    if owner:
+        params["endpoint"] = owner
+    if available:
+        params["count"] = len(available)
+    return params
 
 
 def _key_looks_like(base_url: str, key: str) -> bool:
@@ -280,6 +365,11 @@ def collect_status(config: Any, *, probe: bool = True) -> CredentialReport:
                 configured=has_github,
                 detail="已配置（尚未探测连通性）。" if has_github else "未配置 GitHub Token。",
                 fix_hint="" if has_github else "在设置页填入具有 repo 权限的 Token。",
+                label_key="credentials.github",
+                detail_key=(
+                    "credentials.github.unprobed" if has_github else "credentials.github.missing"
+                ),
+                fix_hint_key="" if has_github else "credentials.github.fix_token",
             ),
             CredentialStatus(
                 key="model",
@@ -292,6 +382,23 @@ def collect_status(config: Any, *, probe: bool = True) -> CredentialReport:
                     else "未配置模型 API Key，完整审查无法执行。"
                 ),
                 fix_hint="" if has_key else "在设置页填入 API Key；计划模式不需要密钥。",
+                label_key="credentials.provider",
+                detail_key=(
+                    # 模型名可能没配：有名字才用带 `{model}` 的词条，否则用无占位符那条。
+                    (
+                        "credentials.provider.unprobed_model"
+                        if str(ai.model or "").strip()
+                        else "credentials.provider.unprobed"
+                    )
+                    if has_key
+                    else "credentials.provider.missing"
+                ),
+                fix_hint_key="" if has_key else "credentials.provider.fix_key",
+                params=(
+                    {"model": str(ai.model).strip()}
+                    if has_key and str(ai.model or "").strip()
+                    else {}
+                ),
             ),
         ]
     )

@@ -657,6 +657,32 @@ class TestConfigSaveSemantics:
         assert parsed["ok"] is True
         assert "unsupported key" not in parsed["message"]
 
+    def test_save_response_carries_structured_message_keys(self, server):
+        """英文界面要显示"Saved …"而不是中文原文，靠的就是响应里的 `message_key`。
+
+        回归点：`SaveResult` 早就带了 `message_key/message_params`，但 HTTP 层曾只回
+        `message`，前端 `hasDictKey` 永远拿不到 key，于是英文界面静默回落成中文。
+        这条用例锁死"键必须真的过线"。
+        """
+        status, body = call(
+            server["base"], "POST", "/api/config", {"ui_language": "en-US"}
+        )
+
+        parsed = json.loads(body)
+        assert status == 200, body
+        assert parsed["message_key"] == "config.save.saved", body
+        assert parsed["message_params"]["count"] == 1
+
+        # 无改动时走 noop 分支，键也要跟着换，而不是继续复用 saved。
+        status, body = call(
+            server["base"], "POST", "/api/config", {"ui_language": "en-US"}
+        )
+
+        parsed = json.loads(body)
+        assert status == 200, body
+        assert parsed["message_key"] == "config.save.noop", body
+        assert parsed["message_params"] == {}
+
 
 class TestCrossSiteGuard:
     """写端点必须挡住"任意网页对 127.0.0.1 发简单请求"这条 CSRF 路径。

@@ -18,6 +18,7 @@ from typing import Any, Callable, Literal
 
 from ai_pr_review.config import FilterPipelineConfig
 from ai_pr_review.models.pr_data import FileDiff, PRData
+from ai_pr_review.services.i18n_text import filter_included_by_default
 
 FilterAction = Literal["include", "exclude"]
 CustomFilterRule = Callable[[FileDiff], "FilterReason | None"]
@@ -150,9 +151,13 @@ class FileFilter:
         self,
         config: FilterPipelineConfig | None = None,
         custom_rules: list[CustomFilterRule] | None = None,
+        language: object = None,
     ) -> None:
         self._config = config or FilterPipelineConfig()
         self._custom_rules = custom_rules or []
+        # 生成时本地化：默认中文（拿不到语言即回落 zh），调用方从
+        # config.preferences.ui_language 注入，见 i18n_text 模块说明。
+        self._language = language
 
     def evaluate(self, file_diff: FileDiff) -> FilterResult:
         """评估单个文件是否应被纳入后续分析。"""
@@ -241,7 +246,7 @@ class FileFilter:
                 FilterReason(
                     code=FilterReasonCode.INCLUDED_BY_DEFAULT,
                     action="include",
-                    message="文件未命中过滤规则，默认纳入审查。",
+                    message=filter_included_by_default(self._language),
                 )
             ],
         )
@@ -292,8 +297,9 @@ class FilterPipeline:
         self,
         config: FilterPipelineConfig | None = None,
         custom_rules: list[CustomFilterRule] | None = None,
+        language: object = None,
     ) -> None:
-        self._filter = FileFilter(config=config, custom_rules=custom_rules)
+        self._filter = FileFilter(config=config, custom_rules=custom_rules, language=language)
 
     def run(self, files: list[FileDiff]) -> FilterPipelineResult:
         """过滤一组文件，返回包含明细和汇总的结果对象。"""

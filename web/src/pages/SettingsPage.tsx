@@ -9,7 +9,7 @@ import type {
   SaveConfigResponse,
 } from '../api/types'
 import { Card, CardHead, Chip, Notice, Section, Spinner } from '../components/ui'
-import { setLang, t, useT } from '../i18n'
+import { dictKeys, setLang, t, useT } from '../i18n'
 
 const API_FORMATS = ['openai', 'anthropic'] as const
 
@@ -131,6 +131,23 @@ const EMPTY_PREFERENCES: Record<PreferenceKey, string> = {
 function listOf(options: ConfigOptions | undefined, key: OptionListKey): OptionItem[] {
   const list = options?.[key]
   return Array.isArray(list) ? list : []
+}
+
+/**
+ * 词典里真有这个 key 才走 `t()`。后端的 `*_key` 可能是空串或缺失，
+ * 词典也可能还没跟上契约 → 一律回落原文，绝不显示空白或裸 key。
+ */
+function hasDictKey(key: string | undefined): boolean {
+  return Boolean(key) && dictKeys().includes(key as string)
+}
+
+/** 结构化键优先：`key` 可用则 `t(key, params)`，否则回落后端原文 `fallback`。 */
+function localizeKey(
+  key: string | undefined,
+  fallback: string,
+  params?: Record<string, string | number>,
+): string {
+  return key && hasDictKey(key) ? t(key, params) : fallback
 }
 
 /**
@@ -433,18 +450,22 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
       if (githubToken.trim()) payload.github_token = githubToken.trim()
 
       const result = await postConfig(payload)
+      // message_key 可能为空串/缺失（旧后端）→ 回落 message 原文；成功/失败分支同一套规则。
+      const saveText = result.message_key && hasDictKey(result.message_key)
+        ? t(result.message_key, result.message_params)
+        : result.message
       if (!result.ok) {
         // 后端明确拒绝（ok:false + message）：原样显示 message，绝不落到成功分支，
         // 也不 hydrate —— 用户刚填的密钥不能被服务端旧值冲掉。
         await probe({ silent: true })
-        setMessage({ kind: 'error', text: result.message || t('settings.message.saveRejected') })
+        setMessage({ kind: 'error', text: saveText || t('settings.message.saveRejected') })
         return
       }
       hydrate(result.config)
       // 界面语言本身就是一个保存项：保存成功后立刻切语言，改完 English 当场全站生效。
       setLang(result.config.preferences?.ui_language)
       await probe({ silent: true })
-      setMessage({ kind: 'ok', text: result.message })
+      setMessage({ kind: 'ok', text: saveText })
       onSaved?.()
     } catch (e) {
       const text = e instanceof Error ? e.message : String(e)
@@ -511,30 +532,47 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
                 {t('settings.credentials.empty')}
               </p>
             )}
-            {report?.items.map((item) => (
-              <div
-                key={item.key}
-                style={{
-                  border: '1px solid var(--ds-color-border-subtle)',
-                  borderRadius: 'var(--ds-radius-media)',
-                  padding: 'var(--ds-space-4)',
-                  background: item.ok ? 'transparent' : 'var(--ds-sev-critical-bg)',
-                }}
-              >
-                <div className="row" style={{ justifyContent: 'space-between' }}>
-                  <strong style={{ fontSize: 'var(--ds-text-md)' }}>{item.label}</strong>
-                  <StatusPill item={item} />
-                </div>
-                <p className="muted" style={{ marginTop: 6, fontSize: 'var(--ds-text-md)', lineHeight: 1.6 }}>
-                  {item.detail}
-                </p>
-                {!item.ok && item.fix_hint && (
-                  <p style={{ marginTop: 6, fontSize: 'var(--ds-text-sm)', color: 'var(--ds-sev-medium)' }}>
-                    {t('settings.credentials.fixHint', { hint: item.fix_hint })}
+            {report?.items.map((item) => {
+              // label/detail/fix_hint：有结构化键就本地化，空串/缺失回落原文；
+              // title 悬停提示与可见文本共用同一份结果，避免“看得懂、悬停又是中文”。
+              const label = localizeKey(item.label_key, item.label, item.params)
+              const detail = localizeKey(item.detail_key, item.detail, item.params)
+              const fixHint = localizeKey(item.fix_hint_key, item.fix_hint, item.params)
+              const fixLine = fixHint ? t('settings.credentials.fixHint', { hint: fixHint }) : ''
+              return (
+                <div
+                  key={item.key}
+                  style={{
+                    border: '1px solid var(--ds-color-border-subtle)',
+                    borderRadius: 'var(--ds-radius-media)',
+                    padding: 'var(--ds-space-4)',
+                    background: item.ok ? 'transparent' : 'var(--ds-sev-critical-bg)',
+                  }}
+                >
+                  <div className="row" style={{ justifyContent: 'space-between' }}>
+                    <strong style={{ fontSize: 'var(--ds-text-md)' }} title={label}>
+                      {label}
+                    </strong>
+                    <StatusPill item={item} />
+                  </div>
+                  <p
+                    className="muted"
+                    style={{ marginTop: 6, fontSize: 'var(--ds-text-md)', lineHeight: 1.6 }}
+                    title={detail}
+                  >
+                    {detail}
                   </p>
-                )}
-              </div>
-            ))}
+                  {!item.ok && fixLine && (
+                    <p
+                      style={{ marginTop: 6, fontSize: 'var(--ds-text-sm)', color: 'var(--ds-sev-medium)' }}
+                      title={fixLine}
+                    >
+                      {fixLine}
+                    </p>
+                  )}
+                </div>
+              )
+            })}
           </div>
         </Card>
       </Section>

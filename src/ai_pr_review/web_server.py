@@ -424,6 +424,10 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
                 "ok": result.ok,
                 "changed": result.changed,
                 "message": result.message,
+                # 结构化文案键：前端按当前语言渲染（英文界面不再回落到中文原文）。
+                # 旧前端忽略这两个字段，仍读 `message`，属加法式契约变更。
+                "message_key": result.message_key,
+                "message_params": result.message_params,
                 "save_key_used": result.save_key_used,
                 "config": build_config_view(self.config, config_path=self.config_path).to_dict(),
             },

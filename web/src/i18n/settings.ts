@@ -91,6 +91,51 @@ export const settings: Namespace = {
     'settings.credential.status.bad': '异常',
     'settings.credential.status.none': '未配置',
 
+    // ── 后端结构化键 · POST /api/config 的 message_key ───────────────
+    'config.save.saved': '已保存 {count} 项到 {path}。',
+    'config.save.noop': '没有需要保存的改动。',
+    'config.save.unsupported_key': '以下配置项当前后端不支持，已跳过：{keys}。',
+    'config.save.unsupported_provider': '不支持的供应商「{provider}」，请换一个预设或改用 custom。',
+    'config.save.invalid_value': '「{name}」的取值不合法，已拒绝写入。',
+    'config.save.invalid_value_options': '「{name}」的取值不合法，可选：{options}。',
+    'config.save.verify_failed': '保存前校验未通过，问题字段：{fields}。',
+
+    // ── 后端结构化键 · GET /api/credentials 的 label/detail/fix_hint ─
+    'credentials.github': 'GitHub',
+    'credentials.provider': '模型服务',
+    'credentials.github.missing': '尚未配置 GitHub Token。',
+    'credentials.github.unprobed': '已配置（尚未探测连通性）。',
+    'credentials.github.ok': '凭证可用，当前登录为 {login}。',
+    'credentials.github.invalid': 'GitHub Token 无效或已过期。',
+    'credentials.github.forbidden': 'GitHub Token 权限不足，无法读取该仓库。',
+    'credentials.github.other': 'GitHub 凭证检查未通过（HTTP {status}）。',
+    'credentials.provider.missing': '尚未配置模型 API Key。',
+    'credentials.provider.unprobed': '已配置（尚未探测连通性）。',
+    'credentials.provider.unprobed_model': '已配置（尚未探测连通性），模型 {model}。',
+    'credentials.provider.ok': '模型端点连接正常。',
+    'credentials.provider.ok_named': '已连接 {endpoint}。',
+    'credentials.provider.ok_models': '模型端点连接正常，可用模型 {count} 个。',
+    'credentials.provider.ok_named_models': '已连接 {endpoint}，可用模型 {count} 个。',
+    'credentials.provider.model_missing':
+      '密钥有效，但端点不提供模型 `{model}`。该端点可用模型：{models}',
+    'credentials.provider.invalid': '密钥被端点拒绝（401 Invalid API Key）。',
+    'credentials.provider.invalid_mismatch':
+      '密钥被端点拒绝（401 Invalid API Key），且疑似与端点不属于同一家供应商。',
+    'credentials.provider.not_found': '端点不存在（404）：{url}',
+    'credentials.provider.unreachable': '无法连接端点：{reason}',
+    'credentials.provider.error': '端点返回 HTTP {status}。',
+    'credentials.github.fix_token': '到设置页填入有效的 GitHub Token（需要 repo 权限）。',
+    'credentials.github.fix_reissue': '重新签发一个 GitHub Token，再到设置页更新。',
+    'credentials.github.fix_retry': '稍后点「重新探测」再试一次。',
+    'credentials.github.fix_network': '检查网络或代理设置后重新探测。',
+    'credentials.provider.fix_key': '到设置页填入模型 API Key。',
+    'credentials.provider.fix_model': '到设置页把模型名改成该端点实际提供的名称。',
+    'credentials.provider.fix_mismatch':
+      '核对 base_url 与 API Key 是否来自同一供应商（例如 DeepSeek 的密钥配 https://api.deepseek.com/v1）。',
+    'credentials.provider.fix_endpoint':
+      '检查 base_url 是否为 OpenAI 兼容端点（通常以 /v1 结尾）。',
+    'credentials.provider.fix_network': '确认 base_url 可达，且本机网络允许访问。',
+
     // ── 设置页 · 模型服务与凭证 ──────────────────────────────────────
     'settings.provider.title': '模型服务与凭证',
     'settings.provider.desc': '运行模式（CLI 助手 1/6）在这里只读展示，槽位路由请用 CLI 助手修改。',
@@ -315,6 +360,53 @@ export const settings: Namespace = {
     'settings.credential.status.ok': 'OK',
     'settings.credential.status.bad': 'Failed',
     'settings.credential.status.none': 'Not configured',
+
+    // ── Backend keys · POST /api/config message_key ──────────────────
+    'config.save.saved': 'Saved {count} item(s) to {path}.',
+    'config.save.noop': 'Nothing to save — no changes.',
+    'config.save.unsupported_key': 'These settings are not supported by the current backend and were skipped: {keys}.',
+    'config.save.unsupported_provider': 'Unsupported provider "{provider}". Pick another preset or use custom.',
+    'config.save.invalid_value': 'Invalid value for "{name}"; nothing was written.',
+    'config.save.invalid_value_options': 'Invalid value for "{name}". Allowed: {options}.',
+    'config.save.verify_failed': 'Pre-save validation failed. Problem fields: {fields}.',
+
+    // ── Backend keys · GET /api/credentials label/detail/fix_hint ────
+    'credentials.github': 'GitHub',
+    'credentials.provider': 'Model provider',
+    'credentials.github.missing': 'GitHub token is not configured yet.',
+    'credentials.github.unprobed': 'Configured (connectivity not probed yet).',
+    'credentials.github.ok': 'Credential is working. Signed in as {login}.',
+    'credentials.github.invalid': 'The GitHub token is invalid or has expired.',
+    'credentials.github.forbidden': 'The GitHub token lacks permission to read this repository.',
+    'credentials.github.other': 'GitHub credential check did not pass (HTTP {status}).',
+    'credentials.provider.missing': 'The model API key is not configured yet.',
+    'credentials.provider.unprobed': 'Configured (connectivity not probed yet).',
+    'credentials.provider.unprobed_model': 'Configured (connectivity not probed yet), model {model}.',
+    'credentials.provider.ok': 'The model endpoint is reachable.',
+    'credentials.provider.ok_named': 'Connected to {endpoint}.',
+    'credentials.provider.ok_models': 'The model endpoint is reachable · {count} model(s) available.',
+    'credentials.provider.ok_named_models': 'Connected to {endpoint} · {count} model(s) available.',
+    'credentials.provider.model_missing':
+      'The key is valid, but the endpoint does not serve `{model}`. Available models: {models}',
+    'credentials.provider.invalid': 'The endpoint rejected the key (401 Invalid API Key).',
+    'credentials.provider.invalid_mismatch':
+      'The endpoint rejected the key (401 Invalid API Key); the key looks like it belongs to a different provider.',
+    'credentials.provider.not_found': 'Endpoint not found (404): {url}',
+    'credentials.provider.unreachable': 'Cannot reach the endpoint: {reason}',
+    'credentials.provider.error': 'The endpoint returned HTTP {status}.',
+    'credentials.github.fix_token': 'Set a valid GitHub token in Settings (repo scope required).',
+    'credentials.github.fix_reissue': 'Reissue a GitHub token, then update it in Settings.',
+    'credentials.github.fix_retry': 'Click "Re-probe" again in a moment.',
+    'credentials.github.fix_network': 'Check your network or proxy settings, then re-probe.',
+    'credentials.provider.fix_key': 'Set the model API key in Settings.',
+    'credentials.provider.fix_model':
+      'Change the model name in Settings to one the endpoint actually serves.',
+    'credentials.provider.fix_mismatch':
+      'Check that base_url and the API key come from the same provider (e.g. a DeepSeek key with https://api.deepseek.com/v1).',
+    'credentials.provider.fix_endpoint':
+      'Check that base_url is an OpenAI-compatible endpoint (usually ending in /v1).',
+    'credentials.provider.fix_network':
+      'Make sure base_url is reachable and allowed by your local network.',
 
     // ── Settings · provider & credentials ────────────────────────────
     'settings.provider.title': 'Model provider & credentials',
