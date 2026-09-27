@@ -10,12 +10,13 @@ export function cx(...parts: (string | false | null | undefined)[]): string {
   return parts.filter(Boolean).join(' ')
 }
 
-const SEVERITY_LABEL: Record<Severity, string> = {
-  critical: 'CRITICAL',
-  high: 'HIGH',
-  medium: 'MEDIUM',
-  low: 'LOW',
-  info: 'INFO',
+/** 严重度 → i18n key（模块级常量不能固化语言，同 EvidenceBadge 的既有写法）。 */
+const SEVERITY_LABEL_KEY: Record<Severity, string> = {
+  critical: 'severity.critical',
+  high: 'severity.high',
+  medium: 'severity.medium',
+  low: 'severity.low',
+  info: 'severity.info',
 }
 
 /** 证据状态 → i18n key（模块级常量不能固化语言）。 */
@@ -27,10 +28,11 @@ const EVIDENCE_LABEL_KEY: Record<EvidenceStatus, string> = {
 }
 
 export function SeverityBadge({ value }: { value: Severity }) {
+  const t = useT()
   return (
     <span className={cx('badge', `sev-${value}`)}>
       <i className="badge-dot" />
-      {SEVERITY_LABEL[value] ?? value}
+      {SEVERITY_LABEL_KEY[value] ? t(SEVERITY_LABEL_KEY[value]) : value}
     </span>
   )
 }

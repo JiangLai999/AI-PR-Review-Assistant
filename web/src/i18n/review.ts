@@ -95,6 +95,12 @@ export const review: Namespace = {
     'review.empty.filtered.desc': '调整筛选条件查看其它结果。',
     // ---- 筛选器 ----
     'review.filter.severity': '严重度',
+    // 严重度徽标 / 筛选 chips：zh 侧用中文，en 侧保持大写徽标样式
+    'severity.critical': '严重',
+    'severity.high': '高',
+    'severity.medium': '中',
+    'severity.low': '低',
+    'severity.info': '提示',
     'review.filter.evidence': '证据状态',
     'review.filter.allWithCount': '全部（{count}）',
     'review.filter.all': '全部',
@@ -234,6 +240,12 @@ export const review: Namespace = {
     'review.empty.filtered.desc': 'Adjust the filters to see other results.',
     // ---- Filters ----
     'review.filter.severity': 'Severity',
+    // Severity badge / filter chips: English keeps the uppercase badge look.
+    'severity.critical': 'CRITICAL',
+    'severity.high': 'HIGH',
+    'severity.medium': 'MEDIUM',
+    'severity.low': 'LOW',
+    'severity.info': 'INFO',
     'review.filter.evidence': 'Evidence status',
     'review.filter.allWithCount': 'All ({count})',
     'review.filter.all': 'All',

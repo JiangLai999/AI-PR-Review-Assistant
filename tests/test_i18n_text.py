@@ -235,6 +235,23 @@ def test_all_i18n_namespaces_keep_identical_language_key_sets():
     }
 
 
+def test_severity_labels_are_not_hardcoded_in_components():
+    """严重度文案必须走词典：写死英文大写会让中文界面的徽标一直显示 MEDIUM。
+
+    回归点：`components/ui.tsx:SeverityBadge` 与 `pages/ReviewPage.tsx` 曾各存一份
+    `SEVERITY_LABEL/SEVERITY_TEXT`（'CRITICAL' / 'HIGH' / …），中文界面里徽标、筛选
+    chips、下拉三处都是英文大写。注意**大小写敏感**：`Severity[]` 这类小写枚举值
+    是合法的规范 id，不算违规。
+    """
+    offenders: list[str] = []
+    for relative in ("components/ui.tsx", "pages/ReviewPage.tsx"):
+        text = (_REPO_ROOT / "web" / "src" / relative).read_text(encoding="utf-8")
+        for label in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"):
+            if f"'{label}'" in text or f'"{label}"' in text:
+                offenders.append(f"{relative}: {label}")
+    assert not offenders, offenders
+
+
 def test_provider_placeholder_values_match_the_branches(monkeypatch):
     """词条里的每个 `{占位符}` 都必须真有值，且中英词条占位符一致。
 

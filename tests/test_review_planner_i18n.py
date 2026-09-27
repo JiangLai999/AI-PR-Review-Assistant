@@ -129,10 +129,16 @@ def test_default_intent_is_localized_but_real_titles_are_untouched():
 
 
 async def test_orchestrator_plan_only_uses_the_configured_language(monkeypatch):
-    """接线验证：`plan_only` 必须把 `preferences.language` 传到 planner。"""
+    """接线验证：`plan_only` 必须把 `preferences.ui_language` 传到 planner。
+
+    用 ui_language 而不是 language，是 `services/i18n_text` 的既有分工：
+    前者管"生成时冻结的展示文案"（摘要/过滤原因/计划），后者管模型回答语言。
+    这里刻意把两者设成相反值，谁被用错都会红。
+    """
     pr = build_pr(*risky_files())
     config = AppConfig.from_env()
-    config.preferences.language = "en-US"
+    config.preferences.ui_language = "en-US"
+    config.preferences.language = "zh-CN"
     # PRFetcher 的构造函数要求有 token；这里只验证"语言是否传到了 planner"，
     # 所以给一个可识别的假 token，不读环境变量、不联网。
     config.github_token = "ghp_test-fake-token"

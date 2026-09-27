@@ -265,8 +265,14 @@ class ReviewOrchestrator:
         )
 
     def _plan_language(self) -> str:
-        """计划文案跟随"模型回复语言"设置（与 PromptAssembler 同一口径）。"""
-        return str(getattr(self._config.preferences, "language", "") or "zh-CN")
+        """计划文案跟随**界面语言**。
+
+        与 `services/i18n_text` 的既有分工一致：`ui_language` 管"生成时冻结的展示文案"
+        （摘要 `review_summary`、过滤原因 `filter_included_by_default` 都用的它），
+        `language` 管"模型用什么语言回答"（`PromptAssembler.response_language`）。
+        计划随 run 落库、之后由界面原样回放，所以属于前者。
+        """
+        return str(getattr(self._config.preferences, "ui_language", "") or "zh-CN")
 
     async def plan_only(self, pr_url: str) -> ReviewArtifacts:
         """Fetch, filter, and produce a transparent review plan without AI calls."""

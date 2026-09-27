@@ -40,12 +40,13 @@ type Status =
 const SEVERITIES: Severity[] = ['critical', 'high', 'medium', 'low', 'info']
 const EVIDENCE: EvidenceStatus[] = ['valid', 'needs_review', 'invalid', 'unverified']
 
-const SEVERITY_TEXT: Record<Severity, string> = {
-  critical: 'CRITICAL',
-  high: 'HIGH',
-  medium: 'MEDIUM',
-  low: 'LOW',
-  info: 'INFO',
+/** 严重度 → i18n key：chips、下拉与 title 提示共用一份，避免三处各写一遍。 */
+const SEVERITY_LABEL_KEY: Record<Severity, string> = {
+  critical: 'severity.critical',
+  high: 'severity.high',
+  medium: 'severity.medium',
+  low: 'severity.low',
+  info: 'severity.info',
 }
 
 const EVIDENCE_KEYS: Record<EvidenceStatus, string> = {
@@ -742,15 +743,13 @@ export function ReviewPage({
                             type="button"
                             className={cx('sev-chip', `sev-${s}`)}
                             aria-pressed={active}
-                            title={
-                              active
-                                ? t('finding.filter.clearOne', { severity: SEVERITY_TEXT[s] })
-                                : t('finding.filter.showOnly', { severity: SEVERITY_TEXT[s] })
-                            }
+                            title={t(active ? 'finding.filter.clearOne' : 'finding.filter.showOnly', {
+                              severity: t(SEVERITY_LABEL_KEY[s]),
+                            })}
                             onClick={() => setSeverity(active ? '' : s)}
                           >
                             <i className="badge-dot" aria-hidden="true" />
-                            {SEVERITY_TEXT[s]}
+                            {t(SEVERITY_LABEL_KEY[s])}
                             <b>{counts[s]}</b>
                           </button>
                         )
@@ -767,7 +766,7 @@ export function ReviewPage({
                           <option value="">{t('review.filter.allWithCount', { count: findings.length })}</option>
                           {SEVERITIES.filter((s) => counts[s]).map((s) => (
                             <option key={s} value={s}>
-                              {`${SEVERITY_TEXT[s]} (${counts[s]})`}
+                              {`${t(SEVERITY_LABEL_KEY[s])} (${counts[s]})`}
                             </option>
                           ))}
                         </select>
