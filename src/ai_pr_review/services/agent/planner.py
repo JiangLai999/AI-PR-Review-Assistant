@@ -8,6 +8,11 @@ from collections.abc import Iterable
 from ai_pr_review.models.pr_data import FileDiff, PRData
 from ai_pr_review.models.review_plan import ReviewPlan
 from ai_pr_review.services.filter_pipeline import FilterPipelineResult
+from ai_pr_review.services.i18n_text import (
+    plan_default_intent,
+    plan_rationale_cross_file,
+    plan_rationale_scope,
+)
 
 
 class ReviewPlanner:
@@ -22,7 +27,19 @@ class ReviewPlanner:
     )
     _HIGH_RISK_TERMS = ("security", "auth", "login", "permission", "payment", "database", "token")
 
-    def build_plan(self, pr_data: PRData, filter_result: FilterPipelineResult) -> ReviewPlan:
+    def build_plan(
+        self,
+        pr_data: PRData,
+        filter_result: FilterPipelineResult,
+        *,
+        language: str | None = None,
+    ) -> ReviewPlan:
+        """按 `language` 生成计划；未给语言时按 `i18n_text` 的约定回落中文。
+
+        `risk_categories` / `strategies` 是**规范 id**，不翻译、不在这里拼进句子：
+        前端按 id 查词典渲染（中文界面显示「安全」，英文界面显示 `Security`）。
+        否则同一套词汇要在前后端各存一份，迟早漂移。
+        """
         included = filter_result.included_files
         searchable_text = " ".join(
             [pr_data.title, pr_data.description or "", *(file.filename for file in pr_data.files)]
@@ -38,21 +55,18 @@ class ReviewPlanner:
             key=lambda filename: self._priority_key(filename, categories),
         )
         strategies = ["changed_line_review", "evidence_validation"]
-        rationale = ["Review scope is derived from the PR metadata and included file set."]
+        rationale = [plan_rationale_scope(language)]
         if categories:
             strategies.append("risk_category_review")
-            rationale.append(f"Detected risk categories: {', '.join(categories)}.")
         requires_cross_file = len(included) > 1 or any(
             token in searchable_text for token in ("api", "refactor", "rename", "schema", "config")
         )
         if requires_cross_file:
             strategies.append("cross_file_impact_review")
-            rationale.append(
-                "Multiple files or interface-sensitive terms require a cross-file pass."
-            )
+            rationale.append(plan_rationale_cross_file(language))
 
         return ReviewPlan(
-            intent=self._infer_intent(pr_data.title, pr_data.description),
+            intent=self._infer_intent(pr_data.title, pr_data.description, language),
             risk_level=risk_level,
             risk_categories=categories,
             priority_files=priority_files,
@@ -91,6 +105,6 @@ class ReviewPlanner:
         )
         return score, filename
 
-    def _infer_intent(self, title: str, description: str | None) -> str:
+    def _infer_intent(self, title: str, description: str | None, language: str | None = None) -> str:
         text = " ".join(value.strip() for value in (title, description or "") if value.strip())
-        return text or "Review the pull request for correctness and security risks."
+        return text or plan_default_intent(language)

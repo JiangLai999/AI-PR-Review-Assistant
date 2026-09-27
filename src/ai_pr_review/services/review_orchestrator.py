@@ -264,6 +264,10 @@ class ReviewOrchestrator:
             duration_seconds=time.perf_counter() - start_time,
         )
 
+    def _plan_language(self) -> str:
+        """计划文案跟随"模型回复语言"设置（与 PromptAssembler 同一口径）。"""
+        return str(getattr(self._config.preferences, "language", "") or "zh-CN")
+
     async def plan_only(self, pr_url: str) -> ReviewArtifacts:
         """Fetch, filter, and produce a transparent review plan without AI calls."""
         start_time = time.perf_counter()
@@ -272,7 +276,7 @@ class ReviewOrchestrator:
         return ReviewArtifacts(
             pr_data=pr_data,
             filter_result=filter_result,
-            review_plan=self._planner.build_plan(pr_data, filter_result),
+            review_plan=self._planner.build_plan(pr_data, filter_result, language=self._plan_language()),
             duration_seconds=time.perf_counter() - start_time,
         )
 
@@ -325,7 +329,9 @@ class ReviewOrchestrator:
         pr_data = await asyncio.to_thread(self._pr_fetcher.fetch, pr_url)
         stage("filtering", f"共 {pr_data.changed_files_count} 个变更文件，正在过滤")
         filtered_pr_data, filter_result = self._filter_pipeline.filter_pr_data(pr_data)
-        review_plan = self._planner.build_plan(pr_data, filter_result)
+        review_plan = self._planner.build_plan(
+            pr_data, filter_result, language=self._plan_language()
+        )
         # 被过滤掉的文件永远不会进入审查循环，只能在这里如实上报。
         emit_skipped_file_results(file_result_callback, filter_result)
         ai_client = AIClient(config=app_config.ai_client)

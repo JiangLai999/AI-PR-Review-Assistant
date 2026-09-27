@@ -17,11 +17,16 @@ def demo_cases_payload() -> list[dict[str, str]]:
     ]
 
 
-def run_demo_case(case_key: str) -> dict[str, Any]:
+def run_demo_case(case_key: str, *, language: str = "en") -> dict[str, Any]:
+    """Web 演示入口；`language` 由调用方从 `preferences.language` 传进来。
+
+    默认 en 的理由同 `services/demo_runner.run_demo`：demo JSON 是被黄金哈希锁住的
+    契约，只有显式传语言时才本地化。
+    """
     case = get_demo_case(case_key)
     pr_data = case.pr_data
     _, filter_result = FilterPipeline().filter_pr_data(pr_data)
-    plan = ReviewPlanner().build_plan(pr_data, filter_result)
+    plan = ReviewPlanner().build_plan(pr_data, filter_result, language=language)
     context_builder = ContextBuilder()
     analyzer = StaticAnalyzer()
     validator = FindingValidator()

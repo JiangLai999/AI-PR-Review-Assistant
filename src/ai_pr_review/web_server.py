@@ -193,7 +193,11 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
                 parse_qs(parsed.query).get("case", ["sql-injection"])[0] or "sql-injection"
             ).strip()
             try:
-                self._send_json(200, run_demo_case(key))
+                # 演示结果也走同一套语言口径：界面中文就看中文计划文案。
+                self._send_json(
+                    200,
+                    run_demo_case(key, language=self.config.preferences.language),
+                )
             except ValueError as exc:
                 self._send_json(404, {"error": str(exc)})
             except Exception as exc:

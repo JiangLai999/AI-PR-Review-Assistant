@@ -2456,10 +2456,14 @@ def test_plain_chat_disables_reasoning_for_local_provider(monkeypatch):
 # findings gained exactly one key: stripping `rule_id` from the current payload
 # reproduces the original hashes (`sql-injection` 91e9948d…, `tls-disabled`
 # d277f194…, `clean-change` d1245bae… unchanged because it has no findings).
+# 2026-09-27 有意更新：规划依据不再内嵌规范 id（`Detected risk categories: security, …`）。
+# 类别/策略本来就是独立字段，由前端按 id 查词典渲染成「安全 / Security」，写进句子
+# 等于同一套词汇在前后端各存一份。三个 case 的其余字段逐字未变（已逐字段核对），
+# demo 的默认语言也刻意保持 en —— 这份 JSON 是 `--json-output` 的冻结契约。
 DEMO_JSON_SHA256 = {
-    "sql-injection": "39860acad2a75d3a2861761c51b2497e37ffa0a1f8fa0ab33d6bbfa4aba7102f",
-    "tls-disabled": "f91ded556683394c342a503e667bec535b33b2fbb2d629002901f0f3a17ad005",
-    "clean-change": "d1245baebe73bad2a0884f32d229105fccec4a2452cbf0e34bc8b1d644203015",
+    "sql-injection": "b6961aef43111a8f73d7d84f27d4530b87e9cd17f9c3feb477d2f5e1d4c488a3",
+    "tls-disabled": "4b079f3fb6aa1e9d3a8933347aa762a6fb59302212941d89a04d396d5ac1f34d",
+    "clean-change": "9e895a866ea21a217e62317d72b1cc9a91d1ef2958b8ec5a8dd9f5913340a347",
 }
 
 # Literal copy of the showcase payload the CLI printed before the refactor.

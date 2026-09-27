@@ -44,3 +44,33 @@ def filter_included_by_default(language: object) -> str:
     if is_english(language):
         return "File did not match any filter rule; included by default."
     return "文件未命中过滤规则，默认纳入审查。"
+
+
+# ---------------------------------------------------------------------------
+# 审查计划（`services/agent/planner.py` 的确定性计划文案）
+#
+# 计划**不调模型**，这些句子全是我们自己写的，所以「规划依据」天然可以被双语化 ——
+# 不需要提示词工程。`risk_categories` / `strategies` 保持规范 id（前端按 id 查词典渲染
+# 成中文或英文），这里只负责**句子**，避免同一套词汇在前后端各存一份而漂移。
+# ---------------------------------------------------------------------------
+
+
+def plan_rationale_scope(language: object) -> str:
+    """规划依据第 1 条：审查范围是怎么定下来的。"""
+    if is_english(language):
+        return "Review scope is derived from the PR metadata and the included file set."
+    return "审查范围由 PR 元数据与纳入审查的文件集推导得出。"
+
+
+def plan_rationale_cross_file(language: object) -> str:
+    """规划依据第 2 条：为什么需要跨文件复核。"""
+    if is_english(language):
+        return "Multiple files or interface-sensitive changes require a cross-file pass."
+    return "涉及多个文件或接口敏感改动，需要做一次跨文件复核。"
+
+
+def plan_default_intent(language: object) -> str:
+    """PR 标题与描述都为空时的默认审查意图。"""
+    if is_english(language):
+        return "Review the pull request for correctness and security risks."
+    return "审查该 PR 的正确性与安全风险。"

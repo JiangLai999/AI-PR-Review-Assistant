@@ -73,11 +73,16 @@ def demo_cases() -> list[dict[str, str]]:
     ]
 
 
-def run_demo(case_key: str = DEFAULT_DEMO_CASE) -> DemoRun:
+def run_demo(case_key: str = DEFAULT_DEMO_CASE, *, language: str = "en") -> DemoRun:
     """Run one demo case offline and return its payload.
 
     Raises:
         UnknownDemoCase: the key is not one of the embedded fixtures.
+
+    `language` 默认 **en**（而不是 `i18n_text` 的"拿不到就中文"）：demo 的 JSON 是
+    `pr-review demo --json-output` 的**冻结契约**，字节级被 SHA256 黄金表锁住
+    （tests/test_cli.py 的 DEMO_JSON_SHA256），改默认语言等于毁掉那个契约。
+    需要本地化时由调用方显式传语言（Web 的 `/api/demo/run` 就是这么做的）。
     """
     try:
         case = get_demo_case(case_key)
@@ -86,7 +91,7 @@ def run_demo(case_key: str = DEFAULT_DEMO_CASE) -> DemoRun:
 
     pr_data = case.pr_data
     _, filter_result = FilterPipeline().filter_pr_data(pr_data)
-    plan = ReviewPlanner().build_plan(pr_data, filter_result)
+    plan = ReviewPlanner().build_plan(pr_data, filter_result, language=language)
     context_builder = ContextBuilder()
     analyzer = StaticAnalyzer()
     validator = FindingValidator()
