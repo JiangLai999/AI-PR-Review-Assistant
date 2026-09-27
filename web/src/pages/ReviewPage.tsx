@@ -4,6 +4,7 @@ import gsap from 'gsap'
 import { api, ApiError } from '../api/client'
 import type { EvidenceStatus, JobEvent, JobSnapshot, ReviewResponse, Severity } from '../api/types'
 import { FindingCard } from '../components/FindingCard'
+import { ReportActions } from '../components/ReportActions'
 import {
   FilterCard,
   InterfaceImpactCard,
@@ -84,6 +85,10 @@ export function ReviewPage({
   const [selectedMode, setSelectedMode] = useState<Mode>('plan')
   const [result, setResult] = useState<ReviewResponse | null>(initialResult)
   const [job, setJob] = useState<JobSnapshot | null>(null)
+  // 发布/导出只认「当前这份结果」的 run：不能用 job.run_id 兜底，否则先跑完整审查、
+  // 再跑一次计划模式时，旧 run 的发布按钮会挂在新结果下面。
+  // 初值取持久化的 initialResult：切换页面再回来时不能因为本组件重挂载就丢掉 run。
+  const [resultRunId, setResultRunId] = useState<string | null>(initialResult?.run?.id ?? null)
   const [severity, setSeverity] = useState<Severity | ''>('')
   const [evidence, setEvidence] = useState<EvidenceStatus | ''>('')
   const inputRef = useRef<HTMLInputElement>(null)
@@ -159,10 +164,13 @@ export function ReviewPage({
     abortRef.current = controller
     setStatus({ kind: 'running', mode: 'plan', label: '正在抓取 PR 并生成审查计划' })
     setResult(null)
+    setResultRunId(null)
     onResult(null, null)
     try {
       const payload = await api.plan(url.trim(), controller.signal)
       setResult(payload)
+      // 计划模式不落库，run.id 通常是 null —— 发布组件据此渲染禁用态。
+      setResultRunId(payload.run?.id ?? null)
       onResult(payload, payload.run?.id ?? null)
       setStatus({ kind: 'ok', mode: 'plan', message: '审查计划已生成，未消耗模型调用。' })
     } catch (error) {
@@ -179,6 +187,7 @@ export function ReviewPage({
   async function runReviewJob() {
     setStatus({ kind: 'running', mode: 'review', label: '正在提交审查任务' })
     setResult(null)
+    setResultRunId(null)
     onResult(null, null)
     setJob(null)
     jobRef.current?.close()
@@ -291,6 +300,7 @@ export function ReviewPage({
       setJob(snapshot)
       if (snapshot.status === 'done' && snapshot.result) {
         setResult(snapshot.result)
+        setResultRunId(snapshot.run_id ?? snapshot.result.run?.id ?? null)
         onResult(snapshot.result, snapshot.run_id ?? snapshot.result.run?.id ?? null)
         setStatus({
           kind: 'ok',
@@ -629,6 +639,12 @@ export function ReviewPage({
                 </div>
               </Card>
             )}
+          </Section>
+
+          <Section eyebrow="DELIVER" title="发布与导出">
+            {/* 计划模式结果没有 run（plan_only 不落库），这里传 null 让组件渲染禁用态并说明原因，
+                而不是整块消失：用户至少能看到「为什么没有发布按钮」，而不是以为功能缺失。 */}
+            <ReportActions runId={resultRunId} />
           </Section>
 
           <Section eyebrow="PLAN" title="审查计划">

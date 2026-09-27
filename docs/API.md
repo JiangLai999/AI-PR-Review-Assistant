@@ -1,6 +1,6 @@
-# CLI API 文档
+# API 文档
 
-本文档描述 `ai-pr-review` 当前已实现的命令行接口。
+本文档描述 `ai-pr-review` 的命令行接口与 Web 工作台 HTTP 接口（18 条 API + 静态资源）。
 
 ## 命令概览
 
@@ -40,7 +40,7 @@ pr-review review <PR_URL>
 
 限制：
 
-- `--dry-run`、`--only-fetch`、`--only-filter` 不能同时使用。
+- `--dry-run`、`--only-filter`、`--only-fetch` 不能同时使用。
 
 示例：
 
@@ -99,41 +99,6 @@ pr-review https://github.com/owner/repo/pull/123 --publish-comment
 ### `pr-review feedback <RUN_ID> <FINDING_ID> --status <STATUS>`
 
 记录人工对 finding 的判断。`STATUS` 可选：`accepted`、`rejected`、`fixed`、`needs_review`。
-
-### `pr-review serve`
-
-启动本地浏览器工作台，默认监听 `127.0.0.1:8787`。
-
-界面为 React + Vite 应用，构建产物随包分发在 `src/ai_pr_review/web_static/`，
-因此 `pip install` 后无需 Node 即可运行。界面包含五个视图：
-
-- **概览**：产品定位、流水线、关键能力、实时统计与基准准确率；
-- **审查工作台**：计划生成、完整审查、风险总览、审查计划、证据校验、文件过滤、
-  跨文件接口影响、可筛选 Findings、人工反馈、原始 JSON；
-- **历史审查**：运行记录、聚合统计、按 run_id 载入完整报告；
-- **准确率**：策略对比、混淆矩阵、逐样例指标；
-- **接口**：接口与 CLI 参考、运行边界。
-
-服务端接口：
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| `GET` | `/api/health` | 健康检查 |
-| `POST` | `/api/plan` | 生成审查计划（不调用模型） |
-| `POST` | `/api/review` | 执行完整审查 |
-| `GET` | `/api/history?limit=N` | 历史运行记录与聚合统计（limit 1–200） |
-| `GET` | `/api/report?run_id=…` | 取回某次运行的完整报告与元数据 |
-| `GET` | `/api/benchmark?strategy=…` | 基准报告，strategy 可选 static / ast / combined / all |
-| `POST` | `/api/feedback` | 记录 finding 人工反馈 |
-
-静态资源路由约定：
-
-- `/` 与 `/index.html` 返回 SPA 入口；
-- `/static/<file>` 映射到包内 `web_static/` 下的文件；
-- 其它非 `/api/` 路径回退到 SPA 入口（供前端 hash 路由使用）；
-- 越出静态目录的路径被拒绝。
-
-请求体上限 64 KB，服务仅监听本机回环地址。
 
 ## 配置命令
 
@@ -203,6 +168,425 @@ pr-review https://github.com/owner/repo/pull/123 --publish-comment
 - `total_cost`
 - `latest_run_at`
 
+---
+
+# Web 工作台 HTTP 接口
+
+## 启动
+
+```bash
+pr-review serve            # 默认 http://127.0.0.1:8787
+```
+
+服务端基于 Python 标准库 `ThreadingHTTPServer`，只监听本机回环地址。
+界面为 React + Vite 应用，构建产物随包分发在 `src/ai_pr_review/web_static/`，
+因此 `pip install` 后无需 Node 即可运行。
+
+界面包含 **6 个视图**：
+
+| 视图 | 路由 id | 内容 |
+|------|---------|------|
+| **概览** | `overview` | 产品定位、审查流水线、关键能力、实时统计与基准准确率 |
+| **审查工作台** | `review` | 计划生成、完整审查、风险总览、审查计划、证据校验、文件过滤、跨文件接口影响、可筛选 Findings、人工反馈、原始 JSON |
+| **历史审查** | `history` | 运行记录、聚合统计、按 run_id 载入完整报告 |
+| **准确率** | `benchmark` | 策略对比、混淆矩阵、逐样例指标 |
+| **接口** | `api` | 接口与 CLI 参考、运行边界 |
+| **设置** | `settings` | Provider / 模型 / Token 配置、连通性探测 |
+
+## 全局约定
+
+- **请求体上限**：64 KB。超限请求在读取请求体之前即被拒绝。
+- **写端点同源守卫**：全部 `POST` 要求 `Content-Type: application/json` 且请求同源；
+  否则返回 `415`。`OPTIONS` 预检一律返回 `405`，且**不返回任何 `Access-Control-*` 头**，
+  以阻断跨站表单/`fetch` 写入。
+- **凭据**：接口只回掩码，绝不明文返回 GitHub Token 或模型 API Key。
+- **编码**：所有 JSON 响应为 `application/json; charset=utf-8`。
+
+## 端点总表（18 条 API + 静态资源）
+
+| # | 方法 | 路径 | 说明 |
+|---|------|------|------|
+| 1 | GET | `/api/health` | 存活探针 |
+| 2 | GET | `/api/meta` | 运行环境 |
+| 3 | GET | `/api/history` | 历史 run 列表 + 统计 |
+| 4 | GET | `/api/report` | 单次 run 完整报告 |
+| 5 | GET | `/api/report/export` | 报告导出（markdown / json） |
+| 6 | GET | `/api/benchmark` | 准确率基准 |
+| 7 | GET | `/api/credentials` | 凭证健康（掩码） |
+| 8 | GET, POST | `/api/config` | 配置视图 / 保存配置 |
+| 9 | GET | `/api/jobs` | 最近任务（10 条） |
+| 10 | GET | `/api/jobs/{id}` | 任务快照 |
+| 11 | GET | `/api/jobs/{id}/events` | 任务 SSE 进度 |
+| 12 | GET | `/api/demo/cases` | 离线演示用例清单 |
+| 13 | GET | `/api/demo/run` | 离线演示结果 |
+| 14 | POST | `/api/plan` | 生成审查计划 |
+| 15 | POST | `/api/review` | 同步 / 异步审查 |
+| 16 | POST | `/api/jobs/{id}/cancel` | 取消任务 |
+| 17 | POST | `/api/feedback` | 人工反馈落库 |
+| 18 | POST | `/api/publish` | 预览 / 发布 GitHub 评论 |
+| — | GET | `/static/*` | 前端构建产物（含 SPA fallback） |
+
+---
+
+## 端点明细
+
+### GET `/api/health`
+
+存活探针，用于确认本地服务已就绪。
+
+响应：
+
+```json
+{ "ok": true, "service": "ai-pr-review" }
+```
+
+```bash
+curl http://127.0.0.1:8787/api/health
+```
+
+### GET `/api/meta`
+
+运行环境快照：规则数、供应商数、tree-sitter 是否可用、跨文件开关、静态分析开关、当前模型。
+
+响应要点：
+
+```json
+{ "rules": 12, "providers": 4, "tree_sitter": true, "cross_file": true, "static_analysis": true, "model": "..." }
+```
+
+```bash
+curl http://127.0.0.1:8787/api/meta
+```
+
+### GET `/api/history`
+
+历史 run 列表 + 聚合统计。
+
+查询参数：
+
+- `limit`：可选，范围 1–200。
+
+响应：
+
+```json
+{ "runs": [ ... ], "statistics": { ... } }
+```
+
+```bash
+curl "http://127.0.0.1:8787/api/history?limit=30"
+```
+
+### GET `/api/report`
+
+单次 run 的完整报告，包含 `review` / `plan` / `validation` / `interface_impacts` / `feedback`。
+
+查询参数：
+
+- `run_id`：必填。
+
+响应：
+
+```json
+{ "run_id": "...", "run": { ... }, "review": { ... }, "plan": { ... }, "validation": { ... }, "interface_impacts": [ ... ], "feedback": [ ... ] }
+```
+
+错误码：`400`（run_id 缺失）、`404`（run 不存在）。
+
+```bash
+curl "http://127.0.0.1:8787/api/report?run_id=<run_id>"
+```
+
+### GET `/api/report/export`
+
+导出报告。
+
+查询参数：
+
+- `run_id`：必填。
+- `format`：`markdown` 或 `json`。
+
+行为：
+
+- `format=markdown`：返回 `Content-Type: text/markdown`，并附带
+  `Content-Disposition: attachment; filename="pr<N>-<run8>.md"`
+  （`N` 为 PR 编号，`run8` 为 run_id 前 8 位）。
+- `format=json`：与 `GET /api/report` 同形，`Content-Type: application/json`。
+
+错误码：`400`（参数缺失或 format 非法）、`404`（run 不存在）。
+
+```bash
+curl -OJ "http://127.0.0.1:8787/api/report/export?run_id=<run_id>&format=markdown"
+curl "http://127.0.0.1:8787/api/report/export?run_id=<run_id>&format=json"
+```
+
+### GET `/api/benchmark`
+
+准确率基准报告。
+
+查询参数：
+
+- `strategy`：`static` / `ast` / `combined` / `all`。
+
+响应要点：
+
+```json
+{ "strategy": "combined", "precision": 1.0, "recall": 0.9, "f1": 0.95, "false_positive_rate": 0.0, "line_accuracy": 0.88, "cases": [ ... ] }
+```
+
+```bash
+curl "http://127.0.0.1:8787/api/benchmark?strategy=combined"
+```
+
+### GET `/api/credentials`
+
+凭证健康检查。**只返回掩码，绝不明文。**
+
+查询参数：
+
+- `probe`：`0` 只读本地状态；`1` 额外做一次连通性探测。
+
+响应要点：
+
+```json
+{ "github": { "ok": true, "masked": "ghp_****" }, "model": { "ok": true, "masked": "sk-****" } }
+```
+
+```bash
+curl "http://127.0.0.1:8787/api/credentials?probe=1"
+```
+
+### GET `/api/config` / POST `/api/config`
+
+**GET**：配置视图。
+
+响应字段：
+
+- `provider`
+- `base_url`
+- `model`
+- `api_format`
+- `api_key`（掩码）
+- `available_providers`
+
+**POST**：保存配置。请求体为 JSON 部分字段：
+
+- 掩码值或留空 = **不修改**该字段；
+- 未知键 → `ok=false`，整次写入拒绝。
+
+响应：
+
+```json
+{ "ok": true, "changed": ["model_provider.model_name"], "rejected": [] }
+```
+
+错误码：`415`（跨站或非 JSON）。
+
+```bash
+curl http://127.0.0.1:8787/api/config
+curl -X POST http://127.0.0.1:8787/api/config \
+  -H "Content-Type: application/json" \
+  -d '{"api_key":""}'
+```
+
+### GET `/api/jobs`
+
+最近任务列表，固定返回 10 条。
+
+```bash
+curl http://127.0.0.1:8787/api/jobs
+```
+
+### GET `/api/jobs/{id}`
+
+任务快照。
+
+响应字段：
+
+- `status`
+- `total_files`
+- `completed_files`
+- `current_file`
+- `progress`
+- `error`
+- `elapsed_seconds`
+- `run_id`
+
+错误码：`404`（任务不存在）。
+
+```bash
+curl http://127.0.0.1:8787/api/jobs/<job_id>
+```
+
+### GET `/api/jobs/{id}/events`（SSE）
+
+逐文件进度事件流。
+
+- `Content-Type: text/event-stream`
+- 每条事件为一行 `data: {json}`，字段与任务快照对齐（`completed_files` / `total_files` / `current_file` / `progress` 等）
+- 连接在任务结束时由服务端关闭；客户端可用 `EventSource` 或 `curl -N` 消费
+
+错误码：`404`（任务不存在）。
+
+```bash
+curl -N http://127.0.0.1:8787/api/jobs/<job_id>/events
+```
+
+### GET `/api/demo/cases`
+
+离线演示用例清单。
+
+```bash
+curl http://127.0.0.1:8787/api/demo/cases
+```
+
+### GET `/api/demo/run`
+
+离线演示结果，**无需 Token / API Key**。
+
+查询参数：
+
+- `case`：用例 id，例如 `sql-injection`。
+
+错误码：`404`（case 不存在）。
+
+```bash
+curl "http://127.0.0.1:8787/api/demo/run?case=sql-injection"
+```
+
+### POST `/api/plan`
+
+只做抓取 / 过滤 / 规划，**不调用模型**。
+
+请求体：
+
+```json
+{ "pr_url": "https://github.com/owner/repo/pull/123" }
+```
+
+响应：
+
+```json
+{ "pr": { ... }, "filter": { ... }, "plan": { ... }, "validation": { ... }, "interface_impacts": [ ... ], "run": { ... } }
+```
+
+错误码：`400`（pr_url 缺失）、`415`（跨站或非 JSON）。
+
+```bash
+curl -X POST http://127.0.0.1:8787/api/plan \
+  -H "Content-Type: application/json" \
+  -d '{"pr_url":"https://github.com/owner/repo/pull/123"}'
+```
+
+### POST `/api/review`
+
+同步审查；`async_job: true` 时任务化。
+
+请求体：
+
+```json
+{ "pr_url": "https://github.com/owner/repo/pull/123", "async_job": true }
+```
+
+行为：
+
+- 默认同步：返回完整审查产物（与 `/api/report` 中 `review` 部分同形，外加 `pr` / `filter` / `plan` 等）。
+- `async_job: true`：返回 `202` + 任务快照（含 `job_id`），进度走
+  `GET /api/jobs/{id}/events`，可 `POST /api/jobs/{id}/cancel` 真取消。
+
+错误码：`400`（pr_url 缺失）、`415`（跨站或非 JSON）。
+
+```bash
+curl -X POST http://127.0.0.1:8787/api/review \
+  -H "Content-Type: application/json" \
+  -d '{"pr_url":"https://github.com/owner/repo/pull/123","async_job":true}'
+```
+
+### POST `/api/jobs/{id}/cancel`
+
+服务端真取消，**取消在文件边界生效**（不会把半个文件的审查结果写回）。
+
+响应：
+
+```json
+{ "ok": true, "job_id": "...", "message": "已请求停止。" }
+```
+
+错误码：`404`（任务不存在或已结束）、`415`（跨站或非 JSON）。
+
+```bash
+curl -X POST http://127.0.0.1:8787/api/jobs/<job_id>/cancel \
+  -H "Content-Type: application/json" -d '{}'
+```
+
+### POST `/api/feedback`
+
+人工反馈落库。
+
+请求体：
+
+```json
+{ "run_id": "...", "finding_id": "...", "status": "accepted", "note": "" }
+```
+
+`status` 可选：`accepted` / `rejected` / `fixed` / `needs_review`。
+
+错误码：`400`（字段缺失）、`404`（run / finding 不存在）、`415`（跨站或非 JSON）。
+
+```bash
+curl -X POST http://127.0.0.1:8787/api/feedback \
+  -H "Content-Type: application/json" \
+  -d '{"run_id":"<run_id>","finding_id":"f-1","status":"accepted","note":""}'
+```
+
+### POST `/api/publish`
+
+预览 / 发布审查评论到 GitHub PR。
+
+请求体：
+
+```json
+{ "run_id": "<run_id>", "confirm": false }
+```
+
+行为：
+
+- `confirm=false`：**只预览**，不触碰 GitHub。返回 `status=preview` 与 `comment_chars`（将要发布的评论长度）。
+- `confirm=true`：真正发布。返回 `status=published` 或 `status=already_published`，
+  以及 `comment_url` / `comment_id`。
+
+错误码：
+
+| 状态码 | 含义 |
+|--------|------|
+| 400 | `run_id` 缺失 |
+| 404 | run 不存在 |
+| 409 | 无 GitHub PR 链接 |
+| 415 | 跨站或非 JSON |
+| 502 | GitHub 侧失败 |
+| 503 | 未配置 GitHub Token |
+
+```bash
+curl -X POST http://127.0.0.1:8787/api/publish \
+  -H "Content-Type: application/json" \
+  -d '{"run_id":"<run_id>","confirm":false}'
+```
+
+---
+
+## 静态资源 `/static/*`
+
+- `/` 与 `/index.html` 返回 SPA 入口；
+- `/static/<file>` 映射到包内 `web_static/` 下的文件（前端 `base=/static/`）；
+- 其它非 `/api/` 路径回退到 SPA 入口（供前端 hash 路由使用）；
+- 越出静态目录的路径被拒绝。
+
+```bash
+curl http://127.0.0.1:8787/static/
+curl http://127.0.0.1:8787/
+```
+
+---
+
 ## 输出格式
 
 ### Terminal
@@ -249,3 +633,4 @@ pr-review https://github.com/owner/repo/pull/123 --publish-comment
 - `src/ai_pr_review/services/analyzers/cross_file_interface.py`
 - `src/ai_pr_review/benchmark/runner.py`
 - `src/ai_pr_review/services/report_renderer.py`
+- `tests/test_web_api_docs.py`（接口文档防漂移）

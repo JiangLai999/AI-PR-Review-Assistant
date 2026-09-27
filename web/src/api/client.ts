@@ -8,6 +8,8 @@ import type {
   HistoryResponse,
   JobSnapshot,
   MetaResponse,
+  PublishResponse,
+  ReportExportFormat,
   ReportResponse,
   ReviewResponse,
   SaveConfigResponse,
@@ -114,6 +116,23 @@ export const api = {
 
   report: (runId: string) =>
     request<ReportResponse>(`/api/report?run_id=${encodeURIComponent(runId)}`),
+
+  /**
+   * 发布审查评论。`confirm=false` 只拿预览，服务端保证不向 GitHub 写任何内容；
+   * 只有 `confirm=true` 才会真的发帖，所以调用点必须由「二次确认」驱动。
+   */
+  publish: (runId: string, confirm: boolean) =>
+    request<PublishResponse>('/api/publish', {
+      method: 'POST',
+      body: JSON.stringify({ run_id: runId, confirm }),
+    }),
+
+  /**
+   * 导出走浏览器原生下载（服务端返回 text/markdown 或 json 的附件响应），
+   * 因此只给 URL 给 <a download> 用，不经过 request() 的 JSON 解析通道。
+   */
+  exportReportUrl: (runId: string, format: ReportExportFormat) =>
+    `/api/report/export?run_id=${encodeURIComponent(runId)}&format=${format}`,
 
   feedback: (runId: string, findingId: string, status: FeedbackStatus, note = '') =>
     request<{ ok: boolean }>('/api/feedback', {

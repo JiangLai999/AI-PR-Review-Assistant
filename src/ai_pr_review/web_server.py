@@ -21,12 +21,91 @@ from urllib.parse import parse_qs, urlparse
 from ai_pr_review.config import AppConfig
 from ai_pr_review.credentials import collect_status
 from ai_pr_review.demo_runner import demo_cases_payload, run_demo_case
+from ai_pr_review.services.exceptions import InvalidPRURLError
+from ai_pr_review.services.publish_service import (
+    PublishError,
+    PublishService,
+    stored_run_pr_data,
+)
+from ai_pr_review.services.report_renderer import ReportRenderer
 from ai_pr_review.services.result_store import ResultStore
 from ai_pr_review.services.review_orchestrator import ReviewOrchestrator
+from ai_pr_review.utils.github_url_parser import parse_pr_url
 from ai_pr_review.web_config import apply_config_update, build_config_view
 from ai_pr_review.web_jobs import ReviewJobManager
 
 MAX_BODY_BYTES = 64 * 1024
+
+# 写端点只接受"同源浏览器"或"本地无 Origin 客户端"（curl / CLI）。
+# 威胁模型：工作台监听回环且无鉴权，任何网页都能对 127.0.0.1:8787 发简单请求
+# （`Content-Type: text/plain` 不触发预检），而 /api/publish 会真的往 GitHub 写东西。
+_LOCAL_ORIGIN_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_PUBLISH_STATUS_CODES = {
+    "invalid_request": 400,
+    "not_found": 404,
+    "not_publishable": 409,
+    "missing_credentials": 503,
+    "publish_failed": 502,
+}
+
+
+def _origin_is_local(origin: str) -> bool:
+    """`http://127.0.0.1:8787` / `http://localhost:5173` 这类本机来源放行。"""
+    try:
+        parsed = urlparse(origin)
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    return (parsed.hostname or "").lower() in _LOCAL_ORIGIN_HOSTS
+
+
+def _published_ledger_path(config: AppConfig) -> Path:
+    """发布账本放在结果库同目录：`<db 目录>/published-comments.json`。
+
+    TUI 的账本只活在会话内存里（关掉就忘）；Web 是无状态的，必须落盘才能回答
+    "这条 run 是不是已经发过评论了"。
+    """
+    return Path(str(config.result_store.db_path)).parent / "published-comments.json"
+
+
+def _load_published_ids(config: AppConfig) -> set[str]:
+    try:
+        payload = json.loads(_published_ledger_path(config).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(payload, list):
+        return set()
+    return {str(item) for item in payload if isinstance(item, str) and item.strip()}
+
+
+def _remember_published(config: AppConfig, run_id: str) -> None:
+    """记下已发布的 run（尽力而为：账本写失败不能把已成功的发布报成失败）。"""
+    ids = _load_published_ids(config)
+    ids.add(run_id)
+    path = _published_ledger_path(config)
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(
+            json.dumps(sorted(ids), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        temporary.replace(path)
+    except OSError:
+        pass
+
+
+def _publish_response(payload: dict[str, Any]) -> dict[str, Any]:
+    """把 `PublishService` 的载荷规整成 Web 契约（status 三态 + 回链 + 人话提示）。"""
+    response = dict(payload)
+    if response.get("status") == "published" and response.get("already_published"):
+        response["status"] = "already_published"
+    response.setdefault("requires_confirmation", response.get("status") == "preview")
+    response.setdefault("comment_url", "")
+    response.setdefault("comment_id", "")
+    response.setdefault("already_published", False)
+    response["message"] = str(response.get("text") or response.get("message") or "")
+    return response
 
 # 前端构建产物目录（随包安装）
 WEB_STATIC_DIR = Path(__file__).resolve().parent / "web_static"
@@ -109,6 +188,9 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
         if path == "/api/report":
             self._handle_report(parse_qs(parsed.query))
             return
+        if path == "/api/report/export":
+            self._handle_report_export(parse_qs(parsed.query))
+            return
         if path == "/api/benchmark":
             self._handle_benchmark(parse_qs(parsed.query))
             return
@@ -137,6 +219,14 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
 
     # ---- POST -----------------------------------------------------
 
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        """不实现 CORS 预检：回 405，且**不**发任何 `Access-Control-*` 头。
+
+        只要浏览器无法完成预检，跨站脚本就拿不到响应；配合写端点的
+        Content-Type / Origin 校验，构成完整的第一层跨站防线。
+        """
+        self._send_json(405, {"error": "OPTIONS not supported"}, close=True)
+
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         if self._declared_body_too_large():
@@ -144,10 +234,16 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
             # 真的发送这么多字节，阻塞读取会把连接挂住。
             self._send_json(400, {"error": "request body is too large"}, close=True)
             return
+        if self._reject_cross_site():
+            return
         try:
             payload = self._read_json()
         except ValueError as exc:
             self._send_json(400, {"error": str(exc)})
+            return
+
+        if path == "/api/publish":
+            self._handle_publish(payload)
             return
 
         if path.startswith("/api/jobs/") and path.endswith("/cancel"):
@@ -307,8 +403,12 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json(400, {"error": str(exc)})
             return
+        # `ok=False` = 提交里有不支持的键/非法值：**必须**回 400，否则设置页会把
+        # "什么都没保存"当成成功（2026-09-27 opencode 实测复现的静默失败）。
+        # 载荷形状保持不变，前端仍可读 changed/message 做局部提示。
+        status = 200 if result.ok else 400
         self._send_json(
-            200,
+            status,
             {
                 "ok": result.ok,
                 "changed": result.changed,
@@ -454,6 +554,66 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # pragma: no cover
             self._send_json(400, {"error": str(exc)})
 
+    def _handle_report_export(self, query: dict[str, list[str]]) -> None:
+        """`GET /api/report/export?run_id=&format=markdown|json`。
+
+        真相源是 `ReportRenderer.render_markdown`（与 CLI `export-run` 同一套渲染），
+        不是前端自己拼的 Markdown——否则 CLI 导出与 Web 导出会各自漂移。
+        """
+        run_id = (query.get("run_id", [""])[0] or "").strip()
+        output_format = (query.get("format", ["markdown"])[0] or "markdown").strip().lower()
+        if not run_id:
+            self._send_json(400, {"error": "run_id is required"})
+            return
+        if output_format not in {"markdown", "json"}:
+            self._send_json(400, {"error": "format must be markdown or json"})
+            return
+        try:
+            store = ResultStore(config=self.config.result_store)
+            result = store.get_result(run_id)
+            summary = store.get_run_summary(run_id)
+            if result is None or summary is None:
+                self._send_json(404, {"error": f"Unknown run_id: {run_id}"})
+                return
+            metadata = store.get_run_metadata(run_id)
+            if output_format == "json":
+                self._send_json(
+                    200,
+                    {
+                        "run_id": run_id,
+                        "run": summary,
+                        "review": result.model_dump(mode="json"),
+                        "plan": metadata.get("review_plan"),
+                        "validation": metadata.get("validation_summary", {}),
+                        "cross_file_impacts": metadata.get("cross_file_impacts", []),
+                        "interface_impacts": metadata.get("interface_impacts", []),
+                        "feedback": store.list_feedback(run_id),
+                    },
+                )
+                return
+            pr_url = str(summary.get("pr_url") or "").strip()
+            parsed = parse_pr_url(pr_url)
+            pr_data = stored_run_pr_data(summary, metadata, parsed, pr_url)
+            files_changed = int(summary.get("total_files") or 0)
+            markdown = ReportRenderer(self.config.report_renderer).render_markdown(
+                result,
+                pr_data,
+                files_changed=files_changed or None,
+            )
+            filename = f"pr{parsed.pr_number}-{run_id[:8]}.md"
+            self._send_download(
+                markdown.encode("utf-8"),
+                "text/markdown; charset=utf-8",
+                filename,
+            )
+        except InvalidPRURLError as exc:
+            self._send_json(
+                409,
+                {"error": f"该 Run 的 PR 链接不是 GitHub PR URL，无法导出报告：{exc}"},
+            )
+        except Exception as exc:  # pragma: no cover - exercised through the live server
+            self._send_json(400, {"error": str(exc)})
+
     def _handle_benchmark(self, query: dict[str, list[str]]) -> None:
         """返回基准测试报告，供工作台展示策略准确率。"""
         strategy = (query.get("strategy", ["combined"])[0] or "combined").strip()
@@ -526,12 +686,70 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
 
     # ---- plumbing -------------------------------------------------
 
+    def _handle_publish(self, payload: dict[str, Any]) -> None:
+        """`POST /api/publish {run_id, confirm}`。
+
+        `confirm=false`（默认）**只预览**，绝不碰 GitHub；`confirm=true` 才真发，
+        发完把 run 记进落盘账本（`_published_ledger_path`）。第二次发布同一 run 时
+        载荷里 `status=already_published` 且带警告文案——按契约"照发 + 警告"，
+        不静默跳过（用户明确二次确认过）。
+        """
+        run_id = str(payload.get("run_id", "") or "").strip()
+        if not run_id:
+            self._send_json(400, {"error": "run_id is required", "code": "invalid_request"})
+            return
+        published_ids = _load_published_ids(self.config)
+        confirm = payload.get("confirm") is True
+        try:
+            service = PublishService(self.config)
+            if confirm:
+                outcome = service.publish(run_id=run_id, published_run_ids=published_ids)
+                _remember_published(self.config, run_id)
+            else:
+                outcome = service.preview(run_id=run_id, published_run_ids=published_ids)
+            self._send_json(200, _publish_response(outcome))
+        except PublishError as exc:
+            self._send_json(
+                _PUBLISH_STATUS_CODES.get(exc.code, 400),
+                {"error": exc.message, "code": exc.code},
+            )
+        except Exception as exc:  # pragma: no cover - exercised through the live server
+            self._send_json(500, {"error": str(exc)})
+
     def _declared_body_too_large(self) -> bool:
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except (TypeError, ValueError):
             return True
         return length > MAX_BODY_BYTES
+
+    def _reject_cross_site(self) -> bool:
+        """跨站守卫：被拒时已经回过响应，返回 True 表示调用方应直接 return。
+
+        三层（任意一层不合规即 415）：
+        1. `Content-Type: application/json`——浏览器把跨站 `text/plain` POST 当"简单请求"，
+           不做预检；强制 JSON 让这类请求先撞墙。
+        2. `Sec-Fetch-Site` 非 `same-origin`/`none` 一律拒绝（现代浏览器一定带）。
+        3. `Origin` 存在时其 host 必须是本机（`127.0.0.1`/`localhost`/`::1`）；
+           CLI/curl 不带 Origin，直接放行。
+        """
+        content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if content_type != "application/json":
+            self._send_json(
+                415,
+                {"error": "Content-Type must be application/json"},
+                close=True,
+            )
+            return True
+        fetch_site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if fetch_site and fetch_site not in {"same-origin", "none"}:
+            self._send_json(415, {"error": "cross-site request rejected"}, close=True)
+            return True
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin and not _origin_is_local(origin):
+            self._send_json(415, {"error": "cross-site request rejected"}, close=True)
+            return True
+        return False
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
@@ -552,6 +770,16 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
             "application/json; charset=utf-8",
             close=close,
         )
+
+    def _send_download(self, body: bytes, content_type: str, filename: str) -> None:
+        """带 `Content-Disposition` 的下载响应（导出报告用）。"""
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _send(self, status: int, body: bytes, content_type: str, *, close: bool = False) -> None:
         self.send_response(status)

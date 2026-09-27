@@ -1124,3 +1124,51 @@ input[type='checkbox']:checked { outline: 2px solid rgba(103, 153, 254, 0.35); o
 .particle-bg-idle .robot-hero { opacity:.68; }
 .particle-bg-focus .robot-hero { opacity:.34; }
 @media(max-width:900px){.overview-hero .hero-copy{padding:8px 0}.particle-bg .robot-hero{opacity:.28}.particle-bg-focus .robot-hero{opacity:.2}}
+
+
+/* ========================= 发布 / 导出（ReportActions） ========================= */
+
+/* 危险动作按钮：唯一会向 GitHub 写入的操作，用 critical 语义色，不给 primary 的白底。 */
+.btn-danger {
+  background: var(--ds-sev-critical-bg);
+  color: var(--ds-sev-critical);
+  border-color: var(--ds-sev-critical-bg);
+  font-weight: 600;
+}
+.btn-danger:hover:not(:disabled) { border-color: var(--ds-sev-critical); }
+
+.report-actions { display:flex; flex-direction:column; gap:var(--ds-space-4); }
+.report-actions.is-disabled { border-color:var(--ds-color-border-subtle); }
+.report-actions-head { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:var(--ds-space-4); }
+.report-actions-title { display:flex; flex-direction:column; gap:6px; min-width:0; }
+.report-actions-title .eyebrow { color:var(--ds-color-brand); font-size:var(--ds-text-3xs); letter-spacing:.13em; }
+.report-actions-title h3 { font-size:var(--ds-text-subtitle); }
+.report-actions-lead { max-width:62ch; color:var(--ds-color-text-description); font-size:var(--ds-text-xs); line-height:1.6; }
+.report-actions-downloads { display:flex; flex-wrap:wrap; gap:var(--ds-space-2); }
+.report-actions-downloads a[aria-disabled='true'] { opacity:.4; cursor:not-allowed; }
+
+.report-actions-bar { display:flex; flex-direction:column; gap:var(--ds-space-3); }
+.report-actions-hint { display:flex; align-items:center; gap:var(--ds-space-2); color:var(--ds-color-text-description); font-size:var(--ds-text-xs); }
+
+.report-actions-confirm { display:flex; flex-direction:column; gap:var(--ds-space-3); padding:var(--ds-space-3) var(--ds-space-4); border:1px solid var(--ds-sev-critical-bg); border-left:2px solid var(--ds-sev-critical); border-radius:var(--ds-radius-sm); background:var(--ds-sev-critical-bg); }
+.report-actions-warning { display:flex; flex-direction:column; gap:4px; }
+.report-actions-warning strong { color:var(--ds-sev-critical); font-size:var(--ds-text-xs); }
+.report-actions-warning span { color:var(--ds-color-text-description); font-size:var(--ds-text-2xs); }
+
+.report-actions-outcome { display:flex; flex-direction:column; gap:var(--ds-space-3); }
+.report-actions-links { align-items:baseline; gap:var(--ds-space-3); font-size:var(--ds-text-xs); }
+.report-actions-links .dim { font-size:var(--ds-text-2xs); }
+
+.report-actions-error { display:flex; flex-direction:column; gap:var(--ds-space-3); }
+.report-actions-error-detail { display:block; margin-top:2px; color:var(--ds-color-text-description); font-size:var(--ds-text-2xs); line-height:1.6; }
+
+.report-actions-preview { display:flex; flex-direction:column; gap:var(--ds-space-2); }
+.report-actions-preview-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:var(--ds-space-2); }
+.report-actions-preview-title { color:var(--ds-color-text-description); font-size:var(--ds-text-2xs); }
+.report-actions-copied { color:var(--ds-state-valid); font-size:var(--ds-text-2xs); }
+.report-actions-copy-failed { color:var(--ds-sev-critical); font-size:var(--ds-text-2xs); }
+.report-actions-preview-body { max-height:360px; white-space:pre-wrap; overflow-wrap:anywhere; }
+
+.report-actions-footnote { color:var(--ds-color-text-placeholder); font-size:var(--ds-text-3xs); line-height:1.6; }
+.report-actions-footnote code { font-family:var(--ds-font-mono); }
+@media (max-width:620px){ .report-actions-head{flex-direction:column} }

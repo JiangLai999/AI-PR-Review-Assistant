@@ -146,6 +146,27 @@ export interface ReportResponse {
   feedback: { run_id: string; finding_id: string; status: string; note: string; created_at: string }[]
 }
 
+/** `POST /api/publish` 的状态机：preview = 只渲染不联网，published = 本次新发，already_published = 之前发过但照发。 */
+export type PublishStatus = 'preview' | 'published' | 'already_published'
+
+export interface PublishResponse {
+  status: PublishStatus
+  /** 完整 Markdown 评论正文（预览与成功态都返回，可直接给用户看/复制）。 */
+  comment_body: string
+  comment_chars: number
+  /** 服务端要求二次确认时出现；已发布分支可能省略，判定一律以 status 为准。 */
+  requires_confirmation?: boolean
+  /** 评论链接，仅 published / already_published 且上游返回时可非空。 */
+  comment_url: string
+  /** 评论 ID，可能为空串。 */
+  comment_id: string
+  /** 服务端给的人话状态/警告，可能为空串。 */
+  message: string
+}
+
+/** 报告导出格式；markdown 与 CLI `export-run` 逐字节一致。 */
+export type ReportExportFormat = 'markdown' | 'json'
+
 export interface BenchmarkCaseOutcome {
   case_id: string
   true_positives: number

@@ -221,7 +221,7 @@ def _fork_info(metadata: dict[str, Any]) -> tuple[bool, str | None]:
     return bool(fork.get("is_fork")), head_repo
 
 
-def _stored_run_pr_data(
+def stored_run_pr_data(
     run: dict[str, Any],
     metadata: dict[str, Any],
     parsed: ParsedPRUrl,
@@ -272,6 +272,10 @@ class PublishService:
     def __init__(self, config: AppConfig, *, store: ResultStore | None = None) -> None:
         self.config = config
         self._store = store
+        # 最近一次真实发布的评论链接：Web 工作台需要可点击的回链，
+        # CLI 侧只用 `text`，两者共用同一份载荷（见 `_published_payload`）。
+        self.last_comment_url = ""
+        self.last_comment_id = ""
 
     @property
     def store(self) -> ResultStore:
@@ -330,7 +334,7 @@ class PublishService:
             metadata.get("filtered_findings"),
             fallback_threshold=self.config.post_processor.confidence_threshold,
         )
-        pr_data = _stored_run_pr_data(run, metadata, parsed, pr_url, head_repo_full_name=head_repo)
+        pr_data = stored_run_pr_data(run, metadata, parsed, pr_url, head_repo_full_name=head_repo)
         comment_body = ReportRenderer(self.config.report_renderer).render_github_comment(
             result,
             pr_data,
@@ -397,7 +401,12 @@ class PublishService:
         self._post_comment(target)
         if published_run_ids is not None:
             published_run_ids.add(target.run_id)
-        return _published_payload(target, already_published)
+        return _published_payload(
+            target,
+            already_published,
+            comment_url=self.last_comment_url,
+            comment_id=self.last_comment_id,
+        )
 
     def _post_comment(self, target: PublishTarget) -> None:
         """The only place in this module that talks to GitHub."""
@@ -407,7 +416,11 @@ class PublishService:
                 config=self.config.pr_fetcher,
             )
             pull_request = fetcher._get_pull_request(target.owner, target.repo, target.pr_number)
-            pull_request.create_issue_comment(target.comment_body)
+            created = pull_request.create_issue_comment(target.comment_body)
+            # PyGithub 的 IssueComment 带 html_url / id；属性缺失时保持空串，
+            # 由调用方降级成 PR 链接（不允许因为拿不到回链就报发布失败）。
+            self.last_comment_url = str(getattr(created, "html_url", "") or "")
+            self.last_comment_id = str(getattr(created, "id", "") or "")
         except Exception as exc:  # noqa: BLE001 - one honest code for any upstream failure
             raise PublishError(
                 "publish_failed",
@@ -443,7 +456,13 @@ def _preview_payload(target: PublishTarget, already_published: bool) -> dict[str
     }
 
 
-def _published_payload(target: PublishTarget, already_published: bool) -> dict[str, Any]:
+def _published_payload(
+    target: PublishTarget,
+    already_published: bool,
+    *,
+    comment_url: str = "",
+    comment_id: str = "",
+) -> dict[str, Any]:
     text = (
         f"已向 {target.repository}#{target.pr_number} 发布审查评论"
         f"（{len(target.comment_body)} 字符）：{target.url}"
@@ -460,5 +479,8 @@ def _published_payload(target: PublishTarget, already_published: bool) -> dict[s
         "comment_chars": len(target.comment_body),
         "findings": target.findings,
         "already_published": already_published,
+        # Web 工作台要可点击的评论回链；CLI 不读这两项（缺省为空串）。
+        "comment_url": comment_url,
+        "comment_id": comment_id,
         "text": text,
     }

@@ -13,10 +13,12 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
 from ai_pr_review.config import AppConfig, ResultStoreConfig
+from ai_pr_review.services.publish_service import PublishError, PublishService
 from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
 from ai_pr_review.services.result_store import ResultStore
 from ai_pr_review.web_server import ReviewWebHandler
@@ -559,3 +561,308 @@ def test_serve_command_hands_the_resolved_config_path_to_the_web_layer(
     assert result.exit_code == 0, result.output
     assert captured["config_path"] == config_path
     assert captured["port"] == 9123
+
+
+def call_raw(
+    base: str,
+    method: str,
+    path: str,
+    *,
+    body: dict | str | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict[str, str], str]:
+    """像 `call` 一样发请求，但能自定义 body 原文与请求头，并回读响应头。
+
+    `body` 传字符串时按原样发送（用来构造"不是 JSON 的简单请求"）。
+    """
+    data: bytes | None
+    if body is None:
+        data = None
+    elif isinstance(body, str):
+        data = body.encode("utf-8")
+    else:
+        data = json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        base + path,
+        data=data,
+        headers=headers or {},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return (
+                response.status,
+                {key.lower(): value for key, value in response.headers.items()},
+                response.read().decode("utf-8", errors="replace"),
+            )
+    except urllib.error.HTTPError as error:
+        return (
+            error.code,
+            {key.lower(): value for key, value in error.headers.items()},
+            error.read().decode("utf-8", errors="replace"),
+        )
+
+
+class TestConfigSaveSemantics:
+    """保存接口的成败必须与磁盘一致（opencode 实测的两个静默失败回归点）。"""
+
+    def test_unsupported_key_returns_400_not_a_silent_200(self, server):
+        status, body = call(server["base"], "POST", "/api/config", {"not_a_real_key": 1})
+
+        payload = json.loads(body)
+        assert status == 400, body
+        assert payload["ok"] is False
+        assert "unsupported key" in payload["message"]
+        assert payload["changed"] == []
+
+    def test_preference_key_actually_persists(self, server):
+        status, body = call(
+            server["base"], "POST", "/api/config", {"ui_language": "en-US"}
+        )
+
+        payload = json.loads(body)
+        assert status == 200, body
+        assert payload["ok"] is True
+        assert "ui_language" in payload["changed"]
+        # `ConfigView` 目前还没暴露 preferences（Phase 2 的计划），所以这里核对
+        # 落盘真相——本用例要证明的是"保存成功 == 磁盘真的变了"。
+        saved = json.loads(server["config_path"].read_text(encoding="utf-8"))
+        assert saved["preferences"]["ui_language"] == "en-US"
+
+    def test_settings_page_payload_shape_is_accepted(self, server):
+        """真实设置页会带 validate / persist_secrets / 数值项：白名单必须覆盖它，
+        否则"未知键拒绝"会把正常的保存也一起挡掉（这是本用例存在的唯一理由）。"""
+        payload = {
+            "provider_name": "deepseek",
+            "base_url": "https://api.deepseek.com/v1",
+            "model": "deepseek-chat",
+            "api_format": "openai",
+            "persist_secrets": True,
+            "validate": False,
+            "max_tokens": 4096,
+            "timeout_seconds": 60,
+            "review_concurrency": 3,
+            "enable_static_analysis": True,
+            "enable_cross_file_review": False,
+            "cross_file_max_files": 5,
+            "max_cost_per_run": 1.0,
+            "max_cost_per_24h": 5.0,
+            "ui_language": "zh-CN",
+        }
+
+        status, body = call(server["base"], "POST", "/api/config", payload)
+
+        parsed = json.loads(body)
+        assert status == 200, body
+        assert parsed["ok"] is True
+        assert "unsupported key" not in parsed["message"]
+
+
+class TestCrossSiteGuard:
+    """写端点必须挡住"任意网页对 127.0.0.1 发简单请求"这条 CSRF 路径。
+
+    工作台无鉴权、监听回环：浏览器把跨站 `text/plain` POST 当简单请求（无预检），
+    所以只靠"localhost"这个事实并不安全——`/api/config` 与 `/api/publish` 都会真的写东西。
+    """
+
+    def test_plain_text_post_is_rejected(self, server):
+        status, _, _ = call_raw(
+            server["base"],
+            "POST",
+            "/api/feedback",
+            body='{"run_id":"x","finding_id":"y","status":"accepted"}',
+            headers={"content-type": "text/plain"},
+        )
+
+        assert status == 415
+
+    def test_cross_origin_json_post_is_rejected(self, server):
+        status, _, _ = call_raw(
+            server["base"],
+            "POST",
+            "/api/config",
+            body={"ui_language": "en-US"},
+            headers={"content-type": "application/json", "origin": "https://evil.example"},
+        )
+
+        assert status == 415
+
+    def test_cross_site_fetch_metadata_is_rejected(self, server):
+        status, _, _ = call_raw(
+            server["base"],
+            "POST",
+            "/api/publish",
+            body={"run_id": server["run_id"], "confirm": False},
+            headers={
+                "content-type": "application/json",
+                "sec-fetch-site": "cross-site",
+            },
+        )
+
+        assert status == 415
+
+    def test_same_origin_preview_is_allowed(self, server):
+        """同源（本机 Origin）请求必须放行——守卫不能把工作台自己挡住。"""
+        status, _, _ = call_raw(
+            server["base"],
+            "POST",
+            "/api/publish",
+            body={"run_id": server["run_id"], "confirm": False},
+            headers={
+                "content-type": "application/json",
+                "origin": server["base"],
+                "sec-fetch-site": "same-origin",
+            },
+        )
+
+        assert status == 200
+
+    def test_options_is_not_implemented_without_cors_headers(self, server):
+        status, headers, _ = call_raw(server["base"], "OPTIONS", "/api/config")
+
+        assert status == 405
+        assert not any(key.startswith("access-control-") for key in headers)
+
+
+class TestPublishEndpoint:
+    def test_missing_run_id_is_rejected(self, server):
+        status, body = call(server["base"], "POST", "/api/publish", {})
+
+        assert status == 400
+        assert json.loads(body)["code"] == "invalid_request"
+
+    def test_preview_never_posts_and_returns_comment_body(self, server):
+        with mock.patch.object(
+            PublishService, "_post_comment", side_effect=AssertionError("preview must not post")
+        ) as post:
+            status, body = call(
+                server["base"],
+                "POST",
+                "/api/publish",
+                {"run_id": server["run_id"], "confirm": False},
+            )
+
+        payload = json.loads(body)
+        assert status == 200, body
+        assert payload["status"] == "preview"
+        assert payload["requires_confirmation"] is True
+        assert payload["comment_chars"] == len(payload["comment_body"])
+        assert payload["comment_url"] == ""
+        assert post.call_count == 0
+
+    def test_unknown_run_is_not_found(self, server):
+        status, body = call(
+            server["base"], "POST", "/api/publish", {"run_id": "does-not-exist"}
+        )
+
+        assert status == 404
+        assert json.loads(body)["code"] == "not_found"
+
+    def test_confirm_publishes_and_records_ledger(self, server):
+        def fake_post(self, target):  # noqa: ANN001 - 只模拟"GitHub 写成功"
+            self.last_comment_url = "https://github.com/owner/repo/pull/7#issuecomment-1"
+            self.last_comment_id = "1"
+
+        with mock.patch.object(PublishService, "_post_comment", fake_post):
+            status, body = call(
+                server["base"],
+                "POST",
+                "/api/publish",
+                {"run_id": server["run_id"], "confirm": True},
+            )
+
+        payload = json.loads(body)
+        assert status == 200
+        assert payload["status"] == "published"
+        assert payload["comment_id"] == "1"
+        assert payload["comment_url"].endswith("#issuecomment-1")
+
+        ledger = server["config_path"].parent / "published-comments.json"
+        assert ledger.exists()
+        assert server["run_id"] in json.loads(ledger.read_text(encoding="utf-8"))
+
+    def test_second_publish_is_flagged_as_repeat(self, server):
+        def fake_post(self, target):  # noqa: ANN001
+            self.last_comment_url = "https://github.com/owner/repo/pull/7#issuecomment-2"
+            self.last_comment_id = "2"
+
+        with mock.patch.object(PublishService, "_post_comment", fake_post):
+            call(
+                server["base"],
+                "POST",
+                "/api/publish",
+                {"run_id": server["run_id"], "confirm": True},
+            )
+            _, body = call(
+                server["base"],
+                "POST",
+                "/api/publish",
+                {"run_id": server["run_id"], "confirm": True},
+            )
+
+        payload = json.loads(body)
+        # 契约：重复发布"照发 + 警告"，不静默跳过
+        assert payload["status"] == "already_published"
+        assert payload["already_published"] is True
+        assert "已发布过" in payload["message"]
+
+    def test_missing_credentials_maps_to_503(self, server):
+        with mock.patch.object(
+            PublishService,
+            "preview",
+            side_effect=PublishError("missing_credentials", "未配置 GitHub Token"),
+        ):
+            status, body = call(
+                server["base"], "POST", "/api/publish", {"run_id": server["run_id"]}
+            )
+
+        assert status == 503
+        assert json.loads(body)["code"] == "missing_credentials"
+
+
+class TestReportExportEndpoint:
+    def test_markdown_export_is_an_attachment(self, server):
+        status, headers, body = call_raw(
+            server["base"],
+            "GET",
+            f"/api/report/export?run_id={server['run_id']}&format=markdown",
+        )
+
+        assert status == 200
+        assert "text/markdown" in headers["content-type"]
+        assert headers["content-disposition"].startswith("attachment;")
+        assert f"pr7-{server['run_id'][:8]}.md" in headers["content-disposition"]
+        assert body.startswith("# ")
+        # 报告正文必须带上 findings 内容（渲染器模板可能中英不同，只断言内容）
+        assert "SQL injection risk" in body
+
+    def test_json_export_matches_report_shape(self, server):
+        status, headers, body = call_raw(
+            server["base"],
+            "GET",
+            f"/api/report/export?run_id={server['run_id']}&format=json",
+        )
+
+        payload = json.loads(body)
+        assert status == 200
+        assert "application/json" in headers["content-type"]
+        assert payload["run_id"] == server["run_id"]
+        assert payload["review"]["findings"][0]["title"] == "SQL injection risk"
+        assert payload["plan"]["risk_level"] == "high"
+
+    def test_unknown_format_is_rejected(self, server):
+        status, body = call(
+            server["base"],
+            "GET",
+            f"/api/report/export?run_id={server['run_id']}&format=pdf",
+        )
+
+        assert status == 400
+        assert "format must be" in json.loads(body)["error"]
+
+    def test_unknown_run_is_not_found(self, server):
+        status, _ = call(
+            server["base"], "GET", "/api/report/export?run_id=nope&format=markdown"
+        )
+
+        assert status == 404
