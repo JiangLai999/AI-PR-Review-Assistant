@@ -128,13 +128,14 @@ def test_documented_concrete_paths_exist_on_server(doc_path_set: set[str]) -> No
 
 
 def test_expected_endpoint_count() -> None:
-    """21 条 API 路由的硬约束：文档总表必须列出 21 行 + 静态资源。
+    """22 条 API 路由的硬约束：文档总表必须列出 22 行 + 静态资源。
 
     这是一道**绊线**：新增端点时必须显式改这个数字（Phase 3 加 `/api/chat` 时从 18 → 19；
-    Phase 5 加 `/api/chat/history` 与 `/api/chat/history/clear` 时 19 → 21），
+    Phase 5 加 `/api/chat/history`、`/api/chat/history/clear` 时 19 → 21，
+    再加 `/api/config/import-cli` 时 21 → 22），
     避免"悄悄多了一个没写文档的接口"。
     """
     text = API_DOC.read_text(encoding="utf-8")
     table_rows = re.findall(r"^\|\s*\d+\s*\|\s*(?:GET|POST|GET, POST)", text, re.M)
-    assert len(table_rows) == 21, f"API.md 端点总表应有 21 条编号行，实际 {len(table_rows)}"
+    assert len(table_rows) == 22, f"API.md 端点总表应有 22 条编号行，实际 {len(table_rows)}"
     assert "/static/*" in text or "/static/" in text, "API.md 需描述 /static/* 静态资源"

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api } from '../api/client'
+import { ApiError, api } from '../api/client'
 import type {
   ConfigOptions,
   ConfigView,
@@ -336,6 +336,7 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
   const [report, setReport] = useState<CredentialReport | null>(null)
   const [probing, setProbing] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [importing, setImporting] = useState(false)
   const [message, setMessage] = useState<{ kind: 'ok' | 'error' | 'info'; text: string } | null>(null)
 
   const [providerName, setProviderName] = useState('')
@@ -482,6 +483,50 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
     return preset ? preset.base_url : ''
   }, [config, providerName])
 
+  /**
+   * 当前这份 Web 配置的文件名（路径 Chip 显示的也是它）。
+   *
+   * 两条文案都要指名文件：隔离说明与二次确认句子里出现的是同一个名字，用户才分得清
+   * "被覆盖的是哪一份"。取不到就退回完整路径，绝不显示空白。
+   */
+  const configFileName = useMemo(
+    () => config?.config_path.split(/[\\/]/).pop() || config?.config_path || '',
+    [config],
+  )
+
+  /**
+   * 「从 CLI 配置导入」：覆盖动作，先弹二次确认再打端点。
+   *
+   * 成功后走与保存完全一致的刷新路径（hydrate + 凭证探测 + 切语言），界面因此当场
+   * 显示导入结果，而不用用户手动刷新。404 = CLI 侧没有配置文件，是"没有可导入的
+   * 来源"而不是故障，单独给一句人话，不把 `HTTP 404` 甩给用户。
+   */
+  async function importFromCli() {
+    if (!config) return
+    if (!window.confirm(t('settings.configPath.confirm', { file: configFileName }))) return
+    setImporting(true)
+    setMessage(null)
+    try {
+      const result = await api.importCliConfig(true)
+      hydrate(result.config)
+      // 导入会把 CLI 的界面语言一起带过来（它是 preferences 之一），与保存同款处理。
+      setLang(result.config.preferences?.ui_language)
+      await probe({ silent: true })
+      setMessage({ kind: 'ok', text: t('settings.configPath.success', { path: result.imported_from }) })
+      onSaved?.()
+    } catch (e) {
+      const missing = e instanceof ApiError && e.status === 404
+      setMessage({
+        kind: missing ? 'info' : 'error',
+        text: t(missing ? 'settings.configPath.missing' : 'settings.configPath.failed', {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      })
+    } finally {
+      setImporting(false)
+    }
+  }
+
   if (!config) {
     return (
       <Card>
@@ -591,11 +636,33 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
                 {config.runtime_profile && (
                   <Chip accent>{t('settings.provider.runtime', { profile: config.runtime_profile })}</Chip>
                 )}
-                <Chip>{config.config_path.split(/[\\/]/).pop()}</Chip>
+                <Chip>{configFileName}</Chip>
               </span>
             }
           />
           <div className="card-body stack">
+            {/* 配置隔离说明 + 「从 CLI 配置导入」：紧贴上方那个路径 Chip，
+                说明的就是它指向的那份文件（docs/config-isolation.md）。 */}
+            <div className="stack" style={{ gap: 'var(--ds-space-2)' }}>
+              <p className="muted" style={{ fontSize: 'var(--ds-text-md)', lineHeight: 1.65 }}>
+                {t('settings.configPath.isolation', { file: configFileName })}
+              </p>
+              <div className="row row-wrap" style={{ gap: 'var(--ds-space-3)' }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  disabled={importing || saving}
+                  onClick={() => void importFromCli()}
+                >
+                  {importing ? <Spinner /> : null}
+                  {t(importing ? 'settings.configPath.running' : 'settings.configPath.import')}
+                </button>
+                <span className="dim" style={{ fontSize: 'var(--ds-text-2xs)' }}>
+                  {t('settings.configPath.hint')}
+                </span>
+              </div>
+            </div>
+
             <div className="field">
               <label className="label" htmlFor="provider">
                 {t('settings.provider.presetLabel')}

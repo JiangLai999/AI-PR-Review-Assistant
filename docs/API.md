@@ -227,6 +227,7 @@ pr-review serve            # 默认 http://127.0.0.1:8787
 | 19 | POST | `/api/chat` | 对某次审查追问（带 `run_id` 注入上下文并落库；不带则普通对话） |
 | 20 | GET | `/api/chat/history` | 某次审查的追问历史（问题 + 回答） |
 | 21 | POST | `/api/chat/history/clear` | 清空某次审查的追问历史（幂等） |
+| 22 | POST | `/api/config/import-cli` | 用 CLI 侧配置覆盖 Web 独立配置（服务端兜底二次确认） |
 | — | GET | `/static/*` | 前端构建产物（含 SPA fallback） |
 
 ---
@@ -389,6 +390,42 @@ curl http://127.0.0.1:8787/api/config
 curl -X POST http://127.0.0.1:8787/api/config \
   -H "Content-Type: application/json" \
   -d '{"api_key":""}'
+```
+
+### POST `/api/config/import-cli`
+
+用 **CLI 侧配置**覆盖 Web 工作台的独立配置（`*.web.json`）。两者的边界与派生规则见
+[`docs/config-isolation.md`](config-isolation.md)。
+
+请求体：
+
+```json
+{ "confirm": true }
+```
+
+`confirm` 必须是字面 `true`：这是覆盖动作，前端会先弹一次确认，服务端再兜底挡一道
+（脚本直接调用也覆盖不了）。导入后**当前进程立即生效**，不需要重启 `serve`。
+
+响应：
+
+```json
+{
+  "ok": true,
+  "imported_from": "C:\\Users\\<you>\\AppData\\Roaming\\ai-pr-review\\config.json",
+  "config": { "config_path": "...config.web.json", "provider_name": "deepseek", "...": "..." }
+}
+```
+
+| 状态码 | 含义 |
+|--------|------|
+| 400 | `confirm` 不是 `true`（或导入本身失败） |
+| 404 | Web 配置文件名没有 `.web` 后缀 / CLI 侧没有任何配置文件（纯 env 场景） |
+| 415 | 跨站或非 JSON |
+
+```bash
+curl -X POST http://127.0.0.1:8787/api/config/import-cli \
+  -H "Content-Type: application/json" \
+  -d '{"confirm":true}'
 ```
 
 ### GET `/api/jobs`

@@ -9,6 +9,7 @@ import type {
   CredentialReport,
   FeedbackStatus,
   HistoryResponse,
+  ImportCliConfigResponse,
   JobSnapshot,
   MetaResponse,
   PublishResponse,
@@ -114,6 +115,19 @@ export const api = {
     request<SaveConfigResponse>('/api/config', {
       method: 'POST',
       body: JSON.stringify(payload),
+    }),
+
+  /**
+   * 把 CLI 侧**实际生效**的合并结果导入 Web 这份配置（`POST /api/config/import-cli`）。
+   *
+   * 覆盖动作：调用点必须先做二次确认，缺 `confirm: true` 服务端回 400。
+   * 404 = 没有可导入的来源（CLI 侧没有配置文件，或 Web 配置名反推不出 CLI 路径），
+   * 响应体的 `error` 可直接展示；`request()` 已在非 2xx 时读它。
+   */
+  importCliConfig: (confirm: boolean) =>
+    request<ImportCliConfigResponse>('/api/config/import-cli', {
+      method: 'POST',
+      body: JSON.stringify({ confirm }),
     }),
 
   startReviewJob: (prUrl: string) =>

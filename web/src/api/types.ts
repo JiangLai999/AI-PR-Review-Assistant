@@ -274,6 +274,22 @@ export interface SaveConfigResponse {
   message_params?: Record<string, string | number>
 }
 
+/**
+ * `POST /api/config/import-cli` 的响应：把 CLI 侧实际生效的配置导入 Web 那份。
+ *
+ * 失败形状（以 `ApiError` 抛出，status 供调用点区分）：
+ * - 400 未确认 —— `confirm` 不是字面 `true`；
+ * - 404 无来源 —— CLI 侧没有任何配置文件，或 Web 配置名不带 `.web` 后缀（反推不出 CLI 路径）；
+ * - 400 其它 —— 读取/写入源配置失败。
+ * 成功后 `config` 已经是导入后的视图，调用点直接 hydrate，不必再拉一次 `GET /api/config`。
+ */
+export interface ImportCliConfigResponse {
+  ok: boolean
+  /** 实际导入来源（CLI 配置的绝对路径）。 */
+  imported_from: string
+  config: ConfigView
+}
+
 export type JobStatus = 'queued' | 'running' | 'cancelling' | 'done' | 'failed' | 'cancelled'
 
 export interface JobSnapshot {

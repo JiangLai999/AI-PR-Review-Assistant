@@ -13,12 +13,21 @@ import asyncio
 import json
 import mimetypes
 import tempfile
+import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from ai_pr_review.config import AppConfig
+from ai_pr_review.config import (
+    MODEL_PROVIDER_PRESETS,
+    AppConfig,
+    ImportedConfig,
+    active_config_paths,
+    adopt_config_layers,
+    cli_config_path_for,
+    import_config_layers,
+)
 from ai_pr_review.credentials import collect_status
 from ai_pr_review.demo_runner import demo_cases_payload, run_demo_case
 from ai_pr_review.services.exceptions import InvalidPRURLError
@@ -31,7 +40,12 @@ from ai_pr_review.services.report_renderer import ReportRenderer
 from ai_pr_review.services.result_store import ResultStore
 from ai_pr_review.services.review_orchestrator import ReviewOrchestrator
 from ai_pr_review.utils.github_url_parser import parse_pr_url
-from ai_pr_review.web_config import apply_config_update, build_config_view
+from ai_pr_review.web_config import (
+    EDITABLE_PREFERENCE_FIELDS,
+    PREFERENCE_VOCABULARIES,
+    apply_config_update,
+    build_config_view,
+)
 from ai_pr_review.web_jobs import ReviewJobManager
 
 MAX_BODY_BYTES = 64 * 1024
@@ -272,7 +286,11 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
             self._handle_chat_history_clear(payload)
             return
 
-        if path not in {"/api/plan", "/api/review", "/api/feedback", "/api/config"}:
+        known_paths = {"/api/plan", "/api/review", "/api/feedback", "/api/config"}
+        # 「从 CLI 配置导入」与 `/api/config` 同一个写端点家族：走同一条跨站守卫、
+        # 同一份落盘与读回校验，只是入参语义不同。
+        known_paths.add("/api/config/import-cli")
+        if path not in known_paths:
             self._send_json(404, {"error": "Not found"})
             return
 
@@ -281,6 +299,9 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/config":
             self._handle_config_save(payload)
+            return
+        if path == "/api/config/import-cli":
+            self._handle_config_import_cli(payload)
             return
 
         try:
@@ -437,6 +458,71 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
                 "message_params": result.message_params,
                 "save_key_used": result.save_key_used,
                 "config": build_config_view(self.config, config_path=self.config_path).to_dict(),
+            },
+        )
+
+    def _handle_config_import_cli(self, payload: dict[str, Any]) -> None:
+        """`POST /api/config/import-cli {confirm}` —— 用 CLI 侧配置覆盖 Web 那份。
+
+        这是**覆盖**动作，因此二次确认由服务端兜底：`confirm` 不是字面 `true` 一律
+        400（前端会先弹一次 `window.confirm`，这里再挡一道，免得误点或脚本直接覆盖）。
+
+        CLI 侧一个配置文件都没有时回 404（纯 env / 全新机器）：那种情况下"导入"没有
+        来源，凭空造一份只会把环境变量里的密钥写进磁盘 —— 这正是首次派生刻意不做的
+        事（`config.import_config_layers` 的规则 3）。
+        """
+        if payload.get("confirm") is not True:
+            self._send_json(
+                400,
+                {"error": "confirm must be true before the CLI config is imported."},
+            )
+            return
+        target_path = self.config_path
+        if target_path is None:
+            self._send_json(404, {"error": "this workbench has no writable config path."})
+            return
+        cli_path = cli_config_path_for(target_path)
+        if cli_path is None:
+            self._send_json(
+                404,
+                {
+                    "error": (
+                        f"cannot derive a CLI config path from {target_path.name}: "
+                        "the web config file name must carry the .web suffix."
+                    )
+                },
+            )
+            return
+        if not any(path.exists() for path in active_config_paths(cli_path)):
+            self._send_json(404, {"error": f"no CLI config file to import: {cli_path}"})
+            return
+        try:
+            imported = import_config_layers(target_path, source_path=cli_path)
+        except Exception as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        # 进程内立刻生效：磁盘已经是导入后的内容，运行中的服务必须跟上，否则界面显示
+        # "已导入"、下一次审查却仍在用旧配置。
+        adopt_config_layers(self.config, imported.config)
+        with warnings.catch_warnings():
+            if not imported.secrets_persisted:
+                # 密钥来自环境变量、我们刻意不落盘时，`save()` 那条"忘了 save_key=True"
+                # 的警告是误导（与 config.import_config_layers 的规则 4 同理）。
+                warnings.simplefilter("ignore", RuntimeWarning)
+            result = apply_config_update(
+                self.config,
+                _import_cli_payload(imported),
+                config_path=target_path,
+            )
+        if not result.ok:
+            self._send_json(400, {"error": result.message, "imported_from": str(cli_path)})
+            return
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "imported_from": str(cli_path),
+                "config": build_config_view(self.config, config_path=target_path).to_dict(),
             },
         )
 
@@ -926,6 +1012,44 @@ def _pr_payload(pr_data: Any) -> dict[str, Any]:
     """
     payload = pr_data.model_dump(mode="json")
     payload["files_changed"] = pr_data.changed_files_count
+    return payload
+
+
+def _import_cli_payload(imported: ImportedConfig) -> dict[str, Any]:
+    """按设置页的提交契约组装「导入 CLI 配置」的载荷。
+
+    只搬**设置页表达得了**的那部分（供应商/端点/模型 + 6 个偏好 + 凭据）；其余段由
+    `config.adopt_config_layers` 整体搬进内存，而落盘仍然只走 `apply_config_update`
+    这一条既有路径（读回校验也在这里）。
+
+    两处刻意的过滤，缺一个就会把"导入"变成一次整单失败：
+
+    - 偏好只提交词表内的取值：手改坏的 CLI 配置不该让整次导入变成 400；
+    - 密钥只在**源文件里本来就有明文**时才提交：来自环境变量的密钥留在 env 就好，
+      导入不该顺手把它变成第二条落盘副本（与首次派生同一条规矩）。
+    """
+    config = imported.config
+    provider_name = str(config.ai_client.provider or "").strip().lower()
+    payload: dict[str, Any] = {
+        # 自定义/中转站供应商名不在预设表里，提交它会被 `apply_config_update` 整单拒绝；
+        # 端点与模型名照常带过去，供应商名以落盘的那份为准。
+        "provider_name": provider_name if provider_name in MODEL_PROVIDER_PRESETS else "",
+        "base_url": config.ai_client.base_url,
+        "model": config.ai_client.model,
+        "api_format": config.ai_client.api_format,
+        "persist_secrets": imported.secrets_persisted,
+    }
+    for name in EDITABLE_PREFERENCE_FIELDS:
+        value = str(getattr(config.preferences, name, "") or "").strip()
+        if value and value in PREFERENCE_VOCABULARIES[name]:
+            payload[name] = value
+    if imported.secrets_persisted:
+        api_key = str(config.ai_client.api_key or "").strip()
+        github_token = str(config.github_token or "").strip()
+        if api_key:
+            payload["api_key"] = api_key
+        if github_token:
+            payload["github_token"] = github_token
     return payload
 
 

@@ -74,6 +74,19 @@ export const settings: Namespace = {
     'settings.group.review.desc':
       'CLI 助手里这两项也在第 5 阶段（紧跟在审查工作台之后），Web 拆成一组便于查找。',
 
+    // ── 设置页 · 配置文件路径与「从 CLI 配置导入」 ─────────────────────
+    'settings.configPath.label': 'Web 配置文件',
+    'settings.configPath.isolation':
+      'Web 工作台与命令行各自持有一份配置，互不影响：这里只改 {file}，`pr-review` 仍读它自己的 config。',
+    'settings.configPath.import': '从 CLI 配置导入',
+    'settings.configPath.hint': '用 CLI 侧当前生效的配置覆盖这份文件（历史、报告与追问记录仍共用同一个库）。',
+    'settings.configPath.confirm':
+      '将用命令行（pr-review）当前生效的配置覆盖这份 Web 配置：{file}。历史记录不受影响。确定继续？',
+    'settings.configPath.running': '正在导入…',
+    'settings.configPath.success': '已从 CLI 配置导入：{path}',
+    'settings.configPath.missing': 'CLI 侧没有配置文件，无可导入：{detail}',
+    'settings.configPath.failed': '导入失败：{detail}',
+
     // ── 设置页 · 读写提示 ────────────────────────────────────────────
     'settings.message.loadFailed': '读取配置失败：{detail}',
     'settings.message.probeFailed': '探测失败：{detail}',
@@ -224,6 +237,10 @@ export const settings: Namespace = {
     'api.endpoint.config.errors': '415 跨站或非 JSON · POST 未知键 → ok=false',
     'api.endpoint.config.response':
       'GET：{ provider, base_url, model, api_format, api_key(masked), available_providers }\nPOST：{ ok, changed, rejected? }',
+    'api.endpoint.configImport.desc':
+      '用 CLI 侧配置覆盖 Web 的独立配置（*.web.json）。覆盖动作，confirm 必须为 true；导入后当前进程立即生效。',
+    'api.endpoint.configImport.errors':
+      '400 confirm 非 true 或导入失败 · 404 无 .web 后缀或 CLI 侧没有配置文件 · 415 跨站或非 JSON',
     'api.endpoint.credentials.desc': '凭证健康检查。只返回掩码，绝不明文；probe=1 时做一次连通性探测。',
     'api.endpoint.meta.desc': '运行环境：规则数、供应商数、tree-sitter、跨文件开关、静态分析开关、模型。',
     'api.endpoint.health.desc': '存活探针，用于确认本地服务已就绪。',
@@ -348,6 +365,20 @@ export const settings: Namespace = {
     'settings.group.review.title': 'Review preferences',
     'settings.group.review.desc':
       'These two also sit in step 5 of the CLI assistant (right after the review workbench); the Web groups them separately so they are easy to find.',
+
+    // ── Settings · config file path & "import from CLI" ─────────────
+    'settings.configPath.label': 'Web config file',
+    'settings.configPath.isolation':
+      'The workbench and the command line keep separate config files: only {file} changes here, `pr-review` still reads its own config.',
+    'settings.configPath.import': 'Import from CLI config',
+    'settings.configPath.hint':
+      'Overwrite this file with whatever the CLI (`pr-review`) currently has in effect. History, reports and follow-ups still share one database.',
+    'settings.configPath.confirm':
+      'Overwrite this Web config ({file}) with the configuration the CLI currently has in effect? History is not affected.',
+    'settings.configPath.running': 'Importing…',
+    'settings.configPath.success': 'Imported from the CLI config: {path}',
+    'settings.configPath.missing': 'The CLI side has no config file to import: {detail}',
+    'settings.configPath.failed': 'Import failed: {detail}',
 
     // ── Settings · load/save messages ────────────────────────────────
     'settings.message.loadFailed': 'Failed to load the config: {detail}',
@@ -507,6 +538,10 @@ export const settings: Namespace = {
     'api.endpoint.config.errors': '415 cross-site or non-JSON · unknown key in POST → ok=false',
     'api.endpoint.config.response':
       'GET: { provider, base_url, model, api_format, api_key(masked), available_providers }\nPOST: { ok, changed, rejected? }',
+    'api.endpoint.configImport.desc':
+      'Overwrite the workbench-only config (*.web.json) with the CLI-side config. This is an overwrite: confirm must be true, and it takes effect in the running process immediately.',
+    'api.endpoint.configImport.errors':
+      '400 confirm is not true, or the import failed · 404 no .web suffix, or no CLI-side config exists · 415 cross-site or non-JSON',
     'api.endpoint.credentials.desc':
       'Credential health check. Only masked values are ever returned, never plain text; probe=1 runs one connectivity probe.',
     'api.endpoint.meta.desc':

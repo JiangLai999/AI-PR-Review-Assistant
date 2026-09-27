@@ -107,6 +107,28 @@ def resolve_web_config_path(path: Path | None = None) -> Path:
     return base.with_name(f"{base.stem}{WEB_CONFIG_SUFFIX}{base.suffix}")
 
 
+def cli_config_path_for(web_config_path: Path | None) -> Path | None:
+    """`resolve_web_config_path` 的反函数：Web 配置路径 → CLI 配置路径。
+
+    派生规则是"往 stem 里插 `.web`"，反推就必须能原样还原：
+    `config.web.json` → `config.json`，无扩展名的 `config.web` → `config`。
+
+    **反推不唯一时返回 `None`**（= 没有 CLI 侧）。调用方据此回 404，而不是猜一个
+    文件名去覆盖用户根本没在用的配置 —— 这个反推的产物会被写操作直接落盘，
+    猜错的代价太大。
+    """
+    if web_config_path is None:
+        return None
+    candidate = Path(web_config_path).expanduser()
+    if candidate.suffix == WEB_CONFIG_SUFFIX:
+        # 原配置没有扩展名时的派生结果：`config.web` → `config`
+        return candidate.with_suffix("") if candidate.stem else None
+    if candidate.stem.endswith(WEB_CONFIG_SUFFIX):
+        stem = candidate.stem[: -len(WEB_CONFIG_SUFFIX)]
+        return candidate.with_name(f"{stem}{candidate.suffix}") if stem else None
+    return None
+
+
 def resolve_save_path(path: Path | None = None, *, source_path: Path | None = None) -> Path:
     """Resolve the highest-precedence writable config path.
 
@@ -1804,3 +1826,116 @@ class AppConfig:
         self.result_store.db_path = str(self.result_store.db_path)
         self._explicit_result_store_db_path = True
         return self.result_store.db_path
+
+
+# `import_config_layers` 要搬的段。与 `AppConfig.save()` 的 payload 键一一对应，
+# 少搬一段就等于让那段留在目标文件的旧值上。
+_ADOPTABLE_SECTIONS: tuple[str, ...] = (
+    "provider",
+    "local_provider",
+    "preferences",
+    "pr_fetcher",
+    "filter_pipeline",
+    "context_builder",
+    "prompt_assembler",
+    "ai_client",
+    "cost_controller",
+    "post_processor",
+    "result_store",
+    "report_renderer",
+)
+
+
+def _stores_plaintext_secret(path: Path) -> bool:
+    """这个配置文件里是否**真的**存了明文凭据（决定搬运时要否连带复制）。
+
+    只认"写在文件里的"：密钥若来自环境变量（`AI_PR_REVIEW_API_KEY` 等），搬运时
+    不落盘 —— 把密钥留在 env 是用户刻意的选择，不该被我们复制成文件。
+    """
+    if not path.exists():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    provider = payload.get("provider")
+    ai_client = payload.get("ai_client")
+    return bool(
+        (isinstance(provider, dict) and str(provider.get("api_key") or "").strip())
+        or (isinstance(ai_client, dict) and str(ai_client.get("api_key") or "").strip())
+        or str(payload.get("github_token") or "").strip()
+    )
+
+
+@dataclass(frozen=True)
+class ImportedConfig:
+    """一次"把源侧合并结果搬进目标文件"的结果。"""
+
+    #: 实际生效的合并结果（已钉住 result_store 路径）。
+    config: AppConfig
+    #: 落盘目标。
+    saved_path: Path
+    #: 是否连带写入了明文密钥（源文件里本来就有才算）。
+    secrets_persisted: bool
+
+
+def import_config_layers(target_path: Path, *, source_path: Path | None = None) -> ImportedConfig:
+    """把 `source_path` 侧**实际生效**的合并结果写进 `target_path`。
+
+    Web 与 CLI 两份配置之间的搬运规则只有这一份实现：`pr-review serve` 首次派生
+    （`cli._seed_web_config`）与设置页的「从 CLI 配置导入」（`POST /api/config/import-cli`）
+    都必须走它 —— 两条路径各写一份的话，"首次派生"和"手动导入"迟早给出不同结果。
+
+    规则（每条都有理由，别顺手简化）：
+
+    1. 搬的是**合并结果**（`AppConfig.load` 的用户级 + 项目级叠加），不是单个文件：
+       只搬用户级文件会让带 `.ai_pr_review/config.json` 的项目在另一侧少看到一层。
+    2. **钉住 result_store 路径**：设置隔离 ≠ 数据隔离，历史/报告/追问记录必须与
+       CLI 共用一份 SQLite；不钉住的话目标不在默认位置会触发
+       `_derived_result_store_default()`，把库换成旁边的另一个文件（历史页"清空"）。
+    3. **密钥只按"源文件里本来就有明文"来决定是否落盘**：来自环境变量的密钥不写进磁盘。
+    4. `save_key=False` 时 `save()` 会发一条"调用方忘了 `save_key=True`"的
+       RuntimeWarning；它与 (3) 的刻意行为不是一回事，压掉以免误导。
+
+    源侧一个配置文件都不存在时（纯 env / 全新机器）**不创建任何文件**，只把合并结果
+    交回调用方；是新建还是回 404 由调用方决定。
+    """
+    merged = AppConfig.load(source_path)
+    # 设置隔离 ≠ 数据隔离：历史/报告/追问记录必须与源侧共用一份 SQLite，
+    # 否则目标文件不在默认位置时会把库换成它旁边的另一个文件。
+    merged.pin_result_store_path()
+    source_paths = active_config_paths(source_path)
+    secrets_persisted = any(_stores_plaintext_secret(path) for path in source_paths)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        saved_path = merged.save(target_path, save_key=secrets_persisted)
+    return ImportedConfig(
+        config=merged,
+        saved_path=saved_path,
+        secrets_persisted=secrets_persisted,
+    )
+
+
+def adopt_config_layers(target: AppConfig, source: AppConfig) -> None:
+    """把 `source` 的各段整体搬进**正在运行的** `target`（原地，不换对象）。
+
+    用途：设置页导入 CLI 配置落盘之后，必须让当前进程立刻用上导入结果，否则磁盘是
+    导入后的内容、内存还是旧的 —— 界面显示"已导入"，下一次审查却仍在用旧配置，
+    而 `apply_config_update` 的落盘读回校验还会把内存里的旧值写回磁盘。
+
+    搬**整份**而不是只搬设置页那 11+6 个白名单键：`import_config_layers` 落的是源侧
+    合并结果，只搬白名单字段会让运行档位、过滤器、`local_provider` 这些段留在旧值上，
+    等于把刚导入的内容悄悄退回一半。
+
+    搬完按 `AppConfig.load` 的同款顺序重算运行态（同步运行段 → 环境变量覆盖），
+    等价于"重启一次"，但对象引用不变：任务管理器、发布服务等都已经持有它了。
+    """
+    for section in _ADOPTABLE_SECTIONS:
+        setattr(target, section, getattr(source, section))
+    target.github_token = source.github_token
+    # 显式钉住：否则下一次 `save()` 会把库路径当成"我们自己推导的"抹掉。
+    target.pin_result_store_path()
+    target._sync_runtime_sections()
+    target._apply_env_overrides()

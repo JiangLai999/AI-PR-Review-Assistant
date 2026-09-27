@@ -549,7 +549,9 @@
   display: flex;
   align-items: flex-start;
   gap: var(--ds-space-3);
-  padding: var(--ds-space-4) var(--ds-space-5);
+  /* 下留白收窄：元信息行已挪出这个 role="button" 容器（见 .finding-meta-row），
+     卡片底部的呼吸感由 meta 行接管。 */
+  padding: var(--ds-space-4) var(--ds-space-5) var(--ds-space-2);
   cursor: pointer;
   user-select: none;
 }
@@ -583,6 +585,29 @@
 }
 .finding-text { font-size: var(--ds-text-xs); line-height: 1.65; color: var(--ds-color-text-secondary); }
 .finding-actions { display: flex; gap: var(--ds-space-2); flex-wrap: wrap; align-items: center; }
+
+/* P5c：元信息 chip 行（含 GitHub 位置链接）。放在展开按钮之外，交互元素不嵌 role="button"。 */
+.finding-meta-row {
+  margin-top: 0;
+  padding: 0 var(--ds-space-5) var(--ds-space-4);
+}
+.chip-link {
+  color: var(--ds-color-brand);
+  border-color: rgba(103, 153, 254, 0.35);
+  text-decoration: none;
+}
+.chip-link:hover { border-color: var(--ds-color-brand); }
+
+/* P5c：反馈动作条与详情分离（虚线分隔 + 独立成块）。 */
+.finding-actions-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ds-space-2) var(--ds-space-3);
+  padding-top: var(--ds-space-4);
+  border-top: 1px dashed var(--ds-color-border-divider);
+}
+.finding-actions-error { color: var(--ds-sev-critical); font-size: var(--ds-text-sm); }
 .fb-tag {
   padding: 2px 8px;
   border-radius: var(--ds-radius-pill);
@@ -1367,5 +1392,79 @@ a:focus:not(:focus-visible) {
   .workspace-content .container {
     max-width: 100%;
     min-width: 0;
+  }
+}
+
+/* ========================= P5c · 审查计划 / 发现区排版 ========================= */
+
+/* ── 审查计划：统计条 + 自适应栅格 + 有序规划依据 ─────────────────── */
+.plan-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ds-space-2);
+  padding-bottom: var(--ds-space-3);
+  border-bottom: 1px solid var(--ds-color-border-subtle);
+}
+/* 标签列有下限（96px）也让得出去（最多 132px）：窄屏不再把值列挤成一条缝。 */
+.plan-grid-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 132px) minmax(0, 1fr);
+  gap: var(--ds-space-4);
+  align-items: start;
+}
+.plan-value {
+  min-width: 0;
+  font-size: var(--ds-text-md);
+  color: var(--ds-color-text-secondary);
+}
+/* 规划依据：有序列表 + 左侧引导线，条数与层级一眼可数。 */
+.plan-rationale {
+  margin: 6px 0 0;
+  padding-left: var(--ds-space-6);
+  border-left: 2px solid var(--ds-color-border-subtle);
+  display: grid;
+  gap: 4px;
+  font-size: var(--ds-text-md);
+  color: var(--ds-color-text-secondary);
+}
+.plan-rationale li { padding-left: 2px; }
+.plan-rationale li::marker {
+  color: var(--ds-color-text-placeholder);
+  font-family: var(--ds-font-mono);
+  font-size: var(--ds-text-3xs);
+}
+
+/* ── FINDINGS 头部：严重度计数 chips（点击筛选，再点同一条取消）────── */
+.sev-chips { display: flex; flex-wrap: wrap; gap: var(--ds-space-2); }
+.sev-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--ds-radius-pill);
+  font-family: var(--ds-font-mono);
+  font-size: var(--ds-text-3xs);
+  letter-spacing: 0.02em;
+  line-height: 1.6;
+  cursor: pointer;
+  transition:
+    border-color var(--ds-dur-fast) ease,
+    box-shadow var(--ds-dur-fast) ease;
+}
+.sev-chip b { font-size: var(--ds-text-xs); font-weight: 600; }
+.sev-chip:hover { border-color: currentColor; }
+/* 选中态用描边而不是降透明度：3xs 小字降透明度会掉到 AA 对比度以下。 */
+.sev-chip[aria-pressed='true'] {
+  border-color: currentColor;
+  box-shadow: 0 0 0 1px currentColor;
+}
+
+@media (max-width: 720px) {
+  /* 计划表在窄屏堆叠：标签一行、值一行，不再左右对峙。 */
+  .plan-grid-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
   }
 }

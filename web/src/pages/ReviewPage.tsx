@@ -713,7 +713,36 @@ export function ReviewPage({
               ) : (
                 <>
                   <Card >
-                    <div className="toolbar">
+                    {/* 严重度分布 chips：点一下按该级别筛选，再点同一条回到全部。
+                        下拉框保留（两者同步在同一份 severity 状态上）。 */}
+                    <div
+                      className="sev-chips"
+                      role="group"
+                      aria-label={t('finding.filter.severityGroup')}
+                    >
+                      {SEVERITIES.filter((s) => counts[s] > 0).map((s) => {
+                        const active = severity === s
+                        return (
+                          <button
+                            key={s}
+                            type="button"
+                            className={cx('sev-chip', `sev-${s}`)}
+                            aria-pressed={active}
+                            title={
+                              active
+                                ? t('finding.filter.clearOne', { severity: SEVERITY_TEXT[s] })
+                                : t('finding.filter.showOnly', { severity: SEVERITY_TEXT[s] })
+                            }
+                            onClick={() => setSeverity(active ? '' : s)}
+                          >
+                            <i className="badge-dot" aria-hidden="true" />
+                            {SEVERITY_TEXT[s]}
+                            <b>{counts[s]}</b>
+                          </button>
+                        )
+                      })}
+                    </div>
+                    <div className="toolbar" style={{ marginTop: 'var(--ds-space-4)' }}>
                       <div className="toolbar-group">
                         <span className="label">{t('review.filter.severity')}</span>
                         <select
@@ -785,6 +814,8 @@ export function ReviewPage({
                             finding={finding}
                             runId={result.run?.id ?? null}
                             index={index}
+                            prUrl={result.pr.url}
+                            headSha={result.pr.head_sha}
                           />
                         </div>
                       ))

@@ -1,11 +1,14 @@
 import type { InterfaceImpact, ReviewPlan } from '../api/types'
-import { Card, CardHead, Chip, Empty } from './ui'
+import { Card, CardHead, Chip, Empty, cx } from './ui'
 import { useT } from '../i18n'
+
+/** 空值统一显示的长破折号（与导出的 Markdown / CLI 表格保持同一种"没有"）。 */
+const EMPTY_VALUE = '—'
 
 export function PlanCard({ plan }: { plan: ReviewPlan }) {
   const t = useT()
   const rows: { label: string; value: React.ReactNode }[] = [
-    { label: t('panels.plan.intent'), value: plan.intent },
+    { label: t('panels.plan.intent'), value: plan.intent || EMPTY_VALUE },
     {
       label: t('panels.plan.riskLevel'),
       value: <Chip accent>{plan.risk_level}</Chip>,
@@ -19,7 +22,7 @@ export function PlanCard({ plan }: { plan: ReviewPlan }) {
           ))}
         </span>
       ) : (
-        '—'
+        EMPTY_VALUE
       ),
     },
     {
@@ -31,7 +34,7 @@ export function PlanCard({ plan }: { plan: ReviewPlan }) {
           ))}
         </span>
       ) : (
-        '—'
+        EMPTY_VALUE
       ),
     },
     {
@@ -50,47 +53,40 @@ export function PlanCard({ plan }: { plan: ReviewPlan }) {
     <Card flush>
       <CardHead title={t('panels.plan.title')} extra={<span className="dim mono">ReviewPlan</span>} />
       <div className="card-body stack" style={{ gap: 'var(--ds-space-3)' }}>
+        {/* 统计条：三个数字（类别 / 策略 / 待审文件）+ 风险等级，窄屏自动换行。 */}
+        <div className="plan-stats" role="group" aria-label={t('panels.plan.stats.aria')}>
+          <span className={cx('chip', `chip-risk-${plan.risk_level}`)}>
+            {t('panels.plan.stats.risk', { level: plan.risk_level })}
+          </span>
+          <Chip>{t('panels.plan.stats.categories', { count: plan.risk_categories.length })}</Chip>
+          <Chip>{t('panels.plan.stats.strategies', { count: plan.strategies.length })}</Chip>
+          <Chip>{t('panels.plan.stats.files', { count: plan.estimated_file_reviews })}</Chip>
+        </div>
+
         {rows.map((row) => (
-          <div
-            key={row.label}
-            style={{
-              display: 'grid',
-              gridTemplateColumns: '132px 1fr',
-              gap: 'var(--ds-space-4)',
-              alignItems: 'start',
-            }}
-          >
+          <div key={row.label} className="plan-grid-row">
             <span className="finding-field-label" style={{ paddingTop: 3 }}>
               {row.label}
             </span>
-            <span style={{ fontSize: 'var(--ds-text-md)', color: 'var(--ds-color-text-secondary)' }}>
-              {row.value}
-            </span>
+            <span className="plan-value">{row.value}</span>
           </div>
         ))}
 
-        {plan.rationale.length > 0 && (
-          <>
-            <hr className="divider" style={{ margin: 'var(--ds-space-2) 0' }} />
-            <div>
-              <span className="finding-field-label">{t('panels.plan.rationale')}</span>
-              <ul
-                style={{
-                  margin: '6px 0 0',
-                  paddingLeft: '1.15em',
-                  display: 'grid',
-                  gap: 3,
-                  fontSize: 'var(--ds-text-md)',
-                  color: 'var(--ds-color-text-secondary)',
-                }}
-              >
-                {plan.rationale.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-            </div>
-          </>
-        )}
+        <hr className="divider" style={{ margin: 'var(--ds-space-2) 0' }} />
+        <div>
+          <span className="finding-field-label">{t('panels.plan.rationale')}</span>
+          {plan.rationale.length > 0 ? (
+            <ol className="plan-rationale">
+              {plan.rationale.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ol>
+          ) : (
+            <p className="plan-value" style={{ margin: '6px 0 0' }}>
+              {EMPTY_VALUE}
+            </p>
+          )}
+        </div>
       </div>
     </Card>
   )

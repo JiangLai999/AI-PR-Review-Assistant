@@ -160,6 +160,16 @@ const GROUPS: Group[] = [
   -H "Content-Type: application/json" -d '{"api_key":""}'`,
       },
       {
+        method: 'POST',
+        path: '/api/config/import-cli',
+        descKey: 'api.endpoint.configImport.desc',
+        body: `{ "confirm": true }`,
+        response: `{ ok: true, imported_from: "<cli config path>", config: { config_path, provider_name, ... } }`,
+        errorsKey: 'api.endpoint.configImport.errors',
+        curl: `curl -X POST http://127.0.0.1:8787/api/config/import-cli \\
+  -H "Content-Type: application/json" -d '{"confirm":true}'`,
+      },
+      {
         method: 'GET',
         path: '/api/credentials',
         descKey: 'api.endpoint.credentials.desc',
