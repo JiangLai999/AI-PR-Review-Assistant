@@ -1,20 +1,27 @@
 import { useEffect, useRef, useState } from 'react'
 import { ApiError, api } from '../api/client'
-import type { ChatContextMeta } from '../api/types'
+import type { ChatContextMeta, ChatTurn } from '../api/types'
+// 同目录有 `markdownLite.ts`（解析器）与 `MarkdownLite.tsx`（组件），大小写不敏感
+// 文件系统上裸写 `./MarkdownLite` 会解析到前者。`.js` 后缀与 MarkdownLite.tsx
+// 锁定解析器的做法对称：这里用 `.jsx` 锁定组件文件本身。
+import { MarkdownLite } from './MarkdownLite.jsx'
 import { Card, Notice, Spinner, cx } from './ui'
 import { t, useT } from '../i18n'
 
 /**
- * 「追问这次审查」面板（Phase 3）。
+ * 「追问这次审查」面板。
  *
- * 只做**当前挂载期内**的多轮记忆：不落库、不写 localStorage，离开页面或刷新即清空。
+ * 绑定 `runId` 时问答**落库**，进入面板先拉 `GET /api/chat/history` 再渲染；
+ * 未绑定 run 的普通对话不落库、不拉历史，仍是当前挂载期内存。
  * 请求体严格是 `{run_id?, text}`（契约见 docs/claude-web-ask-panel.md），所以
  * `language` 只落到容器的 `lang` 属性上，不会混进请求体。
  *
- * 回答一律用 <pre> 等宽渲染（保留换行、转义 HTML），**不引入 Markdown 依赖**：
- * 模型输出里的 `<img onerror=...>` 之类必须是纯文本，而不是能执行的东西。
+ * 回答用受限 Markdown 渲染器 `<MarkdownLite>`（无 dangerouslySetInnerHTML，
+ * 模型里的 HTML 只会当纯文本），错误分支/截断警告/焦点归还逻辑保持不变。
  */
 type Phase = 'idle' | 'asking' | 'answered' | 'failed'
+
+type HistoryState = 'idle' | 'loading' | 'ready' | 'error'
 
 interface Failure {
   /** HTTP 状态码；0 表示连不上本地服务。 */
@@ -34,6 +41,14 @@ interface Turn {
   meta: ChatContextMeta | null
   /** 失败轮的错误描述；成功轮为 null。 */
   error: Failure | null
+  /** 墙钟耗时（毫秒）；历史里拿不到时为 null。 */
+  durationMs: number | null
+  /** `usage.total_tokens`；没有就为 null，界面不显示 token 行。 */
+  totalTokens: number | null
+  /** 服务端时间戳原样保存，显示时只截 `HH:MM:SS`。 */
+  createdAt: string | null
+  /** 是否已写入追问历史；false → 元信息标「未保存」。历史轮恒为 true。 */
+  persisted: boolean | null
 }
 
 /** 有专属文案的状态码（key 形如 `ask.failure.<status>.title/detail`）。 */
@@ -63,6 +78,84 @@ function toFailure(error: unknown): Failure {
   return describeChatFailure(0, message)
 }
 
+/** `duration_ms` → `1.8s` 这类展示串；没有耗时就返回 null。 */
+function formatDuration(ms: number | null | undefined): string | null {
+  if (ms == null || !Number.isFinite(ms)) return null
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
+/** `created_at` → `HH:MM:SS`；解析不出时间就原样返回（不引日期库）。 */
+function formatClock(value: string | null | undefined): string | null {
+  if (!value) return null
+  const match = /(\d{2}:\d{2}:\d{2})/.exec(value)
+  return match ? match[1] : value
+}
+
+/** 历史里的 `context_meta` 可能是 `{}` 或缺字段，补全成本地展示用的形状。 */
+function normalizeMeta(raw: Partial<ChatContextMeta> | null | undefined): ChatContextMeta | null {
+  if (!raw || Object.keys(raw).length === 0) return null
+  return {
+    bound_run: raw.bound_run ?? null,
+    token_estimate: raw.token_estimate ?? null,
+    sections: raw.sections ?? [],
+    truncated: Boolean(raw.truncated),
+    note: raw.note ?? '',
+  }
+}
+
+/** 把后端的 user/assistant 流水拼成本面板的问答对；落单的 user/assistant 也保留。 */
+function turnsFromHistory(items: ChatTurn[]): Turn[] {
+  const result: Turn[] = []
+  let id = 0
+  let pending: Turn | null = null
+  for (const item of items) {
+    if (item.role === 'user') {
+      if (pending) result.push(pending)
+      pending = {
+        id: ++id,
+        question: item.content,
+        answer: '',
+        model: '',
+        meta: null,
+        error: null,
+        durationMs: null,
+        totalTokens: null,
+        createdAt: item.created_at || null,
+        persisted: true,
+      }
+      continue
+    }
+    const meta = normalizeMeta(item.context_meta)
+    const durationMs = item.duration_ms ?? null
+    const totalTokens = item.usage?.total_tokens ?? null
+    if (pending) {
+      pending.answer = item.content
+      pending.model = item.model || ''
+      pending.meta = meta
+      pending.durationMs = durationMs
+      pending.totalTokens = totalTokens
+      pending.createdAt = item.created_at || pending.createdAt
+      result.push(pending)
+      pending = null
+    } else {
+      result.push({
+        id: ++id,
+        question: '',
+        answer: item.content,
+        model: item.model || '',
+        meta,
+        error: null,
+        durationMs,
+        totalTokens,
+        createdAt: item.created_at || null,
+        persisted: true,
+      })
+    }
+  }
+  if (pending) result.push(pending)
+  return result
+}
+
 export function AskPanel({
   runId,
   language,
@@ -78,16 +171,78 @@ export function AskPanel({
   const [phase, setPhase] = useState<Phase>('idle')
   const [turns, setTurns] = useState<Turn[]>([])
   const [draft, setDraft] = useState('')
+  const [historyState, setHistoryState] = useState<HistoryState>('idle')
+  const [historyError, setHistoryError] = useState<Failure | null>(null)
+  const [historyRetryKind, setHistoryRetryKind] = useState<'load' | 'clear'>('load')
+  const [clearing, setClearing] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const nextIdRef = useRef(1)
   /** 提交后要把焦点还给输入框，但必须等这次提交的渲染落地（见下面的 useEffect）。 */
   const refocusRef = useRef(false)
+  /** 递增序号：换 run / 重拉时让在途请求作废，避免旧响应覆盖新会话。 */
+  const loadSeqRef = useRef(0)
 
-  // 换 run 就清空会话：上一条审查的问答挂在新报告下面会误导人。
+  /**
+   * 拉取当前 run 的追问历史并整段替换本地轮次。
+   * **失败时不碰 `turns`**（保留已有内容），只挂一条可重试的错误提示。
+   */
+  async function loadHistory() {
+    if (!runId) return
+    const seq = ++loadSeqRef.current
+    setHistoryState('loading')
+    setHistoryError(null)
+    try {
+      const payload = await api.chatHistory(runId)
+      if (seq !== loadSeqRef.current) return
+      setTurns(turnsFromHistory(payload.turns))
+      nextIdRef.current = payload.turns.length + 1
+      setHistoryState('ready')
+    } catch (error) {
+      if (seq !== loadSeqRef.current) return
+      setHistoryState('error')
+      setHistoryError(toFailure(error))
+      setHistoryRetryKind('load')
+    }
+  }
+
+  async function clearHistory() {
+    if (!runId || turns.length === 0 || clearing) return
+    if (!window.confirm(t('ask.history.clearConfirm'))) return
+    setClearing(true)
+    setHistoryError(null)
+    try {
+      await api.clearChatHistory(runId)
+      setTurns([])
+      setHistoryState('ready')
+    } catch (error) {
+      setHistoryError(toFailure(error))
+      setHistoryRetryKind('clear')
+    } finally {
+      setClearing(false)
+    }
+  }
+
+  function retryHistory() {
+    if (historyRetryKind === 'clear') void clearHistory()
+    else void loadHistory()
+  }
+
+  // 换 run：先清掉上一条审查的问答（挂在新报告下会误导人），再拉这条 run 的历史。
+  // 未绑定 run 时不请求历史，保持普通对话形态。
   useEffect(() => {
     setPhase('idle')
-    setTurns([])
     setDraft('')
+    setTurns([])
+    setHistoryError(null)
+    setHistoryRetryKind('load')
+    loadSeqRef.current++
+    if (!runId) {
+      setHistoryState('idle')
+      return
+    }
+    void loadHistory()
+    // loadHistory 跟随当前 render 的 runId，这里只在 runId 变化时重跑
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId])
 
   // asking 期间输入框是 disabled，浏览器会忽略 focus()；所以在请求回调里同步还焦点是
@@ -126,13 +281,28 @@ export function AskPanel({
           model: payload.model ?? '',
           meta: payload.context_meta ?? null,
           error: null,
+          durationMs: payload.duration_ms ?? null,
+          totalTokens: payload.usage?.total_tokens ?? null,
+          createdAt: payload.created_at ?? null,
+          persisted: payload.persisted,
         },
       ])
       setPhase('answered')
     } catch (error) {
       setTurns((prev) => [
         ...prev,
-        { id, question, answer: '', model: '', meta: null, error: toFailure(error) },
+        {
+          id,
+          question,
+          answer: '',
+          model: '',
+          meta: null,
+          error: toFailure(error),
+          durationMs: null,
+          totalTokens: null,
+          createdAt: null,
+          persisted: null,
+        },
       ])
       setPhase('failed')
     }
@@ -159,6 +329,25 @@ export function AskPanel({
             </p>
           )}
         </div>
+        {turns.length > 0 && (
+          <div className="ask-panel-head-actions">
+            <p className="ask-panel-status">
+              {runId
+                ? t('ask.history.statusSaved', { count: turns.length })
+                : t('ask.history.statusUnsaved', { count: turns.length })}
+            </p>
+            {runId && (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                disabled={busy || clearing}
+                onClick={() => void clearHistory()}
+              >
+                {t('ask.history.clear')}
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <form
@@ -198,8 +387,33 @@ export function AskPanel({
         </span>
       )}
 
+      {historyState === 'loading' && (
+        <span className="ask-panel-hint" role="status">
+          <Spinner /> {t('ask.history.loading')}
+        </span>
+      )}
+
+      {historyError && (
+        <div className="ask-panel-history-error">
+          <Notice kind="error">
+            <strong>{historyError.title}</strong>
+            <span className="ask-panel-error-detail">{historyError.detail}</span>
+          </Notice>
+          <div className="row row-wrap">
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              disabled={busy || clearing || historyState === 'loading'}
+              onClick={retryHistory}
+            >
+              {t('ask.retry')}
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="ask-panel-log" role="log" aria-live="polite" aria-label={t('ask.log.aria')}>
-        {turns.length === 0 && !busy && (
+        {turns.length === 0 && !busy && historyState !== 'loading' && !historyError && (
           <p className="ask-panel-empty">{t('ask.empty')}</p>
         )}
 
@@ -242,11 +456,20 @@ export function AskPanel({
                     {turn.meta.note || t('ask.truncatedFallback')}
                   </Notice>
                 )}
-                <pre className="ask-panel-answer">{turn.answer}</pre>
+                <div className="ask-panel-answer">
+                  <MarkdownLite text={turn.answer} />
+                </div>
                 <div className="ask-panel-meta">
                   <span>
                     {t('ask.answeredBy', { model: turn.model || t('ask.modelFallback') })}
                   </span>
+                  {formatDuration(turn.durationMs) && (
+                    <span>{formatDuration(turn.durationMs)}</span>
+                  )}
+                  {turn.totalTokens != null && (
+                    <span>{t('ask.meta.tokens', { count: turn.totalTokens })}</span>
+                  )}
+                  {formatClock(turn.createdAt) && <span>{formatClock(turn.createdAt)}</span>}
                   {turn.meta?.sections?.length ? (
                     <span>
                       {t('ask.sections', {
@@ -254,6 +477,9 @@ export function AskPanel({
                       })}
                     </span>
                   ) : null}
+                  {turn.persisted === false && (
+                    <span className="ask-panel-unsaved">{t('ask.history.unsaved')}</span>
+                  )}
                 </div>
               </>
             )}

@@ -7,6 +7,7 @@ import type { CSSProperties, ReactNode } from 'react'
 import { inlineSegments, parseMarkdownLite } from './markdownLite.js'
 import type { MdBlock, MdInline } from './markdownLite.js'
 import { cx } from './ui'
+import { useT } from '../i18n'
 
 /**
  * 受限 Markdown 渲染层（追问回答专用）。
@@ -18,15 +19,9 @@ import { cx } from './ui'
  *
  * 样式一律走内联 + 现成设计变量（`var(--ds-*)`）：本轮 write_scope 不含 CSS 文件。
  *
- * 文案暂时是中文常量 + `// TODO(i18n)`；i18n 词条由后续任务统一补，本轮不动词典。
+ * 文案走 `t()`（词条在 `web/src/i18n/components.ts` 的 `markdown.*`）：
+ * 语言切换即时生效，组件里不留硬编码中文。
  */
-
-// TODO(i18n): 以下文案随 i18n 任务统一迁到词典
-const LABEL_COPY = '复制'
-const LABEL_COPIED = '已复制'
-const LABEL_EXPAND = (hidden: number) => `展开 ${hidden} 行`
-const LABEL_COLLAPSE = '收起'
-// TODO(i18n)
 
 /** 超过这么多行就默认折叠，避免长日志把面板撑爆。 */
 const COLLAPSE_LINES = 15
@@ -217,6 +212,7 @@ async function copyText(text: string): Promise<boolean> {
 
 /** 围栏代码块：右上角 lang 标签 + 复制按钮；超过 15 行默认折叠。 */
 function CodeBlock({ lang, code }: { lang: string; code: string }) {
+  const t = useT()
   const [copied, setCopied] = useState(false)
   const [expanded, setExpanded] = useState(false)
   const timer = useRef<number | null>(null)
@@ -247,7 +243,7 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
         {/* lang 是解析器的占位值（原文本没写语言）时不显示标签，免得看着像某种语言。 */}
         {lang !== PLACEHOLDER_LANG && <span style={LANG_STYLE}>{lang}</span>}
         <button type="button" className="btn btn-ghost btn-sm" style={CHIP_BUTTON_STYLE} onClick={() => void copy()}>
-          {copied ? LABEL_COPIED : LABEL_COPY}
+          {copied ? t('markdown.copied') : t('markdown.copy')}
         </button>
       </div>
       <pre style={CODE_PRE_STYLE}>
@@ -261,7 +257,7 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
             style={CHIP_BUTTON_STYLE}
             onClick={() => setExpanded((value) => !value)}
           >
-            {expanded ? LABEL_COLLAPSE : LABEL_EXPAND(hidden)}
+            {expanded ? t('markdown.collapse') : t('markdown.expand', { count: hidden })}
           </button>
         </div>
       )}

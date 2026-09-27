@@ -56,8 +56,14 @@ export const components: Namespace = {
     'report.failure.503.detail': '请到「设置」页填写 GitHub Token 后重试。',
 
     // ── 追问（AskPanel）──────────────────────────────────────────
+    // ── Markdown 渲染器（MarkdownLite）────────────────────────────
+    'markdown.copy': '复制',
+    'markdown.copied': '已复制',
+    'markdown.expand': '展开 {count} 行',
+    'markdown.collapse': '收起',
+
     'ask.title': '追问这次审查',
-    'ask.intro': '就这次审查继续提问。回答会连同报告上下文一起发给当前配置的模型；对话只留在当前页面，不落库，切走或刷新即清空。',
+    'ask.intro': '就这次审查继续提问。回答会连同报告上下文一起发给当前配置的模型；绑定审查记录时，问答会保存到本机追问历史。',
     'ask.context.bound': '只读上下文 · 审查记录',
     'ask.context.tokens': '约 {count} tokens 上下文',
     'ask.context.unbound': '未绑定审查记录，将按普通对话回答',
@@ -65,6 +71,14 @@ export const components: Namespace = {
     'ask.placeholder.unbound': '例如：Python 里怎么写才不会有 SQL 注入？',
     'ask.aria': '追问内容',
     'ask.submit': '追问',
+    // 追问历史与元信息（写入侧在 web_chat，读取侧 GET /api/chat/history）
+    'ask.history.statusSaved': '本次追问 {count} 轮 · 已保存',
+    'ask.history.statusUnsaved': '本次追问 {count} 轮 · 未保存',
+    'ask.history.loading': '正在加载追问历史…',
+    'ask.history.clear': '清空记录',
+    'ask.history.clearConfirm': '确定清空这次追问的全部记录吗？此操作不可撤销。',
+    'ask.history.unsaved': '未保存',
+    'ask.meta.tokens': '{count} tokens',
     'ask.asking': '正在追问…',
     'ask.log.aria': '追问记录',
     'ask.empty': '还没有追问。回答由模型生成，可能出错 —— 关键结论请回到上面的发现列表核对证据。',
@@ -208,8 +222,14 @@ export const components: Namespace = {
     'report.failure.503.title': 'GitHub token is not configured',
     'report.failure.503.detail': 'Add a GitHub token on the Settings page, then retry.',
 
+    // ── Markdown renderer (MarkdownLite) ───────────────────────────
+    'markdown.copy': 'Copy',
+    'markdown.copied': 'Copied',
+    'markdown.expand': 'Expand {count} more lines',
+    'markdown.collapse': 'Collapse',
+
     'ask.title': 'Ask about this review',
-    'ask.intro': 'Keep asking about this review. The answer goes to the configured model together with the report context; the conversation lives only on this page (not persisted, cleared on navigation or reload).',
+    'ask.intro': 'Keep asking about this review. The answer goes to the configured model together with the report context; when a review run is bound, the Q&A is saved to the local follow-up history.',
     'ask.context.bound': 'Read-only context · review run',
     'ask.context.tokens': '≈{count} tokens of context',
     'ask.context.unbound': 'No review bound — answering as plain chat',
@@ -217,6 +237,15 @@ export const components: Namespace = {
     'ask.placeholder.unbound': 'e.g. How do I write this in Python without SQL injection?',
     'ask.aria': 'Question',
     'ask.submit': 'Ask',
+    // Follow-up history & turn meta (written by web_chat, read via GET /api/chat/history)
+    'ask.history.statusSaved': '{count} follow-ups · saved',
+    'ask.history.statusUnsaved': '{count} follow-ups · not saved',
+    'ask.history.loading': 'Loading follow-up history…',
+    'ask.history.clear': 'Clear history',
+    'ask.history.clearConfirm':
+      'Clear all follow-up history for this review? This cannot be undone.',
+    'ask.history.unsaved': 'not saved',
+    'ask.meta.tokens': '{count} tokens',
     'ask.asking': 'Asking…',
     'ask.log.aria': 'Question log',
     'ask.empty': 'No questions yet. Answers are model-generated and can be wrong — verify key conclusions against the findings above.',

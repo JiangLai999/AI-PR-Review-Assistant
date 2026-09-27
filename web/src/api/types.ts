@@ -352,11 +352,58 @@ export interface ChatContextMeta {
   note: string
 }
 
+/** 模型用量统计；字段全部可选，服务端拿不到的就不出现。 */
+export interface ChatUsage {
+  prompt_tokens?: number
+  completion_tokens?: number
+  total_tokens?: number
+}
+
 /** `POST /api/chat` 的成功响应（失败形状见 client.ts 的 ApiError.status）。 */
 export interface ChatResponse {
   reply: string
   model: string
   /** 用量统计；服务端拿不到时为 null。前端只做展示，不参与任何判定。 */
-  usage: Record<string, number> | null
+  usage: ChatUsage | null
   context_meta: ChatContextMeta
+  /** 本次模型调用的墙钟耗时（毫秒）。 */
+  duration_ms: number
+  /** 回答语言（`preferences.language`），与界面语言无关。 */
+  language: string
+  /** 请求绑定的 run；未绑定普通对话时为空串。 */
+  run_id: string
+  /** 这一轮是否已写入追问历史；false = 未绑定 run 或写库失败。 */
+  persisted: boolean
+  /** 以下三个只在 `persisted=true` 时出现。 */
+  turn_id?: number
+  question_turn_id?: number
+  created_at?: string
+}
+
+/** `GET /api/chat/history` 的单条记录：user / assistant 各占一条，按 `turn_index` 升序。 */
+export interface ChatTurn {
+  turn_id: number
+  turn_index: number
+  role: 'user' | 'assistant'
+  content: string
+  model: string
+  /** user 轮通常为 `{}`。 */
+  usage: ChatUsage
+  /** user 轮通常为 `{}`；assistant 轮可能是部分字段。 */
+  context_meta: Partial<ChatContextMeta> | null
+  duration_ms: number | null
+  created_at: string
+}
+
+export interface ChatHistoryResponse {
+  run_id: string
+  count: number
+  turns: ChatTurn[]
+}
+
+/** `POST /api/chat/history/clear` 的响应（幂等：没有记录时 `deleted: 0`）。 */
+export interface ClearChatHistoryResponse {
+  ok: boolean
+  run_id: string
+  deleted: number
 }

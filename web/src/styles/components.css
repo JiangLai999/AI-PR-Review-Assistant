@@ -1189,9 +1189,16 @@ input[type='checkbox']:checked { outline: 2px solid rgba(103, 153, 254, 0.35); o
 .ask-panel-context code { font-family:var(--ds-font-mono); color:var(--ds-color-text-secondary); }
 .ask-panel-context[data-bound='false'] { color:var(--ds-state-needs); }
 
+/* 头部右侧：本轮计数 + 清空记录（未绑定/0 轮时由组件决定不渲染）。 */
+.ask-panel-head-actions { display:flex; flex-wrap:wrap; align-items:center; gap:var(--ds-space-3); }
+.ask-panel-status { margin:0; color:var(--ds-color-text-description); font-size:var(--ds-text-2xs); }
+
 .ask-panel-form { display:flex; align-items:center; gap:var(--ds-space-2); }
 .ask-panel-input { flex:1 1 auto; min-width:0; }
 .ask-panel-hint { display:flex; align-items:center; gap:var(--ds-space-2); color:var(--ds-color-text-description); font-size:var(--ds-text-xs); }
+
+/* 历史拉取/清空失败：保留已有内容，只挂一条可重试提示。 */
+.ask-panel-history-error { display:flex; flex-direction:column; gap:var(--ds-space-3); }
 
 .ask-panel-log { display:flex; flex-direction:column; gap:var(--ds-space-4); }
 .ask-panel-empty { color:var(--ds-color-text-placeholder); font-size:var(--ds-text-xs); line-height:1.6; }
@@ -1202,9 +1209,10 @@ input[type='checkbox']:checked { outline: 2px solid rgba(103, 153, 254, 0.35); o
 .ask-panel-role { flex:none; display:grid; place-items:center; width:20px; height:20px; border-radius:var(--ds-radius-xs); background:var(--ds-color-brand-soft); color:var(--ds-color-brand); font-family:var(--ds-font-mono); font-size:var(--ds-text-3xs); }
 .ask-panel-question p { min-width:0; color:var(--ds-color-text-primary); font-size:var(--ds-text-xs); line-height:1.6; white-space:pre-wrap; overflow-wrap:anywhere; }
 
-/* 回答：等宽 + 保留换行 + 转义 HTML，不引 Markdown 依赖。 */
-.ask-panel-answer { margin:0; max-height:420px; padding:var(--ds-space-3) var(--ds-space-4); border-radius:var(--ds-radius-code); border:1px solid var(--ds-color-border-default); background:var(--ds-color-bg-code); color:var(--ds-color-text-secondary); font-family:var(--ds-font-mono); font-size:var(--ds-text-2xs); line-height:1.7; white-space:pre-wrap; overflow-wrap:anywhere; overflow:auto; }
+/* 回答：MarkdownLite 负责排版，这里只给外框与滚动上限。 */
+.ask-panel-answer { max-height:420px; padding:var(--ds-space-3) var(--ds-space-4); border-radius:var(--ds-radius-code); border:1px solid var(--ds-color-border-default); background:var(--ds-color-bg-code); overflow:auto; }
 .ask-panel-meta { display:flex; flex-wrap:wrap; gap:var(--ds-space-3); color:var(--ds-color-text-placeholder); font-size:var(--ds-text-2xs); }
+.ask-panel-unsaved { color:var(--ds-state-needs); }
 
 .ask-panel-error { display:flex; flex-direction:column; gap:var(--ds-space-3); }
 .ask-panel-error-detail { display:block; margin-top:2px; color:var(--ds-color-text-description); font-size:var(--ds-text-2xs); line-height:1.6; }

@@ -1,6 +1,8 @@
 import type {
   BenchmarkReport,
+  ChatHistoryResponse,
   ChatResponse,
+  ClearChatHistoryResponse,
   DemoCasesResponse,
   DemoResult,
   ConfigView,
@@ -159,6 +161,23 @@ export const api = {
     request<ChatResponse>('/api/chat', {
       method: 'POST',
       body: JSON.stringify(runId ? { run_id: runId, text } : { text }),
+    }),
+
+  /**
+   * 读取某次审查的追问历史。未知 run → 404；缺 run_id → 400；
+   * `limit` 超出 1–1000 也返回 400（省略时走服务端默认 200）。
+   */
+  chatHistory: (runId: string, limit?: number) =>
+    request<ChatHistoryResponse>(
+      `/api/chat/history?run_id=${encodeURIComponent(runId)}` +
+        (limit === undefined ? '' : `&limit=${limit}`),
+    ),
+
+  /** 清空某次审查的追问历史。幂等：没有记录时 `deleted: 0`。 */
+  clearChatHistory: (runId: string) =>
+    request<ClearChatHistoryResponse>('/api/chat/history/clear', {
+      method: 'POST',
+      body: JSON.stringify({ run_id: runId }),
     }),
 
   feedback: (runId: string, findingId: string, status: FeedbackStatus, note = '') =>
