@@ -198,6 +198,16 @@ def default_session_title(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
+def placeholder_session_title() -> str:
+    """新建会话的**占位标题**（本地时间）：此时还没有用户消息可摘要。
+
+    2026-09-27 用户实测反馈：新建后标题为空，会话列表里是一整片空白行——
+    看起来像"没有会话/没有命名"。给一个带时间的占位，`save()` 在首条用户消息
+    出现后会把它替换成消息摘要（`title_source` 保持 `auto`，用户 rename 的不动）。
+    """
+    return f"新会话 · {datetime.now().strftime('%H:%M')}"
+
+
 def _atomic_write_json(path: Path, payload: Any) -> None:
     """tempfile + fsync + `os.replace` 原子写（沿用 `AppConfig.save` 的模式）。
 
@@ -498,7 +508,7 @@ class ChatSessionStore:
         now = _session_now()
         payload = {
             "id": session_id,
-            "title": title or default_session_title(messages),
+            "title": title or default_session_title(messages) or placeholder_session_title(),
             "title_source": title_source,
             "created_at": now,
             "updated_at": now,
@@ -598,8 +608,13 @@ class ChatSessionStore:
             return None
         title = str(payload.get("title", "") or "")
         title_source = str(payload.get("title_source", "") or TITLE_SOURCE_AUTO)
-        if not title and title_source != TITLE_SOURCE_USER:
-            title = default_session_title(messages)
+        if title_source != TITLE_SOURCE_USER:
+            # auto 来源：首条用户消息出现后用消息摘要**覆盖占位标题**
+            # （`placeholder_session_title` 的"新会话 · HH:MM"）；后续轮次重算为同值。
+            # 用户 rename 过的（`title_source=user`）永不动。
+            auto_title = default_session_title(messages)
+            if auto_title:
+                title = auto_title
         payload.update(
             {
                 "title": title,

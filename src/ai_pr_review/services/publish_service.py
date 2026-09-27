@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, MutableSet, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from pydantic import PrivateAttr
@@ -150,13 +150,13 @@ def _as_count(value: Any) -> int | None:
 
 
 def format_reviewed_at(value: Any) -> str:
-    """Render the stored review time with an explicit UTC marker.
+    """把存储的审查时间渲染为**北京时间（UTC+8）**并显式标注。
 
-    SQLite hands back `created_at` from `CURRENT_TIMESTAMP`: UTC, but with no
-    zone marker, so printing it verbatim reads as local time (a UTC+8 reader
-    sees 06:39:28 for a review that ran at 14:39:28). Anything that does not
-    parse is passed through untouched — a timestamp we cannot read is not
-    silently rewritten, and a malformed row must not break `/publish`.
+    SQLite 的 `created_at` 来自 `CURRENT_TIMESTAMP`：UTC 且**不带时区标记**——
+    直接打印会让 UTC+8 的读者把 14:39 的审查读成 06:39（用户实测反馈）。
+    无时区标记的裸时间戳按 UTC 解释（来源确定），再转北京时间；
+    带时区标记的按其自身偏移转换。解析失败的**原样透传**（读不出的时间戳不臆改，
+    也绝不能让一行坏数据打断 `/publish`）。
 
     Public because the CLI's inline `--publish-comment` path renders the same
     field, and the two must not drift (P6 review follow-up).
@@ -168,9 +168,11 @@ def format_reviewed_at(value: Any) -> str:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return raw
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(timezone.utc)
-    return f"{parsed.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+    if parsed.tzinfo is None:
+        # SQLite `CURRENT_TIMESTAMP` 的裸时间戳：按 UTC 解释。
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    beijing = parsed.astimezone(timezone(timedelta(hours=8)))
+    return f"{beijing.strftime('%Y-%m-%d %H:%M:%S')} 北京时间"
 
 
 def comment_filter_disclosure(

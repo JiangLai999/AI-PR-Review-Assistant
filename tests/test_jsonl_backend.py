@@ -2693,12 +2693,13 @@ def test_publish_of_a_run_without_pr_author_never_mentions_an_unknown_user(
     assert "@alice" not in body
 
 
-def test_publish_marks_the_stored_review_time_as_utc(
+def test_publish_marks_the_stored_review_time_in_beijing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_github: _FakeGitHub
 ) -> None:
-    """`created_at` 是 SQLite 的 UTC 时间却没有时区标记；发布必须显式标出 UTC。
+    """`created_at` 是 SQLite 的 UTC 时间却没有时区标记；发布必须转成**北京时间**。
 
-    UTC+8 的读者看到 06:39:28 会读成本地时间（实际发生在 14:39:28）。
+    2026-09-27 用户实测反馈：UTC+8 的读者看到 06:39:28 会读成本地时间
+    （实际发生在 14:39:28）——所以评论里统一渲染北京时间并显式标注。
     """
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
     backend = JsonlBackend(tmp_path / "config.json")
@@ -2707,17 +2708,18 @@ def test_publish_marks_the_stored_review_time_as_utc(
 
     body = _execute(backend, "publish", [run_id], session_id)["result"]["comment_body"]
 
-    assert re.search(r"审查于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC", body)
+    assert re.search(r"审查于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} 北京时间", body)
 
 
-def test_reviewed_at_formatter_marks_utc_and_never_raises() -> None:
-    """格式化规则本身：无时区的按 UTC 标注，带时区的换算，坏值原样返回。"""
+def test_reviewed_at_formatter_converts_to_beijing_and_never_raises() -> None:
+    """格式化规则本身：裸时间戳按 UTC 解释→转北京时间；带时区的按其偏移；坏值原样返回。"""
     from ai_pr_review.services.publish_service import format_reviewed_at
 
-    assert format_reviewed_at("2026-09-25 06:39:28") == "2026-09-25 06:39:28 UTC"
-    assert format_reviewed_at("2026-09-25T06:39:28Z") == "2026-09-25 06:39:28 UTC"
-    # 已带时区的时间换算到 UTC，不会被重复贴标记
-    assert format_reviewed_at("2026-09-25T06:39:28+08:00") == "2026-09-24 22:39:28 UTC"
+    # 裸时间戳（SQLite）按 UTC 解释 → +8 小时
+    assert format_reviewed_at("2026-09-25 06:39:28") == "2026-09-25 14:39:28 北京时间"
+    assert format_reviewed_at("2026-09-25T06:39:28Z") == "2026-09-25 14:39:28 北京时间"
+    # 已带 +08:00 的时间本身就是北京时间：不重复偏移
+    assert format_reviewed_at("2026-09-25T06:39:28+08:00") == "2026-09-25 06:39:28 北京时间"
     # 解析失败/缺失一律原样返回：坏数据不能让 /publish 崩，也不能被静默改写
     assert format_reviewed_at("not a timestamp") == "not a timestamp"
     assert format_reviewed_at(None) == ""
