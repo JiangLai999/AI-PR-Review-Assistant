@@ -9,7 +9,7 @@ const root = resolve(import.meta.dir, "../../../")
 const python = resolve(root, ".venv313/Scripts/python.exe")
 
 const localTest = existsSync(python) ? test : test.skip
-localTest("unexpected backend exit invalidates old in-memory sessions", async () => {
+localTest("unexpected backend exit keeps persisted sessions alive (multi-session store)", async () => {
   const previousRoot = process.env.AI_PR_REVIEW_ROOT
   const previousPython = process.env.AI_PR_REVIEW_PYTHON
   const previousConfig = process.env.AI_PR_REVIEW_CONFIG
@@ -26,8 +26,10 @@ localTest("unexpected backend exit invalidates old in-memory sessions", async ()
     expect((await client.request("health")).ok).toBe(true)
     expect(client.generation).toBe(firstGeneration + 1)
     const stale = await client.request("session.get", { session_id: original.result.session_id })
-    expect(stale.ok).toBe(false)
-    expect(stale.error?.code).toBe("not_found")
+    // 2026-09-27 多会话存储落地（docs/claude-sessions-compaction.md）：会话持久化到
+    // `sessions/` 目录，后端重启后旧 session_id **仍然有效**——这是行为升级
+    // （重启不再丢会话），不是回归。generation 递增仍证明是新进程。
+    expect(stale.ok).toBe(true)
     expect((await client.request("session.create")).ok).toBe(true)
   } finally {
     await client.stop()

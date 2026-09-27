@@ -13,12 +13,19 @@ import {
   parseModelSpecBlock,
   parseReasoningDelta,
   parseReviewReasoningOptions,
+  parseSessionCreateResult,
+  parseSessionDeleteResult,
+  parseSessionListResult,
+  parseSessionRenameResult,
+  parseSessionSwitchResult,
   parseThinkCommandResult,
   hasDedicatedCommandRenderer,
+  type ContextPressure,
   type CustomEndpointOptions,
   type ModelSpecBlock,
   type ModelSpecOptions,
   type ReviewReasoningOptions,
+  type SessionSummary,
 } from "./protocol"
 import { sendWithSessionRecovery } from "./session-recovery"
 import { commandArgumentLabel, commandCompletion, commandDescription, commandEnterAction, commandMatches } from "./command-menu"
@@ -41,14 +48,24 @@ import {
   formatMessageMetrics,
   formatModelHeadline,
   formatNeedsVerification,
+  formatPressureTip,
   formatReviewBudgetCapHint,
   formatReviewEffortCost,
   formatReviewEffortDisabled,
+  formatSessionBadge,
+  formatSessionDeleteConfirm,
+  formatSessionListEmpty,
+  formatSessionListFooter,
+  formatSessionListItem,
+  formatSessionRenamePrompt,
+  formatSessionSwitched,
+  formatSessionTitle,
   formatSourceBadge,
   formatSpecBoundHint,
   formatThinkLevel,
   formatThinkTransparent,
   formatThinkUnsupported,
+  contextPressureColor,
   type MarkdownSegment,
   overBudgetTip,
   reviewEffortBilingualLabel,
@@ -323,6 +340,8 @@ export function RuntimeStatusLine(props: {
   status: AppStatus
   width: number
   height: number
+  /** A-P3 · 当前会话标题（session.list 的 current 项 / runtime 会话字段）。 */
+  sessionTitle?: string
 }) {
   const routingLabel = () =>
     routingStatusText(props.runtime.routing, props.runtime.ui_language) || (props.runtime.model ?? "model")
@@ -332,10 +351,21 @@ export function RuntimeStatusLine(props: {
     props.width >= 90
       ? formatEffortBadge(props.runtime.chat_reasoning_effort, props.runtime.ui_language)
       : ""
+  // A-P3 · 会话名段：长标题截断；窄终端（<100 列）隐藏，状态栏不被挤爆。
+  const sessionBadge = () => {
+    if (props.width < 100) return ""
+    // runtime 里的会话字段优先（若有），否则用 session.list 刷新到的标题。
+    const title =
+      (props.runtime as { session_title?: string; session_name?: string }).session_title ??
+      (props.runtime as { session_title?: string; session_name?: string }).session_name ??
+      props.sessionTitle
+    return formatSessionBadge(title, 20, props.runtime.ui_language)
+  }
   return (
     <text fg={statusColors[props.status]}>
       {props.runtime.runtime_profile ?? "RUNTIME"} · {statusLabels[props.status]} · {routingLabel()}
-      {effortBadge() ? ` · ${effortBadge()}` : ""} ·{" "}
+      {effortBadge() ? ` · ${effortBadge()}` : ""}
+      {sessionBadge() ? ` · ${sessionBadge()}` : ""} ·{" "}
       {props.runtime.available === false ? "OFFLINE" : props.runtime.available === true ? "ONLINE" : "0.1.0"} ·{" "}
       {props.width}×{props.height}
     </text>
@@ -495,15 +525,33 @@ export function OverBudgetTip(props: { language?: string; width?: number }) {
   )
 }
 
-/** A5 · 上下文提示：`上下文 12% · 2.4k/20k`；无 context 时不渲染。 */
+/**
+ * A5 · 上下文提示：`上下文 12% · 2.4k/20k`；无 context 时不渲染。
+ * B-P3 · 压力分级只提示不自动压缩：medium/high 上下文段变黄，critical 变红；
+ * high/critical 尾部追加「可用 /compact」提示。low/null/缺失维持现状。
+ */
 export function ContextUsageLine(props: {
-  context: { used_tokens?: number; budget_tokens?: number; used_percent?: number } | undefined
+  context:
+    | {
+        used_tokens?: number
+        budget_tokens?: number
+        used_percent?: number
+        pressure?: ContextPressure | null
+      }
+    | undefined
   language?: string
 }) {
   const label = () => formatContextUsage(props.context, props.language)
+  const color = () => contextPressureColor(props.context?.pressure)
+  const tip = () => formatPressureTip(props.context?.pressure, props.language)
   return (
     <Show when={label()}>
-      <text fg={muted}>{label()}</text>
+      <box flexDirection="column">
+        <text fg={color()}>{label()}</text>
+        <Show when={tip()}>
+          <text fg={color()}>{tip()}</text>
+        </Show>
+      </box>
     </Show>
   )
 }
@@ -715,6 +763,8 @@ function Composer(props: {
   onToggleCodeFold: () => void
   /** C5 · Toggle the thinking block fold (`Alt+T`). */
   onToggleThinking: () => void
+  /** A-P2 · Open the session list dialog (`Alt+S`, `/sessions`). */
+  onOpenSessions: () => void
   /** Show the `Alt+L 代码块` hint only when a foldable block exists. */
   codeFoldActive?: boolean
   /** Show the `Alt+W 工作台` hint only when a workbench exists. */
@@ -877,6 +927,41 @@ function Composer(props: {
     if (text === "/workbench") {
       props.onToggleWorkbench()
       submitLock = false
+      return
+    }
+    // A-P2 · /sessions 前端拦截 → session.list；Alt+S 同效（见 useKeyboard）。
+    if (text === "/sessions") {
+      props.onOpenSessions()
+      submitLock = false
+      return
+    }
+    // 契约 v1 · /new → session.create（新建并切换）；旧后端无该方法时回退现有清空行为。
+    if (text === "/new") {
+      props.onMessage({ role: "user", content: text })
+      props.onStatus("THINKING")
+      try {
+        const created = await props.backend.request("session.create", {}, { timeoutMs: CHAT_TIMEOUT_MS })
+        if (created.ok) {
+          const parsed = parseSessionCreateResult(created.result)
+          const nextId = parsed?.session_id ?? String(created.result?.session_id ?? "")
+          if (nextId) props.onSessionChange(nextId)
+          props.onNewSession()
+          const title = parsed?.session?.title ?? parsed?.title ?? ""
+          if (title) {
+            props.onMessage({ role: "assistant", content: formatSessionSwitched(title, props.runtime.ui_language) })
+          }
+        } else {
+          // 旧后端：回退现有清空行为（不报错打断）。
+          props.onNewSession()
+        }
+        props.onStatus("READY")
+      } catch {
+        props.onNewSession()
+        props.onStatus("READY")
+      } finally {
+        props.onChatRequestEnd()
+        submitLock = false
+      }
       return
     }
     if (text === "/demo" || text.startsWith("/demo ")) {
@@ -1107,6 +1192,12 @@ function Composer(props: {
       key.stopPropagation?.()
       return
     }
+    // A-P2 · Alt+S 会话列表（与 Alt+L 代码块 / Alt+T 思考 / Alt+W 工作台成体系）。
+    if (props.focused !== false && key.meta === true && key.name === "s") {
+      props.onOpenSessions()
+      key.stopPropagation?.()
+      return
+    }
     if (props.focused === false) return
     if (key.name === "tab" && matches().length === 0) {
       key.preventDefault()
@@ -1204,6 +1295,7 @@ function Composer(props: {
         <text><span style={{ fg: "#eeeeee" }}>Ctrl+P</span> <span style={{ fg: muted }}>设置</span></text>
         <text><span style={{ fg: "#eeeeee" }}>Ctrl+L</span> <span style={{ fg: muted }}>历史</span></text>
         <text><span style={{ fg: "#eeeeee" }}>Ctrl+K</span> <span style={{ fg: muted }}>模型</span></text>
+        <text><span style={{ fg: "#eeeeee" }}>Alt+S</span> <span style={{ fg: muted }}>会话</span></text>
         <Show when={props.workbenchActive}>
           <text><span style={{ fg: "#eeeeee" }}>Alt+W</span> <span style={{ fg: muted }}>工作台</span></text>
         </Show>
@@ -3872,6 +3964,209 @@ export function FindingsFilterOverlay(props: {
   )
 }
 
+/**
+ * `/sessions` · 会话列表弹窗（A-P2，docs/mimo-sessions-ui.md）。
+ *
+ * 状态机：list ⇄ rename（内联输入） / list → confirm-delete（二次确认）。
+ * `supported=false` 或 sessions 为空 → 空态文案「当前后端不支持会话列表」，
+ * 只允许 Esc 关闭，绝不因为旧后端缺方法而崩溃。
+ */
+export function SessionsDialog(props: {
+  sessions: SessionSummary[]
+  currentId?: string
+  /** session.list 是否可用；false = 旧后端 → 空态。 */
+  supported: boolean
+  language?: string
+  onSwitch: (session: SessionSummary) => void
+  onRename: (session: SessionSummary, title: string) => void
+  onDelete: (session: SessionSummary) => void
+  onClose: () => void
+}) {
+  type DialogMode = "list" | "rename" | "confirm-delete"
+  const [mode, setMode] = createSignal<DialogMode>("list")
+  const [selectedIndex, setSelectedIndex] = createSignal(0)
+  const [renameDraft, setRenameDraft] = createSignal("")
+  const [notice, setNotice] = createSignal("")
+  let renameInput: InputRenderable | undefined
+
+  const selected = () => props.sessions[selectedIndex()]
+  const listLabel = (): string[] =>
+    props.sessions.map((session) =>
+      formatSessionListItem(
+        {
+          title: session.title,
+          updated_at: session.updated_at,
+          message_count: session.message_count,
+          // 顶层 current 优先（契约 v1），列表项 current 兜底。
+          current: props.currentId ? session.id === props.currentId : session.current,
+        },
+        new Date(),
+        props.language,
+      ),
+    )
+
+  const startRename = () => {
+    const session = selected()
+    if (!session) return
+    setRenameDraft(session.title ?? "")
+    setMode("rename")
+    setNotice("")
+    // 输入框在下一帧才挂上，延迟聚焦。
+    setTimeout(() => renameInput?.focus?.(), 0)
+  }
+
+  const commitRename = () => {
+    const session = selected()
+    if (!session) return
+    const title = renameDraft().trim()
+    setMode("list")
+    if (title) props.onRename(session, title)
+  }
+
+  const commitDelete = () => {
+    const session = selected()
+    if (!session) return
+    setMode("list")
+    props.onDelete(session)
+  }
+
+  useKeyboard((key) => {
+    if (mode() === "rename") {
+      if (key.name === "escape") {
+        key.stopPropagation?.()
+        setMode("list")
+        return
+      }
+      if (isEnterKey(key)) {
+        key.stopPropagation?.()
+        commitRename()
+      }
+      return
+    }
+    if (mode() === "confirm-delete") {
+      if (key.name === "escape" || key.name === "n") {
+        key.stopPropagation?.()
+        setMode("list")
+        return
+      }
+      if (isEnterKey(key) || key.name === "y") {
+        key.stopPropagation?.()
+        commitDelete()
+      }
+      return
+    }
+    // list 模式
+    if (key.name === "escape") {
+      key.stopPropagation?.()
+      props.onClose()
+      return
+    }
+    if (key.name === "up" || key.name === "down") {
+      key.stopPropagation?.()
+      const count = props.sessions.length
+      if (count === 0) return
+      setSelectedIndex((index) => (index + (key.name === "down" ? 1 : -1) + count) % count)
+      setNotice("")
+      return
+    }
+    if (isEnterKey(key)) {
+      key.stopPropagation?.()
+      const session = selected()
+      if (session) props.onSwitch(session)
+      return
+    }
+    if (key.name === "r") {
+      key.stopPropagation?.()
+      startRename()
+      return
+    }
+    if (key.name === "d") {
+      key.stopPropagation?.()
+      const session = selected()
+      if (session) {
+        setMode("confirm-delete")
+        setNotice(formatSessionDeleteConfirm(session.title, props.language))
+      }
+    }
+  })
+
+  const empty = !props.supported || props.sessions.length === 0
+  return (
+    <box
+      position="absolute"
+      left={6}
+      top={2}
+      width={72}
+      height={22}
+      backgroundColor="#171717"
+      borderStyle="single"
+      borderColor={orange}
+      padding={2}
+      zIndex={150}
+      flexDirection="column"
+    >
+      <text fg={orange}>SESSIONS // 会话列表</text>
+      <Show when={props.supported}>
+        <text fg={muted}>共 {props.sessions.length} 个会话</text>
+      </Show>
+      <Show when={!props.supported}>
+        <text fg="#f3c742">{formatSessionListEmpty(props.language)}</text>
+      </Show>
+      <Show when={!empty}>
+        <box marginTop={1} flexDirection="column" flexGrow={1}>
+          <For each={listLabel()}>{(line, index) =>
+            <text
+              bg={index() === selectedIndex() && mode() === "list" ? "#5a2e1c" : undefined}
+              fg={props.sessions[index()]?.id === props.currentId ? "#ffd0bb" : "#eeeeee"}
+            >
+              {line}
+            </text>
+          }</For>
+        </box>
+      </Show>
+      <Show when={empty}>
+        <box marginTop={1} flexGrow={1} flexDirection="column">
+          {/* 空态文案在 !supported 时已由副标题给出，这里只在「支持但列表为空」时再补一行。 */}
+          <Show when={props.supported}>
+            <text fg="#f3c742">{formatSessionListEmpty(props.language)}</text>
+          </Show>
+          <text fg={muted}>
+            {isEn(props.language)
+              ? "Press Esc to close this dialog"
+              : "按 Esc 关闭本弹窗"}
+          </text>
+        </box>
+      </Show>
+      <Show when={mode() === "rename"}>
+        <box marginTop={1} flexDirection="column">
+          <text fg="#f3c742">
+            {isEn(props.language) ? "Rename session:" : "重命名会话："}
+          </text>
+          <box backgroundColor="#202020" paddingLeft={1} paddingRight={1}>
+            <input
+              ref={(node) => {
+                renameInput = node
+              }}
+              value={renameDraft()}
+              onContentChange={() => setRenameDraft(renameInput?.value ?? "")}
+              focused
+              flexGrow={1}
+            />
+          </box>
+          <text fg={muted}>{formatSessionRenamePrompt(props.language)}</text>
+        </box>
+      </Show>
+      <Show when={mode() === "confirm-delete"}>
+        <text fg="#ff6b6b">{notice()}</text>
+      </Show>
+      <Show when={mode() === "list" && notice()}>
+        <text fg="#7edc92">{notice()}</text>
+      </Show>
+      <text fg={muted}>{formatSessionListFooter(props.language)}</text>
+    </box>
+  )
+}
+
 export function App() {
   const [mode, setMode] = createSignal("Build")
   const [composerDraft, setComposerDraft] = createSignal("")
@@ -3887,9 +4182,21 @@ export function App() {
   // C3 · 动画 tick（光标/spinner）；onCleanup 清定时器。
   const [animTick, setAnimTick] = createSignal(0)
   // A5 · 最近一次 assistant.finished.context（旧后端没有则保持 undefined）。
+  // B-P3 · 第七键 pressure：只提示不自动压缩（medium/high 变黄，critical 变红）。
   const [assistantContext, setAssistantContext] = createSignal<
-    { used_tokens?: number; budget_tokens?: number; used_percent?: number } | undefined
+    | {
+        used_tokens?: number
+        budget_tokens?: number
+        used_percent?: number
+        pressure?: ContextPressure | null
+      }
+    | undefined
   >()
+  // A-P2/A-P3 · 会话弹窗与状态栏会话名（session.list / session.switch 刷新）。
+  const [sessionsOpen, setSessionsOpen] = createSignal(false)
+  const [sessionList, setSessionList] = createSignal<SessionSummary[]>([])
+  const [sessionListSupported, setSessionListSupported] = createSignal(true)
+  const [sessionTitle, setSessionTitle] = createSignal("")
   const [activeChatRequestId, setActiveChatRequestId] = createSignal<string>()
   // Request ids whose reply already reached the transcript through
   // `assistant.finished` / `assistant.cancelled`. Used to decide whether the
@@ -4708,6 +5015,7 @@ export function App() {
     setMessages([])
     setStreamingAssistant("")
     setActiveChatRequestId(undefined)
+    setAssistantContext(undefined)
     setReviewStage("")
     setReviewDetail("")
     setReviewFile("")
@@ -4727,6 +5035,153 @@ export function App() {
     setReviewing(false)
     setErrorMessage("")
     setBackendStatus("READY")
+  }
+
+  // ---------------------------------------------------------------------
+  // A-P2/A-P3 · 会话列表（/sessions、Alt+S）与状态栏会话名。
+  // 与后端并行：session.list 缺失/失败 → 空态文案，不崩溃。
+  // ---------------------------------------------------------------------
+  const applySessionList = (list: ReturnType<typeof parseSessionListResult>) => {
+    if (!list) {
+      setSessionListSupported(false)
+      setSessionList([])
+      return
+    }
+    setSessionListSupported(true)
+    setSessionList(list.sessions)
+    const current =
+      list.sessions.find((item) => (list.current ? item.id === list.current : item.current)) ??
+      list.sessions.find((item) => item.id === sessionId())
+    if (current) setSessionTitle(current.title ?? "")
+  }
+
+  const refreshSessionList = async () => {
+    try {
+      const response = await backend.request("session.list", {}, { timeoutMs: PROBE_TIMEOUT_MS })
+      if (!response.ok) {
+        applySessionList(undefined)
+        return
+      }
+      applySessionList(parseSessionListResult(response.result))
+    } catch {
+      applySessionList(undefined)
+    }
+  }
+
+  const openSessions = () => {
+    setSessionsOpen(true)
+    void refreshSessionList()
+  }
+
+  const switchToSession = async (session: SessionSummary) => {
+    try {
+      const response = await backend.request(
+        "session.switch",
+        { session_id: session.id },
+        { timeoutMs: CHAT_TIMEOUT_MS },
+      )
+      if (!response.ok) {
+        appendMessage({
+          role: "assistant",
+          content: response.error?.message ?? "切换会话失败",
+        })
+        return
+      }
+      const parsed = parseSessionSwitchResult(response.result)
+      // 切换后刷新消息区：用 session.switch 返回的消息重建历史。
+      const history = (parsed?.messages ?? []).map((item) => ({
+        role: item.role === "user" ? ("user" as const) : ("assistant" as const),
+        content: item.content ?? "",
+        thinking: item.thinking,
+        timestamp: item.timestamp,
+      }))
+      setMessages(
+        history.map((message, index) => ({
+          ...message,
+          id: `sw-${index + 1}`,
+          timestamp: message.timestamp ?? localHHMM(),
+        })),
+      )
+      setStreamingAssistant("")
+      setStreamingThinking("")
+      setActiveChatRequestId(undefined)
+      setAssistantContext(undefined)
+      setSessionId(session.id)
+      const title = parsed?.session?.title ?? session.title ?? ""
+      setSessionTitle(title)
+      setSessionsOpen(false)
+      appendMessage({
+        role: "assistant",
+        content: formatSessionSwitched(title, runtime().ui_language),
+      })
+      void refreshSessionList()
+    } catch (error) {
+      appendMessage({ role: "assistant", content: String(error) })
+    }
+  }
+
+  const renameSession = async (session: SessionSummary, title: string) => {
+    try {
+      const response = await backend.request(
+        "session.rename",
+        { session_id: session.id, title },
+        { timeoutMs: PROBE_TIMEOUT_MS },
+      )
+      if (!response.ok) {
+        appendMessage({
+          role: "assistant",
+          content: response.error?.message ?? "重命名会话失败",
+        })
+        return
+      }
+      const parsed = parseSessionRenameResult(response.result)
+      const nextTitle = parsed?.title ?? title
+      setSessionList((current) =>
+        current.map((item) => (item.id === session.id ? { ...item, title: nextTitle } : item)),
+      )
+      if (session.id === sessionId()) setSessionTitle(nextTitle)
+    } catch (error) {
+      appendMessage({ role: "assistant", content: String(error) })
+    }
+  }
+
+  const deleteSession = async (session: SessionSummary) => {
+    try {
+      const response = await backend.request(
+        "session.delete",
+        { session_id: session.id },
+        { timeoutMs: PROBE_TIMEOUT_MS },
+      )
+      if (!response.ok) {
+        appendMessage({
+          role: "assistant",
+          content: response.error?.message ?? "删除会话失败",
+        })
+        return
+      }
+      const parsed = parseSessionDeleteResult(response.result)
+      setSessionList((current) => current.filter((item) => item.id !== session.id))
+      // 若当前被删则自动跟随 next（契约 v1）。
+      if (session.id === sessionId()) {
+        const nextId = parsed?.next
+        if (nextId) {
+          const next = sessionList().find((item) => item.id === nextId)
+          if (next) {
+            void switchToSession(next)
+            return
+          }
+          setSessionId(nextId)
+          setSessionTitle("")
+          resetSessionUi()
+        } else {
+          setSessionTitle("")
+          resetSessionUi()
+        }
+      }
+      void refreshSessionList()
+    } catch (error) {
+      appendMessage({ role: "assistant", content: String(error) })
+    }
   }
 
   // A restarted Python process has no in-memory sessions. Bind exactly one
@@ -5291,6 +5746,7 @@ export function App() {
         onToggleWorkbench={toggleWorkbench}
         onToggleCodeFold={toggleCodeFold}
         onToggleThinking={toggleThinking}
+        onOpenSessions={openSessions}
         codeFoldActive={codeFoldTargets().length > 0}
         workbenchActive={workbenchVisible()}
         onDraftChange={setComposerDraft}
@@ -5308,6 +5764,7 @@ export function App() {
           !publishOpen() &&
           !demoOpen() &&
           !showcaseOpen() &&
+          !sessionsOpen() &&
           pendingReviewUrl() === "" &&
           reviewStage() !== "审查失败"
         }
@@ -5370,6 +5827,18 @@ export function App() {
       </Show>
       <Show when={historyOpen()}>
         <HistoryDialog runs={historyRuns()} statistics={historyStats()} fallbackNote={historyStoreNote()} onOpen={openHistoryRun} onClose={() => setHistoryOpen(false)} />
+      </Show>
+      <Show when={sessionsOpen()}>
+        <SessionsDialog
+          sessions={sessionList()}
+          currentId={sessionId()}
+          supported={sessionListSupported()}
+          language={runtime().ui_language}
+          onSwitch={(session) => void switchToSession(session)}
+          onRename={(session, title) => void renameSession(session, title)}
+          onDelete={(session) => void deleteSession(session)}
+          onClose={() => setSessionsOpen(false)}
+        />
       </Show>
       <Show when={findingsOpen()}>
         <FindingsDialog
@@ -5486,6 +5955,7 @@ export function App() {
           status={backendStatus()}
           width={dimensions().width}
           height={dimensions().height}
+          sessionTitle={sessionTitle()}
         />
       </box>
     </box>

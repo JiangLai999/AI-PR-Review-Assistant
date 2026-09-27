@@ -89,6 +89,11 @@ export const chatCommands: readonly ChatCommandI18n[] = [
     argument: "[指令]",
     argument_en: "[instruction]",
   },
+  {
+    name: "/sessions",
+    description: "打开会话列表（切换/重命名/删除）",
+    description_en: "Open the session list (switch / rename / delete)",
+  },
   { name: "/new", description: "开始新会话", description_en: "Start a new session" },
 ]
 

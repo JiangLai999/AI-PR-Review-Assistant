@@ -33,6 +33,11 @@
  *   L. 【思考区可展开】header 绑 onMouseDown：行为断言点击展开/折叠；
  *      Alt+T 键盘循环切换；折叠态 `▸ 思考（N 行）` 行数标注正确。
  *
+ * 追加（mimo-sessions-ui，docs/mimo-sessions-ui.md）：
+ *
+ *   N. 【会话 UI】会话弹窗 120×30 / 209×51、重命名态、空态、
+ *      状态栏会话名（≥100 列显示 / <100 列隐藏）、pressure=high 黄段与提示。
+ *
  * 运行（在 frontend/tui 下）：
  *
  *   bun --preload @opentui/solid/preload scripts/manual-chat-markdown-check.tsx
@@ -52,6 +57,8 @@ import {
   foldMarkdownCodeBlocks,
   MessageMetricsLine,
   OverBudgetTip,
+  RuntimeStatusLine,
+  SessionsDialog,
   splitFoldableMarkdown,
   ThinkingBlock,
 } from "../src/app"
@@ -715,6 +722,220 @@ console.log(tipsFrame)
 check(tipsFrame.includes("/compact"), "A4 tips：提到 /compact")
 check(tipsFrame.includes("/new"), "A4 tips：提到 /new")
 check(tipsFrame.toLowerCase().includes("context near limit"), "A4 tips：en 文案可见")
+
+// ---------------------------------------------------------------------
+// N. 【会话 UI · docs/mimo-sessions-ui.md】会话弹窗 / 重命名态 / 空态 /
+//    状态栏会话名 / pressure=high 黄段与提示
+// ---------------------------------------------------------------------
+
+// 时间戳相对「现在」生成：formatRelativeTime 的分档断言（5 分钟前 / 3 小时前）
+// 依赖真实时钟，固定字面量会在不同时刻落到别的桶里。
+const SESSIONS_NOW = new Date()
+const minutesAgo = (n: number) => new Date(SESSIONS_NOW.getTime() - n * 60_000).toISOString()
+const SESSIONS_FIXTURE = [
+  { id: "s2", title: "修复 XSS 与 CSRF", updated_at: minutesAgo(5), message_count: 12, current: true },
+  { id: "s1", title: "PR #31 审查", updated_at: minutesAgo(3 * 60), message_count: 3 },
+  {
+    id: "s0",
+    title: "一个非常非常长的会话标题需要被截断以适配列表宽度和状态栏宽度限制",
+    updated_at: minutesAgo(2 * 24 * 60),
+    message_count: 40,
+  },
+]
+
+async function renderSessionsFrame(label: string, width: number, height: number) {
+  const view = await testRender(
+    () => (
+      <box width={width} height={height} flexDirection="column">
+        <SessionsDialog
+          sessions={SESSIONS_FIXTURE}
+          currentId="s2"
+          supported
+          onSwitch={() => {}}
+          onRename={() => {}}
+          onDelete={() => {}}
+          onClose={() => {}}
+        />
+      </box>
+    ),
+    { width, height },
+  )
+  await settle(view)
+  const frame = view.captureCharFrame()
+  dumpFrame(frame, label)
+  return { frame, lines: frame.replace(/\n+$/, "").split("\n") }
+}
+
+const sessions120 = await renderSessionsFrame("sessions-120x30", 120, 30)
+console.log("\n---- 120x30 sessions dialog frame ----")
+console.log(sessions120.frame)
+check(sessions120.frame.includes("SESSIONS"), "120x30 会话弹窗：标题可见")
+check(sessions120.frame.includes("●"), "120x30 会话弹窗：当前会话 `●` 标记")
+check(sessions120.frame.includes("修复 XSS 与 CSRF"), "120x30 会话弹窗：当前会话标题可见")
+check(sessions120.frame.includes("▸ PR #31 审查"), "120x30 会话弹窗：非当前项 `▸` 前缀")
+check(sessions120.frame.includes("12 条"), "120x30 会话弹窗：消息条数可见")
+check(sessions120.frame.includes("5 分钟前"), "120x30 会话弹窗：相对时间可见")
+check(sessions120.frame.includes("↑↓ 选择 · Enter 切换 · r 重命名 · d 删除 · Esc 关闭"), "120x30 会话弹窗：中英页脚键位")
+check(sessions120.frame.includes("…"), "120x30 会话弹窗：超长标题被截断")
+check(
+  sessions120.lines.every((line) => [...line].length <= 120),
+  "120x30 会话弹窗：无行宽溢出",
+)
+
+const sessions209 = await renderSessionsFrame("sessions-209x51", 209, 51)
+console.log("\n---- 209x51 sessions dialog frame ----")
+console.log(sessions209.frame)
+check(sessions209.frame.includes("SESSIONS"), "209x51 会话弹窗：标题可见")
+check(sessions209.frame.includes("●"), "209x51 会话弹窗：当前会话 `●` 标记")
+check(sessions209.frame.includes("↑↓ 选择 · Enter 切换"), "209x51 会话弹窗：页脚键位")
+check(
+  sessions209.lines.every((line) => [...line].length <= 209),
+  "209x51 会话弹窗：无行宽溢出",
+)
+
+// 重命名态：内联输入 + Enter/Esc 提示（行为：模式状态机 list → rename）。
+const renameView = await testRender(
+  () => (
+    <box width={96} height={24} flexDirection="column">
+      <SessionsDialog
+        sessions={SESSIONS_FIXTURE}
+        currentId="s2"
+        supported
+        onSwitch={() => {}}
+        onRename={() => {}}
+        onDelete={() => {}}
+        onClose={() => {}}
+      />
+    </box>
+  ),
+  { width: 96, height: 24 },
+)
+await settle(renameView)
+// `r` 进入重命名态（与 SessionsDialog useKeyboard 的 key.name === "r" 一致）。
+renameView.mockInput.pressKey("r")
+await settle(renameView)
+const renameFrame = renameView.captureCharFrame()
+dumpFrame(renameFrame, "sessions-rename")
+console.log("\n---- sessions rename frame ----")
+console.log(renameFrame)
+check(renameFrame.includes("重命名会话"), "重命名态：提示行可见")
+check(renameFrame.includes("Enter 保存 · Esc 取消"), "重命名态：Enter/Esc 提示可见")
+check(renameFrame.includes("修复 XSS 与 CSRF"), "重命名态：输入框预填当前标题")
+
+// 空态：session.list 不存在/失败（旧后端）→ 空态文案，不崩溃。
+const emptyView = await testRender(
+  () => (
+    <box width={96} height={20} flexDirection="column">
+      <SessionsDialog
+        sessions={[]}
+        supported={false}
+        onSwitch={() => {}}
+        onRename={() => {}}
+        onDelete={() => {}}
+        onClose={() => {}}
+      />
+    </box>
+  ),
+  { width: 96, height: 20 },
+)
+await settle(emptyView)
+const emptyFrame = emptyView.captureCharFrame()
+dumpFrame(emptyFrame, "sessions-empty")
+console.log("\n---- sessions empty frame ----")
+console.log(emptyFrame)
+check(emptyFrame.includes("当前后端不支持会话列表"), "空态：「当前后端不支持会话列表」文案可见")
+check(emptyFrame.includes("Esc"), "空态：仍可 Esc 关闭")
+
+// 状态栏会话名（A-P3）：120 列显示、80 列（<100）隐藏。
+const statusRuntime = {
+  runtime_profile: "CLOUD",
+  model: "deepseek-flash",
+  ui_language: "zh-CN",
+  available: true,
+  chat_reasoning_effort: "high",
+}
+const statusWide = await testRender(
+  () => (
+    <box width={120} height={4} flexDirection="column">
+      <RuntimeStatusLine
+        runtime={statusRuntime}
+        status="READY"
+        width={120}
+        height={30}
+        sessionTitle="修复 XSS 与 CSRF"
+      />
+    </box>
+  ),
+  { width: 120, height: 4 },
+)
+await settle(statusWide)
+const statusWideFrame = statusWide.captureCharFrame()
+dumpFrame(statusWideFrame, "status-session-120")
+console.log("\n---- status bar session name (120 cols) ----")
+console.log(statusWideFrame)
+check(statusWideFrame.includes("会话《"), "状态栏 120 列：会话名段可见")
+check(statusWideFrame.includes("修复 XSS 与 CSRF"), "状态栏 120 列：会话标题内容可见")
+
+const statusNarrow = await testRender(
+  () => (
+    <box width={80} height={4} flexDirection="column">
+      <RuntimeStatusLine
+        runtime={statusRuntime}
+        status="READY"
+        width={80}
+        height={24}
+        sessionTitle="修复 XSS 与 CSRF"
+      />
+    </box>
+  ),
+  { width: 80, height: 4 },
+)
+await settle(statusNarrow)
+const statusNarrowFrame = statusNarrow.captureCharFrame()
+dumpFrame(statusNarrowFrame, "status-session-80")
+console.log("\n---- status bar session name hidden (80 cols) ----")
+console.log(statusNarrowFrame)
+check(!statusNarrowFrame.includes("会话《"), "状态栏 80 列：<100 列隐藏会话名段")
+check(statusNarrowFrame.includes("CLOUD"), "状态栏 80 列：其余段保留")
+
+// pressure=high：上下文段黄 + 尾部提示「上下文接近上限：可用 /compact 压缩」。
+const pressureView = await testRender(
+  () => (
+    <box width={96} height={8} flexDirection="column">
+      <ContextUsageLine
+        context={{ used_tokens: 18000, budget_tokens: 20000, used_percent: 92, pressure: "high" }}
+        language="zh-CN"
+      />
+    </box>
+  ),
+  { width: 96, height: 8 },
+)
+await settle(pressureView)
+const pressureFrame = pressureView.captureCharFrame()
+dumpFrame(pressureFrame, "pressure-high")
+console.log("\n---- pressure=high frame ----")
+console.log(pressureFrame)
+check(pressureFrame.includes("上下文 92%"), "pressure=high：上下文段可见")
+check(pressureFrame.includes("上下文接近上限"), "pressure=high：尾部提示可见")
+check(pressureFrame.includes("/compact"), "pressure=high：提示提到 /compact")
+
+// pressure=low/null：不提示、不改色（现状不变）。
+const pressureCalm = await testRender(
+  () => (
+    <box width={96} height={6} flexDirection="column">
+      <ContextUsageLine
+        context={{ used_tokens: 2400, budget_tokens: 20000, used_percent: 12, pressure: "low" }}
+        language="zh-CN"
+      />
+    </box>
+  ),
+  { width: 96, height: 6 },
+)
+await settle(pressureCalm)
+const pressureCalmFrame = pressureCalm.captureCharFrame()
+dumpFrame(pressureCalmFrame, "pressure-low")
+check(pressureCalmFrame.includes("上下文 12%"), "pressure=low：上下文段可见")
+check(!pressureCalmFrame.includes("上下文接近上限"), "pressure=low：无压力提示")
 
 console.log(failures.length === 0 ? `\nALL PASS · frames: ${outDir}` : `\nFAILURES: ${failures.length}`)
 process.exit(failures.length === 0 ? 0 : 1)

@@ -8,6 +8,11 @@ import {
   parseModelSpecBlock,
   parseReasoningDelta,
   parseReviewReasoningOptions,
+  parseSessionCreateResult,
+  parseSessionDeleteResult,
+  parseSessionListResult,
+  parseSessionRenameResult,
+  parseSessionSwitchResult,
   parseThinkCommandResult,
   hasDedicatedCommandRenderer,
 } from "./protocol"
@@ -298,4 +303,129 @@ test("review reasoning options drops malformed option entries", () => {
   })
   expect(parsed?.options).toHaveLength(1)
   expect(parsed?.options?.[0].value).toBe("off")
+})
+
+// ---------------------------------------------------------------------
+// 契约 v1 · 会话协议（session.list / switch / rename / delete / create）
+// ---------------------------------------------------------------------
+
+test("session list parses sessions and top-level current", () => {
+  const parsed = parseSessionListResult({
+    sessions: [
+      { id: "s2", title: "修复 XSS", updated_at: "2026-09-27T03:00:00Z", message_count: 12, current: true },
+      { id: "s1", title: "旧会话", updated_at: "2026-09-26T01:00:00Z", message_count: 3 },
+    ],
+    current: "s2",
+  })
+  expect(parsed?.sessions).toHaveLength(2)
+  expect(parsed?.current).toBe("s2")
+  expect(parsed?.sessions[0].title).toBe("修复 XSS")
+  expect(parsed?.sessions[0].message_count).toBe(12)
+  expect(parsed?.sessions[1].current).toBeUndefined()
+})
+
+test("session list falls back to item-level current when top-level is missing", () => {
+  const parsed = parseSessionListResult({
+    sessions: [{ id: "s1", title: "A", current: true }, { id: "s2", title: "B" }],
+  })
+  expect(parsed?.current).toBe("s1")
+})
+
+test("session list tolerates a missing or malformed payload", () => {
+  expect(parseSessionListResult(undefined)).toBeUndefined()
+  expect(parseSessionListResult("junk")).toBeUndefined()
+  const empty = parseSessionListResult({})
+  expect(empty?.sessions).toEqual([])
+  expect(empty?.current).toBeUndefined()
+  const junkItems = parseSessionListResult({
+    sessions: [null, "x", { title: "no id" }, { id: "ok", title: "T" }],
+  })
+  expect(junkItems?.sessions).toHaveLength(1)
+  expect(junkItems?.sessions[0].id).toBe("ok")
+})
+
+test("session switch parses session block and message history", () => {
+  const parsed = parseSessionSwitchResult({
+    session: { id: "s9", title: "切换目标", updated_at: "2026-09-27T04:00:00Z", message_count: 2 },
+    messages: [
+      { role: "user", content: "看看这个 PR" },
+      { role: "assistant", content: "已审查", thinking: "先定位" },
+      { role: "ghost", content: "dropped" },
+      "junk",
+    ],
+  })
+  expect(parsed?.session?.id).toBe("s9")
+  expect(parsed?.session?.title).toBe("切换目标")
+  expect(parsed?.messages).toHaveLength(3)
+  expect(parsed?.messages?.[0].role).toBe("user")
+  expect(parsed?.messages?.[1].thinking).toBe("先定位")
+  expect(parsed?.messages?.[2].role).toBeUndefined()
+})
+
+test("session switch tolerates a payload without session/messages", () => {
+  expect(parseSessionSwitchResult(undefined)).toBeUndefined()
+  const bare = parseSessionSwitchResult({ ok: true })
+  expect(bare?.session).toBeUndefined()
+  expect(bare?.messages).toBeUndefined()
+})
+
+test("session rename/delete/create parse their contract fields", () => {
+  const renamed = parseSessionRenameResult({ id: "s1", title: "新标题" })
+  expect(renamed?.id).toBe("s1")
+  expect(renamed?.title).toBe("新标题")
+  // 后端契约返回被删会话 **id（string）**；早期实现用 boolean，两者都要放行
+  // （docs/claude-sessions-compaction.md §协议：deleted=<id>）。
+  const deletedById = parseSessionDeleteResult({ deleted: "s1", next: "s2" })
+  expect(deletedById?.deleted).toBe("s1")
+  expect(deletedById?.next).toBe("s2")
+  const deletedLegacy = parseSessionDeleteResult({ deleted: true, next: "s2" })
+  expect(deletedLegacy?.deleted).toBe(true)
+  expect(parseSessionDeleteResult({})?.deleted).toBeUndefined()
+  const created = parseSessionCreateResult({ session_id: "s10", title: "新会话" })
+  expect(created?.session_id).toBe("s10")
+  expect(created?.title).toBe("新会话")
+  const createdNested = parseSessionCreateResult({ session: { id: "s11", title: "嵌套" } })
+  expect(createdNested?.session_id).toBe("s11")
+  expect(createdNested?.session?.title).toBe("嵌套")
+  expect(parseSessionRenameResult(null)).toBeUndefined()
+  expect(parseSessionDeleteResult(undefined)).toBeUndefined()
+})
+
+// ---------------------------------------------------------------------
+// 契约 v1 · assistant.finished.context.pressure（B-P3 前端）
+// ---------------------------------------------------------------------
+
+test("context pressure accepts the four contract levels and explicit null", () => {
+  for (const level of ["low", "medium", "high", "critical"] as const) {
+    const meta = parseAssistantFinishMeta({
+      event: "assistant.finished",
+      context: { used_percent: 50, pressure: level },
+    })
+    expect(meta.context?.pressure).toBe(level)
+  }
+  const nulled = parseAssistantFinishMeta({
+    event: "assistant.finished",
+    context: { used_percent: 5, pressure: null },
+  })
+  expect(nulled.context?.pressure).toBeNull()
+})
+
+test("context pressure drops unknown strings and missing keys (old backend)", () => {
+  const unknown = parseAssistantFinishMeta({
+    event: "assistant.finished",
+    context: { used_percent: 40, pressure: "melting" },
+  })
+  expect(unknown.context?.used_percent).toBe(40)
+  expect(unknown.context?.pressure).toBeUndefined()
+  const missing = parseAssistantFinishMeta({
+    event: "assistant.finished",
+    context: { used_percent: 40 },
+  })
+  expect(missing.context?.pressure).toBeUndefined()
+  // pressure-only context still parses (all other keys may be absent).
+  const onlyPressure = parseAssistantFinishMeta({
+    event: "assistant.finished",
+    context: { pressure: "high" },
+  })
+  expect(onlyPressure.context?.pressure).toBe("high")
 })

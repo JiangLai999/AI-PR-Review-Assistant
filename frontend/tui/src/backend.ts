@@ -22,6 +22,11 @@ export class BackendClient {
     const cwd = process.env.AI_PR_REVIEW_ROOT ?? process.cwd()
     const spawned = Bun.spawn([python, "-m", "ai_pr_review.backend.jsonl_server"], {
       cwd,
+      // 显式传 env：Bun 的 spawn **不继承运行时修改过的 process.env**
+      // （实测子进程只看到启动时的快照，`process.env.X = v` 后 spawn 拿不到 X）。
+      // 测试与集成场景会在启动后才设置 AI_PR_REVIEW_CONFIG / _ROOT / _PYTHON，
+      // 不传这一行后端会回落默认用户目录（曾导致 storage_error: Permission denied）。
+      env: process.env,
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",

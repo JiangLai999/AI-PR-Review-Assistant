@@ -5,6 +5,9 @@
 .ai_pr_review/results.db
 .ai_pr_review/results.db-shm
 .ai_pr_review/results.db-wal
+# 多会话存储的运行时产物（backend.test.ts 等测试会在仓库内写它；
+# 真实用户的数据在配置目录旁，也不会进仓库）。
+.ai_pr_review/sessions/
 
 # Python cache and test artifacts
 __pycache__/

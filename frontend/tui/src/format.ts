@@ -756,3 +756,142 @@ export function reviewSlotMaxOutput(
   if (key === "local") return spec?.slots?.local?.max_output
   return undefined
 }
+
+// ---------------------------------------------------------------------
+// 会话 UI（docs/mimo-sessions-ui.md）：列表行 / 相对时间 / 标题截断 / 压力提示
+// 纯函数，便于单测；app.tsx 只负责取数与排版。
+// ---------------------------------------------------------------------
+
+/**
+ * 会话列表的相对时间：`刚刚` / `5 分钟前` / `3 小时前` / `2 天前`。
+ * 解析失败或未来时间（时钟漂移）回落日期段，绝不抛错。
+ */
+export function formatRelativeTime(
+  updatedAt: string | undefined,
+  now: Date = new Date(),
+  language?: string,
+): string {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  const fallback = en ? "unknown time" : "时间未知"
+  if (!updatedAt) return fallback
+  const parsed = new Date(updatedAt)
+  if (Number.isNaN(parsed.getTime())) return fallback
+  const deltaMs = now.getTime() - parsed.getTime()
+  // 未来时间按「刚刚」处理：时钟漂移不该让用户看到负数分钟。
+  if (deltaMs < 60_000) return en ? "just now" : "刚刚"
+  const minutes = Math.floor(deltaMs / 60_000)
+  if (minutes < 60) return en ? `${minutes}m ago` : `${minutes} 分钟前`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return en ? `${hours}h ago` : `${hours} 小时前`
+  const days = Math.floor(hours / 24)
+  if (days < 30) return en ? `${days}d ago` : `${days} 天前`
+  // 更久直接给日期段（相对时间失去意义）。
+  return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}`
+}
+
+/**
+ * 会话标题截断（状态栏/列表行共用）：超长中间省略，保住两端可辨识度。
+ * 空标题给占位符，避免状态栏出现裸分隔符。
+ */
+export function formatSessionTitle(title: string | undefined, max = 24): string {
+  const raw = (title ?? "").trim()
+  if (!raw) return "未命名会话"
+  return truncateMiddle(raw, max)
+}
+
+/**
+ * 列表项：`▸ <标题> · <相对时间> · <N 条>`；当前会话用 `●` 高亮标记。
+ * 字段缺失时该段省略（缺 message_count 就不显示条数），不编造数字。
+ */
+export function formatSessionListItem(
+  session: {
+    title?: string
+    updated_at?: string
+    message_count?: number
+    current?: boolean
+  },
+  now: Date = new Date(),
+  language?: string,
+): string {
+  const marker = session.current ? "●" : "▸"
+  const parts = [formatSessionTitle(session.title, 28)]
+  const when = formatRelativeTime(session.updated_at, now, language)
+  if (when) parts.push(when)
+  if (typeof session.message_count === "number" && Number.isFinite(session.message_count)) {
+    const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+    parts.push(en ? `${Math.round(session.message_count)} msgs` : `${Math.round(session.message_count)} 条`)
+  }
+  return `${marker} ${parts.join(" · ")}`
+}
+
+/** `session.list` 不存在/失败时的空态文案（不崩溃、可关闭）。 */
+export function formatSessionListEmpty(language?: string): string {
+  return String(language ?? "zh-CN").toLowerCase().startsWith("en")
+    ? "This backend does not support the session list"
+    : "当前后端不支持会话列表"
+}
+
+/** 弹窗页脚键位提示（中英双语，契约固定键位）。 */
+export function formatSessionListFooter(language?: string): string {
+  return String(language ?? "zh-CN").toLowerCase().startsWith("en")
+    ? "↑↓ select · Enter switch · r rename · d delete · Esc close"
+    : "↑↓ 选择 · Enter 切换 · r 重命名 · d 删除 · Esc 关闭"
+}
+
+/** 切换成功后的提示：「已切换到《标题》」。 */
+export function formatSessionSwitched(title: string | undefined, language?: string): string {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  const label = formatSessionTitle(title, 32)
+  return en ? `Switched to "${label}"` : `已切换到《${label}》`
+}
+
+/** 删除二次确认文案。 */
+export function formatSessionDeleteConfirm(title: string | undefined, language?: string): string {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  const label = formatSessionTitle(title, 24)
+  return en
+    ? `Delete "${label}"? Enter/y confirm · Esc cancel`
+    : `删除《${label}》？Enter/y 确认 · Esc 取消`
+}
+
+/** 重命名内联输入提示。 */
+export function formatSessionRenamePrompt(language?: string): string {
+  return String(language ?? "zh-CN").toLowerCase().startsWith("en")
+    ? "Enter save · Esc cancel"
+    : "Enter 保存 · Esc 取消"
+}
+
+/** 状态栏会话名段：`会话《标题》`；空标题不显示（避免裸标签）。 */
+export function formatSessionBadge(title: string | undefined, max = 20, language?: string): string {
+  const raw = (title ?? "").trim()
+  if (!raw) return ""
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en")
+  return en ? `session ${formatSessionTitle(title, max)}` : `会话《${formatSessionTitle(title, max)}》`
+}
+
+/**
+ * 压力提示（B-P3 · 只提示不自动压缩）：
+ * `high` / `critical` → 「上下文接近上限：可用 /compact 压缩」；
+ * `medium` 只变色不提示；`low` / null / 缺失 → 空串。
+ */
+export function formatPressureTip(
+  pressure: "low" | "medium" | "high" | "critical" | null | undefined,
+  language?: string,
+): string {
+  if (pressure !== "high" && pressure !== "critical") return ""
+  return String(language ?? "zh-CN").toLowerCase().startsWith("en")
+    ? "Context near limit: run /compact to compress"
+    : "上下文接近上限：可用 /compact 压缩"
+}
+
+/**
+ * 上下文段配色（复用现有色系，不引入新色）：
+ * medium/high → 黄 `#f3c742`；critical → 红 `#ff6b6b`；low/null/缺失 → muted。
+ */
+export function contextPressureColor(
+  pressure: "low" | "medium" | "high" | "critical" | null | undefined,
+): string {
+  if (pressure === "critical") return "#ff6b6b"
+  if (pressure === "medium" || pressure === "high") return "#f3c742"
+  return "#808080"
+}

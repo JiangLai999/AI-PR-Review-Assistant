@@ -24,6 +24,9 @@ export type AssistantUsage = {
   total_tokens?: number
 }
 
+/** 压缩压力分级（契约 v1 · B 组）：后端按 used_percent 分级下发。 */
+export type ContextPressure = "low" | "medium" | "high" | "critical"
+
 /** assistant.finished.context */
 export type AssistantContext = {
   used_tokens?: number
@@ -31,6 +34,8 @@ export type AssistantContext = {
   used_percent?: number
   trimmed_messages?: number
   compacted?: boolean
+  /** 第七键 · 缺失/null = 未分级（旧后端），前端维持现状不提示。 */
+  pressure?: ContextPressure | null
 }
 
 export type AssistantWarning = "over_budget"
@@ -51,6 +56,20 @@ const asFiniteNumber = (value: unknown): number | undefined =>
 
 const asOptionalString = (value: unknown): string | undefined =>
   typeof value === "string" && value.length > 0 ? value : undefined
+
+const PRESSURE_VALUES: readonly ContextPressure[] = ["low", "medium", "high", "critical"]
+
+/**
+ * `context.pressure`：只认契约四档；`null` 原样保留（显式未分级），
+ * 缺失/未知字符串一律归 undefined（旧后端或脏数据 → 前端不提示）。
+ */
+function parsePressure(raw: unknown): ContextPressure | null | undefined {
+  if (raw === null) return null
+  if (typeof raw === "string" && (PRESSURE_VALUES as readonly string[]).includes(raw)) {
+    return raw as ContextPressure
+  }
+  return undefined
+}
 
 /** 契约里的 token 计数字段：有限数字才收，null/字符串/NaN 一律丢弃。 */
 function parseUsage(raw: unknown): AssistantUsage | undefined {
@@ -80,13 +99,15 @@ function parseContext(raw: unknown): AssistantContext | undefined {
     used_percent: asFiniteNumber(record.used_percent),
     trimmed_messages: asFiniteNumber(record.trimmed_messages),
     compacted: typeof record.compacted === "boolean" ? record.compacted : undefined,
+    pressure: parsePressure(record.pressure),
   }
   if (
     context.used_tokens === undefined &&
     context.budget_tokens === undefined &&
     context.used_percent === undefined &&
     context.trimmed_messages === undefined &&
-    context.compacted === undefined
+    context.compacted === undefined &&
+    context.pressure === undefined
   ) {
     return undefined
   }
@@ -487,5 +508,153 @@ export function parseReviewReasoningOptions(raw: unknown): ReviewReasoningOption
     options,
     state: asOptionalString(record.state),
     reason: asOptionalString(record.reason),
+  }
+}
+
+// ---------------------------------------------------------------------
+// 会话协议 v1（docs/session-and-compaction-plan.md A 组 · 契约 v1）
+// 与后端/验收/手册三线共用，字段名不可改。后端可能尚未落地：
+// 解析器必须容忍缺字段/方法不存在，不抛错、不编造。
+// ---------------------------------------------------------------------
+
+/** 会话列表项：`session.list` / `session.switch.session` 同键同形。 */
+export type SessionSummary = {
+  id: string
+  title?: string
+  updated_at?: string
+  message_count?: number
+  /** 是否当前会话（列表项内标记；`session.list` 顶层另有 current）。 */
+  current?: boolean
+}
+
+/** `session.list` → `{sessions, current}`（updated_at 降序由后端保证）。 */
+export type SessionListResult = {
+  sessions: SessionSummary[]
+  current?: string
+}
+
+/** `session.switch` → `{session, messages}`：切换后当前会话的消息即为新历史。 */
+export type SessionSwitchResult = {
+  session?: SessionSummary
+  messages?: Array<{ role?: string; content?: string; thinking?: string; timestamp?: string }>
+}
+
+/** `session.rename` → `{id, title}`。 */
+export type SessionRenameResult = {
+  id?: string
+  title?: string
+}
+
+/** `session.delete` → `{deleted, next}`（删当前会话自动切到最近一个）。 */
+export type SessionDeleteResult = {
+  /**
+   * 后端契约返回**被删会话的 id（string）**；早期实现曾用 boolean，
+   * 两种都放行以免旧后端解析出 undefined。
+   */
+  deleted?: string | boolean
+  next?: string
+}
+
+/** `session.create` → 新建并切换；`session_id` 为现有后端字段名。 */
+export type SessionCreateResult = {
+  session_id?: string
+  session?: SessionSummary
+  title?: string
+}
+
+function parseSessionSummary(raw: unknown): SessionSummary | undefined {
+  if (!raw || typeof raw !== "object") return undefined
+  const record = raw as Record<string, unknown>
+  const id = asOptionalString(record.id) ?? asOptionalString(record.session_id)
+  if (!id) return undefined
+  return {
+    id,
+    title: typeof record.title === "string" ? record.title : undefined,
+    updated_at: asOptionalString(record.updated_at),
+    message_count: asFiniteNumber(record.message_count),
+    current: typeof record.current === "boolean" ? record.current : undefined,
+  }
+}
+
+function parseSessionMessages(raw: unknown): SessionSwitchResult["messages"] {
+  if (!Array.isArray(raw)) return undefined
+  return raw.flatMap((item) => {
+    if (!item || typeof item !== "object") return []
+    const entry = item as Record<string, unknown>
+    const role = entry.role === "user" || entry.role === "assistant" ? entry.role : undefined
+    const content = typeof entry.content === "string" ? entry.content : undefined
+    if (!role && content === undefined) return []
+    return [
+      {
+        role,
+        content,
+        thinking: typeof entry.thinking === "string" ? entry.thinking : undefined,
+        timestamp: asOptionalString(entry.timestamp),
+      },
+    ]
+  })
+}
+
+/** `session.list`：sessions 缺失时给空数组（调用方走空态文案），不抛错。 */
+export function parseSessionListResult(raw: unknown): SessionListResult | undefined {
+  if (!raw || typeof raw !== "object") return undefined
+  const record = raw as Record<string, unknown>
+  const sessions = Array.isArray(record.sessions)
+    ? record.sessions.flatMap((item) => {
+        const parsed = parseSessionSummary(item)
+        return parsed ? [parsed] : []
+      })
+    : []
+  return {
+    sessions,
+    current: asOptionalString(record.current) ?? sessions.find((item) => item.current)?.id,
+  }
+}
+
+/** `session.switch`：session / messages 均允许缺失（旧后端只回 ok）。 */
+export function parseSessionSwitchResult(raw: unknown): SessionSwitchResult | undefined {
+  if (!raw || typeof raw !== "object") return undefined
+  const record = raw as Record<string, unknown>
+  return {
+    session: parseSessionSummary(record.session),
+    messages: parseSessionMessages(record.messages),
+  }
+}
+
+export function parseSessionRenameResult(raw: unknown): SessionRenameResult | undefined {
+  if (!raw || typeof raw !== "object") return undefined
+  const record = raw as Record<string, unknown>
+  return {
+    id: asOptionalString(record.id) ?? asOptionalString(record.session_id),
+    title: typeof record.title === "string" ? record.title : undefined,
+  }
+}
+
+export function parseSessionDeleteResult(raw: unknown): SessionDeleteResult | undefined {
+  if (!raw || typeof raw !== "object") return undefined
+  const record = raw as Record<string, unknown>
+  return {
+    deleted:
+      typeof record.deleted === "string"
+        ? record.deleted
+        : typeof record.deleted === "boolean"
+          ? record.deleted
+          : undefined,
+    next: asOptionalString(record.next),
+  }
+}
+
+export function parseSessionCreateResult(raw: unknown): SessionCreateResult | undefined {
+  if (!raw || typeof raw !== "object") return undefined
+  const record = raw as Record<string, unknown>
+  const session = parseSessionSummary(record.session)
+  return {
+    session_id:
+      asOptionalString(record.session_id) ?? asOptionalString(record.id) ?? session?.id,
+    session,
+    title:
+      typeof record.title === "string"
+        ? record.title
+        : session?.title,
   }
 }

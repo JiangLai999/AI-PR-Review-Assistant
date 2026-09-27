@@ -4,6 +4,7 @@ import {
   codeFoldStateKey,
   CODE_FOLD_LINE_THRESHOLD,
   compactPath,
+  contextPressureColor,
   cursorFrame,
   foldableCodeBlocks,
   foldMarkdownCodeBlocks,
@@ -15,9 +16,18 @@ import {
   formatEffortBadge,
   formatMessageMetrics,
   formatOutputLength,
+  formatPressureTip,
+  formatRelativeTime,
   formatReviewBudgetCapHint,
   formatReviewEffortCost,
   formatReviewEffortDisabled,
+  formatSessionBadge,
+  formatSessionDeleteConfirm,
+  formatSessionListEmpty,
+  formatSessionListFooter,
+  formatSessionListItem,
+  formatSessionSwitched,
+  formatSessionTitle,
   formatThinkLevel,
   formatThinkTransparent,
   formatThinkUnsupported,
@@ -481,4 +491,99 @@ test("reviewSlotMaxOutput reads the review slot's max_output from model spec slo
   expect(reviewSlotMaxOutput("remote", undefined)).toBeUndefined()
   // 槽块缺 max_output 字段 → undefined
   expect(reviewSlotMaxOutput("remote", { slots: { remote: {} } })).toBeUndefined()
+})
+
+// ---------------------------------------------------------------------
+// 会话 UI（docs/mimo-sessions-ui.md）：相对时间 / 标题截断 / 列表行 / 压力
+// ---------------------------------------------------------------------
+
+test("formatRelativeTime renders relative buckets and never throws", () => {
+  const now = new Date("2026-09-27T12:00:00Z")
+  expect(formatRelativeTime("2026-09-27T11:59:30Z", now)).toBe("刚刚")
+  expect(formatRelativeTime("2026-09-27T11:55:00Z", now)).toBe("5 分钟前")
+  expect(formatRelativeTime("2026-09-27T09:00:00Z", now)).toBe("3 小时前")
+  expect(formatRelativeTime("2026-09-25T12:00:00Z", now)).toBe("2 天前")
+  // en 文案
+  expect(formatRelativeTime("2026-09-27T11:59:30Z", now, "en-US")).toBe("just now")
+  expect(formatRelativeTime("2026-09-27T11:55:00Z", now, "en-US")).toBe("5m ago")
+  // 缺字段 / 非法时间 / 未来时间（时钟漂移）→ 兜底，不抛错
+  expect(formatRelativeTime(undefined, now)).toBe("时间未知")
+  expect(formatRelativeTime("not-a-date", now)).toBe("时间未知")
+  expect(formatRelativeTime("2026-09-27T13:00:00Z", now)).toBe("刚刚")
+  // 30 天以上回落日期段
+  expect(formatRelativeTime("2026-08-01T12:00:00Z", now)).toBe("2026-08-01")
+})
+
+test("formatSessionTitle truncates long titles and placeholders empty ones", () => {
+  expect(formatSessionTitle("短标题")).toBe("短标题")
+  expect(formatSessionTitle("")).toBe("未命名会话")
+  expect(formatSessionTitle(undefined)).toBe("未命名会话")
+  const long = "这是一个非常非常长的会话标题需要被中间截断以适配状态栏宽度"
+  const cut = formatSessionTitle(long, 12)
+  expect(cut.length).toBeLessThanOrEqual(12)
+  expect(cut).toContain("…")
+  // 两端保留：截断后仍以原标题首尾字符可辨识
+  expect(cut.startsWith(long.slice(0, 2))).toBe(true)
+})
+
+test("formatSessionListItem marks the current session and skips missing fields", () => {
+  const now = new Date("2026-09-27T12:00:00Z")
+  const row = formatSessionListItem(
+    { title: "修复 XSS", updated_at: "2026-09-27T11:55:00Z", message_count: 12, current: true },
+    now,
+  )
+  expect(row.startsWith("● ")).toBe(true)
+  expect(row).toContain("修复 XSS")
+  expect(row).toContain("5 分钟前")
+  expect(row).toContain("12 条")
+  const other = formatSessionListItem(
+    { title: "旧会话", updated_at: "2026-09-27T09:00:00Z" },
+    now,
+    "en-US",
+  )
+  expect(other.startsWith("▸ ")).toBe(true)
+  expect(other).toContain("3h ago")
+  expect(other).not.toContain("条")
+  // 缺 message_count 不显示条数段（不编造数字）
+  expect(other).not.toContain("0")
+})
+
+test("formatSessionListEmpty / footer / switched / deleteConfirm are bilingual", () => {
+  expect(formatSessionListEmpty()).toContain("当前后端不支持会话列表")
+  expect(formatSessionListEmpty("en-US")).toContain("does not support")
+  expect(formatSessionListFooter()).toContain("↑↓ 选择 · Enter 切换 · r 重命名 · d 删除 · Esc 关闭")
+  expect(formatSessionListFooter("en-US")).toContain("Enter switch")
+  expect(formatSessionSwitched("修复 XSS")).toBe("已切换到《修复 XSS》")
+  expect(formatSessionSwitched("fix", "en-US")).toContain("Switched to")
+  expect(formatSessionDeleteConfirm("旧会话")).toContain("删除《旧会话》？")
+  expect(formatSessionDeleteConfirm("old", "en-US")).toContain("Delete")
+})
+
+test("formatSessionBadge hides empty titles and truncates long ones", () => {
+  expect(formatSessionBadge("")).toBe("")
+  expect(formatSessionBadge(undefined)).toBe("")
+  expect(formatSessionBadge("修复 XSS")).toBe("会话《修复 XSS》")
+  expect(formatSessionBadge("fix", 10, "en-US")).toContain("session ")
+  const long = formatSessionBadge("a".repeat(40), 12)
+  expect(long).toContain("…")
+})
+
+test("formatPressureTip only fires for high/critical and is bilingual", () => {
+  expect(formatPressureTip("low")).toBe("")
+  expect(formatPressureTip(null)).toBe("")
+  expect(formatPressureTip(undefined)).toBe("")
+  expect(formatPressureTip("medium")).toBe("")
+  expect(formatPressureTip("high")).toContain("上下文接近上限")
+  expect(formatPressureTip("high")).toContain("/compact")
+  expect(formatPressureTip("critical")).toContain("可用 /compact 压缩")
+  expect(formatPressureTip("high", "en-US")).toContain("Context near limit")
+})
+
+test("contextPressureColor uses the existing palette tiers", () => {
+  expect(contextPressureColor(undefined)).toBe("#808080")
+  expect(contextPressureColor(null)).toBe("#808080")
+  expect(contextPressureColor("low")).toBe("#808080")
+  expect(contextPressureColor("medium")).toBe("#f3c742")
+  expect(contextPressureColor("high")).toBe("#f3c742")
+  expect(contextPressureColor("critical")).toBe("#ff6b6b")
 })
