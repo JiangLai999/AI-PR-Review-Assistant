@@ -13,20 +13,16 @@ import re
 import sys
 import threading
 import time
-import uuid
 from collections.abc import Awaitable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, cast
 
-# 会话落盘（A2）：`chat_session.json` 与 CLI 的 `pr-review chat` 共用同一份文件，
-# 格式也共用（见 chat_session.load_chat_session）——两个前端切换着用不该互相看不见。
-from ai_pr_review.chat_session import (
-    clear_chat_session,
-    load_chat_session,
-    save_chat_session,
-)
+# 会话落盘：TUI 走多会话存储（`sessions/index.json` + `sessions/<id>.json`，契约 v1 §A），
+# 旧的单文件 `chat_session.json` 只作为**迁移来源**与 CLI `pr-review chat` 的存储
+# （见 chat_session.ChatSessionStore.migrate_legacy）——两个前端切换着用不该互相看不见。
+from ai_pr_review.chat_session import ChatSessionStore
 from ai_pr_review.config import (
     CHAT_CONTEXT_BUDGET_RANGE,
     CHAT_SLOT_VALUES,
@@ -345,7 +341,23 @@ CHAT_INVENTORY_RETRY_SECONDS = 60.0
 CHAT_REPO_FINDING_WINDOW_LINES = 80
 # A3：对话历史窗口（原为硬编码的 40 条）。裁剪时必须明确告知用户，不再静默丢弃。
 CHAT_HISTORY_MESSAGE_LIMIT = 80
-CHAT_COMPACT_KEPT_TURNS = 10
+# 压缩保留策略（docs/session-and-compaction-plan.md §B2，契约 v1）：
+# `tail_budget = min(preferences.compaction_tail_tokens, effective_window × 0.25)`，
+# 从最新往回**按对话轮**累加估算 token，直到超预算。下面这个常量是"极端配置兜底"：
+# 预算比一轮还小时也只丢更早的历史，绝不清空对话（旧实现按条数保 10 轮，硬编码）。
+CHAT_COMPACT_MIN_TURNS = 1
+CHAT_COMPACTION_TAIL_RATIO = 0.25
+# §B5 安全网：发给摘要模型的正文最多占可用窗口的 60%，超出部分丢最旧的并标注条数。
+CHAT_COMPACTION_SUMMARY_INPUT_RATIO = 0.6
+# 摘要文件清单的条数上限（`## 已压缩对话涉及的文件`）：清单是给模型的"指代锚点"，
+# 不是文件浏览器——超过这个数只会把摘要重新撑大。
+CHAT_COMPACTION_FILE_LIMIT = 12
+# 压力分级（契约 v1 §C）：`used_percent` 的四档阈值（含下界）。
+# `pressure=null` 只在"算不出百分比"时出现（预算 ≤ 0），与"低压力"必须可区分——
+# 前端据此决定显示灰色还是"未知"，两者混在一起会让"估算失败"看起来像"很轻松"。
+CHAT_PRESSURE_MEDIUM_PERCENT = 50.0
+CHAT_PRESSURE_HIGH_PERCENT = 80.0
+CHAT_PRESSURE_CRITICAL_PERCENT = 100.0
 # 档位 → 思考 token 预算表已挪到 `config.CHAT_REASONING_TOKEN_BUDGETS`：本模块与
 # `services/reasoning_specs`（预算型供应商的 budget_tokens）共用同一份数字，上面的
 # import 把它带进来，名字保持不变（既有调用点与文档都按这个名字写）。
@@ -796,6 +808,10 @@ class JsonlBackend:
         # 进程内定档一次（§2.1）：同一个助手里两次 `config.options` 不会把 source 翻转。
         self._catalog_state: _CatalogState | None = None
         self.sessions: dict[str, Session] = {}
+        # 多会话存储（契约 v1 §A）：`self.sessions` 只是**本进程已载入**的会话，
+        # 真相在 `sessions/` 目录里（见 chat_session.ChatSessionStore 的"单一真源"说明）。
+        # 构造不读盘：目录/索引由第一次访问时按需创建，测试里 new 一个后端不该产生文件。
+        self.session_store = ChatSessionStore(config_path)
         # 仓库结构注入（B/C）的进程内缓存：run_id → {kind: (文本, 时间戳, 是否成功)}。
         # 同一 run 的 head 提交固定，清单/目录树只拉一次；失败条目在冷却期内复用（见
         # CHAT_INVENTORY_RETRY_SECONDS），不会每一轮都付一次带重试的网络等待。
@@ -2056,6 +2072,86 @@ class JsonlBackend:
             "current_run_id": session.current_run_id,
         }
 
+    # -- 多会话协议（契约 v1 §A）--------------------------------------------
+
+    @staticmethod
+    def _session_record_payload(record: dict[str, Any]) -> dict[str, Any]:
+        """索引记录 → 协议载荷。
+
+        契约 v1 的字段名与语义是四条线共用的，**不可改**：`id`（不是 `session_id`）、
+        `title`、`updated_at`、`message_count`、`current`、`current_run_id`。
+        `session.list` 的列表项与 `session.switch.session` 同形同键，前端两个解析器共用一份。
+        """
+        return {
+            "id": str(record.get("id", "")),
+            "title": str(record.get("title", "") or ""),
+            "updated_at": str(record.get("updated_at", "") or ""),
+            "message_count": int(record.get("message_count") or 0),
+            "current": bool(record.get("current", False)),
+            # 契约 v1：review 绑定随会话走。`switch` 的消费方（TUI）靠它恢复
+            # "这个会话在聊哪次审查"，不必再发一次 `/context`。
+            "current_run_id": record.get("current_run_id") or None,
+        }
+
+    def _session_list_payload(self) -> dict[str, Any]:
+        """`session.list` → `{sessions, current}`；**降序由 store 保证**（契约 v1）。"""
+        current = self.session_store.current_id()
+        sessions: list[dict[str, Any]] = []
+        for record in self.session_store.records():
+            item = self._session_record_payload({**record, "current": record["id"] == current})
+            # 列表项按契约只有五个键：`current_run_id` 是 `switch.session` 才需要的细节，
+            # 而且这里是**统一**去掉的——同一数组里的元素不能同键不同形。
+            item.pop("current_run_id", None)
+            sessions.append(item)
+        return {"sessions": sessions, "current": current}
+
+    def _open_session(self, session_id: str) -> Session | None:
+        """把落盘会话载入内存（本进程已载入则直接复用）；不存在返回 `None`。
+
+        复用而不是重建：`published_run_ids` / `context_candidates` 是**按会话**的进程内
+        状态（§12.2 的重复发布拦截、§9.2 E 的候选序号）。每次切换都新建 Session 会让
+        "切走再切回"丢掉这些状态，同一个 run 会被再发一次评论。
+
+        载入时恢复 `current_run_id`（review 绑定随会话走，契约 v1）。
+        """
+        existing = self.sessions.get(session_id)
+        if existing is not None:
+            return existing
+        payload = self.session_store.get(session_id)
+        if payload is None:
+            return None
+        session = Session(
+            session_id=session_id,
+            messages=list(payload.get("messages") or []),
+            current_run_id=payload.get("current_run_id") or None,
+        )
+        self.sessions[session_id] = session
+        return session
+
+    def _create_store_session(self, *, source: str = "new") -> dict[str, Any]:
+        """新建并切换（契约 v1：旧 `/new` 语义升级）；返回 store 的完整载荷。
+
+        标题留空：标题的默认值是"首条用户消息截断 40 字"，而此刻还没有任何消息——
+        第一次 `_persist_session` 会补上（`ChatSessionStore.save` 的空标题分支），
+        用户 rename 过的标题则永不被覆盖。
+        """
+        record = self.session_store.create(source=source)
+        self.sessions[record["id"]] = Session(session_id=record["id"])
+        return record
+
+    def _session_create_payload(self) -> dict[str, Any]:
+        """`session.create` / `/new` 的返回体：旧键（`session_id`…）+ 契约 v1 的 `session`。
+
+        旧键是**故意保留**的：`session_id` 是 TUI 现行代码与 80+ 条既有用例读的字段，
+        契约 v1 只要求"返回里有 `session`"，没有要求删掉旧键——两个都给，谁都不破。
+        """
+        record = self._create_store_session()
+        session = self.sessions[record["id"]]
+        return {
+            **self._session_snapshot(session),
+            "session": self._session_record_payload({**record, "current": True}),
+        }
+
     def _chat_slot_provider(self) -> ModelProviderConfig:
         """聊天槽位的 provider 配置（docs/dual-model-roles-plan.md §5.1 #4）。
 
@@ -3110,7 +3206,20 @@ class JsonlBackend:
             trimmed_messages=dropped,
             compacted=False,
         )
-        warning = "over_budget" if dropped or context["used_percent"] >= 100 else None
+        # B-P3：默认只把 `pressure` 交给前端提示；`compaction_auto=true` 时才真压一次
+        # （压完重算 context 只为把 `compacted` 标成 true——`used_percent` 仍是本轮
+        # **实际发出去的那个 prompt** 的压力，压缩要到下一轮才见效）。
+        if await self._maybe_auto_compact(session, context):
+            context = self._chat_context_payload(
+                wire_history=wire_history,
+                answer=response_text,
+                usage=usage,
+                trimmed_messages=dropped,
+                compacted=True,
+            )
+        # `critical` 恰好是 `used_percent >= 100`（`_pressure_level`），用它代替裸比数字：
+        # 百分比算不出来时 `warning` 只看裁剪，不会因为 None 比较而炸。
+        warning = "over_budget" if dropped or context["pressure"] == "critical" else None
         return (
             f"{prefix}{response_text}{suffix}",
             {
@@ -3169,6 +3278,23 @@ class JsonlBackend:
             "total_tokens": prompt_tokens + completion_tokens,
         }
 
+    @staticmethod
+    def _pressure_level(used_percent: float | None) -> str | None:
+        """`used_percent` → 压力档（契约 v1 §C）；算不出百分比时返回 `None`。
+
+        `None` 与 `"low"` 是两件事：前者是"估算失败，不知道"，后者是"确实很轻"。
+        混在一起会让状态栏把"算不出来"画成绿色。
+        """
+        if used_percent is None:
+            return None
+        if used_percent >= CHAT_PRESSURE_CRITICAL_PERCENT:
+            return "critical"
+        if used_percent >= CHAT_PRESSURE_HIGH_PERCENT:
+            return "high"
+        if used_percent >= CHAT_PRESSURE_MEDIUM_PERCENT:
+            return "medium"
+        return "low"
+
     def _chat_context_payload(
         self,
         *,
@@ -3196,35 +3322,40 @@ class JsonlBackend:
         # 同一枚举；这里补齐，让**只订阅事件的消费方**也能一次拿到来源，不必再发命令。
         # 加键向后兼容：旧消费方按已知键读取，多余键被忽略（契约文档已同步）。
         budget, budget_source = self._chat_context_budget_plan()
+        used_percent = round((used_tokens / budget) * 100, 1) if budget > 0 else None
         return {
             "used_tokens": used_tokens,
             "budget_tokens": budget,
-            "used_percent": round((used_tokens / budget) * 100, 1),
+            "used_percent": used_percent,
             "trimmed_messages": trimmed_messages,
             "compacted": compacted,
             "budget_source": budget_source,
+            # 契约 v1 §C（2026-09-27）：第七键 `pressure`（low|medium|high|critical|null）。
+            # 默认**只提示**：事件消费方（TUI 状态栏）自己决定怎么显示，后端不静默压缩——
+            # 自动压缩要 `preferences.compaction_auto=true` 才打开（见 `_maybe_auto_compact`）。
+            "pressure": self._pressure_level(used_percent),
         }
 
-    def _restore_session_messages(self) -> list[dict[str, Any]]:
-        """新建会话时恢复落盘的对话历史（A2：backend 重启后接着聊）。
+    def _persist_session(self, session: Session) -> None:
+        """把会话落盘（契约 v1 §A：`sessions/<id>.json` + 索引）。写失败只记 warning：
+        磁盘问题不该让这轮回答失败（沿用 A2 的既有语义）。
 
-        读不到（首次运行 / 文件损坏 / 无权限）就是空历史：恢复失败不该挡住聊天。
+        写回时带上 `current_run_id`：绑定随会话走——切走再切回、甚至重启后端，
+        `/context` 显示的仍是同一个 Run。
         """
         try:
-            return load_chat_session(self.config_path)
-        except Exception as exc:
-            print(
-                f"chat session restore failed ({exc.__class__.__name__}: {exc}); "
-                "starting with an empty history",
-                file=sys.stderr,
-                flush=True,
+            saved = self.session_store.save(
+                session.session_id, session.messages, run_id=session.current_run_id
             )
-            return []
-
-    def _persist_session(self, session: Session) -> None:
-        """把会话落盘（A2）。写失败只记 warning：磁盘问题不该让这轮回答失败。"""
-        try:
-            save_chat_session(self.config_path, session.messages)
+            if saved is None:
+                # 内存里有一个 store 不认识的会话（例如 `_publish_ledger` 为"没有
+                # session.create 的发布请求"临时造的）。落盘会凭空造出一个会话文件，
+                # 反而让用户在下一次 `session.list` 里看到幽灵会话——只告警。
+                print(
+                    f"chat session save skipped (unknown session {session.session_id})",
+                    file=sys.stderr,
+                    flush=True,
+                )
         except Exception as exc:
             print(
                 f"chat session save failed ({exc.__class__.__name__}: {exc})",
@@ -3265,43 +3396,248 @@ class JsonlBackend:
             "text": "\n".join(lines) if lines else "当前会话还没有对话消息。",
         }
 
-    async def _compact_chat_history(
-        self, session: Session, instruction: str = ""
-    ) -> dict[str, Any]:
-        """A6: replace old turns with one summary, keeping the newest ten turns raw."""
-        kept_messages = min(CHAT_COMPACT_KEPT_TURNS * 2, len(session.messages))
-        old_messages = session.messages[:-kept_messages]
-        kept = session.messages[-kept_messages:]
+    # -- 压缩（契约 v1 §B；docs/session-and-compaction-plan.md §B2-B5）--------
 
-        def transcript_tokens(messages: list[dict[str, Any]]) -> int:
-            return estimate_tokens(
-                json.dumps(
-                    [
-                        {"role": item.get("role", ""), "content": item.get("content", "")}
-                        for item in messages
-                    ],
-                    ensure_ascii=False,
-                )
+    def _compaction_preferences(self) -> tuple[int, float, bool]:
+        """`(tail_tokens, trigger_ratio, auto)`；三个值都由 `PreferencesConfig` 归一化。"""
+        preferences = self.config.preferences
+        return (
+            int(preferences.compaction_tail_tokens),
+            float(preferences.compaction_trigger_ratio),
+            bool(preferences.compaction_auto),
+        )
+
+    def _chat_effective_window(self) -> int:
+        """压缩口径的"有效窗口"：模型 `context_window` → 聊天预算 → 兜底 8000。
+
+        与 `_chat_context_budget_plan` 的区别是**问的问题不同**：预算是"还能塞多少审查
+        上下文"，窗口是"这个模型到底能装多少"。压缩按后者算。窗口常常不可信
+        （内置预设刻意不参与推算，见 `_chat_context_window`），拿不到就退回预算——
+        宁可保守地多压一点，也不要按想象中的大窗口留下超长的原文。
+        """
+        window = self._chat_context_window()
+        if window is not None:
+            return max(1, int(window))
+        return max(1, self._chat_context_budget())
+
+    def _compaction_tail_budget(self) -> int:
+        """`min(compaction_tail_tokens, effective_window × 0.25)`（契约 v1 §B）。"""
+        tail_tokens, _, _ = self._compaction_preferences()
+        window = self._chat_effective_window()
+        return max(1, min(int(tail_tokens), int(window * CHAT_COMPACTION_TAIL_RATIO)))
+
+    @staticmethod
+    def _messages_tokens(messages: list[dict[str, Any]]) -> int:
+        """一组消息的估算 token（与 `estimate_tokens` 同一口径：4 字符 ≈ 1 token）。
+
+        按消息**逐条**序列化再相加，而不是把整组拼成一段 JSON：一组消息的 token 数要
+        能单独比较，才能回答"这一轮装不装得下"。序列化带上的 `{"role":…}` 骨架是估算的
+        一部分，两侧都算它，不引入偏差。
+        """
+        return estimate_tokens(
+            json.dumps(
+                [
+                    {"role": item.get("role", ""), "content": item.get("content", "")}
+                    for item in messages
+                ],
+                ensure_ascii=False,
             )
+        )
 
+    @staticmethod
+    def _conversation_turns(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        """按【对话轮】切分：一轮 = 一条 user + 其后的 assistant（契约 v1 §B）。
+
+        轮边界只认 user：assistant 的回答、工具链、以及上一轮的压缩摘要（role=system）
+        都跟在自己那一轮的 user 后面。**不拆散一轮是硬约束**——把"问题"留在原文、
+        把"回答"塞进摘要，模型会看到一段没有问句的答案。首条 user 之前的消息
+        （例如旧摘要）自成一组：它们没有对应的 user，但仍要参与 token 累加。
+        """
+        turns: list[list[dict[str, Any]]] = []
+        for message in messages:
+            starts_new_turn = not turns or (
+                str(message.get("role", "")) == "user"
+                and any(str(item.get("role", "")) == "user" for item in turns[-1])
+            )
+            if starts_new_turn:
+                turns.append([])
+            turns[-1].append(message)
+        return turns
+
+    @staticmethod
+    def _count_turns(turns: list[list[dict[str, Any]]]) -> int:
+        """对话轮数（只数含 user 的组：首条 user 之前的摘要不是一轮）。"""
+        return sum(
+            1 for turn in turns if any(str(item.get("role", "")) == "user" for item in turn)
+        )
+
+    def _split_compaction_tail(
+        self, messages: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+        """从最新往回按轮累加到 `tail_budget`；返回 `(被摘要的旧消息, 保留的原文, 保留轮数)`。
+
+        至少保留 `CHAT_COMPACT_MIN_TURNS` 轮（极端配置兜底：预算比一轮还小也只多留一轮，
+        绝不清空对话）。被摘要的一侧**从旧到新**原序返回，摘要模型看到的时间顺序才是对的。
+        """
+        turns = self._conversation_turns(messages)
+        if not turns:
+            return [], [], 0
+        budget = self._compaction_tail_budget()
+        kept_turns: list[list[dict[str, Any]]] = []
+        used = 0
+        for turn in reversed(turns):
+            cost = self._messages_tokens(turn)
+            # `kept_turns` 非空 = 已经保住了至少一轮 → 预算到此为止。
+            if len(kept_turns) >= CHAT_COMPACT_MIN_TURNS and used + cost > budget:
+                break
+            kept_turns.append(turn)
+            used += cost
+        kept_turns.reverse()
+        boundary = len(turns) - len(kept_turns)
+        old_messages = [message for turn in turns[:boundary] for message in turn]
+        kept = [message for turn in kept_turns for message in turn]
+        return old_messages, kept, self._count_turns(kept_turns)
+
+    def _summary_input(
+        self, messages: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], int]:
+        """§B5 安全网：待摘要正文截断到 `有效窗口 × 0.6`；返回 `(保留的消息, 省略条数)`。
+
+        丢弃的是**最旧**的一段：摘要是越近越相关，且下一次压缩会把旧摘要一起重写。
+        至少留一条（哪怕它自己就超预算）——否则"内容太长"会变成"没有可摘要的内容"，
+        摘要调用照发，却什么也没读到。
+        """
+        budget = max(
+            1, int(self._chat_effective_window() * CHAT_COMPACTION_SUMMARY_INPUT_RATIO)
+        )
+        kept: list[dict[str, Any]] = []
+        used = 0
+        for message in reversed(messages):
+            cost = self._messages_tokens([message])
+            if kept and used + cost > budget:
+                break
+            kept.append(message)
+            used += cost
+        kept.reverse()
+        return kept, len(messages) - len(kept)
+
+    @staticmethod
+    def _mentioned_path_counts(messages: list[dict[str, Any]]) -> dict[str, int]:
+        """被压缩消息里出现过的路径 → 出现次数（"讨论过 N 次"）。
+
+        用 `_PATH_TOKEN_PATTERN`（比 `_mentioned_repo_paths` 宽：这里只做**摘要里的
+        指代锚点**，`.html`/`.md` 这类非源码文件恰恰最常出现在"我们改过哪些文件"里，
+        所以不像注入路径那样限定源码扩展名）。URL 先剔掉——网址不是仓库文件。
+        """
+        counts: dict[str, int] = {}
+        for message in messages:
+            text = _URL_PATTERN.sub(" ", str(message.get("content", "")))
+            # 同一条消息里重复出现的路径只算一次："讨论过 3 次"指的是**说过 3 轮**，
+            # 不是"在一段长文里刷了 3 遍"（后者会让清单里的数字随摘要在压缩间自我累加）。
+            seen = {
+                token.replace("\\", "/").strip("./")
+                for token in _PATH_TOKEN_PATTERN.findall(text)
+            }
+            for path in seen:
+                if not path or len(path) > 120:
+                    continue
+                counts[path] = counts.get(path, 0) + 1
+        return counts
+
+    def _compacted_file_lines(
+        self, messages: list[dict[str, Any]], run_id: str | None
+    ) -> list[str]:
+        """`## 已压缩对话涉及的文件` 的清单行（契约 v1 §B）。
+
+        两个数据源（方案 §B3）：被压缩消息里的路径（按出现次数）+ 该会话绑定 run 的
+        finding 文件（`_findings_file_paths`，可能一次都没被"讨论"过，但确实是本次审查
+        涉及的文件）。排序固定为"提及次数降序 → 路径升序"，同一段历史每次压缩结果一致。
+        """
+        entries: dict[str, tuple[int, bool]] = {
+            path: (count, False) for path, count in self._mentioned_path_counts(messages).items()
+        }
+        if run_id:
+            for path in self._findings_file_paths(run_id, limit=CHAT_COMPACTION_FILE_LIMIT):
+                cleaned = path.replace("\\", "/").strip("./")
+                if cleaned and cleaned not in entries:
+                    entries[cleaned] = (0, True)
+        ordered = sorted(entries.items(), key=lambda item: (-item[1][0], item[0]))
+        lines: list[str] = []
+        for path, (count, _from_findings) in ordered[:CHAT_COMPACTION_FILE_LIMIT]:
+            lines.append(f"- {path}（讨论过 {count} 次）" if count else f"- {path}（本次审查点名）")
+        return lines
+
+    @staticmethod
+    def _summary_document(
+        *,
+        trigger: str,
+        summary: str,
+        replaced_messages: int,
+        kept_turns: int,
+        file_lines: list[str],
+        omitted_messages: int,
+    ) -> str:
+        """摘要的 XML 结构（契约 v1 §B，字段名与属性名不可改）。
+
+        `trigger` / `replaced_messages` / `kept_turns` 三个属性让模型（和人）一眼看出
+        "这是摘要、压缩了多少、原文还剩几轮"，而不是把它当成用户说过的话。省略标注是
+        **确定性**写进来的：模型可能忘，账不能忘。
+        """
+        body = [
+            f'<conversation-summary trigger="{trigger}" '
+            f'replaced_messages="{replaced_messages}" kept_turns="{kept_turns}">',
+            summary,
+        ]
+        if omitted_messages > 0:
+            body.append(f"（更早的 {omitted_messages} 条消息已省略，未参与本次摘要）")
+        body.append("")
+        body.append("## 已压缩对话涉及的文件")
+        body.extend(file_lines or ["- （无）"])
+        body.append("</conversation-summary>")
+        return "\n".join(body)
+
+    async def _compact_chat_history(
+        self,
+        session: Session,
+        instruction: str = "",
+        *,
+        trigger: str = "manual",
+    ) -> dict[str, Any]:
+        """A6 改造版：按 **token + 对话轮**保留尾部原文，旧的一段换成 XML 摘要。
+
+        `trigger ∈ {manual, auto}`（契约 v1）：手动 `/compact` 与自动触发共用这一条路径，
+        摘要里如实标注触发源——用户看到的历史必须能解释"这段是谁压的"。
+        """
+        old_messages, kept, kept_turns = self._split_compaction_tail(session.messages)
+        before_tokens = self._messages_tokens(session.messages)
         if not old_messages:
             return {
                 "kind": "compact",
-                "kept_turns": len(kept) // 2,
+                "trigger": trigger,
+                "kept_turns": kept_turns,
                 "replaced_messages": 0,
-                "before_tokens": transcript_tokens(session.messages),
-                "after_tokens": transcript_tokens(session.messages),
+                "omitted_messages": 0,
+                "files": [],
+                "before_tokens": before_tokens,
+                "after_tokens": before_tokens,
                 "summary_chars": 0,
             }
         provider = create_model_provider(self._chat_slot_provider())
+        summary_input, omitted = self._summary_input(old_messages)
         transcript = "\n".join(
             f"{message.get('role', '')}: {message.get('content', '')}"
-            for message in old_messages
+            for message in summary_input
         )
         user_prompt = (
-            "请把以下对话历史压缩为一段中文摘要，保留事实、约束、结论和尚未完成的行动。"
+            "请把以下对话历史压缩为一段中文摘要，保留事实、约束、结论和尚未完成的行动，"
+            "并保留对文件与结论的指代关系（哪个结论对应哪个文件）。"
             "不要添加新信息。输出摘要本身。"
         )
+        if omitted:
+            user_prompt += (
+                f"\n（更早的 {omitted} 条消息已因超出窗口被省略：不要推测它们的内容，"
+                "也不要假装看过。）"
+            )
         if instruction:
             user_prompt += f"\n\n压缩时必须保留：{instruction}"
         response = await provider.chat(
@@ -3313,23 +3649,58 @@ class JsonlBackend:
         )
         summary = self._truncate(str(getattr(response, "text", "")).strip(), 20000)
         if not summary:
+            # 摘要失败保留原历史（现有语义）：下面一行都没执行，session.messages 一字不动。
             raise RuntimeError("摘要模型没有返回内容。")
-        before_tokens = transcript_tokens(session.messages)
+        file_lines = self._compacted_file_lines(old_messages, session.current_run_id)
         summary_message = {
             "role": "system",
-            "content": f"（历史摘要）{summary}",
+            "content": self._summary_document(
+                trigger=trigger,
+                summary=summary,
+                replaced_messages=len(old_messages),
+                kept_turns=kept_turns,
+                file_lines=file_lines,
+                omitted_messages=omitted,
+            ),
             "timestamp": _chat_timestamp(),
         }
         session.messages = [summary_message, *kept]
         self._persist_session(session)
         return {
             "kind": "compact",
-            "kept_turns": len(kept) // 2,
+            "trigger": trigger,
+            "kept_turns": kept_turns,
             "replaced_messages": len(old_messages),
+            "omitted_messages": omitted,
+            "files": file_lines,
             "before_tokens": before_tokens,
-            "after_tokens": transcript_tokens(session.messages),
+            "after_tokens": self._messages_tokens(session.messages),
             "summary_chars": len(summary),
         }
+
+    async def _maybe_auto_compact(self, session: Session, context: dict[str, Any]) -> bool:
+        """契约 v1 §C：`compaction_auto=true` 且压过触发线时才自动压缩；返回是否压过。
+
+        **默认关闭**（`compaction_auto` 默认 False）：自动压缩要静默多花一次模型调用，
+        用户没要求就不该发生——默认路径只把 `pressure` 交给前端去提示。
+        """
+        _, trigger_ratio, auto = self._compaction_preferences()
+        if not auto:
+            return False
+        used_percent = context.get("used_percent")
+        if not isinstance(used_percent, (int, float)) or used_percent < trigger_ratio * 100:
+            return False
+        try:
+            await self._compact_chat_history(session, trigger="auto")
+        except Exception as exc:
+            print(
+                f"auto compaction failed ({exc.__class__.__name__}: {exc}); "
+                "history kept as-is",
+                file=sys.stderr,
+                flush=True,
+            )
+            return False
+        return True
 
     def _resolve_context(self, session: Session, text: str) -> str | None:
         """按消息内容决定这一轮绑定的审查 run；返回"本轮新绑定"的 run_id。
@@ -3837,17 +4208,75 @@ class JsonlBackend:
                 else:
                     result(self._apply_runtime_profile(str(params.get("value", ""))))
             elif method == "session.create":
-                # A2：新建会话从 `chat_session.json` 恢复历史——TUI 重启后接着聊，
-                # 而不是每次打开都从零开始（`/new` 是唯一清空入口）。
-                session = Session(
-                    session_id=uuid.uuid4().hex,
-                    messages=self._restore_session_messages(),
-                )
-                self.sessions[session.session_id] = session
-                self._persist_session(session)
-                result(self._session_snapshot(session))
+                # 契约 v1：`session.create` = **新建并切换**（旧 `/new` 语义升级）。
+                # 旧实现是"从 `chat_session.json` 恢复历史"，等于每次打开 TUI 都续上
+                # 那唯一一个会话；现在恢复走 `session.list` + `session.switch`。
+                result(self._session_create_payload())
+            elif method == "session.list":
+                # 契约 v1：按 updated_at 降序（store 保证），`current` 是当前会话 id。
+                result(self._session_list_payload())
+            elif method == "session.switch":
+                target = str(params.get("session_id", ""))
+                # 先落盘当前会话（契约 v1）：切换前的最后一次改动不能只留在内存里。
+                current_id = self.session_store.current_id()
+                current_session = self.sessions.get(current_id)
+                if current_session is not None:
+                    self._persist_session(current_session)
+                switched = self._open_session(target)
+                if switched is None:
+                    error("Session not found", "not_found")
+                else:
+                    self.session_store.switch(target)
+                    existing_record = next(
+                        (item for item in self.session_store.records() if item["id"] == target),
+                        None,
+                    )
+                    result(
+                        {
+                            # 内存里那份是**这一瞬**的真相：绑定（`current_run_id`）与消息数
+                            # 由 `_bind_session_run` / 内存变更先行更新，索引要到下一次落盘
+                            # 才追上。响应按内存拼，索引只补 title/updated_at 这类元信息。
+                            "session": self._session_record_payload(
+                                {
+                                    **(existing_record or {"id": target}),
+                                    "current": True,
+                                    "current_run_id": switched.current_run_id,
+                                    "message_count": len(switched.messages),
+                                }
+                            ),
+                            "messages": switched.messages,
+                        }
+                    )
+            elif method == "session.rename":
+                title = str(params.get("title", "")).strip()
+                if not title:
+                    # 空标题在列表里就是一行空白（看起来像坏了），而"改回自动标题"
+                    # 用户表达不出来——直接拒绝，与 `chat.send` 的空消息同一套口径。
+                    error("Title cannot be empty", "invalid_request")
+                else:
+                    renamed = self.session_store.rename(
+                        str(params.get("session_id", "")), title
+                    )
+                    if renamed is None:
+                        error("Session not found", "not_found")
+                    else:
+                        result(renamed)
+            elif method == "session.delete":
+                outcome = self.session_store.delete(str(params.get("session_id", "")))
+                if outcome is None:
+                    error("Session not found", "not_found")
+                else:
+                    deleted, next_id = outcome
+                    # 内存里那份一并丢掉：留着它，下一次 `chat.send` 会把已删的会话
+                    # 重新落盘，"删除"就变成了"暂时看不见"。
+                    self.sessions.pop(deleted, None)
+                    if next_id:
+                        # 删当前会话 → 自动切到最近一个（契约 v1）：内存里也切过去，
+                        # 否则紧随其后的 `chat.send` 会 not_found。
+                        self._open_session(next_id)
+                    result({"deleted": deleted, "next": next_id})
             elif method == "session.get":
-                existing_session = self.sessions.get(str(params.get("session_id", "")))
+                existing_session = self._open_session(str(params.get("session_id", "")))
                 if existing_session is None:
                     error("Session not found", "not_found")
                 else:
@@ -3855,7 +4284,9 @@ class JsonlBackend:
             elif method == "chat.send":
                 session_id = str(params.get("session_id", ""))
                 text = str(params.get("text", "")).strip()
-                existing_session = self.sessions.get(session_id)
+                # 按需从落盘载入：TUI 重启后即使直接带着旧 id 发消息也能续上，
+                # 不必先 switch 一次（载入路径与 `session.switch` 完全一致）。
+                existing_session = self._open_session(session_id)
                 if existing_session is None:
                     error("Session not found", "not_found")
                 elif not text:
@@ -3961,7 +4392,7 @@ class JsonlBackend:
                 elif command == "help":
                     result(
                         {
-                            "text": "/help 显示此帮助信息\n/status 查看运行状态\n/setup 打开配置助手\n/model status|chat|review <模型ID>|local|cloud|hybrid 查看/切换模型与运行时\n/think off|low|high|max|auto 设置思考档位（本地端点置灰）\n/review <PR URL> 开始 PR 审查\n/cancel 取消当前对话或审查\n/retry 重试上一次审查\n/report 查看当前报告\n/export json|markdown [路径] 导出当前报告\n/history [N] 查看最近 N 条对话消息\n/history --runs 查看审查历史\n/history <run_id> 载入该 Run 并绑定为当前上下文\n/context [run_id|off] 查看/切换/解除审查上下文绑定\n/explain <run_id> 解释 Finding 与证据\n/feedback <run_id> <finding_id> <status> [note] 记录 Finding 反馈\n/publish [run_id] [--confirm] 预览并发布审查评论到 GitHub\n/new 开始新会话\n/compact [指令] 压缩会话历史（保留最近 10 轮）\n/demo [case_key|list] 运行离线 Demo\n/showcase 查看参赛演示路径\n/workbench 展开/收起审查工作台"
+                            "text": "/help 显示此帮助信息\n/status 查看运行状态\n/setup 打开配置助手\n/model status|chat|review <模型ID>|local|cloud|hybrid 查看/切换模型与运行时\n/think off|low|high|max|auto 设置思考档位（本地端点置灰）\n/review <PR URL> 开始 PR 审查\n/cancel 取消当前对话或审查\n/retry 重试上一次审查\n/report 查看当前报告\n/export json|markdown [路径] 导出当前报告\n/history [N] 查看最近 N 条对话消息\n/history --runs 查看审查历史\n/history <run_id> 载入该 Run 并绑定为当前上下文\n/context [run_id|off] 查看/切换/解除审查上下文绑定\n/explain <run_id> 解释 Finding 与证据\n/feedback <run_id> <finding_id> <status> [note] 记录 Finding 反馈\n/publish [run_id] [--confirm] 预览并发布审查评论到 GitHub\n/new 新建会话（旧会话保留，可在会话列表里切回）\n/compact [指令] 压缩会话历史（按 token 预算保留最近若干轮原文）\n/demo [case_key|list] 运行离线 Demo\n/showcase 查看参赛演示路径\n/workbench 展开/收起审查工作台"
                         }
                     )
                 elif command == "setup":
@@ -4350,21 +4781,12 @@ class JsonlBackend:
                                     self.review_cancellations.pop(review_session_id, None)
                                     self.event_counts.pop(review_session_id, None)
                 elif command == "new":
-                    # A2：`/new` 必须同时清掉落盘的会话，否则下次启动又把它恢复回来——
-                    # 用户会以为"新建会话"没生效。
-                    try:
-                        clear_chat_session(self.config_path)
-                    except Exception as exc:
-                        print(
-                            f"chat session clear failed ({exc.__class__.__name__}: {exc})",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                    session = Session(session_id=uuid.uuid4().hex)
-                    self.sessions[session.session_id] = session
-                    result(self._session_snapshot(session))
+                    # 契约 v1：`/new` = `session.create`（新建并切换）。旧实现在这里
+                    # `clear_chat_session`——那会把唯一的会话连同历史一起删掉；现在旧会话
+                    # 原样留在 `sessions/` 里，用户随时能 `session.switch` 回去。
+                    result(self._session_create_payload())
                 elif command == "compact":
-                    compact_session = self.sessions.get(str(params.get("session_id", "")))
+                    compact_session = self._open_session(str(params.get("session_id", "")))
                     if compact_session is None:
                         error("Session not found", "not_found")
                     else:
@@ -4372,7 +4794,11 @@ class JsonlBackend:
                         instruction = " ".join(
                             [str(item).strip() for item in raw_args if isinstance(item, str)]
                         ).strip()
-                        result(await self._compact_chat_history(compact_session, instruction))
+                        result(
+                            await self._compact_chat_history(
+                                compact_session, instruction, trigger="manual"
+                            )
+                        )
                 elif command == "think":
                     raw_args = params.get("args", [])
                     args = (
@@ -4429,6 +4855,10 @@ def write_event(event: dict[str, Any]) -> None:
 
 async def serve(config_path: Path | None = None) -> None:
     backend = JsonlBackend(config_path, event_sink=write_event)
+    # 契约 v1 §A：旧 `chat_session.json` 在 TUI 后端**首次启动**时迁移为 legacy 会话。
+    # 只读旧文件、失败只告警（`migrate_legacy` 内部兜底），绝不阻塞启动——迁移是"让老
+    # 用户看得见旧历史"，不是聊天的前置条件。
+    backend.session_store.migrate_legacy()
     tasks: set[asyncio.Task[None]] = set()
 
     async def process_request(request: dict[str, Any]) -> None:

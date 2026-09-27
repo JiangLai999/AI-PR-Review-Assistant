@@ -6,7 +6,7 @@
 验证维度（prompt 要求）:
   a. 事件类型序列合法（started 最先、finished 最后、reasoning_delta/delta 只在中间）
   b. reasoning 文本不出现在任何 assistant.delta 的累积结果中；累积 delta == finished.text
-  c. finished 的 duration_seconds>0、usage 三键、context 五键、warning 为 null
+  c. finished 的 duration_seconds>0、usage 三键、context 七键、warning 为 null
   d. stub 不返回 usage 时 context 走估算（used_tokens>0）且 usage 为 null
   e. provider 抛错时 assistant.failed 出现且无 finished
   + /think（set 与 unsupported）、/compact（成功与失败）、/history 三模式结构断言
@@ -210,11 +210,21 @@ def test_contract_event_sequence_is_legal_and_reasoning_is_isolated(
             # 2026-09-26 契约扩展：预算来源（config|model_spec|fallback）。
             # 见 docs/codex-chat-backend-c1.md §2 与 docs/chat-contract-verification.md。
             "budget_source",
+            # 2026-09-27 契约扩展（会话/压缩改造 C 组）：压力分级
+            # （low|medium|high|critical|null）。见 docs/claude-sessions-compaction.md §3。
+            "pressure",
         }
         assert finished["context"]["budget_source"] in {
             "config",
             "model_spec",
             "fallback",
+        }
+        assert finished["context"]["pressure"] in {
+            "low",
+            "medium",
+            "high",
+            "critical",
+            None,
         }
         assert finished["warning"] is None
         assert finished["reasoning"] == "思考第一步。思考第二步。"
@@ -351,13 +361,18 @@ def test_contract_think_unsupported_state(tmp_path: Path) -> None:
 def test_contract_compact_success_shape(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """契约 v1：/compact 成功 → {kind, kept_turns, replaced_messages, before/after_tokens, summary_chars}。"""
+    """契约 v1：/compact 成功 → {kind, kept_turns, replaced_messages, before/after_tokens,
+    summary_chars}；2026-09-27 起保留口径改为 **token + 对话轮**（B 组），并新增
+    trigger / omitted_messages / files 三个字段（见 docs/claude-sessions-compaction.md §2）。
+    """
 
     async def run() -> None:
         backend = _chat_ready_backend(tmp_path)
         session_id = await _new_session_async(backend)
+        # 长消息：新的保留口径按 token 算预算，22 条短消息装得下就**没有可压的东西**
+        # （旧实现按条数硬砍 10 轮，这里的 token 量才是"真的超预算"）。
         backend.sessions[session_id].messages = [
-            {"role": role, "content": f"old {index}", "timestamp": "2026-01-01"}
+            {"role": role, "content": f"old {index} " + "x" * 400, "timestamp": "2026-01-01"}
             for index in range(22)
             for role in ("user", "assistant")
         ][:22]
@@ -380,13 +395,21 @@ def test_contract_compact_success_shape(
             "before_tokens",
             "after_tokens",
             "summary_chars",
+            "trigger",
+            "omitted_messages",
+            "files",
         }
         assert expected_keys <= set(result), f"缺少字段: {expected_keys - set(result)}"
-        assert result["kept_turns"] == 10
-        assert result["replaced_messages"] == 2
+        assert result["trigger"] == "manual"
+        assert result["kept_turns"] >= 1
+        assert result["replaced_messages"] > 0
         assert result["before_tokens"] > 0
         assert result["after_tokens"] > 0
         assert result["summary_chars"] > 0
+        # 原文保留量确实变小了（压缩的意义），且摘要进了历史
+        assert result["after_tokens"] < result["before_tokens"]
+        assert backend.sessions[session_id].messages[0]["role"] == "system"
+        assert "earlier facts" in backend.sessions[session_id].messages[0]["content"]
 
     asyncio.run(run())
 
@@ -399,8 +422,10 @@ def test_contract_compact_failure_is_protocol_error(
     async def run() -> None:
         backend = _chat_ready_backend(tmp_path)
         session_id = await _new_session_async(backend)
+        # 长消息：必须真的走到模型调用（见上一条用例——短消息在新的 token 口径下会被
+        # 判成"装得下"，根本压不起来，失败路径也就无从验证）。
         original = [
-            {"role": role, "content": f"old {index}", "timestamp": "2026-01-01"}
+            {"role": role, "content": f"old {index} " + "x" * 400, "timestamp": "2026-01-01"}
             for index in range(22)
             for role in ("user", "assistant")
         ][:22]

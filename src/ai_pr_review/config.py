@@ -755,6 +755,16 @@ DEFAULT_CHAT_CONTEXT_BUDGET = 8000
 # `preferences.chat_context_budget` 的合法闭区间。后端推算预算时也用它判断"配置文件里
 # 那个字面量算不算配坏了"——两处各写一套数字迟早漂移（同 CONTEXT_WINDOW_RANGE 的做法）。
 CHAT_CONTEXT_BUDGET_RANGE: tuple[int, int] = (1, 200_000)
+# 上下文压缩（docs/session-and-compaction-plan.md §B；契约 v1）。三个数字都由
+# `jsonl_server._compact_chat_history` 消费：保留多少、何时提示/自动压缩、是否自动。
+# 默认值与方案一致：尾部预算对齐 mimocode 的 40k；触发线 0.9；**自动压缩默认关闭**
+# （自动会多花一次模型调用，且本地小模型摘要质量不稳定——默认只提示）。
+DEFAULT_COMPACTION_TAIL_TOKENS = 40_000
+COMPACTION_TAIL_TOKENS_RANGE: tuple[int, int] = (4_000, 200_000)
+DEFAULT_COMPACTION_TRIGGER_RATIO = 0.9
+# 浮点闭区间；比对时留 1e-9 容差，避免 1.0 这类端点值因为二进制表示被判越界。
+COMPACTION_TRIGGER_RATIO_RANGE: tuple[float, float] = (0.5, 1.0)
+DEFAULT_COMPACTION_AUTO = False
 
 
 def normalize_workbench_mode(value: object) -> str:
@@ -998,6 +1008,52 @@ def normalize_review_reasoning_effort(value: object) -> str:
     return DEFAULT_REVIEW_REASONING_EFFORT
 
 
+def normalize_compaction_tail_tokens(value: object) -> int:
+    """压缩时保留的尾部 token 预算（4000..200000，默认 40000）。"""
+    return _normalize_bounded_int(
+        value,
+        field="compaction_tail_tokens",
+        default=DEFAULT_COMPACTION_TAIL_TOKENS,
+        bounds=COMPACTION_TAIL_TOKENS_RANGE,
+    )
+
+
+def normalize_compaction_trigger_ratio(value: object) -> float:
+    """上下文压力触发线（0.5..1.0，默认 0.9）。
+
+    与 ``_normalize_bounded_int`` 同一套规则（bool 非法、字符串可解析、越界回退默认），
+    只是取值是浮点。非法值只回退 + 告警，不抛异常：配置坏了也要能进 `pr-review config`。
+    """
+    minimum, maximum = COMPACTION_TRIGGER_RATIO_RANGE
+    candidate: float | None
+    if isinstance(value, bool):
+        # bool 是 int 的子类：`true` 会被当成 1.0 通过范围检查，但"触发线 = true"
+        # 不是用户能表达的意思（同 `_normalize_bounded_int` 的判断）。
+        candidate = None
+    elif isinstance(value, (int, float)):
+        candidate = float(value)
+    elif isinstance(value, str) and value.strip():
+        try:
+            candidate = float(value.strip())
+        except ValueError:
+            candidate = None
+    else:
+        candidate = None
+    if candidate is None or not minimum - 1e-9 <= candidate <= maximum + 1e-9:
+        _warn_invalid_preference(
+            "compaction_trigger_ratio", f"已回退为 {DEFAULT_COMPACTION_TRIGGER_RATIO}（允许范围：0.5..1.0）"
+        )
+        return DEFAULT_COMPACTION_TRIGGER_RATIO
+    return min(max(candidate, minimum), maximum)
+
+
+def normalize_compaction_auto(value: object) -> bool:
+    """自动压缩开关（默认 **False**：只提示，不静默消耗一次模型调用）。"""
+    return _normalize_bool_preference(
+        value, field="compaction_auto", default=DEFAULT_COMPACTION_AUTO
+    )
+
+
 def _normalize_bool_preference(value: object, *, field: str, default: bool) -> bool:
     """布尔偏好项的统一归一化：bool / 0-1 / "true|yes|on" 等字面量，其余回退。"""
     if isinstance(value, bool):
@@ -1049,6 +1105,11 @@ class PreferencesConfig:
     # Review 思考档位（docs/review-reasoning-assessment.md §4.3 第二步）：与 chat 分开，
     # 默认 off = 现状；`auto` 表示"不干预，由 policy / 供应商默认决定"。
     review_reasoning_effort: str = DEFAULT_REVIEW_REASONING_EFFORT
+    # 上下文压缩（docs/session-and-compaction-plan.md §B；契约 v1）：尾部保留预算、
+    # 压力触发线、是否自动压缩。三个键都在这里归一化，读侧（jsonl_server）只消费。
+    compaction_tail_tokens: int = DEFAULT_COMPACTION_TAIL_TOKENS
+    compaction_trigger_ratio: float = DEFAULT_COMPACTION_TRIGGER_RATIO
+    compaction_auto: bool = DEFAULT_COMPACTION_AUTO
 
     def __post_init__(self) -> None:
         # 属性一旦构造出来就保证合法，加载/导入/向导三条路径因此共用同一套回退规则。
@@ -1079,6 +1140,13 @@ class PreferencesConfig:
             default=DEFAULT_CHAT_CONTEXT_BUDGET,
             bounds=CHAT_CONTEXT_BUDGET_RANGE,
         )
+        self.compaction_tail_tokens = normalize_compaction_tail_tokens(
+            self.compaction_tail_tokens
+        )
+        self.compaction_trigger_ratio = normalize_compaction_trigger_ratio(
+            self.compaction_trigger_ratio
+        )
+        self.compaction_auto = normalize_compaction_auto(self.compaction_auto)
 
 
 def _preferences_of(config: object) -> object:

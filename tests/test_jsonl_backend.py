@@ -5763,10 +5763,12 @@ def test_chat_reports_a_repo_tree_it_could_not_read(
 def test_chat_session_is_persisted_and_restored_by_a_new_backend(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A2：会话落盘（role/content/timestamp），backend 重启后接着聊。
+    """A2 → 契约 v1 §A：会话落盘（role/content/timestamp），backend 重启后接着聊。
 
     只存对话本身：system prompt（含审查上下文与注入的源码）每轮现算，绝不落盘——
     落了盘会让历史重复膨胀、重复计费，还会让注入的源码在后续轮次里"阴魂不散"。
+    恢复路径从"`session.create` 自动续上那唯一一个会话"改成
+    `session.list`（拿到 current）→ `session.switch`（载入历史），见 A 组协议。
     """
 
     async def run() -> None:
@@ -5780,8 +5782,11 @@ def test_chat_session_is_persisted_and_restored_by_a_new_backend(
         response = await backend.handle(_chat_send(session_id, "第一个问题"))
         assert response[0]["ok"] is True
 
-        session_path = tmp_path / "chat_session.json"
-        payload = json.loads(session_path.read_text(encoding="utf-8"))
+        # 契约 v1 的存储布局：`<config 同目录>/sessions/<id>.json`（不再是单文件）
+        session_path = tmp_path / "sessions" / f"{session_id}.json"
+        document = json.loads(session_path.read_text(encoding="utf-8"))
+        assert document["id"] == session_id
+        payload = document["messages"]
         assert [message["role"] for message in payload] == ["user", "assistant"]
         assert payload[0]["content"] == "第一个问题"
         assert payload[1]["content"] == "stub"
@@ -5792,20 +5797,33 @@ def test_chat_session_is_persisted_and_restored_by_a_new_backend(
         assert all(message["timestamp"] for message in payload)
         assert "请默认使用中文回答" not in session_path.read_text(encoding="utf-8")
 
-        # 新实例（TUI 重启）拿到同样的历史；旧绑定（current_run_id）不落盘，回到普通聊天
+        # 新实例（TUI 重启）：`session.list` 指出当前会话，`session.switch` 载入它的历史。
+        # 本例没有绑定过 run，恢复后仍是普通聊天（绑定随会话走见单独的用例）。
         restarted = _chat_ready_backend(tmp_path)
-        restored = (await restarted.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        listing = (await restarted.handle({"id": "s", "method": "session.list"}))[0]["result"]
+        assert listing["current"] == session_id
+        assert [item["id"] for item in listing["sessions"]] == [session_id]
+        restored = (
+            await restarted.handle(
+                {"id": "s", "method": "session.switch", "params": {"session_id": session_id}}
+            )
+        )[0]["result"]
         assert [message["role"] for message in restored["messages"]] == ["user", "assistant"]
         assert restored["messages"][0]["content"] == "第一个问题"
-        assert restored["current_run_id"] is None
+        assert restored["session"]["id"] == session_id
+        assert restarted.sessions[session_id].current_run_id is None
 
     asyncio.run(run())
 
 
-def test_new_command_clears_the_persisted_session(
+def test_new_command_creates_and_switches_without_dropping_the_old_session(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A2：`/new` 清空 —— 包括落盘的那一份，否则重启后旧对话又回来了。"""
+    """契约 v1：`/new` = `session.create`（**新建并切换**），旧会话一条不丢。
+
+    旧实现在这里 `clear_chat_session`——新会话要开，代价却是把唯一的会话删掉。现在
+    `/new` 只是切换：旧会话留在 `sessions/` 里，`/sessions` 随时切得回去。
+    """
 
     async def run() -> None:
         backend = _chat_ready_backend(tmp_path)
@@ -5814,18 +5832,287 @@ def test_new_command_clears_the_persisted_session(
         captured: dict[str, Any] = {}
         _stub_provider(monkeypatch, captured)
         await backend.handle(_chat_send(session_id, "第一轮"))
-        session_path = tmp_path / "chat_session.json"
-        assert session_path.exists()
+        old_path = tmp_path / "sessions" / f"{session_id}.json"
+        assert old_path.exists()
 
         reply = await _execute_async(backend, "new", [])
+        new_id = reply["result"]["session_id"]
         assert reply["result"]["messages"] == []
-        assert not session_path.exists(), "/new 必须把落盘的会话一起清掉"
+        assert reply["result"]["session"]["id"] == new_id
+        assert new_id != session_id, "`/new` 必须真的新建，而不是复用/清空当前会话"
+        assert old_path.exists(), "旧会话必须留在盘上（`/sessions` 要能切回去）"
+        assert (
+            json.loads(old_path.read_text(encoding="utf-8"))["messages"][0]["content"] == "第一轮"
+        ), "旧会话的历史必须原样保留"
 
+        listing = (await backend.handle({"id": "s", "method": "session.list"}))[0]["result"]
+        assert listing["current"] == new_id
+        assert {item["id"] for item in listing["sessions"]} == {session_id, new_id}
+
+        # 重启后旧会话照样切得回来——"/new 没删东西"必须在**新进程**里也成立。
         restarted = _chat_ready_backend(tmp_path)
-        restored = (await restarted.handle({"id": "s", "method": "session.create"}))[0]["result"]
-        assert restored["messages"] == [], "清空后重启不该把旧对话恢复回来"
+        restored = (
+            await restarted.handle(
+                {"id": "s", "method": "session.switch", "params": {"session_id": session_id}}
+            )
+        )[0]["result"]
+        assert restored["messages"][0]["content"] == "第一轮"
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# 会话协议 v1（docs/session-and-compaction-plan.md §A3；四条线共用的字段名不可改）
+# ---------------------------------------------------------------------------
+
+
+def test_session_list_returns_the_contract_shape(tmp_path: Path) -> None:
+    """`session.list` → `{sessions: [{id,title,updated_at,message_count,current}], current}`。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        created = await backend.handle({"id": "s", "method": "session.create", "params": {}})
+        session_id = created[0]["result"]["session_id"]
+
+        reply = (await backend.handle({"id": "s", "method": "session.list", "params": {}}))[0]
+        assert reply["ok"] is True
+        listing = reply["result"]
+        assert set(listing) == {"sessions", "current"}
+        assert listing["current"] == session_id
+        item = listing["sessions"][0]
+        # 列表项**恰好**这五个键：多出来的字段会让契约的"同键同形"失效。
+        assert set(item) == {"id", "title", "updated_at", "message_count", "current"}
+        assert item["id"] == session_id
+        assert item["current"] is True
+        assert item["message_count"] == 0
+
+        # 空列表也要是合法的列表（TUI 走空态文案，不是错误分支）
+        backend.session_store.delete(session_id)
+        empty = (await backend.handle({"id": "s", "method": "session.list", "params": {}}))[0]
+        assert empty["result"] == {"sessions": [], "current": ""}
+
+    asyncio.run(run())
+
+
+def test_session_switch_persists_the_outgoing_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """契约 v1：`session.switch` **先落盘当前会话**，再载入目标并激活。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        first = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+        await backend.handle(_chat_send(first["session_id"], "第一个会话说过的话"))
+        second = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+
+        # 模拟"内存里有一轮还没落盘"：切换前它必须被写回磁盘
+        backend.sessions[second["session_id"]].messages = [
+            {"role": "user", "content": "只存在内存里的一句", "timestamp": "2026-01-01"}
+        ]
+        switched = (
+            await backend.handle(
+                {
+                    "id": "s",
+                    "method": "session.switch",
+                    "params": {"session_id": first["session_id"]},
+                }
+            )
+        )[0]["result"]
+        assert switched["session"]["id"] == first["session_id"]
+        assert switched["session"]["current"] is True
+        assert switched["messages"][0]["content"] == "第一个会话说过的话"
+        assert backend.session_store.current_id() == first["session_id"]
+        persisted = json.loads(
+            (tmp_path / "sessions" / f"{second['session_id']}.json").read_text(encoding="utf-8")
+        )
+        assert persisted["messages"][0]["content"] == "只存在内存里的一句", "切换必须先落盘"
+
+        missing = (
+            await backend.handle(
+                {"id": "s", "method": "session.switch", "params": {"session_id": "s99"}}
+            )
+        )[0]
+        assert missing["ok"] is False
+        assert missing["error"]["code"] == "not_found"
+
+    asyncio.run(run())
+
+
+def test_session_switch_restores_the_review_binding(tmp_path: Path) -> None:
+    """契约 v1：`current_run_id`（review 绑定）**随会话走**——切回来还在。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        first = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        second = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        run_id = _seed_run(backend, 31, "新审查")
+
+        backend.sessions[first["session_id"]].current_run_id = run_id
+        backend._persist_session(backend.sessions[first["session_id"]])
+        assert backend.session_store.get(first["session_id"])["current_run_id"] == run_id
+
+        # 切走再切回：内存里的 Session 被复用，绑定原样还在
+        await backend.handle(
+            {"id": "s", "method": "session.switch", "params": {"session_id": second["session_id"]}}
+        )
+        back = (
+            await backend.handle(
+                {"id": "s", "method": "session.switch", "params": {"session_id": first["session_id"]}}
+            )
+        )[0]["result"]
+        assert backend.sessions[first["session_id"]].current_run_id == run_id
+        assert back["session"]["current_run_id"] == run_id
+
+        # 新进程（TUI 重启）从盘上载入，绑定同样恢复
+        restarted = _chat_ready_backend(tmp_path)
+        resumed = (
+            await restarted.handle(
+                {"id": "s", "method": "session.switch", "params": {"session_id": first["session_id"]}}
+            )
+        )[0]["result"]
+        assert restarted.sessions[first["session_id"]].current_run_id == run_id
+        assert resumed["session"]["current_run_id"] == run_id
+
+    asyncio.run(run())
+
+
+def test_session_rename_and_delete_over_the_protocol(tmp_path: Path) -> None:
+    """`session.rename` → `{id,title}`；`session.delete` → `{deleted, next}`（删当前自动切换）。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        first = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+        second = (await backend.handle({"id": "s", "method": "session.create"}))[0]["result"]
+
+        renamed = (
+            await backend.handle(
+                {
+                    "id": "s",
+                    "method": "session.rename",
+                    "params": {"session_id": first["session_id"], "title": "  标题带空格  "},
+                }
+            )
+        )[0]
+        assert renamed["result"] == {"id": first["session_id"], "title": "标题带空格"}
+        listing = (await backend.handle({"id": "s", "method": "session.list"}))[0]["result"]
+        titles = {item["id"]: item["title"] for item in listing["sessions"]}
+        assert titles[first["session_id"]] == "标题带空格"
+
+        blank = (
+            await backend.handle(
+                {
+                    "id": "s",
+                    "method": "session.rename",
+                    "params": {"session_id": first["session_id"], "title": "   "},
+                }
+            )
+        )[0]
+        assert blank["ok"] is False and blank["error"]["code"] == "invalid_request"
+
+        # 删**当前**会话：自动切到最近一个（本例是 first，因为 rename 刷新了 updated_at）
+        deleted = (
+            await backend.handle(
+                {"id": "s", "method": "session.delete", "params": {"session_id": second["session_id"]}}
+            )
+        )[0]["result"]
+        assert deleted == {"deleted": second["session_id"], "next": first["session_id"]}
+        assert backend.session_store.current_id() == first["session_id"]
+        assert second["session_id"] not in backend.sessions, "内存里那份也要丢"
+
+        unknown = (
+            await backend.handle(
+                {"id": "s", "method": "session.delete", "params": {"session_id": "s99"}}
+            )
+        )[0]
+        assert unknown["ok"] is False and unknown["error"]["code"] == "not_found"
+        # 非法 id（路径穿越）与"不存在"同义：不能漏出内部 ValueError
+        for method in ("session.delete", "session.switch", "session.get", "session.rename"):
+            bad = (
+                await backend.handle(
+                    {
+                        "id": "s",
+                        "method": method,
+                        "params": {"session_id": "../escape", "title": "x"},
+                    }
+                )
+            )[0]
+            assert bad["ok"] is False, method
+            assert bad["error"]["code"] in {"not_found", "invalid_request"}, (method, bad)
+
+    asyncio.run(run())
+
+
+def test_session_create_switches_and_keeps_the_legacy_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`session.create` 既给契约 v1 的 `session`，也保留旧的顶层键（TUI 现行代码在读）。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        created = (await backend.handle({"id": "s", "method": "session.create", "params": {}}))[0]
+        result = created["result"]
+        assert result["session_id"] == result["session"]["id"]
+        assert result["session"]["current"] is True
+        assert result["messages"] == []
+        assert "title" in result["session"]
+
+        captured: dict[str, Any] = {}
+        _stub_provider(monkeypatch, captured)
+        sent = await backend.handle(_chat_send(result["session_id"], "记一笔"))
+        assert sent[0]["ok"] is True
+        listing = (await backend.handle({"id": "s", "method": "session.list"}))[0]["result"]
+        assert listing["sessions"][0]["title"] == "记一笔", "首条用户消息要变成默认标题"
+
+    asyncio.run(run())
+
+
+def test_legacy_chat_session_json_is_migrated_when_the_backend_starts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """契约 v1 §A：旧 `chat_session.json` **首次启动**迁移为 legacy 会话。
+
+    这里走真正的启动函数 `serve()`（把 stdin 换成空流让它读到 EOF 立刻收尾）——
+    只测 `migrate_legacy()` 本身证明不了"启动时确实会调用它"。
+    """
+    import io
+
+    from ai_pr_review.backend.jsonl_server import serve
+
+    config_path = tmp_path / "config.json"
+    (tmp_path / "chat_session.json").write_text(
+        json.dumps(
+            [
+                {"role": "user", "content": "迁移前的问题", "timestamp": "2026-01-01T00:00:00"},
+                {"role": "assistant", "content": "迁移前的回答", "timestamp": "2026-01-01T00:00:01"},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    monkeypatch.setattr("sys.stdout", io.StringIO())
+    asyncio.run(serve(config_path))
+
+    backend = JsonlBackend(config_path, event_sink=lambda event: None)
+    listing = asyncio.run(backend.handle({"id": "s", "method": "session.list"}))[0]["result"]
+    assert [item["title"] for item in listing["sessions"]] == ["legacy"]
+    assert listing["current"] == "s1"
+    restored = asyncio.run(
+        backend.handle({"id": "s", "method": "session.switch", "params": {"session_id": "s1"}})
+    )[0]["result"]
+    assert restored["messages"][0]["content"] == "迁移前的问题"
+    assert (tmp_path / "chat_session.json").exists(), "迁移只读旧文件，CLI 仍要用它"
+
+    # 第二次启动不会再多出一个 legacy 会话
+    asyncio.run(serve(config_path))
+    again = asyncio.run(
+        JsonlBackend(config_path, event_sink=lambda event: None).handle(
+            {"id": "s", "method": "session.list"}
+        )
+    )[0]["result"]
+    assert len(again["sessions"]) == 1
 
 
 def test_chat_history_window_is_80_messages_and_the_trim_is_announced(
@@ -5859,7 +6146,9 @@ def test_chat_history_window_is_80_messages_and_the_trim_is_announced(
         )
         assert texts[40].startswith("stub")
         # 提示只进 UI：落盘的 transcript 仍是干净的一问一答
-        payload = json.loads((tmp_path / "chat_session.json").read_text(encoding="utf-8"))
+        payload = json.loads(
+            (tmp_path / "sessions" / f"{session_id}.json").read_text(encoding="utf-8")
+        )["messages"]
         assert len(payload) == CHAT_HISTORY_MESSAGE_LIMIT
         assert all("对话历史超过" not in message["content"] for message in payload)
 
@@ -6062,6 +6351,7 @@ def test_chat_reasoning_stream_is_separated_from_answer_and_history(
         assert finished["context"]["used_tokens"] == 20
         # 契约 v1 扩展（2026-09-26）：`context` 六键，新增 `budget_source`
         # （config|model_spec|fallback）；订阅事件的消费方不必再发 `/context`。
+        # 2026-09-27 再扩一键 `pressure`（low|medium|high|critical|null，契约 v1 §C）。
         assert set(finished["context"]) == {
             "used_tokens",
             "budget_tokens",
@@ -6069,7 +6359,10 @@ def test_chat_reasoning_stream_is_separated_from_answer_and_history(
             "trimmed_messages",
             "compacted",
             "budget_source",
+            "pressure",
         }
+        # 20 / 8000 = 0.25% → 最低档
+        assert finished["context"]["pressure"] == "low"
         assert finished["context"]["budget_tokens"] == DEFAULT_CHAT_BUDGET
         assert finished["warning"] is None
         assert response[0]["result"]["text"] == "visible answer"
@@ -6555,21 +6848,29 @@ def test_history_defaults_to_chat_and_runs_stay_available(tmp_path: Path) -> Non
 def test_compact_replaces_old_messages_with_a_summary(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A6：成功压缩只保留最近 10 轮原文；摘要进历史并落盘。"""
+    """A6 → 契约 v1 §B：按 **token 预算 + 对话轮**保留尾部原文，旧的一段换成 XML 摘要。"""
 
     async def run() -> None:
         backend = _chat_ready_backend(tmp_path)
         session_id = await _new_session_async(backend)
+        # 每条约 100 token（400 字符）的长消息：12 轮远超尾部预算，必须真的压起来。
+        # （旧实现按条数保 10 轮，这样的会话会被判成"没什么可压"。）
         backend.sessions[session_id].messages = [
-            {"role": role, "content": f"old {index}", "timestamp": "2026-01-01"}
-            for index in range(22)
+            {"role": role, "content": f"old {index} " + "x" * 400, "timestamp": "2026-01-01"}
+            for index in range(12)
             for role in ("user", "assistant")
-        ][:22]
+        ]
+        assert backend._compaction_tail_budget() < backend._messages_tokens(
+            backend.sessions[session_id].messages
+        )
+
+        prompts: list[str] = []
 
         class SummaryProvider:
             async def chat(self, messages, **kwargs):
                 from ai_pr_review.services.model_providers.base import ProviderResponse
 
+                prompts.append(str(kwargs.get("system_prompt", "")))
                 return ProviderResponse(text="earlier facts")
 
         monkeypatch.setattr(
@@ -6577,15 +6878,36 @@ def test_compact_replaces_old_messages_with_a_summary(
             lambda config: SummaryProvider(),
         )
         reply = await _execute_async(backend, "compact", ["保留 API 细节"], session_id)
-        assert reply["result"]["replaced_messages"] == 2
-        assert reply["result"]["kept_turns"] == 10
-        assert reply["result"]["summary_chars"] > 0
+        result = reply["result"]
+        assert result["trigger"] == "manual"
+        assert result["replaced_messages"] > 0
+        assert result["kept_turns"] >= 1
+        assert result["summary_chars"] > 0
+        assert "保留 API 细节" in prompts[0], "用户指令必须进摘要提示词"
+
         messages = backend.sessions[session_id].messages
-        assert len(messages) == 21
-        assert messages[0]["content"] == "（历史摘要）earlier facts"
-        assert messages[1]["content"] == "old 1"
-        payload = json.loads((tmp_path / "chat_session.json").read_text(encoding="utf-8"))
-        assert len(payload) == 21
+        summary = messages[0]["content"]
+        assert messages[0]["role"] == "system"
+        # 契约 v1 的 XML 结构：三个属性 + 正文 + 文件清单 + 闭合标签
+        assert summary.startswith(
+            f'<conversation-summary trigger="manual" '
+            f'replaced_messages="{result["replaced_messages"]}" '
+            f'kept_turns="{result["kept_turns"]}">'
+        )
+        assert summary.endswith("</conversation-summary>")
+        assert "earlier facts" in summary
+        assert "## 已压缩对话涉及的文件" in summary
+        assert "- （无）" in summary, "这次压缩没涉及任何文件，清单要如实写'无'"
+        # **不拆散一轮**：摘要之后的原文必须从一条 user 开始（不能留下半轮 assistant）
+        assert messages[1]["role"] == "user"
+        assert len(messages) == 1 + 2 * result["kept_turns"]
+        # 保留的原文是**原样**的尾部：最后一条仍是最后一轮的回答
+        assert messages[-1]["content"].startswith("old 11 ")
+        # 落盘的是压缩后的历史（不是压缩前的）
+        payload = json.loads(
+            (tmp_path / "sessions" / f"{session_id}.json").read_text(encoding="utf-8")
+        )["messages"]
+        assert payload == messages
 
     asyncio.run(run())
 
@@ -6593,17 +6915,19 @@ def test_compact_replaces_old_messages_with_a_summary(
 def test_compact_failure_preserves_history(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A6：摘要失败时原历史一字不动。"""
+    """A6：摘要失败时原历史一字不动（契约 v1 §B 的"摘要失败保留原历史"）。"""
 
     async def run() -> None:
         backend = _chat_ready_backend(tmp_path)
         session_id = await _new_session_async(backend)
         from ai_pr_review.services.model_providers.base import ProviderResponse
+        # 长消息：必须**真的走到**模型调用那一步，否则"失败被吞掉"这件事根本没被验证
+        # （按条数保 10 轮的旧实现下，22 条短消息会被判成"没什么可压"直接返回）。
         original = [
-            {"role": role, "content": f"old {index}", "timestamp": "2026-01-01"}
-            for index in range(22)
+            {"role": role, "content": f"old {index} " + "x" * 400, "timestamp": "2026-01-01"}
+            for index in range(12)
             for role in ("user", "assistant")
-        ][:22]
+        ]
         backend.sessions[session_id].messages = original
 
         class FailingProvider:
@@ -6618,6 +6942,282 @@ def test_compact_failure_preserves_history(
         assert reply["ok"] is False
         assert "summary failed" in reply["error"]["message"]
         assert backend.sessions[session_id].messages == original
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# 压缩保留策略的边界（契约 v1 §B；docs/session-and-compaction-plan.md §B2/B5）
+# ---------------------------------------------------------------------------
+
+
+def _long_turn(index: int) -> list[dict[str, Any]]:
+    """一轮长消息（user + assistant），每条约 100 token（400 字符）。"""
+    return [
+        {"role": "user", "content": f"问 {index} " + "x" * 400, "timestamp": "2026-01-01"},
+        {"role": "assistant", "content": f"答 {index} " + "y" * 400, "timestamp": "2026-01-01"},
+    ]
+
+
+def test_compaction_tail_keeps_whole_turns_never_half_of_one(tmp_path: Path) -> None:
+    """**不拆散一轮**：一轮 = user + 其后的 assistant，保留的原文必须从 user 开始。"""
+    backend = JsonlBackend(tmp_path / "config.json")
+    messages = [*_long_turn(1), *_long_turn(2), *_long_turn(3)]
+    # 预算刚好两轮：第三轮（最新）先保住，第二轮再保住，第一轮越界
+    one_turn = backend._messages_tokens(_long_turn(1))
+    backend._compaction_tail_budget = lambda: one_turn * 2  # type: ignore[method-assign]
+
+    old, kept, kept_turns = backend._split_compaction_tail(messages)
+    assert kept == [*_long_turn(2), *_long_turn(3)]
+    assert kept[0]["role"] == "user"
+    assert old == _long_turn(1)
+    assert kept_turns == 2
+
+
+def test_compaction_tail_keeps_at_least_one_turn_when_the_budget_is_tiny(tmp_path: Path) -> None:
+    """极端配置兜底：预算比一轮还小 → 那一轮**整轮**留下（不清空对话、也不切半轮）。"""
+    backend = JsonlBackend(tmp_path / "config.json")
+    backend._compaction_tail_budget = lambda: 1  # type: ignore[method-assign]
+    messages = [*_long_turn(1), *_long_turn(2), *_long_turn(3)]
+
+    old, kept, kept_turns = backend._split_compaction_tail(messages)
+    assert kept == _long_turn(3), "至少要留一整轮"
+    assert [message["role"] for message in kept] == ["user", "assistant"]
+    assert old == [*_long_turn(1), *_long_turn(2)]
+    assert kept_turns == 1
+
+
+def test_compaction_tail_keeps_everything_when_the_history_fits(tmp_path: Path) -> None:
+    """短消息多轮全保留：没超预算就**什么都不用压**（旧实现按条数硬砍 10 轮）。"""
+    backend = JsonlBackend(tmp_path / "config.json")
+    messages = [
+        {"role": role, "content": f"短 {index}", "timestamp": "2026-01-01"}
+        for index in range(20)
+        for role in ("user", "assistant")
+    ]
+    old, kept, kept_turns = backend._split_compaction_tail(messages)
+    assert old == []
+    assert kept == messages
+    assert kept_turns == 20
+
+
+def test_compact_is_a_no_op_and_calls_no_model_when_nothing_exceeds_the_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """装得下就别压：`/compact` 返回全零，历史一字不动，**也不多花一次模型调用**。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        session_id = await _new_session_async(backend)
+        original = [
+            {"role": role, "content": f"短 {index}", "timestamp": "2026-01-01"}
+            for index in range(20)
+            for role in ("user", "assistant")
+        ]
+        backend.sessions[session_id].messages = list(original)
+
+        class ExplodingProvider:
+            async def chat(self, messages, **kwargs):
+                raise AssertionError("预算装得下就不该调摘要模型")
+
+        monkeypatch.setattr(
+            "ai_pr_review.backend.jsonl_server.create_model_provider",
+            lambda config: ExplodingProvider(),
+        )
+        reply = await _execute_async(backend, "compact", [], session_id)
+        assert reply["result"]["replaced_messages"] == 0
+        assert reply["result"]["kept_turns"] == 20
+        assert reply["result"]["trigger"] == "manual"
+        assert backend.sessions[session_id].messages == original
+
+    asyncio.run(run())
+
+
+def test_compact_summary_lists_files_from_the_messages_and_the_bound_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """契约 v1 §B：清单 = 被压缩消息里的路径（含次数）+ 该会话绑定 run 的 finding 文件。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        session_id = await _new_session_async(backend)
+        run_id = _store_context_run(backend)  # findings: src/medium.py、src/critical.py、src/high.py
+        backend.sessions[session_id].current_run_id = run_id
+        backend._compaction_tail_budget = lambda: 10  # type: ignore[method-assign]
+        backend.sessions[session_id].messages = [
+            {
+                "role": "user",
+                "content": "看看 website/index.html 和 website/js/main.js 的引用关系",
+                "timestamp": "2026-01-01",
+            },
+            {
+                "role": "assistant",
+                "content": "website/index.html 里的 tab.html 来自 website/js/main.js",
+                "timestamp": "2026-01-01",
+            },
+            *_long_turn(2),
+            *_long_turn(3),
+        ]
+
+        class SummaryProvider:
+            async def chat(self, messages, **kwargs):
+                from ai_pr_review.services.model_providers.base import ProviderResponse
+
+                return ProviderResponse(text="摘要正文")
+
+        monkeypatch.setattr(
+            "ai_pr_review.backend.jsonl_server.create_model_provider",
+            lambda config: SummaryProvider(),
+        )
+        reply = await _execute_async(backend, "compact", [], session_id)
+        summary = backend.sessions[session_id].messages[0]["content"]
+        assert "## 已压缩对话涉及的文件" in summary
+        assert "- website/index.html（讨论过 2 次）" in summary
+        assert "- website/js/main.js（讨论过 2 次）" in summary
+        assert "- src/critical.py（本次审查点名）" in summary, "finding 文件（没被讨论过）也要进清单"
+        # URL 不是仓库文件：清单里不许出现 tps:// 这种碎片
+        assert "tps://" not in summary and "http" not in summary
+        assert reply["result"]["files"][0] == "- website/index.html（讨论过 2 次）"
+
+    asyncio.run(run())
+
+
+def test_compact_truncates_the_summary_input_and_annotates_the_omission(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """§B5 安全网：待摘要正文截断到**可用窗口 × 0.6**，省略条数写进摘要（确定性标注）。"""
+
+    async def run() -> None:
+        backend = _chat_ready_backend(tmp_path)
+        session_id = await _new_session_async(backend)
+        monkeypatch.setattr(backend, "_chat_effective_window", lambda: 300)  # 摘要可用 180 token
+        backend._compaction_tail_budget = lambda: 10  # type: ignore[method-assign]
+        backend.sessions[session_id].messages = [
+            message for index in range(6) for message in _long_turn(index)
+        ]
+        prompts: list[str] = []
+        instructions: list[str] = []
+
+        class SummaryProvider:
+            async def chat(self, messages, **kwargs):
+                from ai_pr_review.services.model_providers.base import ProviderResponse
+
+                prompts.append(str(messages[0]["content"]))
+                instructions.append(str(kwargs.get("system_prompt", "")))
+                return ProviderResponse(text="摘要正文")
+
+        monkeypatch.setattr(
+            "ai_pr_review.backend.jsonl_server.create_model_provider",
+            lambda config: SummaryProvider(),
+        )
+        reply = await _execute_async(backend, "compact", [], session_id)
+        result = reply["result"]
+        assert result["omitted_messages"] > 0, "窗口装不下就一定要丢最旧的"
+        # 丢的是**最旧**的：留在正文里的必须是最新的那几条（§B5 的计量单位是"条"）
+        assert "答 4 " in prompts[0]
+        assert "问 0 " not in prompts[0] and "答 0 " not in prompts[0]
+        assert (
+            f"更早的 {result['omitted_messages']} 条消息已" in instructions[0]
+        ), "提示词要说明丢了多少条，模型才不至于假装看过"
+        summary = backend.sessions[session_id].messages[0]["content"]
+        assert f"（更早的 {result['omitted_messages']} 条消息已省略，未参与本次摘要）" in summary
+
+    asyncio.run(run())
+
+
+def test_pressure_bands_and_null_when_the_percent_is_uncomputable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """契约 v1 §C：`<50 low`、`50–79 medium`、`80–99 high`、`>=100 critical`；算不出为 null。"""
+    backend = JsonlBackend(tmp_path / "config.json")
+    monkeypatch.setattr(backend, "_chat_context_budget_plan", lambda: (100, "config"))
+
+    def payload(prompt_tokens: int | None) -> dict[str, Any]:
+        usage = (
+            None
+            if prompt_tokens is None
+            else {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": 0,
+                "total_tokens": prompt_tokens,
+            }
+        )
+        return backend._chat_context_payload(
+            wire_history=[{"role": "user", "content": "x"}],
+            answer="",
+            usage=usage,
+            trimmed_messages=0,
+            compacted=False,
+        )
+
+    expected = {
+        49: "low",
+        50: "medium",
+        79: "medium",
+        80: "high",
+        99: "high",
+        100: "critical",
+        500: "critical",
+    }
+    for prompt_tokens, band in expected.items():
+        assert payload(prompt_tokens)["pressure"] == band, prompt_tokens
+
+    # 预算算不出来（0）→ 百分比与压力都是 null，绝不能显示成"很轻松"
+    monkeypatch.setattr(backend, "_chat_context_budget_plan", lambda: (0, "fallback"))
+    uncomputable = payload(None)
+    assert uncomputable["used_percent"] is None
+    assert uncomputable["pressure"] is None
+
+
+def test_auto_compaction_is_off_by_default_and_runs_only_when_enabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """契约 v1 §C：默认**只提示**（pressure 随事件下发）；`compaction_auto=true` 才真压。"""
+    published: list[dict[str, Any]] = []
+
+    async def run() -> None:
+        from ai_pr_review.services.model_providers.base import ProviderResponse
+
+        backend = JsonlBackend(tmp_path / "config.json", event_sink=published.append)
+        backend.config.provider.api_key = "test-key"
+        backend.config.ai_client.api_key = "test-key"
+        session_id = await _new_session_async(backend)
+        summaries: list[str] = []
+
+        class Provider:
+            async def stream_chat(self, messages, on_delta, **kwargs):
+                await on_delta("stub")
+                # prompt 9000 > 预算 8000 → used_percent 112.5 → critical
+                return ProviderResponse(
+                    text="stub",
+                    usage={"prompt_tokens": 9000, "completion_tokens": 1, "total_tokens": 9001},
+                )
+
+            async def chat(self, messages, **kwargs):
+                summaries.append(str(messages[0]["content"]))
+                return ProviderResponse(text="摘要正文")
+
+        monkeypatch.setattr(
+            "ai_pr_review.backend.jsonl_server.create_model_provider",
+            lambda config: Provider(),
+        )
+        await backend.handle(_chat_send(session_id, "第一轮"))
+        finished = [event for event in published if event["event"] == "assistant.finished"][-1]
+        assert finished["context"]["pressure"] == "critical"
+        assert finished["context"]["compacted"] is False
+        assert summaries == [], "默认关闭：只提示，不静默消耗一次模型调用"
+
+        # 打开开关 + 把尾部预算压到一轮都装不下 → 自动压缩真的发生
+        backend.config.preferences.compaction_auto = True
+        monkeypatch.setattr(backend, "_compaction_tail_budget", lambda: 10)
+        published.clear()
+        await backend.handle(_chat_send(session_id, "第二轮"))
+        assert len(summaries) == 1
+        finished = [event for event in published if event["event"] == "assistant.finished"][-1]
+        assert finished["context"]["compacted"] is True
+        assert backend.sessions[session_id].messages[0]["content"].startswith(
+            '<conversation-summary trigger="auto" '
+        )
 
     asyncio.run(run())
 
