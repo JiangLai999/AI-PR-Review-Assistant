@@ -4124,10 +4124,11 @@ export function SessionsDialog(props: {
       flexDirection="column"
     >
       <text fg={orange}>SESSIONS // 会话列表</text>
-      <Show when={props.supported}>
+      {/* 有列表数据时永远显示计数（即使某次刷新失败）——避免与"不支持"自相矛盾。 */}
+      <Show when={props.supported || props.sessions.length > 0}>
         <text fg={muted}>共 {props.sessions.length} 个会话</text>
       </Show>
-      <Show when={!props.supported}>
+      <Show when={!props.supported && props.sessions.length === 0}>
         <text fg="#f3c742">{formatSessionListEmpty(props.language)}</text>
       </Show>
       <Show when={!empty}>
@@ -5059,10 +5060,14 @@ export function App() {
   // A-P2/A-P3 · 会话列表（/sessions、Alt+S）与状态栏会话名。
   // 与后端并行：session.list 缺失/失败 → 空态文案，不崩溃。
   // ---------------------------------------------------------------------
+  /** 会话列表刷新的请求序号（防乱序竞态，见 `refreshSessionList`）。 */
+  let sessionListRequest = 0
   const applySessionList = (list: ReturnType<typeof parseSessionListResult>) => {
     if (!list) {
       setSessionListSupported(false)
-      setSessionList([])
+      // 刷新失败**不清空已有列表**：清空会让「共 N 个会话」与"看不到会话"自相矛盾
+      // （用户实测：弹窗同时显示 6 个会话与"当前后端不支持"）。失败只用 supported
+      // 标志表达，旧数据保留到下一次成功刷新。
       return
     }
     setSessionListSupported(true)
@@ -5074,14 +5079,19 @@ export function App() {
   }
 
   const refreshSessionList = async () => {
+    // 防乱序：并发刷新时旧响应不得覆盖新状态（用户实测到的"6 个会话 + 不支持"
+    // 矛盾显示，根因就是两次 refresh 竞态：失败方最后写入 supported=false）。
+    const token = (sessionListRequest += 1)
     try {
       const response = await backend.request("session.list", {}, { timeoutMs: PROBE_TIMEOUT_MS })
+      if (token !== sessionListRequest) return
       if (!response.ok) {
         applySessionList(undefined)
         return
       }
       applySessionList(parseSessionListResult(response.result))
     } catch {
+      if (token !== sessionListRequest) return
       applySessionList(undefined)
     }
   }
