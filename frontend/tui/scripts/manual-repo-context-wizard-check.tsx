@@ -423,12 +423,19 @@ async function optionsFailureFlow() {
     },
   })
   try {
+    // 读取失败的提示落在**首屏**（错误行在页脚上方；`goTo()` 会清掉它，这是有意设计：
+    // 提示属于"出错那一刻的屏幕"，不跨屏残留），所以这里在导航前断言。
+    // 2026-09-27 复核：原断言在导航 20 步之后检查同一个字符串，等于要求错误跨屏残留，
+    // 与实现相反 → 长期红着（这条"红"曾被误读成"错误提示根本不渲染"）。
+    const firstFrame = view.captureCharFrame()
+    console.log(dumpFrame(firstFrame, "repo-context-options-failed-first"))
+    check(/读取配置选项超时/.test(firstFrame), "错误提示可见（助手没有被读取失败锁死）")
     for (let i = 0; i < 3; i += 1) view.mockInput.pressArrow("down")
     await advance(view, /路由细化 · 对话模型/)
     await advance(view, /路由细化 · 审查模型/)
     const frame = await advanceToRepoContext(view)
     console.log(dumpFrame(frame, "repo-context-options-failed"))
-    check(/读取配置选项超时/.test(frame), "错误提示可见（助手没有被读取失败锁死）")
+    check(!/读取配置选项超时/.test(frame), "换屏后错误行被清掉（不跨屏残留）")
     check(/▶\s*仅测试文件/.test(frame), "预选 = 快照里的 tests，而不是清单第一项 off")
     const summaryFrame = await advance(view, /确认并保存/)
     check(/仓库上下文\s+仅测试文件/.test(summaryFrame), "确认页也显示快照里的档位")

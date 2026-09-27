@@ -2412,7 +2412,8 @@ export function SetupWizardDialog(props: SetupDialogProps) {
       props.onClose()
     } catch (cause) {
       const message = String(cause)
-      setError(message)
+      // 先"回到出错的那一屏"，再写错误文案：`goTo()` 里会 `setError("")`，反过来的
+      // 话保存失败只剩一次跳屏、用户看不到原因（2026-09-27 复核发现）。
       // 路由细化页的校验错误要回到出错的那一屏：custom 顺序里没有 provider/model
       // 屏幕，落到那里会让用户卡在一个不在流程里的页面。
       if (isCustom() && message.includes("槽位")) {
@@ -2424,6 +2425,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
       } else if (needsCloud() && message.includes("API Key")) goTo("api_key")
       else if (message.includes("GitHub Token")) goTo("github")
       else if (!isCustom() && message.includes("模型")) goTo("model")
+      setError(message)
     } finally {
       setBusy(false)
     }
@@ -2446,9 +2448,23 @@ export function SetupWizardDialog(props: SetupDialogProps) {
 
   const previous = () => {
     const current = screen()
-    if (current === "runtime") return
+    // 「返回」= 退一级；**已经是根屏时退一级 = 退出助手**（等于 Esc 取消）。
+    //
+    // 这里原来是 `if (current === "runtime") return`：首屏的 ← 成了静默死键，而页脚
+    // 明明写着「← 返回」——用户实测反馈「配置助手的 back 键无反应」（2026-09-27）。
+    // 助手在确认页之前不写任何配置（只有 `apply()` 会落盘），所以这里退出不会丢改动。
+    if (current === "runtime") {
+      props.onClose()
+      return
+    }
     const currentOrder = order()
     const index = currentOrder.indexOf(current)
+    if (index < 0) {
+      // 当前屏不在本次顺序里（例如旧后端缺 review_reasoning_effort 导致该屏被过滤）：
+      // 同样不能让返回变死键，按"无上一屏"处理。
+      props.onClose()
+      return
+    }
     const prevScreen = currentOrder[index - 1]
     if (prevScreen) goTo(prevScreen)
   }

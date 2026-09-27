@@ -1034,6 +1034,55 @@ async function reviewEffortScreen() {
   }
 }
 
+/**
+ * [X] 首屏「← 返回」回归（用户实测 2026-09-27：配置助手的 back 键无反应）。
+ *
+ * 根因：`previous()` 里 `if (screen() === "runtime") return` —— 首屏的 ← 是静默死键，
+ * 而页脚写着「← 返回」。修复后：首屏返回 = 退出助手（等于 Esc 取消，助手在确认页
+ * 之前不落盘，退出不丢改动）；其余屏返回仍是"退上一屏"，不能退出助手。
+ */
+async function rootBackKeyFlow() {
+  console.log("\n[X] 首屏 ← 返回 = 退出助手（回归）")
+  let closed = 0
+  const backend = stubBackend("zh-CN")
+  const view = await testRender(
+    () => (
+      <box width="100%" height="100%">
+        <SetupWizardDialog
+          backend={backend.client}
+          runtime={{ runtime_profile: "cloud", ui_language: "zh-CN" }}
+          onClose={() => {
+            closed += 1
+          }}
+          onApplied={() => {}}
+        />
+      </box>
+    ),
+    { width: 120, height: 30, kittyKeyboard: true },
+  )
+  await settle(view)
+  const rootFrame = view.captureCharFrame()
+  console.log(dumpFrame(rootFrame, "root-back-key"))
+  check(/选择运行模式/.test(rootFrame), "首屏：落在运行模式屏")
+  check(/← 返回/.test(rootFrame), "首屏页脚写明 ← 返回")
+
+  // 对照：第 2 屏的 ← 是"退回上一屏"，不能退出助手。
+  view.mockInput.pressEnter()
+  await settle(view)
+  const secondFrame = view.captureCharFrame()
+  check(/选择模型供应商/.test(secondFrame), "Enter 前进到供应商屏")
+  view.mockInput.pressArrow("left")
+  await settle(view, 4)
+  check(/选择运行模式/.test(view.captureCharFrame()), "供应商屏 ← 退回运行模式屏")
+  check(closed === 0, "非首屏 ← 不退出助手", `closed=${closed}`)
+
+  // 首屏 ← 必须退出助手（修复前：静默无反应）。
+  view.mockInput.pressArrow("left")
+  await settle(view, 4)
+  check(closed === 1, "首屏 ← 返回：退出助手（不再是静默死键）", `closed=${closed}`)
+  view.renderer.destroy()
+}
+
 async function main() {
   await customRouteFlow()
   await presetFlow()
@@ -1041,6 +1090,7 @@ async function main() {
   await englishCopy()
   await specScreenFrames()
   await customEndpointForm()
+  await rootBackKeyFlow()
   await statusLineCases()
   await reviewEffortScreen()
   console.log(`\n${failures.length === 0 ? "ALL PASS" : `${failures.length} FAIL`} · frames: ${outDir}`)
