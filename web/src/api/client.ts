@@ -15,6 +15,7 @@ import type {
   ReviewResponse,
   SaveConfigResponse,
 } from './types'
+import { t } from '../i18n'
 
 const BASE = ''
 
@@ -39,7 +40,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     // 主动取消不是错误，交给调用方按「已取消」处理
     if (error instanceof DOMException && error.name === 'AbortError') throw error
     throw new ApiError(
-      `无法连接到本地服务：${error instanceof Error ? error.message : String(error)}`,
+      t('api.error.offline', {
+        detail: error instanceof Error ? error.message : String(error),
+      }),
       0,
     )
   }
@@ -50,7 +53,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     try {
       payload = JSON.parse(text)
     } catch {
-      throw new ApiError(`服务返回了非 JSON 内容：${text.slice(0, 200)}`, response.status)
+      throw new ApiError(
+        t('api.error.nonJson', { detail: text.slice(0, 200) }),
+        response.status,
+      )
     }
   }
 
@@ -64,7 +70,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
           (payload as { message?: unknown }).message)
         : undefined
     const message = detail === undefined || detail === null || detail === ''
-      ? `HTTP ${response.status}`
+      ? t('api.error.http', { status: response.status })
       : String(detail)
     throw new ApiError(message, response.status)
   }

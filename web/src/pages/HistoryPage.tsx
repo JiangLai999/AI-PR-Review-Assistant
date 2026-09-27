@@ -16,8 +16,10 @@ import {
   Spinner,
 } from '../components/ui'
 import { formatCost, formatDuration, formatNumber, formatTime, repoLabel } from '../lib/format'
+import { useT, tn } from '../i18n'
 
 export function HistoryPage({ onNavigate }: { onNavigate: (page: string) => void }) {
+  const t = useT()
   const [history, setHistory] = useState<HistoryResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -60,11 +62,8 @@ export function HistoryPage({ onNavigate }: { onNavigate: (page: string) => void
     <>
       <div className="page-head">
         <div className="eyebrow">HISTORY</div>
-        <h1>历史审查</h1>
-        <p className="lead">
-          每次审查都会写入本地 SQLite：计划、证据校验摘要、跨文件接口影响与人工反馈都随运行一起保存，
-          方便复盘与对比。
-        </p>
+        <h1>{t('history.head.title')}</h1>
+        <p className="lead">{t('history.head.lead')}</p>
       </div>
 
       {error && (
@@ -73,24 +72,24 @@ export function HistoryPage({ onNavigate }: { onNavigate: (page: string) => void
         </div>
       )}
 
-      <Section eyebrow="AGGREGATE" title="聚合统计">
+      <Section eyebrow="AGGREGATE" title={t('history.stats.title')}>
         <div className="metrics">
-          <Metric label="总运行次数" value={formatNumber(stats.total_runs)} />
-          <Metric label="覆盖 PR" value={formatNumber(stats.unique_prs)} />
-          <Metric label="累计发现" value={formatNumber(stats.total_findings)} />
+          <Metric label={t('history.stats.totalRuns')} value={formatNumber(stats.total_runs)} />
+          <Metric label={t('history.stats.uniquePrs')} value={formatNumber(stats.unique_prs)} />
+          <Metric label={t('history.stats.totalFindings')} value={formatNumber(stats.total_findings)} />
           <Metric label="critical" value={formatNumber(stats.critical_findings)} />
           <Metric label="high" value={formatNumber(stats.high_findings)} />
-          <Metric label="累计成本" value={formatCost(Number(stats.total_cost ?? 0))} small />
+          <Metric label={t('history.stats.totalCost')} value={formatCost(Number(stats.total_cost ?? 0))} small />
         </div>
       </Section>
 
       <Section
         eyebrow="RUNS"
-        title="运行记录"
+        title={t('history.runs.title')}
         extra={
           <button type="button" className="btn btn-ghost" onClick={() => void load()} disabled={loading}>
             {loading ? <Spinner /> : null}
-            刷新
+            {t('history.runs.refresh')}
           </button>
         }
       >
@@ -102,10 +101,10 @@ export function HistoryPage({ onNavigate }: { onNavigate: (page: string) => void
               ))}
             </div>
           ) : runs.length === 0 ? (
-            <Empty mark="[ 0 ]" title="还没有审查记录">
-              <span>在工作台执行一次审查后，运行记录会出现在这里。</span>
+            <Empty mark="[ 0 ]" title={t('history.empty.title')}>
+              <span>{t('history.empty.desc')}</span>
               <button type="button" className="btn btn-primary" onClick={() => onNavigate('review')}>
-                前往审查工作台
+                {t('history.empty.goWorkbench')}
               </button>
             </Empty>
           ) : (
@@ -113,12 +112,12 @@ export function HistoryPage({ onNavigate }: { onNavigate: (page: string) => void
               <table className="table">
                 <thead>
                   <tr>
-                    <th>时间</th>
-                    <th>仓库</th>
-                    <th>模型</th>
-                    <th className="table-num">发现</th>
-                    <th className="table-num">耗时</th>
-                    <th className="table-num">成本</th>
+                    <th>{t('history.runs.col.time')}</th>
+                    <th>{t('history.runs.col.repo')}</th>
+                    <th>{t('history.runs.col.model')}</th>
+                    <th className="table-num">{t('history.runs.col.findings')}</th>
+                    <th className="table-num">{t('history.runs.col.duration')}</th>
+                    <th className="table-num">{t('history.runs.col.cost')}</th>
                     <th />
                   </tr>
                 </thead>
@@ -160,7 +159,7 @@ export function HistoryPage({ onNavigate }: { onNavigate: (page: string) => void
                           onClick={() => void openReport(run.id)}
                         >
                           {reportLoading === run.id ? <Spinner /> : null}
-                          查看报告
+                          {t('history.runs.openReport')}
                         </button>
                       </td>
                     </tr>
@@ -175,10 +174,10 @@ export function HistoryPage({ onNavigate }: { onNavigate: (page: string) => void
       {report && (
         <Section
           eyebrow="REPORT"
-          title={`运行报告 · ${report.run_id.slice(0, 8)}`}
+          title={t('history.report.title', { id: report.run_id.slice(0, 8) })}
           extra={
             <button type="button" className="btn btn-ghost" onClick={() => setReport(null)}>
-              收起
+              {t('history.report.collapse')}
             </button>
           }
         >
@@ -186,18 +185,18 @@ export function HistoryPage({ onNavigate }: { onNavigate: (page: string) => void
             <Card flush >
               <CardHead
                 title={report.run.pr_url ? repoLabel(report.run) : report.run_id}
-                extra={<Chip>{report.review.findings.length} 条发现</Chip>}
+                extra={<Chip>{tn('history.findings', report.review.findings.length)}</Chip>}
               />
               <div className="card-body">
                 <div className="metrics">
-                  <Metric label="耗时" value={formatDuration(report.run.duration_seconds)} small />
-                  <Metric label="成本" value={formatCost(report.run.total_cost)} small />
-                  <Metric label="模型" value={report.run.model || '—'} small />
-                  <Metric label="时间" value={formatTime(report.run.created_at)} small />
+                  <Metric label={t('history.report.duration')} value={formatDuration(report.run.duration_seconds)} small />
+                  <Metric label={t('history.report.cost')} value={formatCost(report.run.total_cost)} small />
+                  <Metric label={t('history.report.model')} value={report.run.model || '—'} small />
+                  <Metric label={t('history.report.time')} value={formatTime(report.run.created_at)} small />
                 </div>
                 {report.review.summary && (
                   <div style={{ marginTop: 'var(--ds-space-4)' }}>
-                    <span className="finding-field-label">审查摘要</span>
+                    <span className="finding-field-label">{t('history.report.summary')}</span>
                     <p className="finding-text" style={{ marginTop: 6, whiteSpace: 'pre-wrap' }}>
                       {report.review.summary}
                     </p>

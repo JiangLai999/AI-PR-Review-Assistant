@@ -5,60 +5,39 @@ import { api } from '../api/client'
 import type { BenchmarkReport, HistoryResponse, MetaResponse } from '../api/types'
 import { Card, CardHead, Chip, Metric, Section } from '../components/ui'
 import { DemoPanel } from '../components/DemoPanel'
+import { tn, useT } from '../i18n'
 import { formatDuration, formatNumber, formatPercent, repoLabel } from '../lib/format'
 
+/** 卡片文案只存 key，渲染时用 t() 取词（语言切换即时生效）。tag 是代码标识，保持不变。 */
 const CAPABILITIES = [
-  {
-    title: '智能审查规划',
-    body: '在调用模型之前先生成确定性的 ReviewPlan：风险等级、风险类别、优先文件、审查策略与是否需要跨文件分析。',
-    tag: 'ReviewPlanner',
-  },
-  {
-    title: '规则 + AI 双路分析',
-    body: '15 条确定性规则（逐行安全规则 + Python AST 语法级规则）与模型结论合并去重，规则命中带来源标记。',
-    tag: 'StaticAnalyzer',
-  },
-  {
-    title: '证据链校验',
-    body: '每条结论都校验文件、行号、是否落在变更行、代码片段是否真实存在，标记 valid / needs_review / invalid。',
-    tag: 'FindingValidator',
-  },
-  {
-    title: '跨文件接口影响',
-    body: '建立符号索引，与 PR base 版本对比签名（参数、返回类型、async、基类），并定位真实外部调用方。',
-    tag: 'SymbolIndex',
-  },
-  {
-    title: '语法级上下文',
-    body: 'tree-sitter 解析 Python / JavaScript / TypeScript，提取 imports、函数签名、类与继承；未安装时自动降级到正则。',
-    tag: 'ContextBuilder',
-  },
-  {
-    title: '可量化的准确率',
-    body: '内置已知缺陷样例库，输出精确率、召回率、F1、误报率与行号准确率，用于防止策略退化。',
-    tag: 'Benchmark',
-  },
+  { titleKey: 'overview.capabilities.1.title', bodyKey: 'overview.capabilities.1.body', tag: 'ReviewPlanner' },
+  { titleKey: 'overview.capabilities.2.title', bodyKey: 'overview.capabilities.2.body', tag: 'StaticAnalyzer' },
+  { titleKey: 'overview.capabilities.3.title', bodyKey: 'overview.capabilities.3.body', tag: 'FindingValidator' },
+  { titleKey: 'overview.capabilities.4.title', bodyKey: 'overview.capabilities.4.body', tag: 'SymbolIndex' },
+  { titleKey: 'overview.capabilities.5.title', bodyKey: 'overview.capabilities.5.body', tag: 'ContextBuilder' },
+  { titleKey: 'overview.capabilities.6.title', bodyKey: 'overview.capabilities.6.body', tag: 'Benchmark' },
 ]
 
 const TRUST_POINTS = [
-  ['01', '先规划', '先生成风险与审查范围，再调用模型。'],
-  ['02', '有证据', '文件、行号、Diff 关联逐条校验。'],
-  ['03', '可复盘', '结果、成本、反馈全部保存在本机。'],
-  ['04', '可演示', '离线 Demo 与 Benchmark 随时可用。'],
+  ['01', 'overview.trust.p1.title', 'overview.trust.p1.body'],
+  ['02', 'overview.trust.p2.title', 'overview.trust.p2.body'],
+  ['03', 'overview.trust.p3.title', 'overview.trust.p3.body'],
+  ['04', 'overview.trust.p4.title', 'overview.trust.p4.body'],
 ]
 
 const PIPELINE = [
-  ['01', '获取 PR', '解析 GitHub PR URL，抓取元数据、diff、文件列表与文件内容。'],
-  ['02', '智能过滤', '跳过纯删除、超大与不相关文件，支持 force include 白名单。'],
-  ['03', '构建上下文', 'tree-sitter 语法树 → 正则提取 → diff 窗口，三级降级保证不崩。'],
-  ['04', '生成计划', '按 PR 意图与变更特征计算风险等级、优先文件与审查策略。'],
-  ['05', '逐文件审查', '并发调用模型输出结构化 findings，受单次与 24 小时预算双重约束。'],
-  ['06', '规则与证据', '合并确定性规则命中，再逐条校验证据是否对应真实变更行。'],
-  ['07', '跨文件影响', '对比 base 签名，定位会被破坏的外部调用方。'],
-  ['08', '报告与落库', '渲染 terminal / markdown / json / GitHub 评论，并写入 SQLite 支持复盘。'],
+  ['01', 'overview.pipeline.1.title', 'overview.pipeline.1.body'],
+  ['02', 'overview.pipeline.2.title', 'overview.pipeline.2.body'],
+  ['03', 'overview.pipeline.3.title', 'overview.pipeline.3.body'],
+  ['04', 'overview.pipeline.4.title', 'overview.pipeline.4.body'],
+  ['05', 'overview.pipeline.5.title', 'overview.pipeline.5.body'],
+  ['06', 'overview.pipeline.6.title', 'overview.pipeline.6.body'],
+  ['07', 'overview.pipeline.7.title', 'overview.pipeline.7.body'],
+  ['08', 'overview.pipeline.8.title', 'overview.pipeline.8.body'],
 ]
 
 export function OverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
+  const t = useT()
   const pageRef = useRef<HTMLDivElement>(null)
   useGSAP(
     () => {
@@ -114,28 +93,27 @@ export function OverviewPage({ onNavigate }: { onNavigate: (page: string) => voi
       <div className="overview-hero">
         <div className="hero-copy">
           <div className="eyebrow" data-anim="eyebrow">
-            AI PR REVIEW AGENT · 本地工作台
+            {t('overview.hero.eyebrow')}
           </div>
           <h1 data-anim="title">
-            把 GitHub PR 审查
+            {t('overview.hero.titleLine1')}
             <br />
-            做成可解释、可复盘的智能工作流
+            {t('overview.hero.titleLine2')}
           </h1>
           <p className="lead" style={{ marginTop: 'var(--ds-space-4)' }} data-anim="lead">
-            不是一次性的模型调用，而是一条带规划、规则、证据校验与跨文件接口分析的审查流水线。
-            所有结论都可追溯到具体的文件与变更行。
+            {t('overview.hero.lead')}
           </p>
 
           <div className="row row-wrap" style={{ marginTop: 'var(--ds-space-5)' }} data-anim="cta">
             <button type="button" className="btn btn-primary" onClick={() => onNavigate('review')}>
-              开始一次审查
+              {t('overview.hero.ctaReview')}
             </button>
             <button
               type="button"
               className="btn btn-secondary"
               onClick={() => onNavigate('benchmark')}
             >
-              查看准确率
+              {t('overview.hero.ctaBenchmark')}
             </button>
             <span className="dim mono" style={{ fontSize: 'var(--ds-text-sm)' }}>
               v0.1.0 · MIT · Python 3.12+
@@ -144,7 +122,7 @@ export function OverviewPage({ onNavigate }: { onNavigate: (page: string) => voi
         </div>
 
         <div className="hero-visual" data-anim="console">
-          <div className="hero-console" aria-label="最近一次审查">
+          <div className="hero-console" aria-label={t('overview.hero.consoleAria')}>
             <div className="hero-console-top">
               <span className="console-dot" />
               <span className="console-dot" />
@@ -171,7 +149,9 @@ export function OverviewPage({ onNavigate }: { onNavigate: (page: string) => voi
                     <span>03</span>
                     <b>findings</b>
                     <em>
-                      {latest.total_findings ?? 0} 条 · {formatDuration(latest.duration_seconds)}
+                      {tn('overview.hero.console.findings', latest.total_findings ?? 0, {
+                        duration: formatDuration(latest.duration_seconds),
+                      })}
                     </em>
                     <strong className="accent">saved</strong>
                   </div>
@@ -185,7 +165,7 @@ export function OverviewPage({ onNavigate }: { onNavigate: (page: string) => voi
                   <div className="console-line dim">
                     <span>--</span>
                     <b>empty</b>
-                    <em>还没有审查记录</em>
+                    <em>{t('overview.hero.console.empty')}</em>
                     <strong>idle</strong>
                   </div>
                   <div className="console-caret">
@@ -199,18 +179,18 @@ export function OverviewPage({ onNavigate }: { onNavigate: (page: string) => voi
         </div>
       </div>
 
-      <div className="trust-strip" data-reveal aria-label="产品工作流承诺">
+      <div className="trust-strip" data-reveal aria-label={t('overview.trust.aria')}>
         <div className="trust-strip-intro">
           <span className="eyebrow">WHY THIS WORKFLOW</span>
-          <strong>不是黑盒结论，而是可验证的工程证据。</strong>
+          <strong>{t('overview.trust.title')}</strong>
         </div>
         <div className="trust-strip-items">
-          {TRUST_POINTS.map(([index, title, body]) => (
-            <div className="trust-point" key={title}>
+          {TRUST_POINTS.map(([index, titleKey, bodyKey]) => (
+            <div className="trust-point" key={index}>
               <span className="trust-point-index mono">{index}</span>
               <div>
-                <b>{title}</b>
-                <p>{body}</p>
+                <b>{t(titleKey)}</b>
+                <p>{t(bodyKey)}</p>
               </div>
             </div>
           ))}
@@ -219,42 +199,51 @@ export function OverviewPage({ onNavigate }: { onNavigate: (page: string) => voi
 
       <DemoPanel />
 
-      <Section eyebrow="SNAPSHOT" title="当前状态" data-reveal>
+      <Section eyebrow="SNAPSHOT" title={t('overview.snapshot.title')} data-reveal>
         {error && (
           <p
             className="muted"
             style={{ marginBottom: 'var(--ds-space-3)', fontSize: 'var(--ds-text-md)' }}
           >
-            部分数据未能载入：{error}
+            {t('overview.snapshot.error', { detail: error })}
           </p>
         )}
         <div className="metrics">
           <Metric
-            label="历史审查"
+            label={t('overview.snapshot.runs')}
             value={formatNumber(runs)}
-            hint={`累计 ${formatNumber(stats.total_runs)} 次运行`}
+            hint={t('overview.snapshot.runsHint', { count: formatNumber(stats.total_runs) })}
           />
-          <Metric label="覆盖 PR" value={formatNumber(stats.unique_prs)} />
-          <Metric label="发现问题" value={formatNumber(stats.total_findings)} />
+          <Metric label={t('overview.snapshot.prs')} value={formatNumber(stats.unique_prs)} />
           <Metric
-            label="规则准确率"
+            label={t('overview.snapshot.findings')}
+            value={formatNumber(stats.total_findings)}
+          />
+          <Metric
+            label={t('overview.snapshot.precision')}
             value={benchmark ? formatPercent(benchmark.precision, 0) : '—'}
-            hint={benchmark ? `召回率 ${formatPercent(benchmark.recall, 0)}` : '未载入'}
+            hint={
+              benchmark
+                ? t('overview.snapshot.precisionHint', {
+                    recall: formatPercent(benchmark.recall, 0),
+                  })
+                : t('overview.snapshot.notLoaded')
+            }
           />
           <Metric
-            label="确定性规则"
+            label={t('overview.snapshot.rules')}
             value={meta ? meta.rule_count : '—'}
-            hint="逐行规则 + AST 规则（去重）"
+            hint={t('overview.snapshot.rulesHint')}
           />
           <Metric
-            label="支持供应商"
+            label={t('overview.snapshot.providers')}
             value={meta ? meta.provider_count : '—'}
-            hint="OpenAI 兼容 + Anthropic"
+            hint={t('overview.snapshot.providersHint')}
           />
         </div>
       </Section>
 
-      <Section data-reveal eyebrow="PIPELINE" title="从 PR 链接到审查报告">
+      <Section data-reveal eyebrow="PIPELINE" title={t('overview.pipeline.title')}>
         <div
           style={{
             display: 'grid',
@@ -262,7 +251,7 @@ export function OverviewPage({ onNavigate }: { onNavigate: (page: string) => voi
             gap: 'var(--ds-space-4)',
           }}
         >
-          {PIPELINE.map(([step, title, body]) => (
+          {PIPELINE.map(([step, titleKey, bodyKey]) => (
             <Card key={step} data-reveal>
               <div className="row" style={{ gap: 'var(--ds-space-3)', alignItems: 'baseline' }}>
                 <span
@@ -276,7 +265,7 @@ export function OverviewPage({ onNavigate }: { onNavigate: (page: string) => voi
                 >
                   {step}
                 </span>
-                <h3 style={{ fontSize: 'var(--ds-text-base)' }}>{title}</h3>
+                <h3 style={{ fontSize: 'var(--ds-text-base)' }}>{t(titleKey)}</h3>
               </div>
               <p
                 className="muted"
@@ -286,14 +275,14 @@ export function OverviewPage({ onNavigate }: { onNavigate: (page: string) => voi
                   lineHeight: 1.6,
                 }}
               >
-                {body}
+                {t(bodyKey)}
               </p>
             </Card>
           ))}
         </div>
       </Section>
 
-      <Section data-reveal eyebrow="CAPABILITIES" title="关键能力">
+      <Section data-reveal eyebrow="CAPABILITIES" title={t('overview.capabilities.title')}>
         <div
           style={{
             display: 'grid',
@@ -302,12 +291,12 @@ export function OverviewPage({ onNavigate }: { onNavigate: (page: string) => voi
           }}
         >
           {CAPABILITIES.map((item) => (
-            <Card key={item.title} data-reveal>
+            <Card key={item.tag} data-reveal>
               <div
                 className="row"
                 style={{ justifyContent: 'space-between', alignItems: 'flex-start' }}
               >
-                <h3 style={{ fontSize: 'var(--ds-text-base)' }}>{item.title}</h3>
+                <h3 style={{ fontSize: 'var(--ds-text-base)' }}>{t(item.titleKey)}</h3>
                 <Chip>{item.tag}</Chip>
               </div>
               <p
@@ -318,7 +307,7 @@ export function OverviewPage({ onNavigate }: { onNavigate: (page: string) => voi
                   lineHeight: 1.65,
                 }}
               >
-                {item.body}
+                {t(item.bodyKey)}
               </p>
             </Card>
           ))}
@@ -328,35 +317,47 @@ export function OverviewPage({ onNavigate }: { onNavigate: (page: string) => voi
       {benchmark && (
         <Section
           eyebrow="ACCURACY"
-          title="基准测试结果"
-          description="精选已知缺陷样例集上的实测成绩，用于防止规则退化与误报增加。"
+          title={t('overview.accuracy.title')}
+          description={t('overview.accuracy.description')}
           extra={
             <button
               type="button"
               className="btn btn-ghost"
               onClick={() => onNavigate('benchmark')}
             >
-              查看明细 →
+              {t('overview.accuracy.detail')}
             </button>
           }
         >
           <Card flush >
             <CardHead
-              title="combined 策略"
-              extra={<Chip accent>{benchmark.case_count} 个样例</Chip>}
+              title={t('overview.accuracy.strategy', { strategy: 'combined' })}
+              extra={<Chip accent>{tn('overview.accuracy.cases', benchmark.case_count)}</Chip>}
             />
             <div className="card-body">
               <div className="metrics">
-                <Metric label="精确率" value={formatPercent(benchmark.precision)} small />
-                <Metric label="召回率" value={formatPercent(benchmark.recall)} small />
-                <Metric label="F1" value={formatPercent(benchmark.f1)} small />
                 <Metric
-                  label="误报率"
+                  label={t('benchmark.metric.precision')}
+                  value={formatPercent(benchmark.precision)}
+                  small
+                />
+                <Metric
+                  label={t('benchmark.metric.recall')}
+                  value={formatPercent(benchmark.recall)}
+                  small
+                />
+                <Metric
+                  label={t('benchmark.metric.f1')}
+                  value={formatPercent(benchmark.f1)}
+                  small
+                />
+                <Metric
+                  label={t('benchmark.metric.fpr')}
                   value={formatPercent(benchmark.false_positive_rate)}
                   small
                 />
                 <Metric
-                  label="行号准确率"
+                  label={t('benchmark.metric.lineAccuracy')}
                   value={formatPercent(benchmark.line_accuracy)}
                   small
                 />
@@ -365,14 +366,14 @@ export function OverviewPage({ onNavigate }: { onNavigate: (page: string) => voi
                 className="dim"
                 style={{ marginTop: 'var(--ds-space-4)', fontSize: 'var(--ds-text-sm)' }}
               >
-                这是精选回归样例集的成绩，代表规则在该集合上的表现，不等同于真实 PR 上的泛化准确率。
+                {t('overview.accuracy.note')}
               </p>
             </div>
           </Card>
         </Section>
       )}
 
-      <Section data-reveal eyebrow="CLI" title="同一个引擎，两种用法">
+      <Section data-reveal eyebrow="CLI" title={t('overview.cli.title')}>
         <div
           style={{
             display: 'grid',
@@ -381,7 +382,7 @@ export function OverviewPage({ onNavigate }: { onNavigate: (page: string) => voi
           }}
         >
           <Card>
-            <h3 style={{ fontSize: 'var(--ds-text-base)' }}>命令行</h3>
+            <h3 style={{ fontSize: 'var(--ds-text-base)' }}>{t('overview.cli.terminal')}</h3>
             <pre className="code" style={{ marginTop: 'var(--ds-space-3)' }}>
               {`pr-review <PR_URL>
 pr-review plan <PR_URL>
@@ -392,14 +393,9 @@ pr-review serve`}
             </pre>
           </Card>
           <Card>
-            <h3 style={{ fontSize: 'var(--ds-text-base)' }}>本地 HTTP 接口</h3>
+            <h3 style={{ fontSize: 'var(--ds-text-base)' }}>{t('overview.cli.http')}</h3>
             <pre className="code" style={{ marginTop: 'var(--ds-space-3)' }}>
-              {`POST /api/plan       生成审查计划
-POST /api/review     执行完整审查
-GET  /api/history    历史与统计
-GET  /api/report     按 run_id 取报告
-GET  /api/benchmark  准确率报告
-POST /api/feedback   记录人工反馈`}
+              {t('overview.cli.endpoints')}
             </pre>
           </Card>
         </div>

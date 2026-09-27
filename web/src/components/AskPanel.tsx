@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import type { ChatContextMeta } from '../api/types'
 import { Card, Notice, Spinner, cx } from './ui'
+import { t, useT } from '../i18n'
 
 /**
  * 「追问这次审查」面板（Phase 3）。
@@ -35,30 +36,24 @@ interface Turn {
   error: Failure | null
 }
 
-const FAILURE_TEXT: Record<number, { title: string; detail: string; toSettings?: boolean }> = {
-  0: { title: '无法连接到本地服务', detail: '请确认 pr-review serve 仍在运行，然后重试。' },
-  400: { title: '问题内容不合法', detail: '请求缺少 text 字段。刷新页面后重试。' },
-  404: {
-    title: '该审查记录已不存在',
-    detail: '这条 run 可能已被清理。可在「历史审查」里换一条记录，或重新跑一次完整审查。',
-  },
-  415: { title: '请求被本地服务拒绝', detail: '跨站或非 JSON 请求会被服务端挡掉；请从本机页面重试。' },
-  502: { title: '模型调用失败', detail: '上游模型返回了错误，可稍后重试。' },
-  503: {
-    title: '未配置模型 API Key',
-    detail: '请到「设置」页填写模型 Key，或把运行档位切到本地模型（Ollama 等）后重试。',
-    toSettings: true,
-  },
-}
+/** 有专属文案的状态码（key 形如 `ask.failure.<status>.title/detail`）。 */
+const KNOWN_FAILURE_STATUSES = new Set([0, 400, 404, 415, 502, 503])
 
 /** status → 可读文案。未知状态码给通用文案，并始终带上服务端原始 message。 */
 export function describeChatFailure(status: number, message: string): Failure {
-  const known = FAILURE_TEXT[status]
+  const known = KNOWN_FAILURE_STATUSES.has(status)
+  const title = known
+    ? t(`ask.failure.${status}.title`)
+    : status
+      ? t('ask.failure.genericStatus', { status })
+      : t('ask.failure.generic')
+  const detail = known ? t(`ask.failure.${status}.detail`) : ''
   return {
     status,
-    title: known?.title ?? (status ? `追问失败（HTTP ${status}）` : '追问失败'),
-    detail: [known?.detail, message ? `原始信息：${message}` : ''].filter(Boolean).join(' '),
-    toSettings: known?.toSettings,
+    title,
+    detail: [detail, message ? t('ask.failure.raw', { message }) : ''].filter(Boolean).join(' '),
+    // 503 = 没配模型 Key：给一个去设置页的入口（文案里已经引导了）
+    toSettings: status === 503,
   }
 }
 
@@ -79,6 +74,7 @@ export function AskPanel({
   language?: string
   className?: string
 }) {
+  const t = useT()
   const [phase, setPhase] = useState<Phase>('idle')
   const [turns, setTurns] = useState<Turn[]>([])
   const [draft, setDraft] = useState('')
@@ -147,20 +143,19 @@ export function AskPanel({
       <div className="ask-panel-head" lang={language}>
         <div className="ask-panel-title">
           <span className="eyebrow">FOLLOW-UP</span>
-          <h3>追问这次审查</h3>
-          <p className="ask-panel-lead">
-            就这次审查继续提问。回答会连同报告上下文一起发给当前配置的模型；
-            对话只留在当前页面，不落库，切走或刷新即清空。
-          </p>
+          <h3>{t('ask.title')}</h3>
+          <p className="ask-panel-lead">{t('ask.intro')}</p>
           {runId ? (
             <p className="ask-panel-context" data-bound="true">
-              <span>只读上下文 · 审查记录</span>
+              <span>{t('ask.context.bound')}</span>
               <code className="code-inline">{runId.slice(0, 8)}</code>
-              {tokenEstimate !== null && <span>约 {Math.round(tokenEstimate)} tokens 上下文</span>}
+              {tokenEstimate !== null && (
+                <span>{t('ask.context.tokens', { count: Math.round(tokenEstimate) })}</span>
+              )}
             </p>
           ) : (
             <p className="ask-panel-context" data-bound="false">
-              未绑定审查记录，将按普通对话回答
+              {t('ask.context.unbound')}
             </p>
           )}
         </div>
@@ -182,8 +177,8 @@ export function AskPanel({
           autoComplete="off"
           value={draft}
           disabled={busy}
-          aria-label="追问内容"
-          placeholder={runId ? '例如：这条 critical 为什么只在特定分支触发？' : '例如：Python 里怎么写才不会有 SQL 注入？'}
+          aria-label={t('ask.aria')}
+          placeholder={runId ? t('ask.placeholder.bound') : t('ask.placeholder.unbound')}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
             // 输入法用 Enter 上屏候选词。不拦住的话会把半成品问题发出去。
@@ -193,28 +188,26 @@ export function AskPanel({
           }}
         />
         <button type="submit" className="btn btn-primary" disabled={!canSubmit}>
-          追问
+          {t('ask.submit')}
         </button>
       </form>
 
       {busy && (
         <span className="ask-panel-hint" role="status">
-          <Spinner /> 正在追问…
+          <Spinner /> {t('ask.asking')}
         </span>
       )}
 
-      <div className="ask-panel-log" role="log" aria-live="polite" aria-label="追问记录">
+      <div className="ask-panel-log" role="log" aria-live="polite" aria-label={t('ask.log.aria')}>
         {turns.length === 0 && !busy && (
-          <p className="ask-panel-empty">
-            还没有追问。回答由模型生成，可能出错 —— 关键结论请回到上面的发现列表核对证据。
-          </p>
+          <p className="ask-panel-empty">{t('ask.empty')}</p>
         )}
 
         {turns.map((turn) => (
           <article key={turn.id} className="ask-panel-turn" data-error={turn.error ? 'true' : undefined}>
             <div className="ask-panel-question">
               <span className="ask-panel-role" aria-hidden="true">
-                问
+                {t('ask.role.q')}
               </span>
               <p>{turn.question}</p>
             </div>
@@ -228,7 +221,7 @@ export function AskPanel({
                 <div className="row row-wrap">
                   {turn.error.toSettings && (
                     <a className="btn btn-ghost btn-sm" href="#/settings">
-                      前往设置
+                      {t('ask.gotoSettings')}
                     </a>
                   )}
                   <button
@@ -237,7 +230,7 @@ export function AskPanel({
                     disabled={busy}
                     onClick={() => void ask(turn.question)}
                   >
-                    重试
+                    {t('ask.retry')}
                   </button>
                 </div>
               </div>
@@ -246,14 +239,20 @@ export function AskPanel({
                 {/* 上下文被裁剪时，警告条必须在回答**上方** —— 先说明这份回答的局限，再给结论。 */}
                 {turn.meta?.truncated && (
                   <Notice kind="warn">
-                    {turn.meta.note || '上下文被裁剪后才发给模型，这条回答可能漏掉部分发现。'}
+                    {turn.meta.note || t('ask.truncatedFallback')}
                   </Notice>
                 )}
                 <pre className="ask-panel-answer">{turn.answer}</pre>
                 <div className="ask-panel-meta">
-                  <span>由 {turn.model || '当前配置的模型'} 回答</span>
+                  <span>
+                    {t('ask.answeredBy', { model: turn.model || t('ask.modelFallback') })}
+                  </span>
                   {turn.meta?.sections?.length ? (
-                    <span>上下文：{turn.meta.sections.join('、')}</span>
+                    <span>
+                      {t('ask.sections', {
+                        sections: turn.meta.sections.join(t('ask.sectionSeparator')),
+                      })}
+                    </span>
                   ) : null}
                 </div>
               </>

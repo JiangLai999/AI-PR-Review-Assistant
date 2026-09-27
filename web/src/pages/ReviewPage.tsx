@@ -24,6 +24,7 @@ import {
   Spinner,
   cx,
 } from '../components/ui'
+import { useT } from '../i18n'
 import { formatCost, formatDuration, parsePrUrl } from '../lib/format'
 
 type Mode = 'plan' | 'review'
@@ -31,7 +32,7 @@ type Status =
   | { kind: 'idle' }
   | { kind: 'running'; mode: Mode; label: string }
   | { kind: 'ok'; mode: Mode; message: string }
-  | { kind: 'error'; message: string }
+  | { kind: 'error'; message: string; offline?: boolean }
   | { kind: 'cancelled' }
 
 const SEVERITIES: Severity[] = ['critical', 'high', 'medium', 'low', 'info']
@@ -45,19 +46,28 @@ const SEVERITY_TEXT: Record<Severity, string> = {
   info: 'INFO',
 }
 
-const EVIDENCE_TEXT: Record<EvidenceStatus, string> = {
-  valid: '证据有效',
-  needs_review: '待人工确认',
-  invalid: '证据不成立',
-  unverified: '未校验',
+const EVIDENCE_KEYS: Record<EvidenceStatus, string> = {
+  valid: 'review.evidence.valid',
+  needs_review: 'review.evidence.needsReview',
+  invalid: 'review.evidence.invalidFull',
+  unverified: 'review.evidence.unverified',
 }
 
-const RUN_STEPS = ['获取 PR 数据', '过滤变更文件', '构建代码上下文', '静态 / AST 分析', 'AI 结构化审查', '证据校验', '跨文件影响', '写入审查记录']
+const RUN_STEPS = [
+  'review.run.step.fetch',
+  'review.run.step.filter',
+  'review.run.step.context',
+  'review.run.step.static',
+  'review.run.step.model',
+  'review.run.step.evidence',
+  'review.run.step.impact',
+  'review.run.step.persist',
+]
 
 const STEPS = [
-  ['1', '填写 PR 链接', '支持任意公开或你有权限访问的 GitHub 仓库。'],
-  ['2', '生成审查计划', '解析 PR、过滤文件、按规则计算风险，不调用模型。'],
-  ['3', '执行完整审查', '构建上下文、逐文件调用模型、校验证据并落库。'],
+  ['1', 'review.section.step1.title', 'review.section.step1.desc'],
+  ['2', 'review.section.step2.title', 'review.section.step2.desc'],
+  ['3', 'review.section.step3.title', 'review.section.step3.desc'],
 ]
 
 function useElapsed(active: boolean) {
@@ -81,6 +91,7 @@ export function ReviewPage({
   initialResult: ReviewResponse | null
   onResult: (result: ReviewResponse | null, runId: string | null) => void
 }) {
+  const t = useT()
   const [url, setUrl] = useState('')
   const [status, setStatus] = useState<Status>({ kind: 'idle' })
   const [selectedMode, setSelectedMode] = useState<Mode>('plan')
@@ -146,7 +157,7 @@ export function ReviewPage({
   async function run(mode: Mode) {
     lastModeRef.current = mode
     if (!validation.ok) {
-      setStatus({ kind: 'error', message: validation.hint ?? '请输入有效的 PR 链接。' })
+      setStatus({ kind: 'error', message: validation.hint ?? t('review.form.invalidUrl') })
       inputRef.current?.focus()
       return
     }
@@ -163,7 +174,7 @@ export function ReviewPage({
     abortRef.current?.abort()
     const controller = new AbortController()
     abortRef.current = controller
-    setStatus({ kind: 'running', mode: 'plan', label: '正在抓取 PR 并生成审查计划' })
+    setStatus({ kind: 'running', mode: 'plan', label: t('review.run.planStart') })
     setResult(null)
     setResultRunId(null)
     onResult(null, null)
@@ -173,7 +184,7 @@ export function ReviewPage({
       // 计划模式不落库，run.id 通常是 null —— 发布组件据此渲染禁用态。
       setResultRunId(payload.run?.id ?? null)
       onResult(payload, payload.run?.id ?? null)
-      setStatus({ kind: 'ok', mode: 'plan', message: '审查计划已生成，未消耗模型调用。' })
+      setStatus({ kind: 'ok', mode: 'plan', message: t('review.run.planDone') })
     } catch (error) {
       handleRunError(error)
     } finally {
@@ -186,7 +197,7 @@ export function ReviewPage({
    * 取消会请求服务端真正停止（在文件边界生效），而不是只断开浏览器连接。
    */
   async function runReviewJob() {
-    setStatus({ kind: 'running', mode: 'review', label: '正在提交审查任务' })
+    setStatus({ kind: 'running', mode: 'review', label: t('review.run.reviewStart') })
     setResult(null)
     setResultRunId(null)
     onResult(null, null)
@@ -203,8 +214,8 @@ export function ReviewPage({
         kind: 'running',
         mode: 'review',
         label: started.total_files
-          ? `正在审查 ${started.total_files} 个文件`
-          : '正在准备审查上下文',
+          ? t('review.run.reviewFiles', { count: started.total_files })
+          : t('review.run.reviewPrepare'),
       })
     } catch (error) {
       handleRunError(error)
@@ -230,8 +241,11 @@ export function ReviewPage({
                 kind: 'running',
                 mode: 'review',
                 label: snapshot.current_file
-                  ? `正在审查 ${snapshot.current_file}`
-                  : `已完成 ${snapshot.completed_files} / ${snapshot.total_files} 个文件`,
+                  ? t('review.run.reviewCurrentFile', { file: snapshot.current_file })
+                  : t('review.run.reviewProgress', {
+                      done: snapshot.completed_files,
+                      total: snapshot.total_files,
+                    }),
               })
             }
           })
@@ -265,7 +279,7 @@ export function ReviewPage({
         setStatus({
           kind: 'running',
           mode: 'review',
-          label: `正在审查 ${event.filename}`,
+          label: t('review.run.reviewCurrentFile', { file: event.filename }),
         })
       }
 
@@ -280,7 +294,7 @@ export function ReviewPage({
       } else if (event.event === 'cancelled') {
         setStatus({ kind: 'cancelled' })
       } else {
-        setStatus({ kind: 'error', message: event.message || event.error || '审查失败' })
+        setStatus({ kind: 'error', message: event.message || event.error || t('review.run.reviewFailed') })
       }
     }
 
@@ -307,7 +321,9 @@ export function ReviewPage({
           kind: 'ok',
           mode: 'review',
           // 任务口径（含抓取/过滤/落库）；下方指标条是模型审查口径，两者不冲突。
-          message: `审查完成，总耗时 ${formatDuration(snapshot.elapsed_seconds)}。`,
+          message: t('review.run.reviewDone', {
+            duration: formatDuration(snapshot.elapsed_seconds),
+          }),
         })
         return
       }
@@ -316,11 +332,11 @@ export function ReviewPage({
         return
       }
       if (snapshot.status === 'failed') {
-        setStatus({ kind: 'error', message: snapshot.error || '审查失败' })
+        setStatus({ kind: 'error', message: snapshot.error || t('review.run.reviewFailed') })
         return
       }
       if (!fallbackOnError) {
-        setStatus({ kind: 'error', message: '任务状态异常，请刷新查看历史记录。' })
+        setStatus({ kind: 'error', message: t('review.run.badJobState') })
       }
     } catch (error) {
       handleRunError(error)
@@ -338,7 +354,12 @@ export function ReviewPage({
         : error instanceof Error
           ? error.message
           : String(error)
-    setStatus({ kind: 'error', message })
+    setStatus({
+      kind: 'error',
+      message,
+      // status 0 = fetch 失败（本地服务未连接），按标记渲染恢复提示而不是比对文案语言。
+      offline: error instanceof ApiError && error.status === 0,
+    })
   }
 
   /** 取消：请求服务端停止任务；SSE 会回推 cancelled 事件收尾。 */
@@ -350,7 +371,7 @@ export function ReviewPage({
       setStatus({ kind: 'cancelled' })
       return
     }
-    setStatus({ kind: 'running', mode: 'review', label: '正在请求停止…' })
+    setStatus({ kind: 'running', mode: 'review', label: t('review.run.requestStop') })
     void api.cancelJob(id).catch(() => {
       setStatus({ kind: 'cancelled' })
     })
@@ -386,18 +407,15 @@ export function ReviewPage({
     <div ref={pageRef} className="review-page">
       <div className="page-head" data-reveal>
         <div className="eyebrow">REVIEW WORKBENCH</div>
-        <h1>审查工作台</h1>
-        <p className="lead">
-          输入 GitHub Pull Request 链接。先「生成审查计划」可以在零模型成本下确认审查范围；
-          确认无误后再执行完整审查。
-        </p>
+        <h1>{t('review.head.title')}</h1>
+        <p className="lead">{t('review.head.lead')}</p>
       </div>
 
       <Card className="review-launch-card" data-reveal>
         <div className="stack">
           <div className="field">
             <label className="label" htmlFor="pr-url">
-              Pull Request 链接
+              {t('review.form.prUrl')}
             </label>
             <input
               id="pr-url"
@@ -414,7 +432,7 @@ export function ReviewPage({
             />
           </div>
 
-          <div className="review-mode-grid" aria-label="选择审查模式">
+          <div className="review-mode-grid" aria-label={t('review.form.modeAria')}>
             <button
               type="button"
               className={cx('review-mode-card', activeMode === 'plan' && 'is-selected')}
@@ -422,8 +440,8 @@ export function ReviewPage({
               onClick={() => setSelectedMode('plan')}
             >
               <span className="review-mode-kicker mono">01 · SAFE START</span>
-              <strong>先生成审查计划</strong>
-              <span>只抓取、过滤和评估风险，不调用模型，不产生模型费用。</span>
+              <strong>{t('review.form.plan.title')}</strong>
+              <span>{t('review.form.plan.desc')}</span>
             </button>
             <button
               type="button"
@@ -432,8 +450,8 @@ export function ReviewPage({
               onClick={() => setSelectedMode('review')}
             >
               <span className="review-mode-kicker mono">02 · FULL REVIEW</span>
-              <strong>直接开始完整审查</strong>
-              <span>执行规则、AI、证据和跨文件分析，并写入本地历史。</span>
+              <strong>{t('review.form.review.title')}</strong>
+              <span>{t('review.form.review.desc')}</span>
             </button>
           </div>
 
@@ -445,7 +463,7 @@ export function ReviewPage({
               onClick={() => void run('plan')}
             >
               {busy && status.kind === 'running' && status.mode === 'plan' && <Spinner />}
-              生成审查计划
+              {t('review.form.planAction')}
             </button>
             <button
               type="button"
@@ -454,7 +472,7 @@ export function ReviewPage({
               onClick={() => void run('review')}
             >
               {busy && status.kind === 'running' && status.mode === 'review' && <Spinner />}
-              开始完整审查
+              {t('review.form.reviewAction')}
             </button>
             {url.trim() && !validation.ok && status.kind !== 'error' && (
               <span className="dim" style={{ fontSize: 'var(--ds-text-sm)' }}>
@@ -463,7 +481,7 @@ export function ReviewPage({
             )}
             {busy ? (
               <button type="button" className="btn btn-ghost" onClick={cancel}>
-                取消
+                {t('review.form.cancel')}
               </button>
             ) : (
               <span
@@ -477,7 +495,7 @@ export function ReviewPage({
                   padding: '3px 10px',
                 }}
               >
-                完整审查会真实调用模型并产生费用
+                {t('review.form.costWarning')}
               </span>
             )}
           </div>
@@ -503,14 +521,22 @@ export function ReviewPage({
             </div>
             {job && job.total_files > 0 && (
               <p className="mono dim" style={{ marginTop: 'var(--ds-space-2)', fontSize: 'var(--ds-text-2xs)' }}>
-                已完成 {job.completed_files} / {job.total_files} 个文件
-                {job.current_file ? ` · 正在处理 ${job.current_file}` : ''}
+                {job.current_file
+                  ? t('review.run.reviewProgressFile', {
+                      done: job.completed_files,
+                      total: job.total_files,
+                      file: job.current_file,
+                    })
+                  : t('review.run.reviewProgress', {
+                      done: job.completed_files,
+                      total: job.total_files,
+                    })}
               </p>
             )}
             <div className="run-pipeline">
               {RUN_STEPS.map((step, index) => (
                 <div key={step} className={cx('run-step', index < activeStep ? 'is-done' : index === activeStep ? 'is-active' : '')}>
-                  <span className="run-step-mark">{index < activeStep ? '✓' : index === activeStep ? '●' : '○'}</span><span>{step}</span>
+                  <span className="run-step-mark">{index < activeStep ? '✓' : index === activeStep ? '●' : '○'}</span><span>{t(step)}</span>
                 </div>
               ))}
             </div>
@@ -518,9 +544,7 @@ export function ReviewPage({
               className="dim"
               style={{ marginTop: 'var(--ds-space-3)', fontSize: 'var(--ds-text-sm)' }}
             >
-              {status.mode === 'plan'
-                ? '正在解析 PR、抓取 diff 与文件内容，并按规则计算风险。'
-                : '正在构建上下文、逐文件调用模型、校验证据并写入本地历史库。'}
+              {status.mode === 'plan' ? t('review.run.planHint') : t('review.run.reviewHint')}
             </p>
           </Card>
         </div>
@@ -530,29 +554,29 @@ export function ReviewPage({
         <div className="review-error-stack" style={{ marginTop: 'var(--ds-space-4)' }}>
           <Notice kind="error">{status.message}</Notice>
           <div className="review-error-actions">
-            <span className="dim mono">服务端：127.0.0.1:8787 · 数据只保存在本机</span>
+            <span className="dim mono">{t('review.error.serverLocal')}</span>
             {lastModeRef.current && validation.ok && (
               <button
                 type="button"
                 className="btn btn-secondary"
                 onClick={() => void run(lastModeRef.current as Mode)}
               >
-                重试上一次操作
+                {t('review.error.retry')}
               </button>
             )}
           </div>
-          {status.message.includes('无法连接') && (
+          {status.offline && (
             <p className="review-recovery-hint">
-              本地服务可能未启动。请在项目目录运行 <code>pr-review serve</code>，然后重试。
+              {t('review.error.recoverPre')}
+              <code>pr-review serve</code>
+              {t('review.error.recoverPost')}
             </p>
           )}
         </div>
       )}
       {status.kind === 'cancelled' && (
         <div style={{ marginTop: 'var(--ds-space-4)' }}>
-          <Notice kind="warn">
-            已取消。界面已停止等待；若服务端仍在处理最后一个文件，它可能会继续跑完并写入历史。
-          </Notice>
+          <Notice kind="warn">{t('review.cancelled.notice')}</Notice>
         </div>
       )}
       {status.kind === 'ok' && (
@@ -565,48 +589,50 @@ export function ReviewPage({
         <>
           <Section
             eyebrow="OVERVIEW"
-            title="风险总览"
+            title={t('review.overview.title')}
             extra={
               riskLevel ? (
-                <span className={`chip chip-risk-${riskLevel}`}>风险等级 {riskLevel}</span>
+                <span className={`chip chip-risk-${riskLevel}`}>
+                  {t('review.overview.riskLevel', { level: riskLevel })}
+                </span>
               ) : undefined
             }
           >
             <div className="metrics">
-              <Metric label="变更文件" value={result.pr.files_changed ?? '—'} zero={!result.pr.files_changed} />
-              <Metric label="纳入审查" value={result.filter?.included_count ?? '—'} zero={!result.filter?.included_count} />
-              <Metric label="已跳过" value={result.filter?.excluded_count ?? '—'} zero={!result.filter?.excluded_count} />
+              <Metric label={t('review.overview.filesChanged')} value={result.pr.files_changed ?? '—'} zero={!result.pr.files_changed} />
+              <Metric label={t('review.overview.included')} value={result.filter?.included_count ?? '—'} zero={!result.filter?.included_count} />
+              <Metric label={t('review.overview.excluded')} value={result.filter?.excluded_count ?? '—'} zero={!result.filter?.excluded_count} />
               <Metric
-                label="Findings"
+                label={t('review.overview.findings')}
                 value={findings.length}
                 zero={findings.length === 0}
                 hint={
                   counts.critical
-                    ? `${counts.critical} 个 critical`
+                    ? t('review.overview.criticalHint', { count: counts.critical })
                     : counts.high
-                      ? `${counts.high} 个 high`
+                      ? t('review.overview.highHint', { count: counts.high })
                       : undefined
                 }
               />
-              <Metric label="模型审查耗时" value={formatDuration(result.run?.duration_seconds)} small />
+              <Metric label={t('review.overview.modelDuration')} value={formatDuration(result.run?.duration_seconds)} small />
               <Metric
-                label="本次成本"
+                label={t('review.overview.cost')}
                 value={formatCost(result.run?.total_cost)}
                 small
                 zero={!result.run?.total_cost}
-                hint={result.run?.total_cost ? undefined : '计划模式不产生费用'}
+                hint={result.run?.total_cost ? undefined : t('review.overview.costHint')}
               />
             </div>
-            <div className="evidence-summary" aria-label="证据校验摘要">
+            <div className="evidence-summary" aria-label={t('review.evidence.summaryAria')}>
               <div className="evidence-summary-lead">
                 <span className="eyebrow">EVIDENCE STATUS</span>
-                <strong>每条结论都要落回真实变更</strong>
+                <strong>{t('review.evidence.lead')}</strong>
               </div>
               <div className="evidence-summary-items">
-                <span className="evidence-summary-item is-valid"><b>{evidenceCounts.valid}</b> 证据有效</span>
-                <span className="evidence-summary-item is-review"><b>{evidenceCounts.needs_review}</b> 待人工确认</span>
-                <span className="evidence-summary-item is-invalid"><b>{evidenceCounts.invalid}</b> 不成立</span>
-                <span className="evidence-summary-item is-muted"><b>{evidenceCounts.unverified}</b> 未校验</span>
+                <span className="evidence-summary-item is-valid"><b>{evidenceCounts.valid}</b> {t('review.evidence.valid')}</span>
+                <span className="evidence-summary-item is-review"><b>{evidenceCounts.needs_review}</b> {t('review.evidence.needsReview')}</span>
+                <span className="evidence-summary-item is-invalid"><b>{evidenceCounts.invalid}</b> {t('review.evidence.invalid')}</span>
+                <span className="evidence-summary-item is-muted"><b>{evidenceCounts.unverified}</b> {t('review.evidence.unverified')}</span>
               </div>
             </div>
 
@@ -623,7 +649,7 @@ export function ReviewPage({
                     )}
                     {result.pr.author && (
                       <span className="dim" style={{ fontSize: 'var(--ds-text-sm)' }}>
-                        作者 {result.pr.author}
+                        {t('review.overview.author', { name: result.pr.author })}
                       </span>
                     )}
                     {result.pr.url && (
@@ -633,7 +659,7 @@ export function ReviewPage({
                         rel="noreferrer noopener"
                         style={{ fontSize: 'var(--ds-text-sm)' }}
                       >
-                        在 GitHub 打开 ↗
+                        {t('review.overview.openGithub')}
                       </a>
                     )}
                   </div>
@@ -642,27 +668,27 @@ export function ReviewPage({
             )}
           </Section>
 
-          <Section eyebrow="DELIVER" title="发布与导出">
+          <Section eyebrow="DELIVER" title={t('review.section.deliver')}>
             {/* 计划模式结果没有 run（plan_only 不落库），这里传 null 让组件渲染禁用态并说明原因，
                 而不是整块消失：用户至少能看到「为什么没有发布按钮」，而不是以为功能缺失。 */}
             <ReportActions runId={resultRunId} />
           </Section>
 
-          <Section eyebrow="FOLLOW-UP" title="追问这次审查">
+          <Section eyebrow="FOLLOW-UP" title={t('review.section.followUp')}>
             {/* 任务书写「有 result.run.id 时」挂载；这里改成只要有结果就渲染，run 缺省时
                 传 undefined 让面板降级成普通对话（否则「未绑定」这条分支在真实界面里
                 根本走不到，验证 1 只能靠伪造 DOM）。 */}
             <AskPanel runId={resultRunId ?? undefined} />
           </Section>
 
-          <Section eyebrow="PLAN" title="审查计划">
+          <Section eyebrow="PLAN" title={t('review.section.plan')}>
             <div className="stack">
               {result.plan ? (
                 <PlanCard plan={result.plan} />
               ) : (
                 <Card>
-                  <Empty mark="[ i ]" title="本次未生成计划">
-                    计划模式会生成完整的 ReviewPlan；完整审查同样会先规划再执行。
+                  <Empty mark="[ i ]" title={t('review.empty.noPlan.title')}>
+                    {t('review.empty.noPlan.desc')}
                   </Empty>
                 </Card>
               )}
@@ -675,10 +701,10 @@ export function ReviewPage({
           {result.review && (
             <Section
               eyebrow="FINDINGS"
-              title="审查发现"
+              title={t('review.section.findings')}
               description={
                 findings.length
-                  ? `共 ${findings.length} 条，按严重度与证据状态可筛选。`
+                  ? t('review.section.findingsDesc', { count: findings.length })
                   : undefined
               }
             >
@@ -689,31 +715,31 @@ export function ReviewPage({
                   <Card >
                     <div className="toolbar">
                       <div className="toolbar-group">
-                        <span className="label">严重度</span>
+                        <span className="label">{t('review.filter.severity')}</span>
                         <select
                           className="select"
                           value={severity}
                           onChange={(e) => setSeverity(e.target.value as Severity | '')}
                         >
-                          <option value="">全部（{findings.length}）</option>
+                          <option value="">{t('review.filter.allWithCount', { count: findings.length })}</option>
                           {SEVERITIES.filter((s) => counts[s]).map((s) => (
                             <option key={s} value={s}>
-                              {SEVERITY_TEXT[s]}（{counts[s]}）
+                              {`${SEVERITY_TEXT[s]} (${counts[s]})`}
                             </option>
                           ))}
                         </select>
                       </div>
                       <div className="toolbar-group">
-                        <span className="label">证据状态</span>
+                        <span className="label">{t('review.filter.evidence')}</span>
                         <select
                           className="select"
                           value={evidence}
                           onChange={(e) => setEvidence(e.target.value as EvidenceStatus | '')}
                         >
-                          <option value="">全部</option>
+                          <option value="">{t('review.filter.all')}</option>
                           {EVIDENCE.map((s) => (
                             <option key={s} value={s}>
-                              {EVIDENCE_TEXT[s]}
+                              {t(EVIDENCE_KEYS[s])}
                             </option>
                           ))}
                         </select>
@@ -727,7 +753,7 @@ export function ReviewPage({
                             setEvidence('')
                           }}
                         >
-                          清除筛选
+                          {t('review.filter.clear')}
                         </button>
                       )}
                       <span
@@ -742,8 +768,8 @@ export function ReviewPage({
                   <div className="stack" style={{ marginTop: 'var(--ds-space-4)' }}>
                     {visible.length === 0 ? (
                       <Card>
-                        <Empty mark="[ ? ]" title="没有符合筛选条件的发现">
-                          调整筛选条件查看其它结果。
+                        <Empty mark="[ ? ]" title={t('review.empty.filtered.title')}>
+                          {t('review.empty.filtered.desc')}
                         </Empty>
                       </Card>
                     ) : (
@@ -769,7 +795,7 @@ export function ReviewPage({
             </Section>
           )}
 
-          <Section eyebrow="RAW" title="原始响应">
+          <Section eyebrow="RAW" title={t('review.section.raw')}>
             <Card flush>
               <CardHead
                 title="JSON"
@@ -781,7 +807,7 @@ export function ReviewPage({
                       void navigator.clipboard?.writeText(JSON.stringify(result, null, 2))
                     }}
                   >
-                    复制
+                    {t('review.section.copy')}
                   </button>
                 }
               />
@@ -796,14 +822,14 @@ export function ReviewPage({
       )}
 
       {!result && status.kind === 'idle' && (
-        <Section eyebrow="GETTING STARTED" title="还没有审查结果">
+        <Section eyebrow="GETTING STARTED" title={t('review.section.startTitle')}>
           <Card>
             <div className="stack" style={{ gap: 'var(--ds-space-4)' }}>
               <p className="muted" style={{ fontSize: 'var(--ds-text-md)' }}>
-                推荐流程：先生成计划确认范围，验证抓取是否正常，最后才执行完整审查。
+                {t('review.section.startLead')}
               </p>
               <div className="stack" style={{ gap: 'var(--ds-space-3)' }}>
-                {STEPS.map(([step, title, desc]) => (
+                {STEPS.map(([step, titleKey, descKey]) => (
                   <div
                     key={step}
                     className="row"
@@ -816,9 +842,9 @@ export function ReviewPage({
                       {step}
                     </span>
                     <div>
-                      <div style={{ fontWeight: 600, fontSize: 'var(--ds-text-md)' }}>{title}</div>
+                      <div style={{ fontWeight: 600, fontSize: 'var(--ds-text-md)' }}>{t(titleKey)}</div>
                       <div className="muted" style={{ fontSize: 'var(--ds-text-sm)' }}>
-                        {desc}
+                        {t(descKey)}
                       </div>
                     </div>
                   </div>

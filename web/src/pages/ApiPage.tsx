@@ -1,36 +1,47 @@
 import { Card, CardHead, Chip, Section } from '../components/ui'
+import { useT } from '../i18n'
 
 type Method = 'GET' | 'POST' | 'GET+POST'
 
+/**
+ * 端点表。
+ *
+ * 只有给人看的文案进词典（存 key，渲染时 `t(key)`）：
+ * `descKey` / `inputKey` / `errorsKey` 与含中文示例的 `responseKey` / `bodyKey` / `curlKey`。
+ * `path` / `body` / `response` / `curl` 是纯英文技术示例，保持原样不翻译。
+ */
 type Endpoint = {
   method: Method
   path: string
-  desc: string
-  input?: string
+  descKey: string
+  inputKey?: string
   body?: string
-  response: string
-  errors?: string
-  curl: string
+  bodyKey?: string
+  response?: string
+  responseKey?: string
+  errorsKey?: string
+  curl?: string
+  curlKey?: string
 }
 
 type Group = {
   eyebrow: string
-  title: string
+  titleKey: string
   endpoints: Endpoint[]
 }
 
 const GROUPS: Group[] = [
   {
     eyebrow: 'REVIEW',
-    title: '审查',
+    titleKey: 'api.group.review',
     endpoints: [
       {
         method: 'POST',
         path: '/api/plan',
-        desc: '抓取 PR、过滤文件并生成审查计划，不调用模型。',
+        descKey: 'api.endpoint.plan.desc',
         body: `{ "pr_url": "https://github.com/owner/repo/pull/123" }`,
         response: `{ pr, filter, plan, validation, interface_impacts, run }`,
-        errors: '400 pr_url 缺失 · 415 跨站或非 JSON',
+        errorsKey: 'api.endpoint.plan.errors',
         curl: `curl -X POST http://127.0.0.1:8787/api/plan \\
   -H "Content-Type: application/json" \\
   -d '{"pr_url":"https://github.com/owner/repo/pull/123"}'`,
@@ -38,10 +49,10 @@ const GROUPS: Group[] = [
       {
         method: 'POST',
         path: '/api/review',
-        desc: '同步执行完整审查；async_job:true 时改走任务化，立即返回 job_id。',
+        descKey: 'api.endpoint.review.desc',
         body: `{ "pr_url": "https://github.com/owner/repo/pull/123", "async_job": true }`,
-        response: `同步：{ pr, filter, plan, validation, review, interface_impacts, run }\n异步：202 { job_id, status, total_files, ... }`,
-        errors: '400 pr_url 缺失 · 415 跨站或非 JSON',
+        responseKey: 'api.endpoint.review.response',
+        errorsKey: 'api.endpoint.review.errors',
         curl: `curl -X POST http://127.0.0.1:8787/api/review \\
   -H "Content-Type: application/json" \\
   -d '{"pr_url":"https://github.com/owner/repo/pull/123","async_job":true}'`,
@@ -49,45 +60,45 @@ const GROUPS: Group[] = [
       {
         method: 'GET',
         path: '/api/jobs',
-        desc: '最近任务列表（固定 10 条）。',
+        descKey: 'api.endpoint.jobs.desc',
         response: `{ jobs: [{ job_id, status, total_files, completed_files, current_file, progress, error, elapsed_seconds, run_id }, ...] }`,
         curl: `curl http://127.0.0.1:8787/api/jobs`,
       },
       {
         method: 'GET',
         path: '/api/jobs/{id}',
-        desc: '任务快照：状态、文件进度、错误与耗时。',
-        input: '路径参数 id = job_id',
+        descKey: 'api.endpoint.job.desc',
+        inputKey: 'api.input.pathParamId',
         response: `{ status, total_files, completed_files, current_file, progress, error, elapsed_seconds, run_id }`,
-        errors: '404 任务不存在',
+        errorsKey: 'api.endpoint.job.errors',
         curl: `curl http://127.0.0.1:8787/api/jobs/<job_id>`,
       },
       {
         method: 'GET',
         path: '/api/jobs/{id}/events',
-        desc: 'SSE 进度流（text/event-stream），逐文件推送进度事件。',
-        input: '路径参数 id = job_id',
+        descKey: 'api.endpoint.jobEvents.desc',
+        inputKey: 'api.input.pathParamId',
         response: `data: {"completed_files":1,"total_files":4,"current_file":"src/app.py", ...}`,
-        errors: '404 任务不存在',
+        errorsKey: 'api.endpoint.jobEvents.errors',
         curl: `curl -N http://127.0.0.1:8787/api/jobs/<job_id>/events`,
       },
       {
         method: 'POST',
         path: '/api/jobs/{id}/cancel',
-        desc: '服务端真取消，取消在文件边界生效。',
-        input: '路径参数 id = job_id',
-        response: `{ "ok": true, "job_id": "...", "message": "已请求停止。" }`,
-        errors: '404 任务不存在或已结束 · 415 跨站或非 JSON',
+        descKey: 'api.endpoint.jobCancel.desc',
+        inputKey: 'api.input.pathParamId',
+        responseKey: 'api.endpoint.jobCancel.response',
+        errorsKey: 'api.endpoint.jobCancel.errors',
         curl: `curl -X POST http://127.0.0.1:8787/api/jobs/<job_id>/cancel \\
   -H "Content-Type: application/json" -d '{}'`,
       },
       {
         method: 'POST',
         path: '/api/feedback',
-        desc: '记录人工对某条 finding 的判断并落库。',
+        descKey: 'api.endpoint.feedback.desc',
         body: `{ "run_id": "...", "finding_id": "...", "status": "accepted", "note": "" }`,
         response: `{ "ok": true, "run_id": "...", "finding_id": "...", "status": "accepted" }`,
-        errors: '400 字段缺失 · 404 run/finding 不存在 · 415 跨站或非 JSON',
+        errorsKey: 'api.endpoint.feedback.errors',
         curl: `curl -X POST http://127.0.0.1:8787/api/feedback \\
   -H "Content-Type: application/json" \\
   -d '{"run_id":"<run_id>","finding_id":"f-1","status":"accepted","note":""}'`,
@@ -96,39 +107,39 @@ const GROUPS: Group[] = [
   },
   {
     eyebrow: 'REPORT',
-    title: '报告与历史',
+    titleKey: 'api.group.report',
     endpoints: [
       {
         method: 'GET',
         path: '/api/report',
-        desc: '单次 run 的完整报告：审查、计划、证据校验、接口影响与人工反馈。',
-        input: 'query: run_id',
+        descKey: 'api.endpoint.report.desc',
+        inputKey: 'api.input.queryRunId',
         response: `{ run_id, run, review, plan, validation, interface_impacts, feedback }`,
-        errors: '400 run_id 缺失 · 404 run 不存在',
+        errorsKey: 'api.endpoint.report.errors',
         curl: `curl "http://127.0.0.1:8787/api/report?run_id=<run_id>"`,
       },
       {
         method: 'GET',
         path: '/api/report/export',
-        desc: '导出报告。markdown 走 text/markdown 并带附件名 pr<N>-<run8>.md；json 与 /api/report 同形。',
-        input: 'query: run_id, format=markdown|json',
-        response: `markdown：正文 + Content-Disposition: attachment; filename="pr<N>-<run8>.md"\njson：同 /api/report`,
-        errors: '400 参数缺失或 format 非法 · 404 run 不存在',
+        descKey: 'api.endpoint.reportExport.desc',
+        inputKey: 'api.input.queryExport',
+        responseKey: 'api.endpoint.reportExport.response',
+        errorsKey: 'api.endpoint.reportExport.errors',
         curl: `curl -OJ "http://127.0.0.1:8787/api/report/export?run_id=<run_id>&format=markdown"`,
       },
       {
         method: 'GET',
         path: '/api/history',
-        desc: '历史 run 列表与聚合统计。limit 范围 1–200。',
-        input: 'query: limit（可选）',
+        descKey: 'api.endpoint.history.desc',
+        inputKey: 'api.input.queryLimit',
         response: `{ runs: [...], statistics: {...} }`,
         curl: `curl "http://127.0.0.1:8787/api/history?limit=30"`,
       },
       {
         method: 'GET',
         path: '/api/benchmark',
-        desc: '基准准确率：precision / recall / F1 / 行号准确率，并附逐 case 明细。',
-        input: 'query: strategy=static|ast|combined|all',
+        descKey: 'api.endpoint.benchmark.desc',
+        inputKey: 'api.input.queryStrategy',
         response: `{ strategy, precision, recall, f1, false_positive_rate, line_accuracy, cases: [...] }`,
         curl: `curl "http://127.0.0.1:8787/api/benchmark?strategy=combined"`,
       },
@@ -136,37 +147,37 @@ const GROUPS: Group[] = [
   },
   {
     eyebrow: 'CONFIG',
-    title: '配置与凭证',
+    titleKey: 'api.group.config',
     endpoints: [
       {
         method: 'GET+POST',
         path: '/api/config',
-        desc: 'GET 读配置视图；POST 保存配置。掩码或留空 = 不改；未知键拒绝。',
+        descKey: 'api.endpoint.config.desc',
         body: `{ "model_provider": { "model_name": "..." }, "api_key": "" }`,
-        response: `GET：{ provider, base_url, model, api_format, api_key(masked), available_providers }\nPOST：{ ok, changed, rejected? }`,
-        errors: '415 跨站或非 JSON · POST 未知键 → ok=false',
+        responseKey: 'api.endpoint.config.response',
+        errorsKey: 'api.endpoint.config.errors',
         curl: `curl http://127.0.0.1:8787/api/config\ncurl -X POST http://127.0.0.1:8787/api/config \\
   -H "Content-Type: application/json" -d '{"api_key":""}'`,
       },
       {
         method: 'GET',
         path: '/api/credentials',
-        desc: '凭证健康检查。只返回掩码，绝不明文；probe=1 时做一次连通性探测。',
-        input: 'query: probe=0|1',
+        descKey: 'api.endpoint.credentials.desc',
+        inputKey: 'api.input.queryProbe',
         response: `{ github: {ok, masked}, model: {ok, masked}, ... }`,
         curl: `curl "http://127.0.0.1:8787/api/credentials?probe=1"`,
       },
       {
         method: 'GET',
         path: '/api/meta',
-        desc: '运行环境：规则数、供应商数、tree-sitter、跨文件开关、静态分析开关、模型。',
+        descKey: 'api.endpoint.meta.desc',
         response: `{ rules, providers, tree_sitter, cross_file, static_analysis, model, ... }`,
         curl: `curl http://127.0.0.1:8787/api/meta`,
       },
       {
         method: 'GET',
         path: '/api/health',
-        desc: '存活探针，用于确认本地服务已就绪。',
+        descKey: 'api.endpoint.health.desc',
         response: `{ "ok": true, "service": "ai-pr-review" }`,
         curl: `curl http://127.0.0.1:8787/api/health`,
       },
@@ -174,38 +185,37 @@ const GROUPS: Group[] = [
   },
   {
     eyebrow: 'DEMO',
-    title: '演示',
+    titleKey: 'api.group.demo',
     endpoints: [
       {
         method: 'GET',
         path: '/api/demo/cases',
-        desc: '离线演示用例清单。',
+        descKey: 'api.endpoint.demoCases.desc',
         response: `{ cases: [{ id, title, ... }, ...] }`,
         curl: `curl http://127.0.0.1:8787/api/demo/cases`,
       },
       {
         method: 'GET',
         path: '/api/demo/run',
-        desc: '离线演示结果，无需 Token / API Key。',
-        input: 'query: case',
+        descKey: 'api.endpoint.demoRun.desc',
+        inputKey: 'api.input.queryCase',
         response: `{ case, plan, findings, validation, ... }`,
-        errors: '404 case 不存在',
+        errorsKey: 'api.endpoint.demoRun.errors',
         curl: `curl "http://127.0.0.1:8787/api/demo/run?case=sql-injection"`,
       },
     ],
   },
   {
     eyebrow: 'PUBLISH',
-    title: '发布',
+    titleKey: 'api.group.publish',
     endpoints: [
       {
         method: 'POST',
         path: '/api/publish',
-        desc: '发布审查评论到 GitHub PR。confirm=false 只预览不碰 GitHub；confirm=true 才真正发布。',
+        descKey: 'api.endpoint.publish.desc',
         body: `{ "run_id": "<run_id>", "confirm": false }`,
-        response: `预览：{ status: "preview", comment_chars, ... }\n发布：{ status: "published"|"already_published", comment_url, comment_id }`,
-        errors:
-          '400 run_id 缺失 · 404 run 不存在 · 409 无 GitHub PR 链接 · 415 跨站或非 JSON · 502 GitHub 侧失败 · 503 未配置 Token',
+        responseKey: 'api.endpoint.publish.response',
+        errorsKey: 'api.endpoint.publish.errors',
         curl: `curl -X POST http://127.0.0.1:8787/api/publish \\
   -H "Content-Type: application/json" \\
   -d '{"run_id":"<run_id>","confirm":false}'`,
@@ -213,27 +223,34 @@ const GROUPS: Group[] = [
       {
         method: 'POST',
         path: '/api/chat',
-        desc: '对某次已完成的审查追问（无状态）。带 run_id 会注入该次审查的摘要与 findings；不带则按普通对话回答。',
-        body: `{ "run_id": "<run_id，可选>", "text": "<问题>" }`,
+        descKey: 'api.endpoint.chat.desc',
+        bodyKey: 'api.endpoint.chat.body',
         response: `{ reply, model, usage, context_meta: { bound_run, token_estimate, sections, truncated, note } }`,
-        errors: '400 text 缺失 · 404 run 不存在 · 415 跨站或非 JSON · 502 上游模型失败 · 503 未配置模型 API Key',
-        curl: `curl -X POST http://127.0.0.1:8787/api/chat \\
-  -H "Content-Type: application/json" \\
-  -d '{"run_id":"<run_id>","text":"这次审查有几个 finding？"}'`,
+        errorsKey: 'api.endpoint.chat.errors',
+        curlKey: 'api.endpoint.chat.curl',
       },
     ],
   },
 ]
 
-const CLI = [
-  ['pr-review <PR_URL>', '对指定 PR 执行完整审查'],
-  ['pr-review plan <PR_URL>', '只生成审查计划，不调用模型'],
-  ['pr-review benchmark', '运行基准测试（--strategy all 可横向比较）'],
-  ['pr-review demo', '离线演示规划、静态规则与证据校验'],
-  ['pr-review feedback', '记录 finding 的人工反馈'],
-  ['pr-review history', '查看历史运行记录'],
-  ['pr-review stats', '查看聚合统计'],
-  ['pr-review serve', '启动本工作台'],
+const CLI: [string, string][] = [
+  ['pr-review <PR_URL>', 'api.cli.run'],
+  ['pr-review plan <PR_URL>', 'api.cli.plan'],
+  ['pr-review benchmark', 'api.cli.benchmark'],
+  ['pr-review demo', 'api.cli.demo'],
+  ['pr-review feedback', 'api.cli.feedback'],
+  ['pr-review history', 'api.cli.history'],
+  ['pr-review stats', 'api.cli.stats'],
+  ['pr-review serve', 'api.cli.serve'],
+]
+
+/** 运行边界：[titleKey, bodyKey]。 */
+const BOUNDARIES: [string, string][] = [
+  ['api.boundary.local.title', 'api.boundary.local.body'],
+  ['api.boundary.limit.title', 'api.boundary.limit.body'],
+  ['api.boundary.cors.title', 'api.boundary.cors.body'],
+  ['api.boundary.secrets.title', 'api.boundary.secrets.body'],
+  ['api.boundary.cost.title', 'api.boundary.cost.body'],
 ]
 
 function MethodBadge({ method }: { method: Method }) {
@@ -259,20 +276,22 @@ function MethodBadge({ method }: { method: Method }) {
 }
 
 export function ApiPage() {
+  const t = useT()
   let index = 0
   return (
     <>
       <div className="page-head">
         <div className="eyebrow">REFERENCE</div>
-        <h1>接口与命令</h1>
+        <h1>{t('api.hero.title')}</h1>
         <p className="lead">
-          工作台是 Python 标准库服务端 + 本地 HTTP 接口之上的前端。共 18 条 API 与静态资源路由；
-          所有能力都可以脱离界面，直接用命令行或 HTTP 调用。完整契约见 <span className="mono">docs/API.md</span>。
+          {t('api.hero.lead')}
+          <span className="mono">docs/API.md</span>
+          {t('api.hero.leadTail')}
         </p>
       </div>
 
       {GROUPS.map((group) => (
-        <Section key={group.title} eyebrow={group.eyebrow} title={group.title}>
+        <Section key={group.titleKey} eyebrow={group.eyebrow} title={t(group.titleKey)}>
           <div className="stack">
             {group.endpoints.map((endpoint) => {
               index += 1
@@ -291,42 +310,42 @@ export function ApiPage() {
                   />
                   <div className="card-body stack" style={{ gap: 'var(--ds-space-3)' }}>
                     <p className="muted" style={{ fontSize: 'var(--ds-text-md)' }}>
-                      {endpoint.desc}
+                      {t(endpoint.descKey)}
                     </p>
-                    {endpoint.input && (
+                    {endpoint.inputKey && (
                       <div>
-                        <span className="finding-field-label">入参</span>
+                        <span className="finding-field-label">{t('api.field.input')}</span>
                         <pre className="code" style={{ marginTop: 5 }}>
-                          {endpoint.input}
+                          {t(endpoint.inputKey)}
                         </pre>
                       </div>
                     )}
-                    {endpoint.body && (
+                    {(endpoint.bodyKey || endpoint.body) && (
                       <div>
-                        <span className="finding-field-label">请求体</span>
+                        <span className="finding-field-label">{t('api.field.body')}</span>
                         <pre className="code" style={{ marginTop: 5 }}>
-                          {endpoint.body}
+                          {endpoint.bodyKey ? t(endpoint.bodyKey) : endpoint.body}
                         </pre>
                       </div>
                     )}
                     <div>
-                      <span className="finding-field-label">响应</span>
+                      <span className="finding-field-label">{t('api.field.response')}</span>
                       <pre className="code" style={{ marginTop: 5 }}>
-                        {endpoint.response}
+                        {endpoint.responseKey ? t(endpoint.responseKey) : endpoint.response}
                       </pre>
                     </div>
-                    {endpoint.errors && (
+                    {endpoint.errorsKey && (
                       <div>
-                        <span className="finding-field-label">错误码</span>
+                        <span className="finding-field-label">{t('api.field.errors')}</span>
                         <pre className="code" style={{ marginTop: 5 }}>
-                          {endpoint.errors}
+                          {t(endpoint.errorsKey)}
                         </pre>
                       </div>
                     )}
                     <div>
                       <span className="finding-field-label">curl</span>
                       <pre className="code" style={{ marginTop: 5 }}>
-                        {endpoint.curl}
+                        {endpoint.curlKey ? t(endpoint.curlKey) : endpoint.curl}
                       </pre>
                     </div>
                   </div>
@@ -337,36 +356,41 @@ export function ApiPage() {
         </Section>
       ))}
 
-      <Section eyebrow="STATIC" title="静态资源">
+      <Section eyebrow="STATIC" title={t('api.static.title')}>
         <Card>
           <div className="stack" style={{ gap: 'var(--ds-space-3)' }}>
             <p className="muted" style={{ fontSize: 'var(--ds-text-md)' }}>
-              前端构建产物挂在 <span className="mono">/static/*</span>（<span className="mono">base=/static/</span>），
-              含 SPA fallback：未命中的非 <span className="mono">/api/</span> 路径回退到入口页。
+              {t('api.static.body1')}
+              <span className="mono">/static/*</span>
+              {t('api.static.body2')}
+              <span className="mono">base=/static/</span>
+              {t('api.static.body3')}
+              <span className="mono">/api/</span>
+              {t('api.static.body4')}
             </p>
             <pre className="code">{`curl http://127.0.0.1:8787/static/\ncurl http://127.0.0.1:8787/`}</pre>
           </div>
         </Card>
       </Section>
 
-      <Section eyebrow="CLI" title="命令行等价能力">
+      <Section eyebrow="CLI" title={t('api.cli.title')}>
         <Card flush>
           <div style={{ overflowX: 'auto' }}>
             <table className="table">
               <thead>
                 <tr>
-                  <th>命令</th>
-                  <th>说明</th>
+                  <th>{t('api.cli.col.command')}</th>
+                  <th>{t('api.cli.col.desc')}</th>
                 </tr>
               </thead>
               <tbody>
-                {CLI.map(([cmd, desc]) => (
+                {CLI.map(([cmd, descKey]) => (
                   <tr key={cmd}>
                     <td className="mono" style={{ fontSize: 'var(--ds-text-sm)', whiteSpace: 'nowrap' }}>
                       {cmd}
                     </td>
                     <td className="muted" style={{ fontSize: 'var(--ds-text-md)' }}>
-                      {desc}
+                      {t(descKey)}
                     </td>
                   </tr>
                 ))}
@@ -376,27 +400,22 @@ export function ApiPage() {
         </Card>
       </Section>
 
-      <Section eyebrow="BOUNDARIES" title="运行边界">
+      <Section eyebrow="BOUNDARIES" title={t('api.boundary.title')}>
         <Card>
           <div className="stack" style={{ gap: 'var(--ds-space-3)' }}>
-            {[
-              ['仅监听本机', '服务绑定 127.0.0.1，不对局域网或公网开放。'],
-              ['请求体上限 64 KB', '超过上限的请求在读取前即被拒绝并关闭连接。'],
-              [
-                '写端点同源守卫',
-                '全部 POST 要求 Content-Type: application/json 且同源，否则 415；OPTIONS → 405，不返回任何 Access-Control-* 头。',
-              ],
-              ['凭据不外传', 'GitHub Token 与模型 API Key 只从本地配置读取，界面与接口都不会展示明文。'],
-              ['费用由模型产生', '计划模式零成本；完整审查按你配置的供应商计费，受单次与 24 小时预算约束。'],
-            ].map(([title, body]) => (
-              <div key={title} className="row" style={{ alignItems: 'flex-start', gap: 'var(--ds-space-3)' }}>
+            {BOUNDARIES.map(([titleKey, bodyKey]) => (
+              <div
+                key={titleKey}
+                className="row"
+                style={{ alignItems: 'flex-start', gap: 'var(--ds-space-3)' }}
+              >
                 <span className="badge st-valid" style={{ marginTop: 2 }}>
                   ✓
                 </span>
                 <div>
-                  <div style={{ fontWeight: 600, fontSize: 'var(--ds-text-md)' }}>{title}</div>
+                  <div style={{ fontWeight: 600, fontSize: 'var(--ds-text-md)' }}>{t(titleKey)}</div>
                   <div className="muted" style={{ fontSize: 'var(--ds-text-sm)' }}>
-                    {body}
+                    {t(bodyKey)}
                   </div>
                 </div>
               </div>

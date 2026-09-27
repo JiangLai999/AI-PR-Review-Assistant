@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react'
+import { t } from '../i18n'
 
 interface Props {
   children: ReactNode
@@ -28,7 +29,7 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     // 本地工具没有远端上报，打印到控制台便于排查
-    console.error('[PR智审] 视图渲染失败', error, info.componentStack)
+    console.error(t('error.console'), error, info.componentStack)
   }
 
   private reset = (): void => {
@@ -40,31 +41,31 @@ export class ErrorBoundary extends Component<Props, State> {
     const { error } = this.state
     if (!error) return this.props.children
 
-    const scope = this.props.scope ? `「${this.props.scope}」` : '该视图'
+    const scope = this.props.scope ? `「${this.props.scope}」` : t('error.view')
     return (
       <div className="notice notice-error" role="alert" style={{ flexDirection: 'column', gap: 12 }}>
         <div className="row" style={{ gap: 10 }}>
           <span className="notice-icon">!</span>
-          <strong>{scope}渲染失败</strong>
+          <strong>{t('error.title', { scope })}</strong>
         </div>
         <p style={{ fontSize: 'var(--ds-text-md)', lineHeight: 1.65 }}>
-          {error.message || '发生了未知错误。'}
+          {error.message || t('error.unknown')}
         </p>
         <div className="row" style={{ gap: 10 }}>
           <button type="button" className="btn btn-secondary btn-sm" onClick={this.reset}>
-            重试
+            {t('error.retry')}
           </button>
           <button
             type="button"
             className="btn btn-ghost btn-sm"
             onClick={() => window.location.reload()}
           >
-            重新加载页面
+            {t('error.reload')}
           </button>
         </div>
         <details style={{ width: '100%' }}>
           <summary style={{ cursor: 'pointer', fontSize: 'var(--ds-text-sm)' }}>
-            查看错误堆栈
+            {t('error.stack')}
           </summary>
           <pre className="code" style={{ marginTop: 8, maxHeight: 220 }}>
             {error.stack || String(error)}

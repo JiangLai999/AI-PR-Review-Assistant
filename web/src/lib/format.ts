@@ -1,5 +1,7 @@
 /** 展示层格式化工具。 */
 
+import { t } from '../i18n'
+
 export function formatDuration(seconds?: number): string {
   if (seconds === undefined || seconds === null || Number.isNaN(seconds)) return '—'
   if (seconds < 1) return `${Math.round(seconds * 1000)} ms`
@@ -53,12 +55,12 @@ export function repoLabel(run: {
 /** 校验输入是否像 GitHub PR URL，用于给出即时反馈。 */
 export function parsePrUrl(value: string): { ok: boolean; hint?: string } {
   const trimmed = value.trim()
-  if (!trimmed) return { ok: false, hint: '请输入 GitHub PR 链接。' }
+  if (!trimmed) return { ok: false, hint: t('url.required') }
   if (!/^https?:\/\//i.test(trimmed)) {
-    return { ok: false, hint: '链接需要以 http:// 或 https:// 开头。' }
+    return { ok: false, hint: t('url.scheme') }
   }
   if (!/^https?:\/\/(www\.)?github\.com\/[^/]+\/[^/]+\/pull\/\d+/i.test(trimmed)) {
-    return { ok: false, hint: '格式应为 https://github.com/{owner}/{repo}/pull/{number}' }
+    return { ok: false, hint: t('url.shape') }
   }
   return { ok: true }
 }

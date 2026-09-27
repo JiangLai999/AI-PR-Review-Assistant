@@ -35,6 +35,11 @@ function listSourceFiles(dir, out = []) {
       if (lower === 'docs' || lower === '__tests__' || lower === 'test' || lower === 'tests') {
         continue;
       }
+      // `web/src/i18n/` 是**译文存放处**（词典里当然有中文），统计"未翻译文案"时必须排除，
+      // 否则 Phase 3b 一边翻译、总量反而一边上涨（真实教训：354 → 501）。
+      if (lower === 'i18n') {
+        continue;
+      }
       listSourceFiles(full, out);
       continue;
     }

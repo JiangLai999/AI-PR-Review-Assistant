@@ -2,6 +2,7 @@ import { useRef } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import { useGSAP } from '@gsap/react'
 import gsap from 'gsap'
+import { useT } from '../i18n'
 import type { EvidenceStatus, Severity } from '../api/types'
 
 /** 小工具：拼接类名，自动丢弃 falsy 项。 */
@@ -17,11 +18,12 @@ const SEVERITY_LABEL: Record<Severity, string> = {
   info: 'INFO',
 }
 
-const EVIDENCE_LABEL: Record<EvidenceStatus, string> = {
-  valid: '证据有效',
-  needs_review: '待人工确认',
-  invalid: '证据不成立',
-  unverified: '未校验',
+/** 证据状态 → i18n key（模块级常量不能固化语言）。 */
+const EVIDENCE_LABEL_KEY: Record<EvidenceStatus, string> = {
+  valid: 'evidence.valid',
+  needs_review: 'evidence.needs_review',
+  invalid: 'evidence.invalid',
+  unverified: 'evidence.unverified',
 }
 
 export function SeverityBadge({ value }: { value: Severity }) {
@@ -34,10 +36,11 @@ export function SeverityBadge({ value }: { value: Severity }) {
 }
 
 export function EvidenceBadge({ value }: { value: EvidenceStatus }) {
+  const t = useT()
   return (
     <span className={cx('badge', `st-${value}`)}>
       <i className="badge-dot" />
-      {EVIDENCE_LABEL[value] ?? value}
+      {EVIDENCE_LABEL_KEY[value] ? t(EVIDENCE_LABEL_KEY[value]) : value}
     </span>
   )
 }

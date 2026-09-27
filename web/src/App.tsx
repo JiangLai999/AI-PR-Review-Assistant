@@ -12,18 +12,20 @@ import { HistoryPage } from './pages/HistoryPage'
 import { OverviewPage } from './pages/OverviewPage'
 import { ReviewPage } from './pages/ReviewPage'
 import { SettingsPage } from './pages/SettingsPage'
+import { setLang, useT } from './i18n'
 
 gsap.registerPlugin(useGSAP)
 
 type PageId = 'overview' | 'review' | 'history' | 'benchmark' | 'api' | 'settings'
 
-const NAV: { id: PageId; label: string; icon: string }[] = [
-  { id: 'overview', label: '概览', icon: '⌂' },
-  { id: 'review', label: '审查工作台', icon: '↗' },
-  { id: 'history', label: '历史审查', icon: '◷' },
-  { id: 'benchmark', label: '准确率', icon: '⌁' },
-  { id: 'api', label: '接口', icon: '{}' },
-  { id: 'settings', label: '设置', icon: '⚙' },
+/** 导航标签存 i18n key（模块级常量不能调 t()，渲染时再取词）。 */
+const NAV: { id: PageId; labelKey: string; icon: string }[] = [
+  { id: 'overview', labelKey: 'nav.overview', icon: '⌂' },
+  { id: 'review', labelKey: 'nav.review', icon: '↗' },
+  { id: 'history', labelKey: 'nav.history', icon: '◷' },
+  { id: 'benchmark', labelKey: 'nav.benchmark', icon: '⌁' },
+  { id: 'api', labelKey: 'nav.api', icon: '{}' },
+  { id: 'settings', labelKey: 'nav.settings', icon: '⚙' },
 ]
 
 const PAGE_FROM_HASH = (hash: string): PageId => {
@@ -32,6 +34,7 @@ const PAGE_FROM_HASH = (hash: string): PageId => {
 }
 
 export function App() {
+  const t = useT()
   const [page, setPage] = useState<PageId>(() => PAGE_FROM_HASH(window.location.hash))
   const [result, setResult] = useState<ReviewResponse | null>(null)
   const [runId, setRunId] = useState<string | null>(null)
@@ -91,6 +94,13 @@ export function App() {
   useEffect(() => {
     let alive = true
     void (async () => {
+      // 语言来自后端配置（Phase 2 起设置页可改）：先取一次，页面才不会中英混排。
+      try {
+        const config = await api.config()
+        if (alive) setLang(config.preferences?.ui_language)
+      } catch {
+        // 读不到配置就保持默认中文，不挡首屏
+      }
       try {
         await api.health()
         if (alive) setOnline(true)
@@ -112,31 +122,31 @@ export function App() {
   return (
     <div ref={appRef} className="shell workspace-shell">
       <ParticleBackground mode={page === 'review' ? 'focus' : 'idle'} />
-      <aside className="workspace-sidebar" aria-label="工作区导航">
+      <aside className="workspace-sidebar" aria-label={t('app.sidebar.aria')}>
         <button type="button" className="sidebar-brand" onClick={() => navigate('overview')}>
           <span className="brand-mark brand-mark-image">
             <img src="/static/assets/site-icon.png" alt="AI PR Review Assistant" />
           </span>
-          <span className="sidebar-brand-text"><strong>PR智审</strong><small>AI PR REVIEW</small></span>
+          <span className="sidebar-brand-text"><strong>{t('app.brand')}</strong><small>{t('app.brand.sub')}</small></span>
         </button>
-        <div className="sidebar-section-label">WORKSPACE</div>
-        <nav className="sidebar-nav" aria-label="工作区">
+        <div className="sidebar-section-label">{t('app.sidebar.workspace')}</div>
+        <nav className="sidebar-nav" aria-label={t('app.sidebar.ariaNav')}>
           {NAV.map((item) => (
             <button key={item.id} type="button" className="sidebar-nav-item" aria-current={page === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}>
-              <span className="sidebar-icon">{item.icon}</span><span>{item.label}</span>{item.id === 'review' && runId && <i className="sidebar-live-dot" />}
+              <span className="sidebar-icon">{item.icon}</span><span>{t(item.labelKey)}</span>{item.id === 'review' && runId && <i className="sidebar-live-dot" />}
             </button>
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <div className="sidebar-context"><span className="status-pulse" />LOCAL WORKSPACE</div>
-          <div className="sidebar-meta">数据保存在本机<br />MIT License · v0.1.0</div>
+          <div className="sidebar-context"><span className="status-pulse" />{t('app.sidebar.local')}</div>
+          <div className="sidebar-meta">{t('app.sidebar.meta')}<br />MIT License · v0.1.0</div>
         </div>
       </aside>
       <div className="workspace-content">
       <header className="workspace-statusbar">
         <div className="statusbar-left">
-          <span className="statusbar-kicker">CURRENT WORKSPACE</span>
-          <span className="statusbar-title">{page === 'review' ? 'Review session' : NAV.find((item) => item.id === page)?.label}</span>
+          <span className="statusbar-kicker">{t('app.statusbar.kicker')}</span>
+          <span className="statusbar-title">{page === 'review' ? t('app.statusbar.reviewSession') : t(NAV.find((item) => item.id === page)?.labelKey ?? 'nav.overview')}</span>
         </div>
         <div className="statusbar-right">
           {/* 凭证健康沿用状态栏：任一异常都要在尝试之前就看得见，而不是填完表单才报错 */}
@@ -155,10 +165,10 @@ export function App() {
             </button>
           ))}
           <span className="statusbar-model">
-            <span className="statusbar-model-dot" /> {credentials ? 'AI runtime' : 'Local AI runtime'}
+            <span className="statusbar-model-dot" /> {credentials ? t('app.statusbar.runtime') : t('app.statusbar.localRuntime')}
           </span>
           <span className={cx('statusbar-health', online === false ? 'is-offline' : online ? 'is-online' : '')}>
-            {online === null ? '检测中' : online ? 'Connected' : 'Offline'}
+            {online === null ? t('app.statusbar.checking') : online ? t('app.statusbar.connected') : t('app.statusbar.offline')}
           </span>
         </div>
       </header>
@@ -166,11 +176,11 @@ export function App() {
       {online === false && (
         <div className="service-outage" role="alert">
           <div>
-            <strong>本地服务未连接</strong>
-            <span>请运行 <code>pr-review serve</code> 后重试，当前仍可浏览离线页面。</span>
+            <strong>{t('app.outage.title')}</strong>
+            <span>{t('app.outage.body', { command: 'pr-review serve' })}</span>
           </div>
           <button type="button" className="btn btn-ghost" onClick={() => void refreshService()}>
-            重新连接
+            {t('app.outage.retry')}
           </button>
         </div>
       )}
@@ -178,7 +188,7 @@ export function App() {
       <main className="main">
         <div className="container">
           {/* 每个视图单独兜底：某一页抛异常不应让整个工作台白屏 */}
-          <ErrorBoundary key={page} scope={NAV.find((item) => item.id === page)?.label}>
+          <ErrorBoundary key={page} scope={t(NAV.find((item) => item.id === page)?.labelKey ?? 'nav.overview')}>
             {page === 'overview' && <OverviewPage onNavigate={navigate} />}
             {page === 'review' && <ReviewPage initialResult={result} onResult={handleResult} />}
             {page === 'history' && <HistoryPage onNavigate={navigate} />}
@@ -201,7 +211,7 @@ export function App() {
           style={{ justifyContent: 'space-between', gap: 'var(--ds-space-3)' }}
         >
           <span className="dim" style={{ fontSize: 'var(--ds-text-sm)' }}>
-            AI PR Review Assistant · MIT License · 本地运行，数据不出本机
+            {t('app.footer.note')}
           </span>
           <span className="row" style={{ gap: 'var(--ds-space-4)' }}>
             <a
@@ -210,7 +220,7 @@ export function App() {
               rel="noreferrer noopener"
               style={{ fontSize: 'var(--ds-text-sm)' }}
             >
-              GitHub ↗
+              {t('app.footer.github')}
             </a>
             <a
               href="https://jianglai999.github.io/AI-PR-Review-Assistant-web/"
@@ -218,7 +228,7 @@ export function App() {
               rel="noreferrer noopener"
               style={{ fontSize: 'var(--ds-text-sm)' }}
             >
-              项目官网 ↗
+              {t('app.footer.website')}
             </a>
           </span>
         </div>

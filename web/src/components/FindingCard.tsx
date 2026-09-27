@@ -4,12 +4,14 @@ import gsap from 'gsap'
 import type { FeedbackStatus, Finding } from '../api/types'
 import { api } from '../api/client'
 import { EvidenceBadge, SeverityBadge, cx } from './ui'
+import { useT } from '../i18n'
 
-const FEEDBACK_OPTIONS: { value: FeedbackStatus; label: string }[] = [
-  { value: 'accepted', label: '确认问题' },
-  { value: 'rejected', label: '误报' },
-  { value: 'fixed', label: '已修复' },
-  { value: 'needs_review', label: '待确认' },
+/** 反馈选项只存 i18n key（模块级常量不能固化语言）。 */
+const FEEDBACK_OPTIONS: { value: FeedbackStatus; labelKey: string }[] = [
+  { value: 'accepted', labelKey: 'finding.feedback.accepted' },
+  { value: 'rejected', labelKey: 'finding.feedback.rejected' },
+  { value: 'fixed', labelKey: 'finding.feedback.fixed' },
+  { value: 'needs_review', labelKey: 'finding.feedback.needs_review' },
 ]
 
 function sourceLabel(sources?: string[]): string {
@@ -28,6 +30,7 @@ export function FindingCard({
   index: number
   initialFeedback?: string
 }) {
+  const t = useT()
   const [open, setOpen] = useState(index === 0)
   const [feedback, setFeedback] = useState<string | undefined>(initialFeedback)
   const [saving, setSaving] = useState<FeedbackStatus | null>(null)
@@ -53,7 +56,7 @@ export function FindingCard({
 
   async function submit(value: FeedbackStatus) {
     if (!runId || !finding.finding_id) {
-      setError('该结果缺少 run_id 或 finding_id，无法记录反馈。')
+      setError(t('finding.feedback.missingIds'))
       return
     }
     setSaving(value)
@@ -98,13 +101,13 @@ export function FindingCard({
             <span>·</span>
             <span>{finding.category}</span>
             <span>·</span>
-            <span>置信度 {finding.confidence.toFixed(2)}</span>
+            <span>{t('finding.confidence', { value: finding.confidence.toFixed(2) })}</span>
             <span>·</span>
             <span>{sourceLabel(finding.sources)}</span>
             {feedback && (
               <>
                 <span>·</span>
-                <span className="fb-tag">已标记：{feedback}</span>
+                <span className="fb-tag">{t('finding.feedback.marked', { value: feedback })}</span>
               </>
             )}
           </div>
@@ -115,24 +118,24 @@ export function FindingCard({
       {open && (
         <div ref={bodyRef} className="finding-body">
           <div className="finding-field">
-            <span className="finding-field-label">问题</span>
+            <span className="finding-field-label">{t('finding.field.problem')}</span>
             <p className="finding-text">{finding.problem}</p>
           </div>
           <div className="finding-field">
-            <span className="finding-field-label">建议</span>
+            <span className="finding-field-label">{t('finding.field.suggestion')}</span>
             <p className="finding-text">{finding.suggestion}</p>
           </div>
 
           {finding.code_snippet && (
             <div className="finding-field">
-              <span className="finding-field-label">代码片段</span>
+              <span className="finding-field-label">{t('finding.field.snippet')}</span>
               <pre className="code">{finding.code_snippet}</pre>
             </div>
           )}
 
           {issues.length > 0 && (
             <div className="finding-field">
-              <span className="finding-field-label">证据校验说明</span>
+              <span className="finding-field-label">{t('finding.field.evidenceIssues')}</span>
               <ul
                 className="finding-text"
                 style={{ margin: 0, paddingLeft: '1.15em', display: 'grid', gap: 3 }}
@@ -146,7 +149,7 @@ export function FindingCard({
 
           <div className="finding-actions">
             <span className="finding-field-label" style={{ alignSelf: 'center' }}>
-              人工反馈
+              {t('finding.feedback.title')}
             </span>
             {FEEDBACK_OPTIONS.map((option) => (
               <button
@@ -156,7 +159,7 @@ export function FindingCard({
                 disabled={saving !== null}
                 onClick={() => submit(option.value)}
               >
-                {saving === option.value ? '记录中…' : option.label}
+                {saving === option.value ? t('finding.feedback.saving') : t(option.labelKey)}
               </button>
             ))}
             {error && (

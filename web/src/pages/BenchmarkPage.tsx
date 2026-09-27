@@ -2,12 +2,17 @@ import { useEffect, useState } from 'react'
 import { api } from '../api/client'
 import type { BenchmarkReport } from '../api/types'
 import { Card, CardHead, Chip, Empty, Metric, Notice, Section, cx } from '../components/ui'
+import { tn, useT } from '../i18n'
 import { formatPercent } from '../lib/format'
 
-const STRATEGY_LABEL: Record<string, { name: string; desc: string }> = {
-  static: { name: '逐行规则', desc: '按行匹配的安全规则：动态执行、硬编码凭证、SQL 插值、危险反序列化等。' },
-  ast: { name: 'AST 规则', desc: '基于 Python 语法树：可变默认参数、裸 except、资源泄漏、弱哈希、异常链丢失等。' },
-  combined: { name: '合并策略', desc: '逐行规则与 AST 规则合并去重，对应真实审查链路的默认行为。' },
+/** 策略名/说明只存 key，渲染时用 t() 取词；后端若返回未知策略，回落显示原始 name。 */
+const STRATEGY_KEYS: Record<string, { name: string; desc: string }> = {
+  static: { name: 'benchmark.strategy.static.name', desc: 'benchmark.strategy.static.desc' },
+  ast: { name: 'benchmark.strategy.ast.name', desc: 'benchmark.strategy.ast.desc' },
+  combined: {
+    name: 'benchmark.strategy.combined.name',
+    desc: 'benchmark.strategy.combined.desc',
+  },
 }
 
 function isReport(value: unknown): value is BenchmarkReport {
@@ -24,6 +29,7 @@ function metricCell(value: number, tp: number, fp: number, fn: number): string {
 }
 
 export function BenchmarkPage() {
+  const t = useT()
   const [reports, setReports] = useState<Record<string, BenchmarkReport> | null>(null)
   const [selected, setSelected] = useState('combined')
   const [error, setError] = useState<string | null>(null)
@@ -53,16 +59,15 @@ export function BenchmarkPage() {
 
   const report = reports?.[selected]
   const names = reports ? Object.keys(reports) : []
+  const selectedKey = STRATEGY_KEYS[selected]
+  const selectedLabel = selectedKey ? t(selectedKey.name) : selected
 
   return (
     <>
       <div className="page-head">
         <div className="eyebrow">BENCHMARK</div>
-        <h1>准确率基准</h1>
-        <p className="lead">
-          内置的已知缺陷样例库。每个样例都预埋了缺陷及其准确行号，用同一套指标衡量不同分析策略，
-          用于防止规则退化与误报增加。
-        </p>
+        <h1>{t('benchmark.hero.title')}</h1>
+        <p className="lead">{t('benchmark.hero.lead')}</p>
       </div>
 
       {error && (
@@ -81,13 +86,13 @@ export function BenchmarkPage() {
         </Card>
       ) : !reports ? (
         <Card>
-          <Empty mark="[ ! ]" title="未能载入基准报告">
-            请确认本地服务正在运行。
+          <Empty mark="[ ! ]" title={t('benchmark.empty.title')}>
+            {t('benchmark.empty.body')}
           </Empty>
         </Card>
       ) : (
         <>
-          <Section eyebrow="STRATEGY" title="策略对比">
+          <Section eyebrow="STRATEGY" title={t('benchmark.strategy.title')}>
             <div
               style={{
                 display: 'grid',
@@ -98,6 +103,7 @@ export function BenchmarkPage() {
               {names.map((name) => {
                 const item = reports[name]
                 const active = name === selected
+                const label = STRATEGY_KEYS[name]
                 return (
                   <button
                     key={name}
@@ -118,22 +124,22 @@ export function BenchmarkPage() {
                   >
                     <div className="row" style={{ justifyContent: 'space-between' }}>
                       <strong style={{ fontSize: 'var(--ds-text-base)' }}>
-                        {STRATEGY_LABEL[name]?.name ?? name}
+                        {label ? t(label.name) : name}
                       </strong>
-                      {active && <Chip accent>当前</Chip>}
+                      {active && <Chip accent>{t('benchmark.strategy.current')}</Chip>}
                     </div>
                     <div
                       className="metrics"
                       style={{ marginTop: 'var(--ds-space-4)', gridTemplateColumns: '1fr 1fr' }}
                     >
                       <div>
-                        <div className="metric-key">精确率</div>
+                        <div className="metric-key">{t('benchmark.metric.precision')}</div>
                         <div className={cx('metric-value', 'metric-value-sm')}>
                           {formatPercent(item.precision, 0)}
                         </div>
                       </div>
                       <div>
-                        <div className="metric-key">召回率</div>
+                        <div className="metric-key">{t('benchmark.metric.recall')}</div>
                         <div className={cx('metric-value', 'metric-value-sm')}>
                           {formatPercent(item.recall, 0)}
                         </div>
@@ -147,7 +153,7 @@ export function BenchmarkPage() {
                         lineHeight: 1.55,
                       }}
                     >
-                      {STRATEGY_LABEL[name]?.desc}
+                      {label ? t(label.desc) : undefined}
                     </p>
                   </button>
                 )
@@ -159,54 +165,78 @@ export function BenchmarkPage() {
             <>
               <Section
                 eyebrow="METRICS"
-                title={`${STRATEGY_LABEL[selected]?.name ?? selected} · 指标`}
+                title={t('benchmark.metrics.title', { strategy: selectedLabel })}
               >
                 <div className="metrics">
                   <Metric
-                    label="精确率"
+                    label={t('benchmark.metric.precision')}
                     value={formatPercent(report.precision)}
                     small
-                    hint="报出的问题里有多少是真缺陷"
+                    hint={t('benchmark.metric.precisionHint')}
                   />
                   <Metric
-                    label="召回率"
+                    label={t('benchmark.metric.recall')}
                     value={formatPercent(report.recall)}
                     small
-                    hint="预埋缺陷有多少被找到"
+                    hint={t('benchmark.metric.recallHint')}
                   />
-                  <Metric label="F1" value={formatPercent(report.f1)} small />
-                  <Metric label="误报率" value={formatPercent(report.false_positive_rate)} small />
-                  <Metric label="行号准确率" value={formatPercent(report.line_accuracy)} small />
-                  <Metric label="样例数" value={report.case_count} small />
+                  <Metric label={t('benchmark.metric.f1')} value={formatPercent(report.f1)} small />
+                  <Metric
+                    label={t('benchmark.metric.fpr')}
+                    value={formatPercent(report.false_positive_rate)}
+                    small
+                  />
+                  <Metric
+                    label={t('benchmark.metric.lineAccuracy')}
+                    value={formatPercent(report.line_accuracy)}
+                    small
+                  />
+                  <Metric
+                    label={t('benchmark.metric.cases')}
+                    value={report.case_count}
+                    small
+                  />
                 </div>
 
                 <Card flush  style={{ marginTop: 'var(--ds-space-4)' }}>
                   <CardHead
-                    title="混淆矩阵计数"
-                    extra={<Chip>{report.case_count} 个样例合计</Chip>}
+                    title={t('benchmark.matrix.title')}
+                    extra={<Chip>{tn('benchmark.matrix.cases', report.case_count)}</Chip>}
                   />
                   <div className="card-body">
                     <div className="metrics" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
-                      <Metric label="命中 (TP)" value={report.true_positives} small />
-                      <Metric label="误报 (FP)" value={report.false_positives} small />
-                      <Metric label="漏报 (FN)" value={report.false_negatives} small />
+                      <Metric
+                        label={t('benchmark.matrix.tp')}
+                        value={report.true_positives}
+                        small
+                      />
+                      <Metric
+                        label={t('benchmark.matrix.fp')}
+                        value={report.false_positives}
+                        small
+                      />
+                      <Metric
+                        label={t('benchmark.matrix.fn')}
+                        value={report.false_negatives}
+                        small
+                      />
                     </div>
                   </div>
                 </Card>
               </Section>
 
-              <Section eyebrow="CASES" title="逐样例结果">
+              <Section eyebrow="CASES" title={t('benchmark.cases.title')}>
                 <Card flush >
                   <div style={{ overflowX: 'auto' }}>
                     <table className="table">
                       <thead>
                         <tr>
-                          <th>样例</th>
+                          <th>{t('benchmark.cases.caseId')}</th>
                           <th className="table-num">TP</th>
                           <th className="table-num">FP</th>
                           <th className="table-num">FN</th>
-                          <th className="table-num">精确率</th>
-                          <th className="table-num">召回率</th>
+                          <th className="table-num">{t('benchmark.metric.precision')}</th>
+                          <th className="table-num">{t('benchmark.metric.recall')}</th>
                           <th className="table-num">F1</th>
                         </tr>
                       </thead>
@@ -217,7 +247,7 @@ export function BenchmarkPage() {
                               {item.case_id}
                               {item.true_positives + item.false_positives + item.false_negatives === 0 && (
                                 <span className="chip" style={{ marginLeft: 8 }}>
-                                  对照组
+                                  {t('benchmark.cases.control')}
                                 </span>
                               )}
                             </td>
@@ -280,9 +310,9 @@ export function BenchmarkPage() {
                       !
                     </span>
                     <p className="muted" style={{ fontSize: 'var(--ds-text-md)', lineHeight: 1.65 }}>
-                      样例库共有 4 个文件样例：3 个预埋缺陷（共 12 处）与 1 个零缺陷对照组。
-                      对照组用于衡量误报。这些数字代表规则在该精选集合上的表现，
-                      <strong>不等同于在真实 PR 上的泛化准确率</strong>。
+                      {t('benchmark.note.body')}
+                      <strong>{t('benchmark.note.emphasis')}</strong>
+                      {t('benchmark.note.tail')}
                     </p>
                   </div>
                 </Card>

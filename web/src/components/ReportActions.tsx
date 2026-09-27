@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import type { PublishResponse, ReportExportFormat } from '../api/types'
+import { t, useT } from '../i18n'
 import { Card, Notice, Spinner, cx } from './ui'
 
 /**
@@ -19,25 +20,22 @@ interface Failure {
   detail: string
 }
 
-const FAILURE_TEXT: Record<number, { title: string; detail: string }> = {
-  0: { title: '无法连接到本地服务', detail: '请确认 pr-review serve 仍在运行，然后重试。' },
-  400: { title: '请求不合法', detail: '缺少或非法的 run_id。刷新页面后重试。' },
-  401: { title: 'GitHub 凭证无效', detail: 'Token 被 GitHub 拒绝（401），请到「设置」页更新后重试。' },
-  403: { title: 'GitHub 拒绝了这次请求', detail: '多半是仓库写权限不足或触发限流，可稍后重试。' },
-  404: { title: '找不到这次审查记录', detail: '该运行可能已被清理，请重新执行一次完整审查。' },
-  409: { title: '这次运行没有可发布的 PR 链接', detail: '只有关联 GitHub PR 的完整审查才能发布评论。' },
-  415: { title: '请求被本地服务拒绝', detail: '跨站或非 JSON 请求会被服务端挡掉；请从本机页面重试。' },
-  502: { title: 'GitHub 侧发布失败', detail: '上游返回了错误，可稍后重试。' },
-  503: { title: '未配置 GitHub Token', detail: '请到「设置」页填写 GitHub Token 后重试。' },
-}
+/** 有专属文案的状态码（key 形如 `report.failure.<status>.title/detail`）。 */
+const KNOWN_FAILURE_STATUSES = new Set([0, 400, 401, 403, 404, 409, 415, 502, 503])
 
 /** status → 可读文案。未知状态码给通用文案，并始终带上服务端原始 message。 */
 export function describePublishFailure(status: number, message: string): Failure {
-  const known = FAILURE_TEXT[status]
+  const known = KNOWN_FAILURE_STATUSES.has(status)
+  const title = known
+    ? t(`report.failure.${status}.title`)
+    : status
+      ? t('report.failure.genericStatus', { status })
+      : t('report.failure.generic')
+  const detail = known ? t(`report.failure.${status}.detail`) : ''
   return {
     status,
-    title: known?.title ?? (status ? `发布失败（HTTP ${status}）` : '发布失败'),
-    detail: [known?.detail, message ? `原始信息：${message}` : ''].filter(Boolean).join(' '),
+    title,
+    detail: [detail, message ? t('report.failure.raw', { message }) : ''].filter(Boolean).join(' '),
   }
 }
 
@@ -86,6 +84,7 @@ export function ReportActions({
   runId: string | null
   className?: string
 }) {
+  const t = useT()
   const [phase, setPhase] = useState<Phase>('idle')
   const [preview, setPreview] = useState<PublishResponse | null>(null)
   const [outcome, setOutcome] = useState<PublishResponse | null>(null)
@@ -177,10 +176,11 @@ export function ReportActions({
       <div className="report-actions-head">
         <div className="report-actions-title">
           <span className="eyebrow">DELIVER</span>
-          <h3>发布与导出</h3>
+          <h3>{t('report.title')}</h3>
           <p className="report-actions-lead">
-            先把评论正文取回来确认，再决定是否真的写入 GitHub PR；
-            导出与命令行 <code className="code-inline">pr-review export-run</code> 同源。
+            {t('report.subtitle.before')}
+            <code className="code-inline">pr-review export-run</code>
+            {t('report.subtitle.after')}
           </p>
         </div>
         <div className="report-actions-downloads">
@@ -193,7 +193,7 @@ export function ReportActions({
               if (disabled) e.preventDefault()
             }}
           >
-            下载 Markdown
+            {t('report.download.markdown')}
           </a>
           <a
             className="btn btn-ghost btn-sm"
@@ -206,14 +206,14 @@ export function ReportActions({
               if (disabled) e.preventDefault()
             }}
           >
-            下载 JSON
+            {t('report.download.json')}
           </a>
         </div>
       </div>
 
       {disabled && (
         <Notice kind="info">
-          这次结果没有审查记录（计划模式只做规划、不落库），先生成一次完整审查再发布或导出。
+          {t('report.noRun')}
         </Notice>
       )}
 
@@ -226,25 +226,25 @@ export function ReportActions({
               disabled={disabled}
               onClick={() => void requestPreview()}
             >
-              发布到 GitHub PR
+               {t('report.publish')}
             </button>
             <span className="report-actions-hint">
-              第一步只生成预览（不联网、不写 GitHub），确认后才会真正发布。
+               {t('report.publish.hint')}
             </span>
           </>
         )}
 
         {phase === 'previewing' && (
           <span className="report-actions-hint" role="status">
-            <Spinner /> 正在生成评论预览…
+            <Spinner /> {t('report.preview.loading')}
           </span>
         )}
 
         {phase === 'previewed' && (
           <div className="report-actions-confirm">
             <div className="report-actions-warning">
-              <strong>发布会向该 PR 写入一条公开评论，且无法从本机撤回。</strong>
-              <span>重复发布不会被拦截，只会提示「已发布过」。</span>
+              <strong>{t('report.confirm.title')}</strong>
+              <span>{t('report.confirm.body')}</span>
             </div>
             <div className="row row-wrap">
               <button
@@ -253,10 +253,10 @@ export function ReportActions({
                 disabled={busy}
                 onClick={() => void confirmPublish()}
               >
-                确认发布到 GitHub PR
+                 {t('report.confirm.button')}
               </button>
               <button type="button" className="btn btn-ghost" onClick={reset}>
-                取消
+                 {t('report.cancel')}
               </button>
             </div>
           </div>
@@ -264,7 +264,7 @@ export function ReportActions({
 
         {phase === 'publishing' && (
           <span className="report-actions-hint" role="status">
-            <Spinner /> 正在发布到 GitHub…发布请求无法中断，请不要关闭页面。
+            <Spinner /> {t('report.publishing')}
           </span>
         )}
 
@@ -272,31 +272,31 @@ export function ReportActions({
           <div className="report-actions-outcome">
             <Notice kind={outcome.status === 'already_published' ? 'warn' : 'success'}>
               {outcome.status === 'already_published'
-                ? '该运行已发布过评论，本次又发了一条。'
+                ? t('report.republished')
                 : outcome.status === 'published'
-                  ? '审查评论已发布到 GitHub PR。'
-                  : '服务端没有确认发布（返回的仍是预览态），请重新预览后再试。'}
+                  ? t('report.published')
+                  : t('report.notConfirmed')}
               {outcome.message ? ` ${outcome.message}` : ''}
             </Notice>
             <div className="row row-wrap report-actions-links">
               {outcome.comment_url ? (
                 <a href={outcome.comment_url} target="_blank" rel="noreferrer noopener">
-                  打开评论 ↗
+                   {t('report.open')}
                 </a>
               ) : (
                 <span className="dim">
-                  GitHub 没有返回评论链接，可在 PR 会话页查看这条评论。
+                  {t('report.noLink')}
                 </span>
               )}
               {outcome.status === 'already_published' && (
                 <span className="dim">
-                  「已发布过」来自本地落盘的发布记录；重复发布不会被拦截，这次仍发了一条。
+                  {t('report.ledgerNote')}
                 </span>
               )}
             </div>
             <div className="row row-wrap">
               <button type="button" className="btn btn-ghost btn-sm" onClick={reset}>
-                重新预览
+                {t('report.repreview')}
               </button>
             </div>
           </div>
@@ -316,7 +316,7 @@ export function ReportActions({
                   disabled={disabled}
                   onClick={() => void confirmPublish()}
                 >
-                  重试发布
+                  {t('report.retryPublish')}
                 </button>
               )}
               <button
@@ -325,7 +325,7 @@ export function ReportActions({
                 disabled={disabled}
                 onClick={() => void requestPreview()}
               >
-                {failedStage === 'publish' ? '重新预览' : '重试预览'}
+                {failedStage === 'publish' ? t('report.repreview') : t('report.retryPreview')}
               </button>
             </div>
           </div>
@@ -336,19 +336,19 @@ export function ReportActions({
         <div className="report-actions-preview">
           <div className="report-actions-preview-head">
             <span className="report-actions-preview-title">
-              评论正文预览 · 只读 · {body.length} 字符
+              {t('report.preview.title', { chars: body.length })}
             </span>
             <span className="row" style={{ gap: 'var(--ds-space-2)' }}>
-              {copyState === 'ok' && <span className="report-actions-copied">已复制</span>}
+              {copyState === 'ok' && <span className="report-actions-copied">{t('report.copied')}</span>}
               {copyState === 'fail' && (
-                <span className="report-actions-copy-failed">复制失败，请手动选中正文复制</span>
+                <span className="report-actions-copy-failed">{t('report.copyFailed')}</span>
               )}
               <button
                 type="button"
                 className="btn btn-ghost btn-sm"
                 onClick={() => void copyBody()}
               >
-                复制正文
+                {t('report.copy')}
               </button>
             </span>
           </div>
@@ -358,8 +358,9 @@ export function ReportActions({
 
       {!disabled && !published && (
         <p className="report-actions-footnote">
-          导出的 Markdown 与 CLI <code className="code-inline">export-run</code> 逐字节一致；
-          评论正文里可能包含代码片段，分享前请先确认。
+          {t('report.footer.before')}
+          <code className="code-inline">export-run</code>
+          {t('report.footer.after')}
         </p>
       )}
     </Card>

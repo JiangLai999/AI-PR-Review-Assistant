@@ -9,6 +9,7 @@ import type {
   SaveConfigResponse,
 } from '../api/types'
 import { Card, CardHead, Chip, Notice, Section, Spinner } from '../components/ui'
+import { setLang, t, useT } from '../i18n'
 
 const API_FORMATS = ['openai', 'anthropic'] as const
 
@@ -18,28 +19,34 @@ const API_FORMATS = ['openai', 'anthropic'] as const
  * `.pytest_claude/ai-pr-review-repo-context-check/frame-repo-context-zh.txt:9`
  * 的 `5/6 · 界面与输出`）。这里只做标注，取值以 CLI 为准。
  */
-const STAGE_PROVIDER = 'CLI 助手 2–4/6'
-const STAGE_WEB_ONLY = 'Web 独有 · CLI 助手无此阶段'
-const STAGE_PREFERENCES = 'CLI 助手 5/6'
+const STAGE_PROVIDER_KEY = 'settings.stage.provider'
+const STAGE_WEB_ONLY_KEY = 'settings.stage.webOnly'
+const STAGE_PREFERENCES_KEY = 'settings.stage.preferences'
+const STAGE_SAVE_KEY = 'settings.stage.save'
 
-/** 旧后端（Phase 2 之前）不返回 `options` / `preferences` 时，控件显示这句并禁用。 */
-const UNSUPPORTED_TEXT = '当前后端不支持这一项'
-
-const NUMERIC_FIELDS: { key: string; label: string; hint: string; step?: number }[] = [
-  { key: 'max_tokens', label: '单次最大输出 tokens', hint: '影响单次模型回复长度' },
-  { key: 'timeout_seconds', label: '请求超时（秒）', hint: '模型响应慢就调大' },
-  { key: 'review_concurrency', label: '并发审查文件数', hint: '越大越快，但更容易触发限流' },
-  { key: 'cross_file_max_files', label: '跨文件分析文件数上限', hint: '参与接口影响对比的文件数量' },
-  { key: 'max_cost_per_run', label: '单次运行成本上限（$）', hint: '超过则中止本次审查', step: 0.1 },
-  { key: 'max_cost_per_24h', label: '24 小时成本上限（$）', hint: '滑动窗口总量', step: 0.5 },
+const NUMERIC_FIELDS: { key: string; labelKey: string; hintKey: string; step?: number }[] = [
+  { key: 'max_tokens', labelKey: 'settings.numeric.maxTokens.label', hintKey: 'settings.numeric.maxTokens.hint' },
+  { key: 'timeout_seconds', labelKey: 'settings.numeric.timeout.label', hintKey: 'settings.numeric.timeout.hint' },
+  {
+    key: 'review_concurrency',
+    labelKey: 'settings.numeric.concurrency.label',
+    hintKey: 'settings.numeric.concurrency.hint',
+  },
+  {
+    key: 'cross_file_max_files',
+    labelKey: 'settings.numeric.crossFile.label',
+    hintKey: 'settings.numeric.crossFile.hint',
+  },
+  { key: 'max_cost_per_run', labelKey: 'settings.numeric.costRun.label', hintKey: 'settings.numeric.costRun.hint', step: 0.1 },
+  { key: 'max_cost_per_24h', labelKey: 'settings.numeric.cost24h.label', hintKey: 'settings.numeric.cost24h.hint', step: 0.5 },
 ]
 
-const BOOL_FIELDS: { key: string; label: string; hint: string }[] = [
-  { key: 'enable_static_analysis', label: '启用静态与 AST 规则', hint: '规则命中不消耗模型调用' },
+const BOOL_FIELDS: { key: string; labelKey: string; hintKey: string }[] = [
+  { key: 'enable_static_analysis', labelKey: 'settings.bool.staticAst.label', hintKey: 'settings.bool.staticAst.hint' },
   {
     key: 'enable_cross_file_review',
-    label: '启用跨文件 AI 审查',
-    hint: '会额外消耗一次模型调用；关闭时仅做确定性的接口影响分析',
+    labelKey: 'settings.bool.crossFile.label',
+    hintKey: 'settings.bool.crossFile.hint',
   },
 ]
 
@@ -64,34 +71,34 @@ type OptionListKey =
 interface PreferenceField {
   key: PreferenceKey
   options: OptionListKey
-  label: string
-  hint: string
+  labelKey: string
+  hintKey: string
 }
 
 const INTERFACE_FIELDS: PreferenceField[] = [
   {
     key: 'ui_language',
     options: 'ui_languages',
-    label: '界面语言',
-    hint: '与 CLI 助手共用 preferences.ui_language',
+    labelKey: 'settings.pref.uiLanguage.label',
+    hintKey: 'settings.pref.uiLanguage.hint',
   },
   {
     key: 'output_format',
     options: 'output_formats',
-    label: '默认输出格式',
-    hint: 'CLI 导出的默认格式；报告导出按钮仍可单独选',
+    labelKey: 'settings.pref.outputFormat.label',
+    hintKey: 'settings.pref.outputFormat.hint',
   },
   {
     key: 'chat_layout',
     options: 'chat_layouts',
-    label: '对话布局',
-    hint: 'CLI 聊天界面的排版方式',
+    labelKey: 'settings.pref.chatLayout.label',
+    hintKey: 'settings.pref.chatLayout.hint',
   },
   {
     key: 'workbench_mode',
     options: 'workbench_modes',
-    label: '审查工作台显示',
-    hint: 'auto = 有审查结果时才展开面板',
+    labelKey: 'settings.pref.workbenchMode.label',
+    hintKey: 'settings.pref.workbenchMode.hint',
   },
 ]
 
@@ -99,14 +106,14 @@ const REVIEW_FIELDS: PreferenceField[] = [
   {
     key: 'repo_context',
     options: 'repo_contexts',
-    label: '仓库上下文',
-    hint: '审查时预取哪些仓库文件（测试文件 / 依赖）',
+    labelKey: 'settings.pref.repoContext.label',
+    hintKey: 'settings.pref.repoContext.hint',
   },
   {
     key: 'review_reasoning_effort',
     options: 'review_efforts',
-    label: '审查思考档位',
-    hint: '档位越高越准，成本与耗时也越高',
+    labelKey: 'settings.pref.reviewEffort.label',
+    hintKey: 'settings.pref.reviewEffort.hint',
   },
 ]
 
@@ -163,7 +170,9 @@ async function postConfig(payload: Record<string, unknown>): Promise<SaveConfigR
     })
   } catch (error) {
     throw new Error(
-      `无法连接到本地服务：${error instanceof Error ? error.message : String(error)}`,
+      t('api.error.offline', {
+        detail: error instanceof Error ? error.message : String(error),
+      }),
     )
   }
 
@@ -172,24 +181,29 @@ async function postConfig(payload: Record<string, unknown>): Promise<SaveConfigR
   try {
     body = text ? JSON.parse(text) : null
   } catch {
-    throw new Error(`服务返回了非 JSON 内容：${text.slice(0, 200)}`)
+    throw new Error(t('api.error.nonJson', { detail: text.slice(0, 200) }))
   }
 
   const record = (body ?? {}) as Record<string, unknown>
   if (!record.config) {
     // 凭证校验失败等分支的 body 是 `{error, credentials}`：只有 error 可展示。
     const message =
-      typeof record.error === 'string' ? record.error : `保存失败（HTTP ${response.status}）`
+      typeof record.error === 'string' ? record.error : t('settings.error.saveHttp', { status: response.status })
     throw new Error(message)
   }
   return body as SaveConfigResponse
 }
 
 function StatusPill({ item }: { item: CredentialItem }) {
+  const t = useT()
   return (
     <span className={`badge ${item.ok ? 'st-valid' : item.configured ? 'st-invalid' : 'st-needs_review'}`}>
       <i className="badge-dot" />
-      {item.ok ? '正常' : item.configured ? '异常' : '未配置'}
+      {item.ok
+        ? t('settings.credential.status.ok')
+        : item.configured
+          ? t('settings.credential.status.bad')
+          : t('settings.credential.status.none')}
     </span>
   )
 }
@@ -207,6 +221,7 @@ function PreferenceSelect({
 }) {
   const list = listOf(options, field.options)
   const supported = list.length > 0
+  const t = useT()
   // 后端给了清单但没有当前值（例如配置文件里是别的取值）：把真值原样放进下拉，
   // 不要让控件事先跳到第一个选项、把用户没改过的设置悄悄改掉。
   const stale = supported && Boolean(value) && !list.some((item) => item.value === value)
@@ -214,7 +229,7 @@ function PreferenceSelect({
   return (
     <div className="field">
       <label className="label" htmlFor={`pref-${field.key}`}>
-        {field.label}
+        {t(field.labelKey)}
       </label>
       <select
         id={`pref-${field.key}`}
@@ -223,8 +238,8 @@ function PreferenceSelect({
         disabled={!supported}
         onChange={(e) => onChange(field.key, e.target.value)}
       >
-        {!supported && <option value={value}>{UNSUPPORTED_TEXT}</option>}
-        {stale && <option value={value}>{value}（当前值不在可选项内）</option>}
+        {!supported && <option value={value}>{t('settings.unsupported')}</option>}
+        {stale && <option value={value}>{t('settings.pref.staleOption', { value })}</option>}
         {list.map((item) => (
           <option key={item.value} value={item.value}>
             {item.label}
@@ -233,8 +248,11 @@ function PreferenceSelect({
       </select>
       <span className="dim" style={{ fontSize: 'var(--ds-text-2xs)' }}>
         {supported
-          ? field.hint
-          : `${UNSUPPORTED_TEXT}：后端未返回 options.${field.options}，已禁用且保存时不提交这个键。`}
+          ? t(field.hintKey)
+          : t('settings.pref.unsupportedHint', {
+              unsupported: t('settings.unsupported'),
+              options: field.options,
+            })}
       </span>
     </div>
   )
@@ -258,21 +276,19 @@ function PreferenceGroup({
   values: Record<PreferenceKey, string>
   onChange: (key: PreferenceKey, value: string) => void
 }) {
+  const t = useT()
   const allUnsupported = fields.every((field) => listOf(options, field.options).length === 0)
   return (
     <Section
       eyebrow={eyebrow}
       title={title}
       description={description}
-      extra={<Chip>{STAGE_PREFERENCES}</Chip>}
+      extra={<Chip>{t(STAGE_PREFERENCES_KEY)}</Chip>}
     >
       <Card flush>
         <div className="card-body stack">
           {allUnsupported && (
-            <Notice kind="info">
-              {UNSUPPORTED_TEXT}：后端没有返回 options / preferences（旧后端），本组控件已禁用，
-              保存时也不会提交这些键。
-            </Notice>
+            <Notice kind="info">{t('settings.pref.unsupportedNotice')}</Notice>
           )}
           <div
             style={{
@@ -298,6 +314,7 @@ function PreferenceGroup({
 }
 
 export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
+  const t = useT()
   const [config, setConfig] = useState<ConfigView | null>(null)
   const [report, setReport] = useState<CredentialReport | null>(null)
   const [probing, setProbing] = useState(false)
@@ -347,9 +364,12 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
       const view = await api.config()
       hydrate(view)
     } catch (e) {
-      setMessage({ kind: 'error', text: `读取配置失败：${e instanceof Error ? e.message : e}` })
+      setMessage({
+        kind: 'error',
+        text: t('settings.message.loadFailed', { detail: e instanceof Error ? e.message : String(e) }),
+      })
     }
-  }, [hydrate])
+  }, [hydrate, t])
 
   useEffect(() => {
     void load()
@@ -369,7 +389,10 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
       setReport(await api.credentials(true))
     } catch (e) {
       if (!silent) {
-        setMessage({ kind: 'error', text: `探测失败：${e instanceof Error ? e.message : e}` })
+        setMessage({
+          kind: 'error',
+          text: t('settings.message.probeFailed', { detail: e instanceof Error ? e.message : String(e) }),
+        })
       }
     } finally {
       setProbing(false)
@@ -414,10 +437,12 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
         // 后端明确拒绝（ok:false + message）：原样显示 message，绝不落到成功分支，
         // 也不 hydrate —— 用户刚填的密钥不能被服务端旧值冲掉。
         await probe({ silent: true })
-        setMessage({ kind: 'error', text: result.message || '保存失败：服务端拒绝了这次改动。' })
+        setMessage({ kind: 'error', text: result.message || t('settings.message.saveRejected') })
         return
       }
       hydrate(result.config)
+      // 界面语言本身就是一个保存项：保存成功后立刻切语言，改完 English 当场全站生效。
+      setLang(result.config.preferences?.ui_language)
       await probe({ silent: true })
       setMessage({ kind: 'ok', text: result.message })
       onSaved?.()
@@ -452,10 +477,11 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
     <>
       <div className="page-head">
         <div className="eyebrow">SETTINGS</div>
-        <h1>设置</h1>
+        <h1>{t('settings.hero.title')}</h1>
         <p className="lead">
-          在这里配置模型供应商、凭证与界面偏好。所有内容只写入本机配置文件，不会上传到任何地方。
-          密钥字段留空表示<b>保持原值不变</b>。
+          {t('settings.hero.lead')}
+          <b>{t('settings.hero.leadStrong')}</b>
+          {t('settings.hero.leadTail')}
         </p>
       </div>
 
@@ -469,12 +495,12 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
 
       <Section
         eyebrow="CREDENTIALS"
-        title="凭证健康"
-        description="点「重新探测」会真实请求 GitHub 与模型端点，用来区分「没填」和「填错」。"
+        title={t('settings.credentials.title')}
+        description={t('settings.credentials.desc')}
         extra={
           <button type="button" className="btn btn-secondary btn-sm" onClick={() => void probe()} disabled={probing}>
             {probing ? <Spinner /> : null}
-            重新探测
+            {t('settings.credentials.probe')}
           </button>
         }
       >
@@ -482,7 +508,7 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
           <div className="card-body stack" style={{ gap: 'var(--ds-space-3)' }}>
             {(report?.items ?? []).length === 0 && (
               <p className="muted" style={{ fontSize: 'var(--ds-text-md)' }}>
-                还没有探测结果。点击右上角「重新探测」开始检查。
+                {t('settings.credentials.empty')}
               </p>
             )}
             {report?.items.map((item) => (
@@ -504,7 +530,7 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
                 </p>
                 {!item.ok && item.fix_hint && (
                   <p style={{ marginTop: 6, fontSize: 'var(--ds-text-sm)', color: 'var(--ds-sev-medium)' }}>
-                    修复建议：{item.fix_hint}
+                    {t('settings.credentials.fixHint', { hint: item.fix_hint })}
                   </p>
                 )}
               </div>
@@ -515,16 +541,18 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
 
       <Section
         eyebrow="STAGE 2–4 · PROVIDER & CREDENTIALS"
-        title="模型服务与凭证"
-        description="运行模式（CLI 助手 1/6）在这里只读展示，槽位路由请用 CLI 助手修改。"
-        extra={<Chip>{STAGE_PROVIDER}</Chip>}
+        title={t('settings.provider.title')}
+        description={t('settings.provider.desc')}
+        extra={<Chip>{t(STAGE_PROVIDER_KEY)}</Chip>}
       >
         <Card flush>
           <CardHead
-            title="连接方式"
+            title={t('settings.provider.connection')}
             extra={
               <span className="row" style={{ gap: 'var(--ds-space-2)' }}>
-                {config.runtime_profile && <Chip accent>运行模式 · {config.runtime_profile}</Chip>}
+                {config.runtime_profile && (
+                  <Chip accent>{t('settings.provider.runtime', { profile: config.runtime_profile })}</Chip>
+                )}
                 <Chip>{config.config_path.split(/[\\/]/).pop()}</Chip>
               </span>
             }
@@ -532,7 +560,7 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
           <div className="card-body stack">
             <div className="field">
               <label className="label" htmlFor="provider">
-                供应商预设
+                {t('settings.provider.presetLabel')}
               </label>
               <select
                 id="provider"
@@ -549,23 +577,23 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
                   }
                 }}
               >
-                <option value="custom">custom（自定义端点）</option>
+                <option value="custom">{t('settings.provider.customOption')}</option>
                 {config.available_providers.map((p) => (
                   <option key={p.name} value={p.name}>
-                    {p.display_name}（{p.name}）
+                    {t('settings.provider.presetOption', { display: p.display_name, name: p.name })}
                   </option>
                 ))}
               </select>
               {presetHint && (
                 <span className="dim" style={{ fontSize: 'var(--ds-text-2xs)' }}>
-                  该预设默认端点：{presetHint}
+                  {t('settings.provider.presetHint', { url: presetHint })}
                 </span>
               )}
             </div>
 
             <div className="field">
               <label className="label" htmlFor="base-url">
-                Base URL（OpenAI 兼容端点，通常以 /v1 结尾）
+                {t('settings.provider.baseUrlLabel')}
               </label>
               <input
                 id="base-url"
@@ -580,7 +608,7 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
             <div className="row row-wrap" style={{ gap: 'var(--ds-space-4)' }}>
               <div className="field" style={{ flex: '1 1 260px' }}>
                 <label className="label" htmlFor="model">
-                  模型名
+                  {t('settings.provider.modelLabel')}
                 </label>
                 <input
                   id="model"
@@ -593,7 +621,7 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
               </div>
               <div className="field" style={{ flex: '0 0 180px' }}>
                 <label className="label" htmlFor="api-format">
-                  API 格式
+                  {t('settings.provider.formatLabel')}
                 </label>
                 <select
                   id="api-format"
@@ -612,9 +640,11 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
 
             <div className="field">
               <label className="label" htmlFor="api-key">
-                模型 API Key
+                {t('settings.provider.apiKeyLabel')}
                 {config.api_key_set && (
-                  <span className="dim"> — 当前已配置（{config.api_key_masked}），留空则不改动</span>
+                  <span className="dim">
+                    {t('settings.provider.configuredNote', { masked: config.api_key_masked })}
+                  </span>
                 )}
               </label>
               <input
@@ -624,7 +654,7 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
                 value={apiKey}
                 spellCheck={false}
                 autoComplete="off"
-                placeholder={config.api_key_set ? '留空表示保持现有密钥' : 'sk-…'}
+                placeholder={config.api_key_set ? t('settings.provider.apiKeyKeep') : 'sk-…'}
                 onChange={(e) => setApiKey(e.target.value)}
               />
             </div>
@@ -634,8 +664,7 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
                 GitHub Token
                 {config.github_token_set && (
                   <span className="dim">
-                    {' '}
-                    — 当前已配置（{config.github_token_masked}），留空则不改动
+                    {t('settings.provider.configuredNote', { masked: config.github_token_masked })}
                   </span>
                 )}
               </label>
@@ -646,11 +675,11 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
                 value={githubToken}
                 spellCheck={false}
                 autoComplete="off"
-                placeholder={config.github_token_set ? '留空表示保持现有 Token' : 'ghp_…'}
+                placeholder={config.github_token_set ? t('settings.provider.tokenKeep') : 'ghp_…'}
                 onChange={(e) => setGithubToken(e.target.value)}
               />
               <span className="dim" style={{ fontSize: 'var(--ds-text-2xs)' }}>
-                只需 repo 权限；用于读取 PR 元数据与 diff。
+                {t('settings.provider.tokenHint')}
               </span>
             </div>
           </div>
@@ -659,9 +688,9 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
 
       <Section
         eyebrow="BEHAVIOUR · WEB ONLY"
-        title="成本与并发"
-        description="CLI 配置助手没有这 8 项，它们只在 Web 设置页可改（后端白名单已支持）。"
-        extra={<Chip>{STAGE_WEB_ONLY}</Chip>}
+        title={t('settings.cost.title')}
+        description={t('settings.cost.desc')}
+        extra={<Chip>{t(STAGE_WEB_ONLY_KEY)}</Chip>}
       >
         <Card flush>
           <div className="card-body stack">
@@ -678,7 +707,7 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
                 return (
                   <div className="field" key={field.key}>
                     <label className="label" htmlFor={field.key}>
-                      {field.label}
+                      {t(field.labelKey)}
                     </label>
                     <input
                       id={field.key}
@@ -693,11 +722,11 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
                       }
                     />
                     <span className="dim" style={{ fontSize: 'var(--ds-text-2xs)' }}>
-                      {field.hint}
+                      {t(field.hintKey)}
                       {range && (range.min !== undefined || range.max !== undefined) && (
                         <>
                           {' '}
-                          （允许范围 {range.min ?? '-∞'} ~ {range.max ?? '+∞'}）
+                          {t('settings.cost.range', { min: range.min ?? '-∞', max: range.max ?? '+∞' })}
                         </>
                       )}
                     </span>
@@ -724,10 +753,10 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
                     }
                   />
                   <span>
-                    <span style={{ fontSize: 'var(--ds-text-md)' }}>{field.label}</span>
+                    <span style={{ fontSize: 'var(--ds-text-md)' }}>{t(field.labelKey)}</span>
                     <br />
                     <span className="dim" style={{ fontSize: 'var(--ds-text-2xs)' }}>
-                      {field.hint}
+                      {t(field.hintKey)}
                     </span>
                   </span>
                 </label>
@@ -739,8 +768,8 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
 
       <PreferenceGroup
         eyebrow="STAGE 5 · UI & OUTPUT"
-        title="界面与输出"
-        description="与 CLI 助手第 5 阶段同一份 preferences：Web 改完，CLI 助手下次打开就是新值。"
+        title={t('settings.group.interface.title')}
+        description={t('settings.group.interface.desc')}
         fields={INTERFACE_FIELDS}
         options={config.options}
         values={preferences}
@@ -749,8 +778,8 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
 
       <PreferenceGroup
         eyebrow="STAGE 5 · REVIEW PREFERENCES"
-        title="审查偏好"
-        description="CLI 助手里这两项也在第 5 阶段（紧跟在审查工作台之后），Web 拆成一组便于查找。"
+        title={t('settings.group.review.title')}
+        description={t('settings.group.review.desc')}
         fields={REVIEW_FIELDS}
         options={config.options}
         values={preferences}
@@ -759,16 +788,14 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
 
       <Section
         eyebrow="STAGE 6 · SAVE"
-        title="保存"
-        description="对应 CLI 助手的第 6 阶段「确认保存」。"
-        extra={<Chip>CLI 助手 6/6</Chip>}
+        title={t('settings.save.title')}
+        description={t('settings.save.desc')}
+        extra={<Chip>{t(STAGE_SAVE_KEY)}</Chip>}
       >
         <Card>
           <div className="stack">
             <p className="muted" style={{ fontSize: 'var(--ds-text-md)', lineHeight: 1.65 }}>
-              保存会把密钥以明文写入上方的配置文件（这是本机工具，不做额外加密）。
-              「校验后保存」会先真实请求一次 GitHub 与模型端点，任一不通就拒绝写入，
-              避免把错误配置落盘。界面偏好与上面其余改动会一并提交。
+              {t('settings.save.body')}
             </p>
             <div className="row row-wrap">
               <button
@@ -778,7 +805,7 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
                 onClick={() => void save(true)}
               >
                 {saving ? <Spinner /> : null}
-                校验后保存
+                {t('settings.save.validate')}
               </button>
               <button
                 type="button"
@@ -786,7 +813,7 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
                 disabled={saving}
                 onClick={() => void save(false)}
               >
-                直接保存
+                {t('settings.save.direct')}
               </button>
               <button
                 type="button"
@@ -794,7 +821,7 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
                 disabled={saving}
                 onClick={() => void load()}
               >
-                放弃改动
+                {t('settings.save.discard')}
               </button>
             </div>
           </div>
