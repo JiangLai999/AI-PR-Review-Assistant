@@ -94,8 +94,11 @@ NODE_CANDIDATES = (
     pathlib.Path(os.environ.get("ProgramFiles", "")) / "nodejs/node.exe",
     pathlib.Path(os.environ.get("LOCALAPPDATA", "")) / "Programs/nodejs/node.exe",
 )
-# 用户指定的协作模型（provider/model 形式，opencode 必须显式给 -m，否则用默认模型）
-OPENCODE_MODEL = "opencode/mimo-v2.6-flash-free"
+# 用户指定的协作模型（provider/model 形式，opencode 必须显式给 -m，否则用默认模型）。
+# `Space Bunny Free`（OpenCode Zen）的真实 id 是 `opencode/space-bunny-free`；
+# 档位用 `--variant`（provider-specific reasoning effort）传，见 _agent_command。
+OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL", "opencode/space-bunny-free")
+OPENCODE_VARIANT = os.environ.get("OPENCODE_VARIANT", "max")
 
 DISPATCH_PROMPT = """你是 {root} 项目的协作 agent（{agent}）。任务 {task_id} 已经由调度器用你的名义认领。
 
@@ -206,6 +209,9 @@ def _agent_command(
             str(ROOT),
             "-m",
             OPENCODE_MODEL,
+            # 档位与模型分开传：`space-bunny-free` 的 max 档就是这里的 variant。
+            "--variant",
+            OPENCODE_VARIANT,
             prompt,
         ], env
     if agent == "workbuddy":

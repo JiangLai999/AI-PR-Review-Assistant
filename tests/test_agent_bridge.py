@@ -27,6 +27,24 @@ def bridge(tmp_path: Path, monkeypatch):
     return module
 
 
+def test_bus_gitignore_keeps_runs_ignored(bridge) -> None:
+    """`ensure_bus()` 不得把 `runs/` 那行删掉。
+
+    历史 bug：常量漏了 `runs/`，而 `ensure_bus()` 一旦发现文件内容与常量不同就重写，
+    于是**每条总线命令都会删一次**，headless 调度器的 agent 日志（`runs/*.log`）
+    随即暴露成待提交文件，仓库里反复出现这条噪声 diff。
+    """
+    bridge.ensure_bus()
+
+    first = (bridge.BUS / ".gitignore").read_text(encoding="utf-8")
+    assert "runs/" in first
+    assert "tasks/" in first and "reports/" in first and "locks/" in first
+
+    # 幂等：再跑一次内容不变（否则 mtime 抖动会一直产生假 diff）。
+    bridge.ensure_bus()
+    assert (bridge.BUS / ".gitignore").read_text(encoding="utf-8") == first
+
+
 def test_task_id_cannot_escape_the_bus(bridge) -> None:
     for bad in ("../../evil", "a/b", "..", "", "x" * 65, "a b"):
         with pytest.raises(SystemExit, match="invalid task id"):

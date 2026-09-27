@@ -15,12 +15,19 @@ HTTP 路由与 code ↔ HTTP 映射在 `web_server._handle_chat`（本模块不�
 
     200 { "reply": str, "model": str,
           "usage": {"prompt_tokens","completion_tokens","total_tokens"} | None,
-          "context_meta": {"bound_run", "token_estimate", "sections", "truncated", "note"} }
+          "context_meta": {"bound_run", "token_estimate", "sections", "truncated", "note"},
+          "duration_ms": int, "language": str,
+          "run_id": str, "persisted": bool,
+          "turn_id": int?, "question_turn_id": int?, "created_at": str? }
 
     text 缺失        -> ChatError("invalid_request", ...)
     run_id 查不到    -> ChatError("not_found", ...)
     没配模型 Key      -> ChatError("missing_api_key", ...)
     上游模型报错      -> ChatError("chat_failed", ...)
+
+`turn_id` / `question_turn_id` / `created_at` 只在**绑定 run**且落库成功时出现
+（`persisted=true`）；未绑定 run 的普通对话没有归属，一律 `persisted=false` 且不落库。
+落库失败不影响回答本身（见 `_persist_turn`）。
 
 错误码 → HTTP 由 `web_server._CHAT_STATUS_CODES` 负责（invalid_request 400 /
 not_found 404 / missing_api_key 503 / chat_failed 502）。
@@ -28,6 +35,7 @@ not_found 404 / missing_api_key 503 / chat_failed 502）。
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from ai_pr_review.config import (
@@ -38,8 +46,10 @@ from ai_pr_review.config import (
     resolve_chat_slot,
 )
 from ai_pr_review.services.model_providers.factory import create_model_provider
+from ai_pr_review.services.i18n_text import response_language_instruction
 from ai_pr_review.services.result_store import ResultStore
 from ai_pr_review.services.review_context import (
+    answer_format_rules,
     build_review_context_meta,
     estimate_tokens,
     wrap_review_context,
@@ -90,9 +100,14 @@ async def answer_with_context(
     if not question:
         raise ChatError("invalid_request", "text is required")
 
+    # 回答语言 = `preferences.language`（与 CLI `_send_chat_message` 同一口径）。
+    # 界面语言（ui_language）只管界面文案，不管模型说什么语言。
+    answer_language = str(getattr(config.preferences, "language", "") or "")
+
     key = str(run_id or "").strip()
     context_text = ""
     context_meta = _plain_context_meta()
+    store: ResultStore | None = None
     if key:
         store = ResultStore(config.result_store)
         if store.get_run_summary(key) is None or store.get_result(key) is None:
@@ -102,12 +117,12 @@ async def answer_with_context(
     provider_config = _chat_provider_config(config)
     _require_api_key(config, provider_config)
 
+    started = time.perf_counter()
     chat_options: dict[str, Any] = {
         "max_tokens": config.ai_client.max_tokens,
         "timeout_seconds": config.ai_client.timeout_seconds,
+        "system_prompt": _system_prompt(key, context_text, answer_language),
     }
-    if context_text:
-        chat_options["system_prompt"] = wrap_review_context(key, context_text)
     if provider_config.name.lower() in LOCAL_PROVIDER_NAMES:
         chat_options["reasoning_effort"] = "none"
 
@@ -116,13 +131,68 @@ async def answer_with_context(
         response = await provider.chat([{"role": "user", "content": question}], **chat_options)
     except Exception as exc:
         raise ChatError("chat_failed", f"模型调用失败：{exc}") from exc
+    duration_ms = int((time.perf_counter() - started) * 1000)
 
-    return {
+    payload: dict[str, Any] = {
         "reply": response.text,
         "model": str(provider_config.model_name or provider_config.name),
         "usage": _usage_payload(response),
         "context_meta": context_meta,
+        "duration_ms": duration_ms,
+        "language": answer_language or "zh-CN",
     }
+    _persist_turn(store, key, question, payload)
+    return payload
+
+
+def _system_prompt(run_id: str, context_text: str, language: str) -> str:
+    """组装 system prompt：上下文（可选）+ 诚实约束/排版规则 + 回复语言。
+
+    三段的分工：
+
+    - 绑定 run 时 `wrap_review_context` 给出「审查上下文 + 诚实约束 + 排版规则」；
+    - 未绑定 run 的普通对话**也要**排版规则（这是排版最乱的分支）；
+    - 最后统一追加回复语言指令 —— 与 CLI `_send_chat_message` 同一份文案。
+    """
+    blocks: list[str] = []
+    if context_text:
+        blocks.append(wrap_review_context(run_id, context_text, language=language))
+    else:
+        blocks.append(answer_format_rules(language))
+    blocks.append(response_language_instruction(language))
+    return "\n\n".join(blocks)
+
+
+def _persist_turn(
+    store: ResultStore | None, run_id: str, question: str, payload: dict[str, Any]
+) -> None:
+    """把这一轮的「问 + 答」落库；未绑定 run 的普通对话不落（没有归属）。
+
+    落库失败**不得**让用户丢回答：回答已经拿到了，写历史是附加能力，
+    所以这里吞掉异常，只把结果标记成 `persisted=False`。
+    """
+    payload["run_id"] = run_id
+    payload["persisted"] = False
+    if store is None or not run_id:
+        return
+    try:
+        question_turn = store.save_chat_turn(run_id, role="user", content=question)
+        answer_turn = store.save_chat_turn(
+            run_id,
+            role="assistant",
+            content=str(payload.get("reply") or ""),
+            model=str(payload.get("model") or ""),
+            usage=payload.get("usage") or {},
+            context_meta=payload.get("context_meta") or {},
+            duration_ms=payload.get("duration_ms"),
+        )
+    except Exception:  # pragma: no cover - 只在库不可写等极端情况下触发
+        return
+    payload["persisted"] = True
+    payload["question_turn_id"] = question_turn.get("turn_id")
+    payload["turn_id"] = answer_turn.get("turn_id")
+    payload["created_at"] = answer_turn.get("created_at")
+
 
 
 # ---------------------------------------------------------------------------

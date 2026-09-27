@@ -70,6 +70,8 @@ def server(tmp_path):
             "base": f"http://127.0.0.1:{httpd.server_address[1]}",
             "run_id": run_id,
             "config_path": tmp_path / "config.json",
+            # 供追问历史用例直接种数据（HTTP 层只读/清，写入由 /api/chat 落库）
+            "store": store,
             # 供测试断言"接口不得回传明文密钥"使用
             "secrets": [
                 value
@@ -220,6 +222,114 @@ class TestReport:
 
         assert status == 400
         assert "run_id" in json.loads(body)["error"]
+
+
+class TestChatHistory:
+    """追问历史的读/清两条端点（写入侧在 /api/chat，由 web_chat 负责落库）。"""
+
+    def _seed(self, server) -> None:
+        store = server["store"]
+        run_id = server["run_id"]
+        store.save_chat_turn(run_id, role="user", content="这次审查有几个问题？")
+        store.save_chat_turn(
+            run_id,
+            role="assistant",
+            content="两个。",
+            model="deepseek-flash",
+            usage={"total_tokens": 42},
+            duration_ms=1500,
+        )
+
+    def test_history_returns_turns_in_order(self, server):
+        self._seed(server)
+
+        status, body = call(server["base"], "GET", f"/api/chat/history?run_id={server['run_id']}")
+
+        payload = json.loads(body)
+        assert status == 200, body
+        assert payload["run_id"] == server["run_id"]
+        assert payload["count"] == 2
+        assert [turn["role"] for turn in payload["turns"]] == ["user", "assistant"]
+        assert payload["turns"][1]["usage"] == {"total_tokens": 42}
+        assert payload["turns"][1]["duration_ms"] == 1500
+
+    def test_history_is_empty_for_run_without_asks(self, server):
+        status, body = call(server["base"], "GET", f"/api/chat/history?run_id={server['run_id']}")
+
+        assert status == 200
+        assert json.loads(body) == {"run_id": server["run_id"], "count": 0, "turns": []}
+
+    def test_history_requires_run_id(self, server):
+        status, body = call(server["base"], "GET", "/api/chat/history")
+
+        assert status == 400
+        assert "run_id" in json.loads(body)["error"]
+
+    def test_history_rejects_unknown_run(self, server):
+        """未知 run 必须 404：不能让前端把"run 不存在"当成"这次没追问过"。"""
+        status, body = call(server["base"], "GET", "/api/chat/history?run_id=nope")
+
+        assert status == 404
+        assert "Unknown run_id" in json.loads(body)["error"]
+
+    def test_history_rejects_bad_limit(self, server):
+        status, body = call(
+            server["base"], "GET", f"/api/chat/history?run_id={server['run_id']}&limit=0"
+        )
+
+        assert status == 400
+        assert "limit" in json.loads(body)["error"]
+
+    def test_history_honours_limit(self, server):
+        self._seed(server)
+
+        status, body = call(
+            server["base"], "GET", f"/api/chat/history?run_id={server['run_id']}&limit=1"
+        )
+
+        payload = json.loads(body)
+        assert status == 200
+        assert [turn["content"] for turn in payload["turns"]] == ["这次审查有几个问题？"]
+
+    def test_clear_removes_turns_and_is_idempotent(self, server):
+        self._seed(server)
+
+        status, body = call(
+            server["base"], "POST", "/api/chat/history/clear", {"run_id": server["run_id"]}
+        )
+        first = json.loads(body)
+
+        assert status == 200, body
+        assert first == {"ok": True, "run_id": server["run_id"], "deleted": 2}
+        _, after = call(server["base"], "GET", f"/api/chat/history?run_id={server['run_id']}")
+        assert json.loads(after)["count"] == 0
+
+        status, body = call(
+            server["base"], "POST", "/api/chat/history/clear", {"run_id": server["run_id"]}
+        )
+        assert status == 200
+        assert json.loads(body)["deleted"] == 0
+
+    def test_clear_requires_run_id_and_known_run(self, server):
+        status, body = call(server["base"], "POST", "/api/chat/history/clear", {})
+        assert status == 400
+        assert "run_id" in json.loads(body)["error"]
+
+        status, body = call(
+            server["base"], "POST", "/api/chat/history/clear", {"run_id": "nope"}
+        )
+        assert status == 404
+        assert "Unknown run_id" in json.loads(body)["error"]
+
+    def test_report_payload_carries_chat_turns(self, server):
+        """报告页要能就地展示追问记录，所以 /api/report 必须一并返回。"""
+        self._seed(server)
+
+        status, body = call(server["base"], "GET", f"/api/report?run_id={server['run_id']}")
+
+        payload = json.loads(body)
+        assert status == 200, body
+        assert [turn["role"] for turn in payload["chat_turns"]] == ["user", "assistant"]
 
 
 class TestFeedback:

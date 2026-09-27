@@ -14,9 +14,22 @@
 
 from __future__ import annotations
 
+
 def is_english(language: object) -> bool:
     """与前端同口径：以 ``en`` 开头即英文（``en`` / ``en-US`` / ``en_GB``…）。"""
     return str(language or "").strip().lower().startswith("en")
+
+
+def response_language_instruction(language: object) -> str:
+    """「模型该用什么语言回答」这一句 system prompt。
+
+    CLI 的 ``_send_chat_message`` 与 Web 的 `/api/chat` **共用同一份文案**：
+    两端的回答语言必须由同一个设置（``preferences.language``）决定，否则同一次
+    审查在 CLI 里答中文、在 Web 里答英文，用户会以为模型换了。
+    """
+    if is_english(language):
+        return "Respond in English unless the user explicitly asks for another language."
+    return "请默认使用中文回答，除非用户明确要求使用其他语言。"
 
 
 def review_summary(language: object, findings: int) -> str:

@@ -110,6 +110,7 @@ from ai_pr_review.services.agent import (
 )
 from ai_pr_review.services.exceptions import AIClientError, PRFetcherError
 from ai_pr_review.services.hybrid_orchestrator import HybridReviewOrchestrator
+from ai_pr_review.services.i18n_text import response_language_instruction
 from ai_pr_review.services.model_providers.factory import create_model_provider
 from ai_pr_review.services.pr_fetcher import PRFetcher
 from ai_pr_review.services.prompt_assembler import ReviewResult
@@ -1805,10 +1806,12 @@ def _missing_api_key_message(provider_name: str) -> str:
 
 
 def _response_language_instruction(language: str) -> str:
-    """根据语言设置生成模型回复语言指令。"""
-    if language.lower().startswith("en"):
-        return "Respond in English unless the user explicitly asks for another language."
-    return "请默认使用中文回答，除非用户明确要求使用其他语言。"
+    """根据语言设置生成模型回复语言指令。
+
+    文案已抽到 `services.i18n_text`：Web 的 `/api/chat` 用同一份，避免两端
+    回答语言漂移。这里保留函数名以免打断既有调用点与测试。
+    """
+    return response_language_instruction(language)
 
 
 def _chat_title(config: AppConfig) -> str:

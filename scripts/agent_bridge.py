@@ -39,7 +39,10 @@ LOCK_TTL_SECONDS = 6 * 60 * 60
 TERMINAL_STATUSES = frozenset({"completed", "blocked", "needs-review"})
 # A report may be re-sent while the task is still open, but never once it is done.
 REPORTABLE_STATUSES = frozenset({"claimed", "blocked", "needs-review"})
-_GITIGNORE = "tasks/\nreports/\nlocks/\n"
+# `runs/` 是 headless 调度器写的 agent 日志（大、机器相关、可能含上下文片段），
+# 必须一直忽略。它曾经漏在这里：`ensure_bus()` 每次对比发现不一致就重写文件，
+# 于是每条总线命令都会把 `runs/` 那行悄悄删掉一次（仓库历史上反复出现）。
+_GITIGNORE = "tasks/\nreports/\nlocks/\nruns/\n"
 
 
 def now() -> str:

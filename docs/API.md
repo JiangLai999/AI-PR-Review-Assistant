@@ -224,7 +224,9 @@ pr-review serve            # 默认 http://127.0.0.1:8787
 | 16 | POST | `/api/jobs/{id}/cancel` | 取消任务 |
 | 17 | POST | `/api/feedback` | 人工反馈落库 |
 | 18 | POST | `/api/publish` | 预览 / 发布 GitHub 评论 |
-| 19 | POST | `/api/chat` | 对某次审查追问（无状态；带 `run_id` 注入审查上下文） |
+| 19 | POST | `/api/chat` | 对某次审查追问（带 `run_id` 注入上下文并落库；不带则普通对话） |
+| 20 | GET | `/api/chat/history` | 某次审查的追问历史（问题 + 回答） |
+| 21 | POST | `/api/chat/history/clear` | 清空某次审查的追问历史（幂等） |
 | — | GET | `/static/*` | 前端构建产物（含 SPA fallback） |
 
 ---
@@ -574,8 +576,9 @@ curl -X POST http://127.0.0.1:8787/api/publish \
 
 ### POST `/api/chat`
 
-对**某次已完成的审查**追问（例如"第 3 条为什么判中风险？"）。无状态：不落库、不建会话，
-每次请求自带 `run_id` 与问题。
+对**某次已完成的审查**追问（例如"第 3 条为什么判中风险？"）。每次请求自带 `run_id`
+与问题；**带 `run_id` 的追问会落库**（见「追问历史」一节），不带 `run_id` 的普通
+对话无归属、不落库。
 
 请求体：
 
@@ -589,7 +592,11 @@ curl -X POST http://127.0.0.1:8787/api/publish \
   （复用 CLI 侧的 `services/review_context.py`，受 `preferences.chat_context_budget` 约束）；
   上下文超预算时**先裁 findings、再裁摘要**，并在 `context_meta.truncated` + `note` 里说明。
 - 不带 `run_id` 时退化为普通对话（`context_meta.bound_run` 为 `null`）。
+- system prompt 恒定注入两段：**排版规则**（前端是受限 Markdown 渲染器：只认三级标题、
+  列表、加粗、行内码、围栏代码块、表格、引用；禁止 HTML/图片）与**回复语言**指令
+  （取自 `preferences.language`，与 CLI chat 同一份文案）。绑定 run 时另有审查上下文块。
 - `usage` 直接来自模型返回；拿不到就为 `null`（不估算、不编造）。
+- `duration_ms` 是本次模型调用的墙钟耗时；`persisted=true` 表示这一轮已写入追问历史。
 
 响应要点：
 
@@ -598,6 +605,13 @@ curl -X POST http://127.0.0.1:8787/api/publish \
   "reply": "…",
   "model": "deepseek-chat",
   "usage": { "prompt_tokens": 812, "completion_tokens": 120, "total_tokens": 932 },
+  "duration_ms": 1820,
+  "language": "zh-CN",
+  "run_id": "<run_id>",
+  "persisted": true,
+  "turn_id": 2,
+  "question_turn_id": 1,
+  "created_at": "2026-09-27 12:00:00",
   "context_meta": {
     "bound_run": "<run_id>",
     "token_estimate": 382,
@@ -607,6 +621,8 @@ curl -X POST http://127.0.0.1:8787/api/publish \
   }
 }
 ```
+
+`turn_id` / `question_turn_id` / `created_at` 只在 `persisted=true` 时出现。
 
 错误码：
 
@@ -623,6 +639,59 @@ curl -X POST http://127.0.0.1:8787/api/chat \
   -H "Content-Type: application/json" \
   -d '{"run_id":"<run_id>","text":"这次审查有几个 finding？"}'
 ```
+
+### GET `/api/chat/history`
+
+读取某次审查的追问历史（问题与回答成对，按 `turn_index` 升序）。
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `run_id` | 是 | 审查 run id |
+| `limit` | 否 | 条数上限，1–1000，默认 200 |
+
+```json
+{
+  "run_id": "<run_id>",
+  "count": 2,
+  "turns": [
+    { "turn_id": 1, "turn_index": 1, "role": "user", "content": "这次审查有几个问题？",
+      "model": "", "usage": {}, "context_meta": {}, "duration_ms": null,
+      "created_at": "2026-09-27 12:00:00" },
+    { "turn_id": 2, "turn_index": 2, "role": "assistant", "content": "两个。",
+      "model": "deepseek-flash", "usage": { "total_tokens": 150 },
+      "context_meta": { "bound_run": "<run_id>" }, "duration_ms": 1820,
+      "created_at": "2026-09-27 12:00:02" }
+  ]
+}
+```
+
+| 状态码 | 含义 |
+|--------|------|
+| 400 | `run_id` 缺失，或 `limit` 非 1–1000 的整数 |
+| 404 | `run_id` 查不到（"run 不存在"必须与"这次没追问过"区分开） |
+
+### POST `/api/chat/history/clear`
+
+清空某次审查的追问记录（幂等：没有记录时返回 `deleted: 0`）。
+
+用 POST 而非 DELETE：本服务的写端点统一走 `do_POST` 顶部的 Content-Type / Origin
+跨站守卫，单独开 DELETE 通道等于绕开这层防护。
+
+请求体与响应：
+
+```json
+{ "run_id": "<run_id>" }
+```
+
+```json
+{ "ok": true, "run_id": "<run_id>", "deleted": 2 }
+```
+
+| 状态码 | 含义 |
+|--------|------|
+| 400 | `run_id` 缺失 |
+| 404 | `run_id` 查不到 |
+| 415 | 跨站或非 JSON |
 
 ---
 

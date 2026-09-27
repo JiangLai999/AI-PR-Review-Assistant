@@ -27,6 +27,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from ai_pr_review.services.i18n_text import is_english
 from ai_pr_review.services.post_processor import SEVERITY_ORDER
 
 # 4 字符 ≈ 1 token（§9.D 的预算口径）。
@@ -56,6 +57,43 @@ CONTEXT_RULES = (
     "2. 引用 finding 时必须给出「文件:行」与严重度；\n"
     '3. 上下文未包含的内容（例如未展示的完整源码）必须明确说明"需要查看源码"，不得臆测。'
 )
+
+# 「追问审查」回答的排版规则（双语）。前端用**受限** Markdown 渲染器展示回答，
+# 下面的白名单/黑名单就是渲染器的边界：白名单外的语法（HTML、图片、脚注）会被
+# 当纯文本或整段丢弃，模型只有照着写才渲染得出来。与 CONTEXT_RULES 一样冻结文案，
+# `web_chat` 只负责拼接；英文分支必须**逐条对应**中文分支，条款序号一一对齐。
+ANSWER_FORMAT_RULES_ZH = (
+    "回答排版规则（前端是受限 Markdown 渲染器，只能识别下列语法）：\n"
+    "1. 结论先行：第一行用一句话给出结论，不要开场寒暄、不要复述问题；\n"
+    "2. 只用这些语法：#/##/### 三级以内标题、- 或 1. 列表、**加粗**、`行内代码`、"
+    "围栏代码块（``` 开头必须标注语言）、表格（最多 4 列）、> 引用；\n"
+    "3. 禁止 HTML 标签、禁止图片语法（如 ![](url)）、禁止脚注与 HTML 表格；\n"
+    "4. 引用 finding 必须给出「文件:行」与严重度；\n"
+    "5. 代码块之外的正文不超过 400 字；代码块不超过 30 行，超长只给关键片段；\n"
+    '6. 上下文没有的信息必须说明"需要查看源码"，不得臆测。'
+)
+
+ANSWER_FORMAT_RULES_EN = (
+    "Answer formatting rules (the frontend is a restricted Markdown renderer that only "
+    "understands the syntax below):\n"
+    "1. Conclusion first: put the one-sentence conclusion on the first line; no greetings, "
+    "no restating the question;\n"
+    "2. Use only these constructs: headings #/##/### (three levels max), - or 1. lists, "
+    "**bold**, `inline code`, fenced code blocks (always tag the language after the opening "
+    "```), tables (4 columns max), > blockquotes;\n"
+    "3. No HTML tags, no image syntax (such as ![](url)), no footnotes or HTML tables;\n"
+    "4. Every finding you cite must include its `file:line` and severity;\n"
+    "5. Keep prose outside code blocks under 400 words; keep code blocks under 30 lines and "
+    "show only the key excerpt when longer;\n"
+    "6. When the context does not contain the answer, say that the source code must be "
+    "inspected; never speculate."
+)
+
+
+def answer_format_rules(language: str | None) -> str:
+    """按语言选排版规则：`en*` → 英文，其余（含 `None`/空串）→ 中文。"""
+    return ANSWER_FORMAT_RULES_EN if is_english(language) else ANSWER_FORMAT_RULES_ZH
+
 
 # 裁剪提示里给用户指路用的确定性命令（零成本、离线可用的 `/explain`）。
 TRIM_HINT_COMMAND = "/explain"
@@ -166,12 +204,16 @@ def build_review_context_meta(
     return ReviewContext(text=text, tokens=estimate_tokens(text), budget=budget, trimmed=trimmed)
 
 
-def wrap_review_context(run_id: str, context: str) -> str:
-    """把上下文包进注入片段（§9.2 C）：上下文块 + 诚实约束。"""
+def wrap_review_context(run_id: str, context: str, *, language: str | None = "zh-CN") -> str:
+    """把上下文包进注入片段（§9.2 C）：上下文块 + 诚实约束 + 排版规则。
+
+    `language` 只加关键字参数且默认 `zh-CN`（现状），既有调用方行为不变；
+    按 `preferences.ui_language` 传入即可让回答格式与界面语言一致。
+    """
     return (
         "你正在协助分析一次 PR 审查结果。以下是本次会话绑定的审查上下文：\n"
         f'<review_context run_id="{run_id}">\n{context}\n</review_context>\n'
-        f"{CONTEXT_RULES}"
+        f"{CONTEXT_RULES}\n\n{answer_format_rules(language)}"
     )
 
 

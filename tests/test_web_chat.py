@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from ai_pr_review import web_chat
@@ -161,7 +163,10 @@ async def test_plain_chat_without_run_has_empty_context_meta(tmp_path, monkeypat
         "truncated": False,
         "note": "",
     }
-    assert "system_prompt" not in provider.kwargs
+    # 没有绑定 run → 不注入审查上下文块，但排版规则与回复语言仍然要发
+    # （这是 2026-09-27 之后的契约：普通对话也要受格式约束）。
+    assert "<review_context" not in provider.system_prompt
+    assert "回答排版规则" in provider.system_prompt
     assert provider.messages == [{"role": "user", "content": "你好"}]
 
 
@@ -225,7 +230,10 @@ async def test_over_budget_truncates_and_notes(tmp_path, monkeypatch):
     assert "run_summary" in meta["note"]
     assert meta["sections"] == []
     assert meta["token_estimate"] == 0
-    assert "system_prompt" not in provider.kwargs
+    # 上下文被裁空 → 不得再注入 review_context 块（空块会误导模型），
+    # 但排版规则/回复语言照发：这是"没有上下文"而不是"没有约束"。
+    assert "<review_context" not in provider.system_prompt
+    assert "回答排版规则" in provider.system_prompt
     assert payload["reply"] == "只按问题回答"
 
 
@@ -256,3 +264,128 @@ async def test_local_slot_without_key_is_allowed(tmp_path, monkeypatch):
     assert payload["usage"] is None
     # 本地思考模型压进内容通道（与 CLI chat 同口径），且不因缺 Key 被拒
     assert provider.kwargs["reasoning_effort"] == "none"
+
+
+# ---------------------------------------------------------------------------
+# system prompt 组装：排版规则 + 回复语言
+# ---------------------------------------------------------------------------
+
+
+async def test_plain_chat_still_gets_format_rules(tmp_path, monkeypatch):
+    """未绑定 run 的普通对话没有审查上下文，但**必须有排版规则**（这段最乱）。"""
+    config = _config(tmp_path)
+    provider = _FakeProvider(reply="结论：没问题。")
+    _stub(monkeypatch, provider)
+
+    await answer_with_context(config, text="你好")
+
+    prompt = provider.system_prompt
+    assert "回答排版规则" in prompt
+    assert "禁止 HTML" in prompt
+    assert "请默认使用中文回答" in prompt
+    # 没有绑定 run 就不该出现审查上下文块
+    assert "<review_context" not in prompt
+
+
+async def test_bound_chat_keeps_honesty_rules_and_adds_format_rules(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    run_id = _save_run(config)
+    provider = _FakeProvider(reply="高风险原因…")
+    _stub(monkeypatch, provider)
+
+    await answer_with_context(config, run_id=run_id, text="为什么判高风险？")
+
+    prompt = provider.system_prompt
+    assert f'<review_context run_id="{run_id}">' in prompt
+    assert "[L1 运行摘要]" in prompt
+    # 既有诚实约束不能被排版规则挤掉
+    assert "只依据上面的审查上下文回答" in prompt
+    assert "回答排版规则" in prompt
+
+
+async def test_answer_language_follows_preferences_language(tmp_path, monkeypatch):
+    """回答语言跟 `preferences.language`（模型回复语言），不是界面语言。"""
+    config = _config(tmp_path)
+    config.preferences.ui_language = "zh-CN"
+    config.preferences.language = "en-US"
+    provider = _FakeProvider(reply="Conclusion first.")
+    _stub(monkeypatch, provider)
+
+    payload = await answer_with_context(config, text="hi")
+
+    prompt = provider.system_prompt
+    assert "Answer formatting rules" in prompt
+    assert "Respond in English unless the user explicitly asks" in prompt
+    assert "回答排版规则" not in prompt
+    assert payload["language"] == "en-US"
+
+
+# ---------------------------------------------------------------------------
+# 追问落库
+# ---------------------------------------------------------------------------
+
+
+async def test_bound_chat_persists_both_turns(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    run_id = _save_run(config)
+    provider = _FakeProvider(
+        reply="两个问题：一个中风险，一个低风险。",
+        usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    )
+    _stub(monkeypatch, provider)
+
+    payload = await answer_with_context(config, run_id=run_id, text="这次审查有几个问题？")
+
+    assert payload["persisted"] is True
+    assert payload["run_id"] == run_id
+    assert isinstance(payload["turn_id"], int)
+    assert payload["created_at"]
+    turns = ResultStore(config=config.result_store).list_chat_turns(run_id)
+    assert [turn["role"] for turn in turns] == ["user", "assistant"]
+    assert turns[0]["content"] == "这次审查有几个问题？"
+    assert turns[1]["content"] == payload["reply"]
+    assert turns[1]["model"] == payload["model"]
+    assert turns[1]["usage"]["total_tokens"] == 15
+    assert turns[1]["context_meta"]["bound_run"] == run_id
+
+
+async def test_plain_chat_is_not_persisted(tmp_path, monkeypatch):
+    """没有 run 就没有归属：普通对话不落库，前端按内存处理。"""
+    config = _config(tmp_path)
+    _stub(monkeypatch, _FakeProvider(reply="普通回答"))
+
+    payload = await answer_with_context(config, text="你好")
+
+    assert payload["persisted"] is False
+    assert payload["run_id"] == ""
+    assert "turn_id" not in payload
+    # 库里确实没有任何记录（真去查一次，而不是只断言返回字段）
+    assert ResultStore(config=config.result_store).list_chat_turns("") == []
+
+
+async def test_persist_failure_does_not_lose_the_answer(tmp_path, monkeypatch):
+    """写历史失败不能连累回答：用户已经付过模型调用的成本了。"""
+    config = _config(tmp_path)
+    run_id = _save_run(config)
+    _stub(monkeypatch, _FakeProvider(reply="照常返回的回答"))
+
+    def explode(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(ResultStore, "save_chat_turn", explode)
+
+    payload = await answer_with_context(config, run_id=run_id, text="你好")
+
+    assert payload["reply"] == "照常返回的回答"
+    assert payload["persisted"] is False
+
+
+async def test_response_reports_duration_ms(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    run_id = _save_run(config)
+    _stub(monkeypatch, _FakeProvider(reply="回答"))
+
+    payload = await answer_with_context(config, run_id=run_id, text="你好")
+
+    assert isinstance(payload["duration_ms"], int)
+    assert payload["duration_ms"] >= 0

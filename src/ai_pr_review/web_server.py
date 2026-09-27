@@ -199,6 +199,9 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
         if path == "/api/report/export":
             self._handle_report_export(parse_qs(parsed.query))
             return
+        if path == "/api/chat/history":
+            self._handle_chat_history(parse_qs(parsed.query))
+            return
         if path == "/api/benchmark":
             self._handle_benchmark(parse_qs(parsed.query))
             return
@@ -263,6 +266,10 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, "job_id": job_id, "message": "已请求停止。"})
             else:
                 self._send_json(404, {"error": f"任务不存在或已结束：{job_id}"})
+            return
+
+        if path == "/api/chat/history/clear":
+            self._handle_chat_history_clear(payload)
             return
 
         if path not in {"/api/plan", "/api/review", "/api/feedback", "/api/config"}:
@@ -564,6 +571,9 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
                     "cross_file_impacts": metadata.get("cross_file_impacts", []),
                     "interface_impacts": metadata.get("interface_impacts", []),
                     "feedback": store.list_feedback(run_id),
+                    # 追问记录随报告一起返回：前端报告页/历史页共用同一份数据源，
+                    # 报告导出（/api/report/export）另有独立的渲染路径。
+                    "chat_turns": store.list_chat_turns(run_id),
                 },
             )
         except Exception as exc:  # pragma: no cover
@@ -730,6 +740,76 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
             )
         except Exception as exc:  # pragma: no cover - exercised through the live server
             self._send_json(500, {"error": str(exc)})
+
+    # ---- 追问历史 ---------------------------------------------------
+
+    def _handle_chat_history(self, query: dict[str, list[str]]) -> None:
+        """`GET /api/chat/history?run_id=&limit=` —— 某次审查的追问记录。
+
+        只服务绑定了 run 的追问：未绑定 run 的普通对话没有归属，不落库也不在这里返回
+        （前端按"挂载期内内存"处理）。未知 run 一律 404，与 `/api/chat` 的
+        `not_found` 语义保持一致——不能让前端把"run 不存在"和"这次没追问过"混为一谈。
+        """
+        run_id = (query.get("run_id", [""])[0] or "").strip()
+        if not run_id:
+            self._send_json(400, {"error": "run_id is required"})
+            return
+        limit = self._parse_int_query(query, "limit", default=200, minimum=1, maximum=1000)
+        if limit is None:
+            self._send_json(400, {"error": "limit must be an integer between 1 and 1000"})
+            return
+        try:
+            store = ResultStore(config=self.config.result_store)
+            if store.get_run_summary(run_id) is None:
+                self._send_json(404, {"error": f"Unknown run_id: {run_id}"})
+                return
+            turns = store.list_chat_turns(run_id, limit=limit)
+        except Exception as exc:  # pragma: no cover
+            self._send_json(400, {"error": str(exc)})
+            return
+        self._send_json(200, {"run_id": run_id, "count": len(turns), "turns": turns})
+
+    def _handle_chat_history_clear(self, payload: dict[str, Any]) -> None:
+        """`POST /api/chat/history/clear {run_id}` —— 清空某次审查的追问记录。
+
+        用 POST 而不是 DELETE：本服务的写端点统一走 `do_POST` 顶部的
+        Content-Type / Origin 跨站守卫，单独开一个 DELETE 通道等于绕开这层防护。
+        """
+        run_id = str(payload.get("run_id", "") or "").strip()
+        if not run_id:
+            self._send_json(400, {"error": "run_id is required"})
+            return
+        try:
+            store = ResultStore(config=self.config.result_store)
+            if store.get_run_summary(run_id) is None:
+                self._send_json(404, {"error": f"Unknown run_id: {run_id}"})
+                return
+            deleted = store.clear_chat_turns(run_id)
+        except Exception as exc:  # pragma: no cover
+            self._send_json(400, {"error": str(exc)})
+            return
+        self._send_json(200, {"ok": True, "run_id": run_id, "deleted": deleted})
+
+    @staticmethod
+    def _parse_int_query(
+        query: dict[str, list[str]],
+        name: str,
+        *,
+        default: int,
+        minimum: int,
+        maximum: int,
+    ) -> int | None:
+        """解析并夹住整数查询参数；缺失用默认值，非法（含越界）返回 None。"""
+        raw = (query.get(name, [""])[0] or "").strip()
+        if not raw:
+            return default
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return None
+        if value < minimum or value > maximum:
+            return None
+        return value
 
     def _handle_chat(self, payload: dict[str, Any]) -> None:
         """`POST /api/chat {run_id?, text}` —— 对某次审查追问（无状态，服务层在 `web_chat`）。

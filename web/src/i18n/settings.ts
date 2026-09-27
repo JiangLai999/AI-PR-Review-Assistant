@@ -237,12 +237,17 @@ export const settings: Namespace = {
     'api.endpoint.publish.response':
       '预览：{ status: "preview", comment_chars, ... }\n发布：{ status: "published"|"already_published", comment_url, comment_id }',
     'api.endpoint.chat.desc':
-      '对某次已完成的审查追问（无状态）。带 run_id 会注入该次审查的摘要与 findings；不带则按普通对话回答。',
+      '对某次已完成的审查追问。带 run_id 会注入该次审查的摘要与 findings，并把这一轮问题与回答写入追问历史；不带则按普通对话回答（不落库）。',
     'api.endpoint.chat.errors':
       '400 text 缺失 · 404 run 不存在 · 415 跨站或非 JSON · 502 上游模型失败 · 503 未配置模型 API Key',
     'api.endpoint.chat.body': '{ "run_id": "<run_id，可选>", "text": "<问题>" }',
     'api.endpoint.chat.curl':
       'curl -X POST http://127.0.0.1:8787/api/chat \\\n  -H "Content-Type: application/json" \\\n  -d \'{"run_id":"<run_id>","text":"这次审查有几个 finding？"}\'',
+    'api.endpoint.chatHistory.desc': '某次审查的追问历史：问题与回答成对，按轮次升序。limit 范围 1–1000。',
+    'api.endpoint.chatHistory.errors': '400 run_id 缺失或 limit 非法 · 404 run 不存在',
+    'api.endpoint.chatHistoryClear.desc':
+      '清空某次审查的追问历史。幂等：没有记录时返回 deleted: 0。用 POST 以复用跨站守卫。',
+    'api.endpoint.chatHistoryClear.errors': '400 run_id 缺失 · 404 run 不存在 · 415 跨站或非 JSON',
 
     // ── 接口页 · 静态资源 ────────────────────────────────────────────
     'api.static.title': '静态资源',
@@ -517,12 +522,19 @@ export const settings: Namespace = {
     'api.endpoint.publish.response':
       'preview: { status: "preview", comment_chars, ... }\npublished: { status: "published"|"already_published", comment_url, comment_id }',
     'api.endpoint.chat.desc':
-      'Ask a follow-up about a completed review (stateless). With run_id the summary and findings of that run are injected; without it, it answers as a normal chat.',
+      'Ask a follow-up about a completed review. With run_id the summary and findings of that run are injected and the question/answer pair is written to the follow-up history; without it, it answers as a normal chat (not stored).',
     'api.endpoint.chat.errors':
       '400 missing text · 404 run not found · 415 cross-site or non-JSON · 502 upstream model failure · 503 model API key not configured',
     'api.endpoint.chat.body': '{ "run_id": "<run_id, optional>", "text": "<question>" }',
     'api.endpoint.chat.curl':
       'curl -X POST http://127.0.0.1:8787/api/chat \\\n  -H "Content-Type: application/json" \\\n  -d \'{"run_id":"<run_id>","text":"How many findings are there in this review?"}\'',
+    'api.endpoint.chatHistory.desc':
+      'Follow-up history of one review: question/answer pairs in turn order. limit is 1–1000.',
+    'api.endpoint.chatHistory.errors': '400 missing run_id or invalid limit · 404 run not found',
+    'api.endpoint.chatHistoryClear.desc':
+      'Clear the follow-up history of one review. Idempotent: returns deleted: 0 when there is nothing to remove. Uses POST to reuse the cross-site guard.',
+    'api.endpoint.chatHistoryClear.errors':
+      '400 missing run_id · 404 run not found · 415 cross-site or non-JSON',
 
     // ── API page · static assets ─────────────────────────────────────
     'api.static.title': 'Static assets',

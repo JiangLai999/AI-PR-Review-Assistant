@@ -224,6 +224,107 @@ class ResultStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    # ------------------------------------------------------------------
+    # 追问记录（`/api/chat` 的落库侧）
+    #
+    # 只服务**绑定了 run** 的追问：未绑定 run 的普通对话没有可归属的记录，
+    # 前端仍按"挂载期内内存"处理，这里不造一个 run_id='' 的伪记录。
+    # ------------------------------------------------------------------
+
+    def save_chat_turn(
+        self,
+        run_id: str,
+        *,
+        role: str,
+        content: str,
+        model: str = "",
+        usage: dict | None = None,
+        context_meta: dict | None = None,
+        duration_ms: int | None = None,
+    ) -> dict:
+        """追加一条追问记录，返回落库后的行（含 `turn_id` / `turn_index` / `created_at`）。
+
+        `turn_index` 由库侧自增（同一 run 内 MAX+1），调用方不需要自己维护计数——
+        并发写同一 run 时也不会串号。
+        """
+        if role not in {"user", "assistant"}:
+            raise ValueError(f"Unsupported chat role: {role}")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COALESCE(MAX(turn_index), 0) + 1 AS next_index FROM chat_turns WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            turn_index = int(row["next_index"])
+            cursor = connection.execute(
+                """
+                INSERT INTO chat_turns (
+                    run_id, turn_index, role, content, model,
+                    usage_json, context_meta_json, duration_ms
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    turn_index,
+                    role,
+                    content,
+                    model,
+                    json.dumps(usage or {}, ensure_ascii=False),
+                    json.dumps(context_meta or {}, ensure_ascii=False),
+                    duration_ms,
+                ),
+            )
+            saved = connection.execute(
+                """SELECT id, run_id, turn_index, role, content, model,
+                          usage_json, context_meta_json, duration_ms, created_at
+                   FROM chat_turns WHERE id = ?""",
+                (cursor.lastrowid,),
+            ).fetchone()
+        return self._chat_turn_payload(saved)
+
+    def list_chat_turns(self, run_id: str, limit: int = 200) -> list[dict]:
+        """按时间顺序返回某次审查的追问记录（最早在前，便于前端直接追加渲染）。"""
+        normalized_limit = max(0, limit)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, run_id, turn_index, role, content, model,
+                       usage_json, context_meta_json, duration_ms, created_at
+                FROM chat_turns
+                WHERE run_id = ?
+                ORDER BY turn_index ASC
+                LIMIT ?
+                """,
+                (run_id, normalized_limit),
+            ).fetchall()
+        return [self._chat_turn_payload(row) for row in rows]
+
+    def clear_chat_turns(self, run_id: str) -> int:
+        """删除某次审查的全部追问记录，返回删除条数。"""
+        with self._connect() as connection:
+            cursor = connection.execute("DELETE FROM chat_turns WHERE run_id = ?", (run_id,))
+        return int(cursor.rowcount or 0)
+
+    @staticmethod
+    def _chat_turn_payload(row: sqlite3.Row | None) -> dict:
+        """把一行 chat_turns 转成前端契约形状（JSON 列解回 dict）。"""
+        if row is None:  # pragma: no cover - 只在并发删除时可能出现
+            return {}
+        payload = dict(row)
+        for column, target in (
+            ("usage_json", "usage"),
+            ("context_meta_json", "context_meta"),
+        ):
+            raw = payload.pop(column, "")
+            try:
+                value = json.loads(raw) if raw else {}
+            except (TypeError, json.JSONDecodeError):
+                value = {}
+            payload[target] = value if isinstance(value, dict) else {}
+        turn_id = payload.pop("id", None)
+        payload["turn_id"] = turn_id
+        return payload
+
     def get_result(self, run_id: str) -> ReviewResult | None:
         """获取 Review 结果。"""
         with self._connect() as connection:
@@ -341,6 +442,28 @@ class ResultStore:
                 )
                 """)
 
+            # 追问记录：同一次审查可多轮，`turn_index` 是库侧自增的稳定顺序。
+            # 不加 FOREIGN KEY：run 被清理后追问记录按同样的清理策略处理，
+            # 但历史库里可能存在"先写追问、后补 run"的极端顺序（导入/迁移）。
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS chat_turns (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    turn_index INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    model TEXT DEFAULT '',
+                    usage_json TEXT DEFAULT '',
+                    context_meta_json TEXT DEFAULT '',
+                    duration_ms INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """)
+            connection.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chat_turns_run
+                ON chat_turns (run_id, turn_index)
+                """)
+
     @staticmethod
     def _migrate_runs_metadata_column(connection: sqlite3.Connection) -> None:
         """Add metadata_json to databases created before the column existed."""
@@ -389,6 +512,7 @@ class ResultStore:
     def _prune_old_results(self, connection: sqlite3.Connection) -> None:
         if self._config.max_results <= 0:
             connection.execute("DELETE FROM runs")
+            connection.execute("DELETE FROM chat_turns")
             return
 
         connection.execute(
@@ -402,4 +526,9 @@ class ResultStore:
             )
             """,
             (self._config.max_results,),
+        )
+        # 追问记录跟着它所属的 run 一起清：孤儿行只会白占空间，且删掉的 run
+        # 已经无法再从历史里打开，留着这些记录没有任何入口能看到它们。
+        connection.execute(
+            "DELETE FROM chat_turns WHERE run_id NOT IN (SELECT id FROM runs)"
         )
