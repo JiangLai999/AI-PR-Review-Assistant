@@ -146,6 +146,12 @@ export const components: Namespace = {
     'panels.plan.strategy.evidence_validation': '证据校验',
     'panels.plan.strategy.risk_category_review': '风险类别审查',
     'panels.plan.strategy.cross_file_impact_review': '跨文件影响审查',
+    // ── 规划依据（渲染时本地化：后端新 run 已按语言生成，老 run 靠这里映射）──
+    'panels.plan.rationale.scope': '审查范围由 PR 元数据与纳入审查的文件集推导得出。',
+    'panels.plan.rationale.crossFile': '涉及多个文件或接口敏感改动，需要做一次跨文件复核。',
+    'panels.plan.rationale.categories': '检测到风险类别：{categories}。',
+    'panels.plan.rationale.categorySeparator': '、',
+    'panels.intent.default': '审查该 PR 的正确性与安全风险。',
     'panels.validation.valid': '证据有效',
     'panels.validation.needs_review': '待人工确认',
     'panels.validation.invalid': '证据不成立',
@@ -352,6 +358,15 @@ export const components: Namespace = {
     'panels.plan.strategy.evidence_validation': 'Evidence validation',
     'panels.plan.strategy.risk_category_review': 'Risk-category review',
     'panels.plan.strategy.cross_file_impact_review': 'Cross-file impact review',
+    // ── Plan rationale (localized at render time: new runs are already generated
+    //    in the UI language, legacy runs are mapped here) ──────────────────────
+    'panels.plan.rationale.scope':
+      'Review scope is derived from the PR metadata and the included file set.',
+    'panels.plan.rationale.crossFile':
+      'Multiple files or interface-sensitive changes require a cross-file pass.',
+    'panels.plan.rationale.categories': 'Detected risk categories: {categories}.',
+    'panels.plan.rationale.categorySeparator': ', ',
+    'panels.intent.default': 'Review the pull request for correctness and security risks.',
     'panels.validation.valid': 'Valid',
     'panels.validation.needs_review': 'Needs review',
     'panels.validation.invalid': 'Invalid',

@@ -2,11 +2,41 @@ import { useState } from 'react'
 import type { InterfaceImpact, ReviewPlan } from '../api/types'
 import { MarkdownLite } from './MarkdownLite.jsx'
 import { Card, CardHead, Chip, Empty, cx } from './ui'
-import { dictKeys, getLang, t, useT } from '../i18n'
+import { dictKeys, dictText, getLang, t, useT } from '../i18n'
 import type { Lang } from '../i18n'
+import { localizeRationale, type RationaleTemplates } from './planRationale'
 
 /** 空值统一显示的长破折号（与导出的 Markdown / CLI 表格保持同一种"没有"）。 */
 const EMPTY_VALUE = '—'
+
+/**
+ * 计划意图：只在命中的是「默认句」时才换语言。
+ *
+ * 用户可以随便写 PR 标题/描述（中文、英文、任意内容），那些**原样显示**；
+ * 只有"标题与描述都为空"时后端补的默认句需要跟着界面语言走（老 run 里是英文）。
+ */
+function localizeIntent(text: string, translate: typeof t): string {
+  const mapped = localizeRationale(text, planRationaleTemplates(), (id) => id)
+  return mapped?.key === 'panels.intent.default' ? translate(mapped.key) : text
+}
+
+/**
+ * 规划依据的识别模板：**两种语言都取**，这样老 run 里英文冻结的句子在中文界面
+ * 也能被认出来映射成中文（反之亦然）。模板来自词典本身，代码里不留第二份文案。
+ */
+let rationaleTemplatesCache: RationaleTemplates | null = null
+function planRationaleTemplates(): RationaleTemplates {
+  if (!rationaleTemplatesCache) {
+    const both = (key: string) =>
+      ['zh-CN', 'en-US'].map((lang) => dictText(key, lang as Lang)).filter((v): v is string => !!v)
+    rationaleTemplatesCache = {
+      scope: both('panels.plan.rationale.scope'),
+      crossFile: both('panels.plan.rationale.crossFile'),
+      defaultIntent: both('panels.intent.default'),
+    }
+  }
+  return rationaleTemplatesCache
+}
 
 /**
  * 词典里真有这条词条才用译文。`dictKeys` 会遍历整本词典，按语言缓存成 Set，
@@ -93,11 +123,19 @@ export function CollapsibleText({ text, className }: { text: string; className?:
 
 export function PlanCard({ plan }: { plan: ReviewPlan }) {
   const t = useT()
+  // 老 run 里出现过空串（后端某版本只写了一行空内容）→ 别在界面上留一个空项目符号。
+  const rationaleLines = plan.rationale.filter((item) => item.trim().length > 0)
   const rows: { label: string; value: React.ReactNode }[] = [
     {
       label: t('panels.plan.intent'),
       // PR 标题 + 描述原文（可能中可能英、可能是长段落），走 Markdown + 折叠。
-      value: plan.intent ? <CollapsibleText text={plan.intent} /> : EMPTY_VALUE,
+      // 唯一例外：标题与描述都为空时后端给的是**默认句**，老 run 里冻结成英文，
+      // 这里同样映射成当前语言。
+      value: plan.intent ? (
+        <CollapsibleText text={localizeIntent(plan.intent, t)} />
+      ) : (
+        EMPTY_VALUE
+      ),
     },
     {
       label: t('panels.plan.riskLevel'),
@@ -166,15 +204,24 @@ export function PlanCard({ plan }: { plan: ReviewPlan }) {
         <hr className="divider" style={{ margin: 'var(--ds-space-2) 0' }} />
         <div>
           <span className="finding-field-label">{t('panels.plan.rationale')}</span>
-          {plan.rationale.length > 0 ? (
-            /* 规划依据是**句子**（后端按 UI 语言生成中英两版，老 run 里是英文），
-               所以不翻译，只交给 MarkdownLite 渲染行内格式（列表外观仍是 ol/li）。 */
+          {rationaleLines.length > 0 ? (
+            /* 规划依据是**句子**：新 run 由后端按 UI 语言生成；老 run 里冻结的是当时的
+               英文模板，靠 `localizeRationale` 在渲染时映射成当前语言（认不出来就原样
+               显示，绝不吞内容）。行内格式仍交给 MarkdownLite。 */
             <ol className="plan-rationale">
-              {plan.rationale.map((item) => (
-                <li key={item}>
-                  <MarkdownLite text={item} />
-                </li>
-              ))}
+              {rationaleLines.map((item) => {
+                const mapped = localizeRationale(
+                  item,
+                  planRationaleTemplates(),
+                  (id) => idText('panels.risk.category.', id),
+                  t('panels.plan.rationale.categorySeparator'),
+                )
+                return (
+                  <li key={item}>
+                    <MarkdownLite text={mapped ? t(mapped.key, mapped.params) : item} />
+                  </li>
+                )
+              })}
             </ol>
           ) : (
             <p className="plan-value" style={{ margin: '6px 0 0' }}>

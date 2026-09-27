@@ -33,6 +33,13 @@ interface Failure {
 
 interface Turn {
   id: number
+  /**
+   * 跨刷新稳定的标识：优先用库里的 `turn_id`（历史轮与刚落库的现场提问都拿得到），
+   * 拿不到才退回本地序号。整轮折叠的记忆按它存，刷新后仍能对上同一条。
+   */
+  key: string
+  /** 刚在本页面问出来的那一轮（默认展开；历史轮默认收起）。 */
+  fresh?: boolean
   question: string
   /** 成功时的回答；失败轮为空串。 */
   answer: string
@@ -102,6 +109,17 @@ function normalizeMeta(raw: Partial<ChatContextMeta> | null | undefined): ChatCo
   }
 }
 
+/**
+ * 一轮的稳定标识。
+ *
+ * 优先 `turn_id`（库里的行号，刷新后仍是同一条）；拿不到才退回 `turn_index` 与角色。
+ * 整轮折叠的展开/收起记忆按它落 localStorage，所以不能只用渲染期的自增序号。
+ */
+function turnKey(item: ChatTurn): string {
+  if (item.turn_id != null) return `t${item.turn_id}`
+  return `i${item.turn_index ?? 0}`
+}
+
 /** 把后端的 user/assistant 流水拼成本面板的问答对；落单的 user/assistant 也保留。 */
 function turnsFromHistory(items: ChatTurn[]): Turn[] {
   const result: Turn[] = []
@@ -112,6 +130,7 @@ function turnsFromHistory(items: ChatTurn[]): Turn[] {
       if (pending) result.push(pending)
       pending = {
         id: ++id,
+        key: turnKey(item),
         question: item.content,
         answer: '',
         model: '',
@@ -139,6 +158,7 @@ function turnsFromHistory(items: ChatTurn[]): Turn[] {
     } else {
       result.push({
         id: ++id,
+        key: turnKey(item),
         question: '',
         answer: item.content,
         model: item.model || '',
@@ -275,6 +295,10 @@ export function AskPanel({
         ...prev,
         {
           id,
+          // 落库成功时用库里的 turn_id（刷新后仍是同一条，折叠记忆能对上）；
+          // 未绑定 run / 写库失败时退回本地序号。
+          key: `t${payload.turn_id ?? id}`,
+          fresh: true,
           question,
           answer: payload.reply ?? '',
           model: payload.model ?? '',
@@ -292,6 +316,8 @@ export function AskPanel({
         ...prev,
         {
           id,
+          key: `t${id}`,
+          fresh: true,
           question,
           answer: '',
           model: '',
@@ -417,11 +443,54 @@ export function AskPanel({
         )}
 
         {turns.map((turn) => (
-          <TurnCard key={turn.id} turn={turn} busy={busy} onRetry={ask} />
+          <TurnCard
+            key={turn.id}
+            turn={turn}
+            busy={busy}
+            runId={runId ?? ''}
+            onRetry={ask}
+          />
         ))}
       </div>
     </Card>
   )
+}
+
+// ---------------------------------------------------------------- 整轮折叠记忆
+//
+// 用户要求：追问**默认收起**，并且这个状态要跨刷新保留。
+// 实现：按 run 存"被手动展开过"的轮次 key（默认全收起 → 只记例外，存储最小）。
+// 隐私：只存 turn key 与 run id，不存任何问答正文。
+
+const EXPANDED_PREFIX = 'ai-pr-review.ask-panel.expanded.'
+
+function expandedStorageKey(runId: string): string {
+  return `${EXPANDED_PREFIX}${runId}`
+}
+
+/** 读"手动展开过"的轮次集合；localStorage 不可用（隐私模式/配额）时返回空集。 */
+function readExpanded(runId: string): Set<string> {
+  if (!runId) return new Set()
+  try {
+    const raw = window.localStorage.getItem(expandedStorageKey(runId))
+    const parsed: unknown = raw ? JSON.parse(raw) : []
+    return new Set(Array.isArray(parsed) ? parsed.map(String) : [])
+  } catch {
+    return new Set()
+  }
+}
+
+/** 记一位"展开/收起"；写失败静默忽略（记忆是增强，不该影响提问本身）。 */
+function writeExpanded(runId: string, key: string, expanded: boolean): void {
+  if (!runId) return
+  try {
+    const next = readExpanded(runId)
+    if (expanded) next.add(key)
+    else next.delete(key)
+    window.localStorage.setItem(expandedStorageKey(runId), JSON.stringify([...next]))
+  } catch {
+    /* 忽略 */
+  }
 }
 
 /**
@@ -432,19 +501,33 @@ export function AskPanel({
  *   用户要求「在每个问题的右边加一个折叠，整体只留问题」；
  * - **回答正文**：`CollapsibleText` 负责长回答的展开/收起，与整轮折叠互不干扰。
  *
- * 默认展开：折叠是"我不想现在看"，不是"默认藏起来"，所以不记忆状态。
+ * 默认**收起**（用户要求），并按 run 记住"手动展开过"的轮次：
+ * 刷新/切走再回来仍保持；只有刚问的那一轮默认展开 —— 你刚问完就想看答案。
  */
 function TurnCard({
   turn,
   busy,
+  runId,
   onRetry,
 }: {
   turn: Turn
   busy: boolean
+  runId: string
   onRetry: (question: string) => void
 }) {
   const t = useT()
-  const [collapsed, setCollapsed] = useState(false)
+  // 现场提问的轮次（fresh）默认展开；历史轮默认收起，除非用户之前手动展开过。
+  const [collapsed, setCollapsed] = useState(
+    () => !turn.fresh && !readExpanded(runId).has(turn.key),
+  )
+
+  function toggle() {
+    setCollapsed((value) => {
+      const next = !value
+      writeExpanded(runId, turn.key, !next) // 展开 → 记入集合
+      return next
+    })
+  }
 
   return (
     <article
@@ -463,7 +546,7 @@ function TurnCard({
           aria-expanded={!collapsed}
           aria-label={collapsed ? t('ask.turn.expand') : t('ask.turn.collapse')}
           title={collapsed ? t('ask.turn.expand') : t('ask.turn.collapse')}
-          onClick={() => setCollapsed((value) => !value)}
+          onClick={toggle}
         >
           <span aria-hidden="true">{collapsed ? '▸' : '▾'}</span>
         </button>

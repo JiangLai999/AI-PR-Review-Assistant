@@ -40,6 +40,12 @@ try {
     // "N 轮" 才说明这条 run 真有追问记录
     if (/\d+\s*轮|\d+\s*follow-up/i.test(status)) {
       opened = true
+      // 追问默认**收起**（只留问题）：要验回答正文与元信息，先把每一轮展开。
+      const collapsed = panel.locator('.ask-panel-turn-toggle[aria-expanded="false"]')
+      for (let turn = (await collapsed.count()) - 1; turn >= 0; turn -= 1) {
+        await collapsed.nth(turn).click()
+        await page.waitForTimeout(150)
+      }
       const text = await panel.innerText()
       check(/已保存|saved/i.test(status), '头部标注已保存', status)
       check(/`/.test(text) === false, '回答不再出现反引号原文（Markdown 已渲染）')

@@ -53,6 +53,17 @@ export function getLang(): Lang {
   return current
 }
 
+/**
+ * 取**指定语言**的词条原文（不跟随当前语言）。
+ *
+ * 用途：需要"认出另一语言的写法"的场景 —— 例如老 run 里冻结的规划依据是英文，
+ * 中文界面要把它映射成中文；把两种语言的模板都从词典读出来比对，代码里就不用
+ * 再写一份中文常量（否则 i18n 审计的"组件里不得有中文"会被我们自己打破）。
+ */
+export function dictText(key: string, lang: Lang): string | undefined {
+  return MERGED[lang][key]
+}
+
 /** 切换语言：更新 `<html lang>` 并通知订阅者（组件即时重渲染）。 */
 export function setLang(value: unknown): void {
   const next = normalizeLang(value)
