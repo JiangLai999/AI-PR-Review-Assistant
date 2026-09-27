@@ -210,6 +210,17 @@ const GROUPS: Group[] = [
   -H "Content-Type: application/json" \\
   -d '{"run_id":"<run_id>","confirm":false}'`,
       },
+      {
+        method: 'POST',
+        path: '/api/chat',
+        desc: '对某次已完成的审查追问（无状态）。带 run_id 会注入该次审查的摘要与 findings；不带则按普通对话回答。',
+        body: `{ "run_id": "<run_id，可选>", "text": "<问题>" }`,
+        response: `{ reply, model, usage, context_meta: { bound_run, token_estimate, sections, truncated, note } }`,
+        errors: '400 text 缺失 · 404 run 不存在 · 415 跨站或非 JSON · 502 上游模型失败 · 503 未配置模型 API Key',
+        curl: `curl -X POST http://127.0.0.1:8787/api/chat \\
+  -H "Content-Type: application/json" \\
+  -d '{"run_id":"<run_id>","text":"这次审查有几个 finding？"}'`,
+      },
     ],
   },
 ]

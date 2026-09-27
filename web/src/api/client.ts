@@ -1,5 +1,6 @@
 import type {
   BenchmarkReport,
+  ChatResponse,
   DemoCasesResponse,
   DemoResult,
   ConfigView,
@@ -140,6 +141,19 @@ export const api = {
    */
   exportReportUrl: (runId: string, format: ReportExportFormat) =>
     `/api/report/export?run_id=${encodeURIComponent(runId)}&format=${format}`,
+
+  /**
+   * 对某次审查追问（Phase 3）。带 `runId` 时服务端把该 run 的报告摘成上下文；
+   * 不带时是普通对话 —— 此时 body 里连 `run_id` 键都不出现，服务端按无绑定处理。
+   *
+   * 失败形状：400 缺 text / 404 run 查不到 / 415 跨站守卫 / 502 模型调用失败 /
+   * 503 未配置 API Key，都以 `ApiError.status` 抛给调用方（映射见 AskPanel）。
+   */
+  chat: (runId: string | null | undefined, text: string) =>
+    request<ChatResponse>('/api/chat', {
+      method: 'POST',
+      body: JSON.stringify(runId ? { run_id: runId, text } : { text }),
+    }),
 
   feedback: (runId: string, findingId: string, status: FeedbackStatus, note = '') =>
     request<{ ok: boolean }>('/api/feedback', {

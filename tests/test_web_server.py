@@ -820,6 +820,82 @@ class TestPublishEndpoint:
         assert json.loads(body)["code"] == "missing_credentials"
 
 
+class TestChatEndpoint:
+    """`POST /api/chat` 的协议层：只做 code ↔ HTTP 映射，模型调用由服务层负责。
+
+    服务层（`ai_pr_review.web_chat`）的真实行为由 `tests/test_web_chat.py` 覆盖；
+    这里锁的是路由接线、错误码映射与响应形状。
+    """
+
+    def test_missing_text_is_rejected(self, server):
+        status, body = call(server["base"], "POST", "/api/chat", {"run_id": server["run_id"]})
+
+        assert status == 400
+        assert json.loads(body)["code"] == "invalid_request"
+
+    def test_unknown_run_is_not_found(self, server):
+        status, body = call(
+            server["base"],
+            "POST",
+            "/api/chat",
+            {"run_id": "does-not-exist", "text": "这条为什么判中风险？"},
+        )
+
+        assert status == 404
+        assert json.loads(body)["code"] == "not_found"
+
+    def test_answer_shape_is_forwarded(self, server):
+        canned = {
+            "reply": "这条判中风险是因为拼接 SQL。",
+            "model": "deepseek-chat",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            "context_meta": {
+                "bound_run": server["run_id"],
+                "token_estimate": 42,
+                "sections": ["run_summary", "findings"],
+                "truncated": False,
+                "note": "",
+            },
+        }
+        with mock.patch(
+            "ai_pr_review.web_chat.answer_with_context",
+            new=mock.AsyncMock(return_value=canned),
+        ):
+            status, body = call(
+                server["base"],
+                "POST",
+                "/api/chat",
+                {"run_id": server["run_id"], "text": "为什么？"},
+            )
+
+        assert status == 200, body
+        assert json.loads(body) == canned
+
+    def test_missing_api_key_maps_to_503(self, server):
+        from ai_pr_review.web_chat import ChatError
+
+        with mock.patch(
+            "ai_pr_review.web_chat.answer_with_context",
+            new=mock.AsyncMock(side_effect=ChatError("missing_api_key", "未配置模型 API Key")),
+        ):
+            status, body = call(server["base"], "POST", "/api/chat", {"text": "你好"})
+
+        assert status == 503
+        assert json.loads(body)["code"] == "missing_api_key"
+
+    def test_upstream_failure_maps_to_502(self, server):
+        from ai_pr_review.web_chat import ChatError
+
+        with mock.patch(
+            "ai_pr_review.web_chat.answer_with_context",
+            new=mock.AsyncMock(side_effect=ChatError("chat_failed", "模型调用失败：timeout")),
+        ):
+            status, body = call(server["base"], "POST", "/api/chat", {"text": "你好"})
+
+        assert status == 502
+        assert json.loads(body)["code"] == "chat_failed"
+
+
 class TestReportExportEndpoint:
     def test_markdown_export_is_an_attachment(self, server):
         status, headers, body = call_raw(

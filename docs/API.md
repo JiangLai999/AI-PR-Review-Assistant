@@ -202,7 +202,7 @@ pr-review serve            # 默认 http://127.0.0.1:8787
 - **凭据**：接口只回掩码，绝不明文返回 GitHub Token 或模型 API Key。
 - **编码**：所有 JSON 响应为 `application/json; charset=utf-8`。
 
-## 端点总表（18 条 API + 静态资源）
+## 端点总表（19 条 API + 静态资源）
 
 | # | 方法 | 路径 | 说明 |
 |---|------|------|------|
@@ -224,6 +224,7 @@ pr-review serve            # 默认 http://127.0.0.1:8787
 | 16 | POST | `/api/jobs/{id}/cancel` | 取消任务 |
 | 17 | POST | `/api/feedback` | 人工反馈落库 |
 | 18 | POST | `/api/publish` | 预览 / 发布 GitHub 评论 |
+| 19 | POST | `/api/chat` | 对某次审查追问（无状态；带 `run_id` 注入审查上下文） |
 | — | GET | `/static/*` | 前端构建产物（含 SPA fallback） |
 
 ---
@@ -569,6 +570,58 @@ curl -X POST http://127.0.0.1:8787/api/feedback \
 curl -X POST http://127.0.0.1:8787/api/publish \
   -H "Content-Type: application/json" \
   -d '{"run_id":"<run_id>","confirm":false}'
+```
+
+### POST `/api/chat`
+
+对**某次已完成的审查**追问（例如"第 3 条为什么判中风险？"）。无状态：不落库、不建会话，
+每次请求自带 `run_id` 与问题。
+
+请求体：
+
+```json
+{ "run_id": "<run_id，可选>", "text": "<问题>" }
+```
+
+行为：
+
+- 带 `run_id` 时把该 run 的摘要与 findings（文件/行号/严重度/证据状态）装配进上下文
+  （复用 CLI 侧的 `services/review_context.py`，受 `preferences.chat_context_budget` 约束）；
+  上下文超预算时**先裁 findings、再裁摘要**，并在 `context_meta.truncated` + `note` 里说明。
+- 不带 `run_id` 时退化为普通对话（`context_meta.bound_run` 为 `null`）。
+- `usage` 直接来自模型返回；拿不到就为 `null`（不估算、不编造）。
+
+响应要点：
+
+```json
+{
+  "reply": "…",
+  "model": "deepseek-chat",
+  "usage": { "prompt_tokens": 812, "completion_tokens": 120, "total_tokens": 932 },
+  "context_meta": {
+    "bound_run": "<run_id>",
+    "token_estimate": 382,
+    "sections": ["run_summary", "findings"],
+    "truncated": false,
+    "note": ""
+  }
+}
+```
+
+错误码：
+
+| 状态码 | 含义 |
+|--------|------|
+| 400 | `text` 缺失 |
+| 404 | `run_id` 查不到 |
+| 415 | 跨站或非 JSON |
+| 502 | 上游模型调用失败 |
+| 503 | 未配置模型 API Key |
+
+```bash
+curl -X POST http://127.0.0.1:8787/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"run_id":"<run_id>","text":"这次审查有几个 finding？"}'
 ```
 
 ---

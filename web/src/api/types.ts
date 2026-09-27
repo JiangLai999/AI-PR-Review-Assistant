@@ -321,3 +321,33 @@ export interface DemoResult {
   findings: Finding[]
   summary: { risk_level: string; finding_count: number; evidence_validated: number; cost: number }
 }
+
+/* ------------------------------ Phase 3：追问 ------------------------------ */
+
+/**
+ * `POST /api/chat` 的上下文元信息。
+ *
+ * `bound_run` 是服务端**实际**绑定的 run（请求没带 run_id、或该 run 的上下文取不到时为
+ * null），前端据此判断这条回答是否真的读到了审查记录 —— 不要用请求里发出去的 run_id
+ * 反推，两者在服务端降级时会不一致。
+ */
+export interface ChatContextMeta {
+  bound_run: string | null
+  /** 估算的上下文规模；服务端算不出时为 null，界面就不显示这一句。 */
+  token_estimate: number | null
+  /** 本次注入的上下文段落名（如 summary / findings / plan）；旧后端可能没有这一层。 */
+  sections: string[]
+  /** 上下文被裁剪过 → 界面在回答上方显示 note 警告条。 */
+  truncated: boolean
+  /** 服务端给用户看的提示语；truncated 时通常说明裁掉了什么。 */
+  note: string
+}
+
+/** `POST /api/chat` 的成功响应（失败形状见 client.ts 的 ApiError.status）。 */
+export interface ChatResponse {
+  reply: string
+  model: string
+  /** 用量统计；服务端拿不到时为 null。前端只做展示，不参与任何判定。 */
+  usage: Record<string, number> | null
+  context_meta: ChatContextMeta
+}

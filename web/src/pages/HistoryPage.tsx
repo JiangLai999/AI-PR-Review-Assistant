@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api/client'
 import type { HistoryResponse, ReportResponse } from '../api/types'
+import { AskPanel } from '../components/AskPanel'
 import { FindingCard } from '../components/FindingCard'
 import { ReportActions } from '../components/ReportActions'
 import { InterfaceImpactCard, PlanCard, ValidationCard } from '../components/ReviewPanels'
@@ -207,6 +208,9 @@ export function HistoryPage({ onNavigate }: { onNavigate: (page: string) => void
 
             {/* 与审查工作台共用同一个组件，发布/导出行为不可能分叉。 */}
             <ReportActions runId={report.run_id} />
+
+            {/* 打开报告即可就地追问；这里的 run_id 一定存在（报告就是从它读出来的）。 */}
+            <AskPanel runId={report.run_id} />
 
             {report.plan && <PlanCard plan={report.plan} />}
             <ValidationCard validation={report.validation ?? {}} />

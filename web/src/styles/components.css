@@ -1173,6 +1173,44 @@ input[type='checkbox']:checked { outline: 2px solid rgba(103, 153, 254, 0.35); o
 .report-actions-footnote code { font-family:var(--ds-font-mono); }
 @media (max-width:620px){ .report-actions-head{flex-direction:column} }
 
+/* ========================= 追问面板（Phase 3 · p3-ask-panel） =========================
+   与 .report-actions 同层同语言：eyebrow + h3 标题、卡片内小间距、token 走语义变量。
+   危险/警告一律复用 <Notice>（.notice-error/.notice-warn），这里只补版面。 */
+
+.ask-panel { display:flex; flex-direction:column; gap:var(--ds-space-4); }
+.ask-panel-head { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:var(--ds-space-4); }
+.ask-panel-title { display:flex; flex-direction:column; gap:6px; min-width:0; }
+.ask-panel-title .eyebrow { color:var(--ds-color-brand); font-size:var(--ds-text-3xs); letter-spacing:.13em; }
+.ask-panel-title h3 { font-size:var(--ds-text-subtitle); }
+.ask-panel-lead { max-width:62ch; color:var(--ds-color-text-description); font-size:var(--ds-text-xs); line-height:1.6; }
+
+/* 只读上下文提示：绑定态用常规弱色，未绑定态借 warning 语义色提示「没有报告可读」。 */
+.ask-panel-context { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-top:2px; color:var(--ds-color-text-description); font-size:var(--ds-text-2xs); }
+.ask-panel-context code { font-family:var(--ds-font-mono); color:var(--ds-color-text-secondary); }
+.ask-panel-context[data-bound='false'] { color:var(--ds-state-needs); }
+
+.ask-panel-form { display:flex; align-items:center; gap:var(--ds-space-2); }
+.ask-panel-input { flex:1 1 auto; min-width:0; }
+.ask-panel-hint { display:flex; align-items:center; gap:var(--ds-space-2); color:var(--ds-color-text-description); font-size:var(--ds-text-xs); }
+
+.ask-panel-log { display:flex; flex-direction:column; gap:var(--ds-space-4); }
+.ask-panel-empty { color:var(--ds-color-text-placeholder); font-size:var(--ds-text-xs); line-height:1.6; }
+.ask-panel-turn { display:flex; flex-direction:column; gap:var(--ds-space-3); padding:var(--ds-space-3) var(--ds-space-4); border:1px solid var(--ds-color-border-subtle); border-radius:var(--ds-radius-panel); background:var(--ds-color-bg-surface-3); }
+.ask-panel-turn[data-error='true'] { border-color:rgba(255,107,107,.28); }
+
+.ask-panel-question { display:flex; align-items:flex-start; gap:var(--ds-space-3); }
+.ask-panel-role { flex:none; display:grid; place-items:center; width:20px; height:20px; border-radius:var(--ds-radius-xs); background:var(--ds-color-brand-soft); color:var(--ds-color-brand); font-family:var(--ds-font-mono); font-size:var(--ds-text-3xs); }
+.ask-panel-question p { min-width:0; color:var(--ds-color-text-primary); font-size:var(--ds-text-xs); line-height:1.6; white-space:pre-wrap; overflow-wrap:anywhere; }
+
+/* 回答：等宽 + 保留换行 + 转义 HTML，不引 Markdown 依赖。 */
+.ask-panel-answer { margin:0; max-height:420px; padding:var(--ds-space-3) var(--ds-space-4); border-radius:var(--ds-radius-code); border:1px solid var(--ds-color-border-default); background:var(--ds-color-bg-code); color:var(--ds-color-text-secondary); font-family:var(--ds-font-mono); font-size:var(--ds-text-2xs); line-height:1.7; white-space:pre-wrap; overflow-wrap:anywhere; overflow:auto; }
+.ask-panel-meta { display:flex; flex-wrap:wrap; gap:var(--ds-space-3); color:var(--ds-color-text-placeholder); font-size:var(--ds-text-2xs); }
+
+.ask-panel-error { display:flex; flex-direction:column; gap:var(--ds-space-3); }
+.ask-panel-error-detail { display:block; margin-top:2px; color:var(--ds-color-text-description); font-size:var(--ds-text-2xs); line-height:1.6; }
+
+@media (max-width:620px){ .ask-panel-form{flex-direction:column; align-items:stretch} }
+
 
 /* ========================= U1 · 键盘焦点可见（p2-ux） =========================
    统一 button / select / input / [role=button] / a 的 :focus-visible 描边：

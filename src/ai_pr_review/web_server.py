@@ -48,6 +48,14 @@ _PUBLISH_STATUS_CODES = {
     "publish_failed": 502,
 }
 
+# `/api/chat` 的失败码 → HTTP（与 publish 同风格：服务层只给 code + message）。
+_CHAT_STATUS_CODES = {
+    "invalid_request": 400,
+    "not_found": 404,
+    "missing_api_key": 503,
+    "chat_failed": 502,
+}
+
 
 def _origin_is_local(origin: str) -> bool:
     """`http://127.0.0.1:8787` / `http://localhost:5173` 这类本机来源放行。"""
@@ -244,6 +252,9 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
 
         if path == "/api/publish":
             self._handle_publish(payload)
+            return
+        if path == "/api/chat":
+            self._handle_chat(payload)
             return
 
         if path.startswith("/api/jobs/") and path.endswith("/cancel"):
@@ -711,6 +722,28 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
         except PublishError as exc:
             self._send_json(
                 _PUBLISH_STATUS_CODES.get(exc.code, 400),
+                {"error": exc.message, "code": exc.code},
+            )
+        except Exception as exc:  # pragma: no cover - exercised through the live server
+            self._send_json(500, {"error": str(exc)})
+
+    def _handle_chat(self, payload: dict[str, Any]) -> None:
+        """`POST /api/chat {run_id?, text}` —— 对某次审查追问（无状态，服务层在 `web_chat`）。
+
+        这里只做协议 ↔ 服务的翻译：服务层抛 `ChatError(code, message)`，本层按 code
+        映射 HTTP（400/404/502/503）；`/api/chat` 同样走 `do_POST` 顶部的跨站守卫。
+        """
+        text = str(payload.get("text", "") or "").strip()
+        run_id = str(payload.get("run_id", "") or "").strip()
+        # 延迟导入：`web_chat` 是后加模块，导入失败不应让整个服务起不来。
+        from ai_pr_review.web_chat import ChatError, answer_with_context
+
+        try:
+            outcome = asyncio.run(answer_with_context(self.config, run_id=run_id, text=text))
+            self._send_json(200, outcome)
+        except ChatError as exc:
+            self._send_json(
+                _CHAT_STATUS_CODES.get(exc.code, 400),
                 {"error": exc.message, "code": exc.code},
             )
         except Exception as exc:  # pragma: no cover - exercised through the live server

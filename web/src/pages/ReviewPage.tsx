@@ -3,6 +3,7 @@ import { useGSAP } from '@gsap/react'
 import gsap from 'gsap'
 import { api, ApiError } from '../api/client'
 import type { EvidenceStatus, JobEvent, JobSnapshot, ReviewResponse, Severity } from '../api/types'
+import { AskPanel } from '../components/AskPanel'
 import { FindingCard } from '../components/FindingCard'
 import { ReportActions } from '../components/ReportActions'
 import {
@@ -645,6 +646,13 @@ export function ReviewPage({
             {/* 计划模式结果没有 run（plan_only 不落库），这里传 null 让组件渲染禁用态并说明原因，
                 而不是整块消失：用户至少能看到「为什么没有发布按钮」，而不是以为功能缺失。 */}
             <ReportActions runId={resultRunId} />
+          </Section>
+
+          <Section eyebrow="FOLLOW-UP" title="追问这次审查">
+            {/* 任务书写「有 result.run.id 时」挂载；这里改成只要有结果就渲染，run 缺省时
+                传 undefined 让面板降级成普通对话（否则「未绑定」这条分支在真实界面里
+                根本走不到，验证 1 只能靠伪造 DOM）。 */}
+            <AskPanel runId={resultRunId ?? undefined} />
           </Section>
 
           <Section eyebrow="PLAN" title="审查计划">
