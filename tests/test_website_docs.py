@@ -1,16 +1,22 @@
 """官网文档数据的防漂移守卫。
 
 回归点（2026-09-28 发现）：`scripts/build_website_docs.py` 把
-``docs/PR_WORKFLOW.md`` 的渲染结果烧进 ``website/assets/docs-data.js``，
-而那个源文档在更早的批量清理里被删掉了 —— 生成器用
-``read_text(...) if exists() else ""`` 静默放行，于是官网上的"PR 工作流"
-标签页继续展示一份仓库里已经不存在的文档，本地测试全绿。
+``README.md`` / ``docs/API.md`` / ``docs/PR_WORKFLOW.md`` 的章节渲染进
+``website/assets/docs-data.js``，但：
 
-因此这里锁三件事：
+1. 一次文档改名让 4 处章节锚点（"配置优先级"/"必需环境变量"/"配置模型供应商"/
+   "代码结构"）全部失效，生成器直接 ValueError，产物退化成"无法再生成的冻结快照"；
+2. 生成器用 ``read_text(...) if exists() else ""`` 静默放行缺失的源文档，
+   官网会继续展示仓库里已经不存在的"幽灵文档"；
+3. 内置渲染器不认表格，README「支持的模型供应商」那张表会渲染成竖线段落。
 
-1. 官网每个标签页的 ``source`` 必须真实存在；
-2. 提交在库里的 ``website/assets/docs-data.js`` 必须与生成器当前输出**逐字节等价**；
-3. 生成器的标题渲染得真的产出 h2/h3/h4，而不是把 ``# 标题`` 当段落。
+因此这里锁四件事：
+
+1. 生成器能跑通今天的文档，且提交在库里的 ``website/assets/docs-data.js``
+   与它当前输出**逐字一致**；
+2. 官网每个标签页的 ``source`` 必须真实存在；
+3. 生成器的标题渲染得真的产出 h2/h3/h4，而不是把 ``# 标题`` 当段落；
+4. 表格只在"表头行 + 分隔行"齐全时渲染成 ``<table>``。
 """
 
 from __future__ import annotations
@@ -20,8 +26,6 @@ import json
 from pathlib import Path
 from types import ModuleType
 from typing import Any
-
-import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 GENERATOR_PATH = ROOT / "scripts" / "build_website_docs.py"
@@ -56,19 +60,23 @@ def test_every_tab_source_exists() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "已知缺陷（2026-09-28 实测）：README 章节改名后生成器 4 处 extract_between/extract_section "
-        "找不到锚点，python scripts/build_website_docs.py 直接 ValueError，"
-        "所以 website/assets/docs-data.js 已经是无法再生成的冻结快照。"
-        "修复属「官网文档刷新」轮：把标签页映射改到现有章节，再重新生成产物。"
-        "本用例 strict：修好后必须摘掉这个标记，否则会以 XPASS 失败提醒。"
-    ),
-)
 def test_generator_can_still_regenerate_the_site_data() -> None:
     """生成器必须能跑通今天的 README —— 它跑不通，官网就只能是冻结快照。"""
     _load_generator().build_docs_data()
+
+
+def test_committed_data_matches_generator_output() -> None:
+    """库里的 docs-data.js 必须等于生成器当前输出，不能是冻结快照。"""
+    module = _load_generator()
+    expected = module.build_docs_data()
+
+    assert _load_committed_data() == expected, (
+        "website/assets/docs-data.js 与 build_docs_data() 的输出不一致；"
+        "改过生成器映射或源文档后，请重跑 python scripts/build_website_docs.py 并提交产物。"
+    )
+    assert DATA_PATH.read_text(encoding="utf-8") == module.render_docs_data(
+        expected
+    ), "产物连字节都对不上（格式/空白被手改过）；请用生成器覆写，不要手改这个文件。"
 
 
 def test_headings_render_as_tags_not_literal_text() -> None:
@@ -91,3 +99,44 @@ def test_hash_comments_inside_code_fences_stay_code() -> None:
 
     assert "<h2>" not in html
     assert "# 注释" in html
+
+
+def test_table_with_delimiter_renders_as_table() -> None:
+    """表头行 + `|---|---|` 分隔行 → `<table>`，单元格只做转义与反引号转 <code>。"""
+    module = _load_generator()
+
+    html = module.markdown_to_html(
+        "| 供应商 | 说明 |\n"
+        "|--------|------|\n"
+        "| OpenAI | `gpt-4` 系列 |\n"
+        "| Anthropic | Claude 系列 |\n"
+    )
+
+    assert "<table><thead><tr><th>供应商</th><th>说明</th></tr></thead><tbody>" in html
+    assert "<tr><td>OpenAI</td><td><code>gpt-4</code> 系列</td></tr>" in html
+    assert "<tr><td>Anthropic</td><td>Claude 系列</td></tr>" in html
+    assert "</tbody></table>" in html
+    # 表格必须包在可横向滚动的容器里：窄屏下不能让表格撑破文档面板。
+    assert html.startswith('<div class="docs-table-wrap"><table>')
+    assert html.endswith("</tbody></table></div>")
+
+
+def test_table_without_delimiter_stays_paragraph() -> None:
+    """没有分隔行的竖线行不得解析成表格，否则普通文本会被吞成表格。"""
+    module = _load_generator()
+
+    html = module.markdown_to_html("| 供应商 | 说明 |\n| OpenAI | 无分隔行 |\n")
+
+    assert "<table>" not in html
+    assert "<p>| 供应商 | 说明 |</p>" in html
+
+
+def test_supported_providers_tab_is_rendered_as_a_table() -> None:
+    """README「支持的模型供应商」是表格章节，产物里必须真的是一张表。"""
+    tabs = _load_generator().build_docs_data()["tabs"]
+
+    provider_tab = next(tab for tab in tabs if tab["id"] == "provider-config")
+
+    assert "<table>" in provider_tab["html"]
+    assert "<th>供应商</th>" in provider_tab["html"]
+    assert "<td>OpenAI</td>" in provider_tab["html"]
