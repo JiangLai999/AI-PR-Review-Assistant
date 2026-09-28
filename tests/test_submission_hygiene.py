@@ -65,7 +65,7 @@ def test_guard_never_reads_local_credential_contents() -> None:
 
     assert ".ai_pr_review/config.local.json" in source
     # 路径常量可以出现在源码里，但绝不能出现读取/打开它的调用。
-    for forbidden in ("open(\".ai_pr_review", "read_text(\".ai_pr_review", "json.load(open("):
+    for forbidden in ('open(".ai_pr_review', 'read_text(".ai_pr_review', "json.load(open("):
         assert forbidden not in source, f"守卫疑似直接读取凭据内容：{forbidden}"
 
 
@@ -172,8 +172,7 @@ def test_mask_collapses_short_values() -> None:
 def test_gitignore_covers_every_required_pattern() -> None:
     guard = _load_guard()
     lines = {
-        line.strip()
-        for line in (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+        line.strip() for line in (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     }
 
     missing = [pattern for pattern in guard.GITIGNORE_REQUIRED if pattern not in lines]

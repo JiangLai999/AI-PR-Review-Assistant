@@ -184,7 +184,8 @@ def is_sensitive(relpath: str) -> bool:
     normalized = relpath.replace("\\", "/")
     basename = normalized.rsplit("/", 1)[-1]
     return any(
-        normalized == pattern or fnmatch.fnmatch(normalized, pattern)
+        normalized == pattern
+        or fnmatch.fnmatch(normalized, pattern)
         or fnmatch.fnmatch(basename, pattern)
         for pattern in SENSITIVE_PATTERNS
     )
