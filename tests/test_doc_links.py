@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -83,15 +84,43 @@ def test_reference_count_is_plausible(
 def test_every_referenced_path_exists_or_is_exempted(
     references: list[tuple[str, int, str, str]],
 ) -> None:
-    """每条引用要么真实存在，要么该行带豁免标记。"""
-    broken = [
-        f"{doc}:{lineno} → {path}"
+    """每条引用要么真实存在、要么被 .gitignore 覆盖、要么该行带豁免标记。
+
+    加 ".gitignore 覆盖" 这一条是因为 CI 与本地差异：`frontend/tui/dist/`、
+    `frontend/tui/node_modules`、`web/.shots/` 这些**构建产物/缓存目录**在开发机上
+    真实存在，但在干净检出里不存在 —— 引用它们是合法的，不该判红。
+    """
+    candidates = [
+        (doc, lineno, path, line)
         for doc, lineno, path, line in references
         if not (ROOT / path).exists() and not _is_exempt(line)
+    ]
+    ignored = _gitignored_paths(sorted({path for _, _, path, _ in candidates}))
+    broken = [
+        f"{doc}:{lineno} → {path}" for doc, lineno, path, _ in candidates if path not in ignored
     ]
     assert not broken, (
         "docs 里有指向不存在文件的路径引用（无豁免标记）：\n  "
         + "\n  ".join(sorted(broken))
         + "\n\n修法：文件只是挪了位置就改成完整路径；示例占位补 `（示例）`；"
-        "提案未实现补 `（提案，未实现）`；文档已改名/删除就改指替代或补 `已归档`。"
+        "提案未实现补 `（提案，未实现）`；文档已改名/删除就改指替代或补 `已归档`；"
+        "引用的若是构建产物/缓存目录，确认它已被 .gitignore 覆盖即可。"
     )
+
+
+def _gitignored_paths(paths: list[str]) -> set[str]:
+    """批量判断哪些路径被 .gitignore 覆盖（一次 git 调用，避免逐条开销）。"""
+    if not paths:
+        return set()
+    try:
+        proc = subprocess.run(
+            ["git", "check-ignore", "--stdin"],
+            input="\n".join(paths),
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+            check=False,
+        )
+    except OSError:
+        return set()
+    return {line.strip() for line in proc.stdout.splitlines() if line.strip()}

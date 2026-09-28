@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from ai_pr_review.models.pr_data import FileDiff, FileStatus
 from ai_pr_review.services.analyzers.cross_file_interface import (
     CrossFileInterfaceAnalyzer,
@@ -57,6 +59,7 @@ def signature_map_for(contexts) -> dict:
 
 class TestSymbolIndex:
     def test_indexes_function_signatures(self):
+        pytest.importorskip("tree_sitter", reason="签名提取依赖 tree-sitter，未安装时会降级为 regex")
         contexts = [build("src/service.py", SERVICE_AFTER)]
 
         definitions = SymbolIndex(contexts).definitions()

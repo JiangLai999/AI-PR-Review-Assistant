@@ -264,7 +264,16 @@ def _run_message_in_background(
 
 
 def _build_prompt_session() -> Any | None:
-    """构建 prompt_toolkit 会话."""
+    """构建 prompt_toolkit 会话。
+
+    只在**交互式终端**里启用。非 TTY（管道、重定向、CI、`printf ... | pr-review chat`）
+    时 prompt_toolkit 会立刻 EOF，导致会话不处理任何输入就退出 —— Linux 上必现，
+    Windows 上不复现，CI 首跑就是这么红掉的。非 TTY 返回 None，主循环回落到
+    Rich 的 ``Prompt.ask``，可正常逐行读取管道输入。
+    """
+    if not getattr(sys.stdin, "isatty", lambda: False)():
+        return None
+
     try:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.completion import WordCompleter

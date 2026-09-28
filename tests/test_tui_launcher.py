@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 from ai_pr_review import cli
 
+# 编译产物的文件名随平台变化（Windows 带 .exe），测试必须跟着平台走，
+# 否则在 Linux CI 上会因为找不到 `pr-review-tui` 而误判启动失败。
+_PREBUILT_NAME = "pr-review-tui.exe" if os.name == "nt" else "pr-review-tui"
 
 def _prepare_launcher_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
     project_root = tmp_path / "proj"
@@ -17,7 +21,7 @@ def _prepare_launcher_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
     (dev_root / "node_modules").mkdir()
     static_root.mkdir(parents=True)
     (static_root / "tui.js").write_text("// staged bundle\n", encoding="utf-8")
-    (static_root / "pr-review-tui.exe").write_bytes(b"stale-exe")
+    (static_root / _PREBUILT_NAME).write_bytes(b"stale-exe")
     return project_root, dev_root, static_root
 
 
@@ -55,7 +59,7 @@ def test_tui_launcher_prefers_dev_source_then_bundle_then_prebuilt(
     # Only when Bun is unavailable may the compiled fallback be used.
     monkeypatch.setattr(cli, "_find_bun_runtime", lambda: None)
     assert cli._open_tui_frontend() is True
-    assert launched[-1] == ([str(static_root / "pr-review-tui.exe")], static_root)
+    assert launched[-1] == ([str(static_root / _PREBUILT_NAME)], static_root)
 
 
 def test_tui_launcher_raw_command_override_wins(tmp_path: Path, monkeypatch) -> None:

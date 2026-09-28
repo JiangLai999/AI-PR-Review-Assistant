@@ -74,6 +74,7 @@ class TestContextBuilder:
         )
 
     def test_tree_sitter_extracts_python_symbols(self):
+        pytest.importorskip("tree_sitter", reason="tree-sitter 属可选 ast extra，未安装时走 regex 降级")
         builder = ContextBuilder(ContextBuilderConfig(enable_tree_sitter=True))
 
         result = builder.extract_ast_context("src/service.py", PYTHON_CONTENT, "python")

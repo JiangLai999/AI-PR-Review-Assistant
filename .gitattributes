@@ -1,0 +1,9 @@
+# 随包构建产物必须跨平台逐字节一致。
+#
+# 背景：`npm run build`（vite）在 Windows 上产出 CRLF、在 ubuntu 上产出 LF。
+# 原先 web_static/index.html 的 blob 里存的是 CRLF，于是本地 `git diff` 干净、
+# CI 却必然报「web_static 与 web/ 源码不同步」。这里把 web_static 下的**文本**
+# 资源统一钉成 LF（二进制资源如 png/woff2/ttf 不在规则内，避免被当成文本转换）。
+src/ai_pr_review/web_static/*.html text eol=lf
+src/ai_pr_review/web_static/assets/*.js text eol=lf
+src/ai_pr_review/web_static/assets/*.css text eol=lf
