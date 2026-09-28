@@ -1,6 +1,6 @@
 # 参赛现场演示脚本
 
-> 版本：2026-09-20  
+> 最后更新：2026-09-28 · 状态：参赛材料  
 > 目标时长：3 分钟  
 > 主路线：Web 工作台 + CLI 备援
 
@@ -14,7 +14,8 @@
 
 - 代码和审查结果默认保存在本机；
 - 支持离线演示；
-- 真实 PR 可以接入 GitHub 和 DeepSeek。
+- 真实 PR 可以接入 GitHub 和 DeepSeek；
+- 三个入口共用同一套审查内核：CLI（`pr-review`）、OpenTUI Chat（`pr-review chat`）、Web 工作台（`pr-review serve`）。
 
 ## 1. 离线 Demo（30 秒）
 
@@ -28,6 +29,7 @@ Web 路线：
 CLI 备援：
 
 ```bash
+pr-review demo --list-cases
 pr-review showcase
 pr-review demo --case sql-injection
 ```
@@ -91,10 +93,11 @@ pr-review <PR_URL> --verbose
 - 代码片段；
 - 人工反馈按钮。
 
-然后点击：
+证据状态与人工反馈是两件事，分别展示：
 
 ```text
-证据有效 / 待人工确认 / 已修复
+证据状态：valid / needs_review / invalid / unverified
+人工反馈：accepted / rejected / fixed / needs_review
 ```
 
 强调：
@@ -147,6 +150,28 @@ pr-review demo --case tls-disabled
 pr-review demo --case clean-change
 ```
 
-## 7. 结束语（10 秒）
+## 7. 备选桥段：Chat 工作区（时间允许时 30 秒）
+
+```bash
+pr-review chat          # 默认 OpenTUI；缺少 Bun / OpenTUI 时自动回退纯文本 CLI
+```
+
+在 Chat 中输入：
+
+```text
+/review https://github.com/owner/repo/pull/123   直接发起审查并绑定结果
+/think high                                      思考档位（本地端点会置灰）
+/history                                         审查历史；/history --chat 看对话
+/context                                         查看或解除审查上下文绑定
+Ctrl+O                                           打开 Findings 详情
+```
+
+讲解重点：
+
+- Chat 不是孤立聊天：绑定审查结果后可继续追问 Finding、证据与修复建议；
+- 会话可切换 / 重命名（`/sessions`、`/rename`），上下文可压缩（`/compact`）；
+- 完整命令与界面差异见 `docs/chat-features.md`（TUI 与纯文本 CLI 的命令集合不同，文档已标注）。
+
+## 8. 结束语（10 秒）
 
 > AI PR Review Assistant 的重点不是让模型替代工程师，而是把模型、规则、证据和人工反馈组织成一个可以验证、可以复盘、可以落地的审查系统。

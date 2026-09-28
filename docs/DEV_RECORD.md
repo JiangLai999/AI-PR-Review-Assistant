@@ -1,5 +1,7 @@
 # 开发过程记录 · Development Record
 
+> 最后更新：2026-09-28 · 状态：过程记录
+>
 > **定位**：这是**过程记录**，不是产品文档。产品文档见 `docs/README.md`。
 >
 > 本文件由 2026-09-28 的「过程文档合并」产生：把此前 96 份分散的协作任务单、交付报告、审计与验收矩阵
@@ -151,6 +153,28 @@ Web 工作台按 Phase 推进，每个 Phase 都有契约与验收：
 4. **文档治理**：25 条断链清零并加防漂移守卫、README/CHANGELOG 数字对齐（CI 徽章替代写死数字）、
    `.gitignore` 兜底（`.pytest_*/`、工具缓存、`.shots/`）、`_p5_verify` 一次性环境清理（372.7MB → 0.56MB）、
    过程文档合并为本文件。
+
+### 3.9 交付收尾（2026-09-28，官网口径与提交包素材）
+
+上线之后的收尾同样走 PR 流程，三次合并都经过 CI 与线上验证：
+
+1. **官网命令口径校准（PR #40 / #41）**：官网「Chat 工作区」标签页直接渲染 README 的斜杠命令表，
+   而该表混用了 TUI 与纯文本 CLI 两套界面的命令 —— `/usage` `/stats` `/restore` `/clear` `/exit`
+   实际**仅 CLI**（TUI 后端实测返回 `Unsupported command`），`/explain` `/feedback` `/publish` `/demo`
+   `/showcase` 实际**仅 TUI**，且漏掉 `/setup` `/think` `/context` `/sessions` `/rename` 等 11 条 TUI 命令。
+   - README 表改为「命令 / 说明 / 可用界面」三列，29 条命令逐条标注；
+   - 新增守卫测试：README 命令表必须等于「后端分发集合 ∪ TUI 前端拦截集合 ∪ CLI 实现集合」，界面标注必须与实现一致；
+   - 首页命令卡补齐 `pr-review config`，标题计数与卡片数量由测试锁定；
+   - TUI 后端 `/help` 补列 `/sessions` 与 `/rename`，与命令菜单对齐（`sessions` 从"已废弃命令"清单移除）。
+2. **P2 配图入库（PR #42）**：10 张应用方案 PDF / 演示视频配图入库 `docs/assets/p2/`，
+   并在 `docs/COMPLIANCE_AND_ORIGINALITY.md` §七 逐条登记为"AI 生成展示素材（核心逻辑不依赖）"；
+   与官网 OG 图逐字节相同的重复副本不入库。
+3. **官网渲染补链接**：文档中心渲染器原先只支持反引号与 `**粗体**`，README / API / 合规文档里的
+   `[文本](链接)` 会被原样显示（实测 10 处）。生成器新增行内链接渲染（只放行 `http` / `https` /
+   `mailto` 与相对路径，其它协议保持字面量）并补单测，重新生成 `docs-data.js` 后同步站点仓并线上验证。
+4. **文档规范化**：13 份文档统一「最后更新 + 状态」元信息行、补齐 19 处代码围栏语言、
+   修正 `docs/API.md` 的双 H1，并刷新 `SUBMISSION_PACKAGE_PLAN.md` 的交付状态（PDF 18 页已成稿、
+   视频待录制）与 `P5_CLI_ACCEPTANCE_2026-09-24.md` 的证据归档说明（`_p5_verify/` 已清理）。
 
 ---
 

@@ -1,5 +1,7 @@
 # Chat 功能手册 / Chat Feature Guide
 
+> 最后更新：2026-09-28 · 状态：对外文档
+>
 > 面向用户的 Chat 命令与交互说明。**中英双语**：每节先中文，后英文（表格内 `中文 / English`）。
 > User-facing manual for Chat commands and interactions. Each section is written in Chinese first,
 > then English; table cells carry both languages.

@@ -1,6 +1,6 @@
 # AI PR Review Assistant — 项目创新点
 
-> 📅 整理日期：2026-05-31
+> 最后更新：2026-05-31 · 状态：对外文档
 > 🏆 项目特色：AI 多模型协作决策 + 透明开发流程
 
 ---
@@ -21,7 +21,7 @@
 
 ### 1.3 会谈流程
 
-```
+```text
 第一轮：架构质疑
   Claude Code 提出初步方案 → DeepSeek 提出 4 个质疑 → 用户反馈
 
@@ -69,7 +69,7 @@
 
 ### 2.3 协作流程
 
-```
+```text
 DeepSeek V4 Pro                    GPT 5.4
     │                                  │
     ▼                                  ▼
@@ -152,7 +152,7 @@ Claude Code 审查 ◄─────────────────► Cla
 **问题**：diff + 前后 10 行的上下文不足，AI 会瞎猜。
 
 **解决方案**：三级 fallback 策略
-```
+```text
 Level 1: tree-sitter 全量解析（最准确）
 Level 2: 正则表达式提取关键 pattern（次准确）
 Level 3: 仅提供 diff context（前后 30 行，保底）
@@ -165,7 +165,7 @@ Level 3: 仅提供 diff context（前后 30 行，保底）
 **问题**：Haiku 分类没有 benchmark 数据，漏判风险高。
 
 **解决方案**：规则预过滤 + 全量 Sonnet 审查
-```
+```text
 始终审查: src/auth/, src/middleware/, migrations/, **/config/**, **/*.sql
 直接跳过: test/**, __test__/**, *.test.*, *.spec.*, docs/**, *.md
 所有剩余文件 → 全部送 Sonnet
@@ -193,7 +193,7 @@ Level 3: 仅提供 diff context（前后 30 行，保底）
 **模式**：每个模块独立开发，测试驱动，持续集成验证
 
 **流程**：
-```
+```text
 设计文档 → 代码实现 → 测试验证 → 代码审查 → 合并
 ```
 
@@ -314,7 +314,7 @@ term.style.boxShadow = `${10+dx}px ${20+dy}px 40px rgba(0,0,0,0.08)`;
 
 ### 6.7 文件结构
 
-```
+```text
 website/
 ├── index.html          # 主页面 (437 行)
 ├── css/

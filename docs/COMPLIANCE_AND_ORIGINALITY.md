@@ -1,7 +1,7 @@
 # 合规、原创性与团队权属声明
 
 > 适用范围：AI PR Review Assistant 参赛提交包（源码、随包前端产物、演示与文档）。
-> 声明日期：2026-09-28。
+> 最后更新：2026-09-28 · 状态：对外文档（声明日期 2026-09-28）。
 > 配套文件：第三方组件与字体许可见 [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)；
 > 提交包密钥卫生守卫为 `scripts/check_submission_hygiene.py`。
 

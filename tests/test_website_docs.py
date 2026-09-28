@@ -125,6 +125,54 @@ def test_bold_renders_as_strong_outside_code_only() -> None:
     assert "<strong>" not in code
 
 
+def test_inline_link_renders_as_anchor() -> None:
+    """`[文本](链接)` → `<a>`，否则官网会显示原始 markdown 文本。"""
+    module = _load_generator()
+
+    html = module.markdown_to_html("见 [docs/API.md](docs/API.md)。\n")
+    assert '<a href="docs/API.md" target="_blank" rel="noopener">docs/API.md</a>' in html
+    assert "](" not in html
+
+    external = module.markdown_to_html("[GitHub](https://github.com/JiangLai999)\n")
+    assert '<a href="https://github.com/JiangLai999"' in external
+
+
+def test_inline_link_inside_code_span_stays_literal() -> None:
+    """代码段里的 `[x](y)` 不能被渲染成锚点。"""
+    module = _load_generator()
+
+    html = module.markdown_to_html("`[x](y)`\n")
+    assert "<a " not in html
+    assert "[x](y)" in html
+
+
+def test_unsafe_link_scheme_stays_literal() -> None:
+    """`javascript:` 这类协议不能进入 href，只按字面量保留。"""
+    module = _load_generator()
+
+    html = module.markdown_to_html("[click](javascript:void)\n")
+    assert "<a " not in html
+    assert "javascript:void" in html
+
+
+def test_relative_doc_links_are_rewritten_to_repo_blob() -> None:
+    """给定 source_path 时，相对链接要指回仓库文件（官网目录里没有这些文件）。"""
+    module = _load_generator()
+
+    html = module.markdown_to_html(
+        "见 [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)。\n",
+        source_path="docs/COMPLIANCE_AND_ORIGINALITY.md",
+    )
+    assert (
+        'href="https://github.com/JiangLai999/AI-PR-Review-Assistant/blob/main/THIRD_PARTY_NOTICES.md"'
+        in html
+    )
+    assert "<code>../THIRD_PARTY_NOTICES.md</code>" in html
+
+    readme = module.markdown_to_html("[`docs/API.md`](docs/API.md)\n", source_path="README.md")
+    assert "/blob/main/docs/API.md" in readme
+
+
 def test_table_with_delimiter_renders_as_table() -> None:
     """表头行 + `|---|---|` 分隔行 → `<table>`，单元格只做转义与反引号转 <code>。"""
     module = _load_generator()
