@@ -17,7 +17,7 @@ skipped` 回调；后端沿用已有的 `except ReviewCancelled` 分支发出 `r
 
 | 证据 | 命令 / 位置 | 结果 |
 |---|---|---|
-| 逐文件阶段完全没有取消检查 | 改动前快照 `_p5_verify/venv/Lib/site-packages/ai_pr_review/services/review_orchestrator.py:374-382`：`_review_file_contexts(...)` 参数表里没有 `cancel_check` | 并发跑完全部文件前不会看取消标志 |
+| 逐文件阶段完全没有取消检查 | 改动前快照 `_p5_verify/venv/Lib/site-packages/ai_pr_review/services/review_orchestrator.py:374-382`（该一次性环境已于 2026-09-28 清理；同一份旧代码可用 `git show <改动前提交>:src/ai_pr_review/services/review_orchestrator.py` 复现）：`_review_file_contexts(...)` 参数表里没有 `cancel_check` | 并发跑完全部文件前不会看取消标志 |
 | `cancel_check` 只在阶段边界被调用 | 同快照 `:142`（`stage()`）与 `:235`（写库前复查）；hybrid 同构 | 一次模型调用（默认超时 120s）内不生效 |
 | 文档自述无法中断在飞调用 | 改动前 `review_orchestrator.py` 的 `ReviewCancelled` docstring：「停止发生在文件之间，无法中断在飞的模型调用」；`review()` docstring 同义 | 与用户实测「按 Esc 要么失败、要么等很久」一致 |
 | 同批任务不会被取消 | `asyncio.gather` 语义：只抛第一个异常，同批任务继续跑 | 取消后其余文件的模型调用仍在后台继续 |

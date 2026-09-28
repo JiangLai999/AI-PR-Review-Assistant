@@ -131,7 +131,7 @@ python -m pytest -q --no-cov
 
 | 验证 | 方法 | 结果 |
 |---|---|---|
-| 英文文案逐字一致 + finding_id 不变 | 加载 `_p5_verify/cleanvenv/.../analyzers/{static,python_ast}_analyzer.py`（改造前快照）与当前实现，对 19 段样例比对 `title/problem/suggestion/category/severity/confidence/finding_id/sources/code_snippet/line_start/line_end` | 19 样例 × 2 分析器，**0 处差异** |
+| 英文文案逐字一致 + finding_id 不变 | 加载 `_p5_verify/cleanvenv/.../analyzers/{static,python_ast}_analyzer.py`（改造前快照；该一次性环境已于 2026-09-28 清理，同版本可用 `git show <改动前提交>:src/ai_pr_review/services/analyzers/...` 复现）与当前实现，对 19 段样例比对 `title/problem/suggestion/category/severity/confidence/finding_id/sources/code_snippet/line_start/line_end` | 19 样例 × 2 分析器，**0 处差异** |
 | demo 载荷仅多 `rule_id` | 当前 payload 逐个 finding 去掉 `rule_id` 后再算 SHA-256 | 与旧 golden 完全一致（`sql-injection` 91e9948d…、`tls-disabled` d277f194…、`clean-change` 不变） |
 | Schema 收敛 | 打印 `get_json_schema()` | 见 §2.1 |
 | UI 规则数 | `web_server.count_deterministic_rules()` | 18 == `len(all_rule_ids())` |

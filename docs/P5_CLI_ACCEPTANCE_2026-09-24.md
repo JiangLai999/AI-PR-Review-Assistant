@@ -13,8 +13,8 @@
 - `scripts/hatch_build.py` 在 Windows x64 构建 `py3-none-win_amd64`，设置 `Root-Is-Purelib: false`；缺少 `tui.js`/`opentui.dll` 或平台不符时直接失败。非 Windows 不误收该 wheel。
 - **精简包（需 Bun）**：先 `cd frontend/tui; bun run stage`，再回仓库根运行 `python -m pip wheel . --no-deps --no-build-isolation -w _p5_verify/wheel`，得到 2,437,329 字节 wheel。无 Bun 时显式 `chat --tui` 提示安装 Bun 或用 `--plain`，返回非零；此项属于正确的降级，不代表 TUI 已启动。
 - **比赛用独立 TUI 包（无需 Bun）**：`cd frontend/tui; bun run scripts/build-tui.ts --stage`，回仓库根设置 `AI_PR_REVIEW_STANDALONE_TUI=1` 后构建 wheel。该环境变量未设置时，即使 staged exe 存在也不意外纳入精简包；设置后若 exe 缺失直接失败。
-- 当前独立包：`_p5_verify/standalone-wheel/ai_pr_review-0.1.0-py3-none-win_amd64.whl`，**43,264,372 字节**；SHA-256：`220F5AA3B6EC0F5B3C211F208455E98A885E67EA55654D5764EF3BF032ED8697`。包含 92,016,128 字节 `pr-review-tui.exe` 和包内 JS/DLL，wheel 的 WHEEL 元数据标记 `py3-none-win_amd64`。
-- **真干净 venv**：`_p5_verify/cleanvenv` 在不设置 PYTHONPATH 的条件下，从 PyPI 安装声明的 Python 依赖和 wheel，`pip check` = `No broken requirements found`；`doctor --json-output` 与 `demo --case sql-injection --json-output` 都返回 0；安装包 `pr-review chat --tui` 进入 OpenTUI 并从连接中到“就绪”。目标端 PATH/APPDATA/BUN_EXECUTABLE 在进程内设为无 Bun 后，同一独立 wheel 仍成功进入 TUI 且后端就绪。PTY 测试里手动 Ctrl+C 使 shell 返回 1，故不把退出码记成 0；屏幕恢复正常。
+- 当前独立包：`_p5_verify/standalone-wheel/ai_pr_review-0.1.0-py3-none-win_amd64.whl`，**43,264,372 字节**；SHA-256：`220F5AA3B6EC0F5B3C211F208455E98A885E67EA55654D5764EF3BF032ED8697`。包含 92,016,128 字节 `pr-review-tui.exe` 和包内 JS/DLL，wheel 的 WHEEL 元数据标记 `py3-none-win_amd64`。（注：`_p5_verify/` 下的一次性安装目录已于 2026-09-28 清理以回收磁盘；该 wheel 可用本节命令按上面的字节数/SHA 复现。）
+- **真干净 venv**：`_p5_verify/cleanvenv` 在不设置 PYTHONPATH 的条件下，从 PyPI 安装声明的 Python 依赖和 wheel，`pip check` = `No broken requirements found`；`doctor --json-output` 与 `demo --case sql-injection --json-output` 都返回 0；安装包 `pr-review chat --tui` 进入 OpenTUI 并从连接中到“就绪”。目标端 PATH/APPDATA/BUN_EXECUTABLE 在进程内设为无 Bun 后，同一独立 wheel 仍成功进入 TUI 且后端就绪。PTY 测试里手动 Ctrl+C 使 shell 返回 1，故不把退出码记成 0；屏幕恢复正常。（注：该 cleanvenv 已于 2026-09-28 清理；按本段命令可重建。）
 
 ## UI 尺寸矩阵与键位模拟
 
