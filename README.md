@@ -576,3 +576,20 @@ mypy src
 
 > 历史上这里有一张按模块手写的用例数表（合计 270），它早已与实际套件脱节、容易误导，已删除；
 > 需要更细的口径请直接看 CI 里 `pytest` 的输出与 `pytest --cov` 的逐文件表。
+
+---
+
+## 合规、原创性与许可
+
+- [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) —— 第三方组件、字体与随包捆绑产物的
+  许可总表（含版本、许可证、上游链接、证据来源），以及二进制 / 一体化分发注意事项。
+- [`docs/COMPLIANCE_AND_ORIGINALITY.md`](docs/COMPLIANCE_AND_ORIGINALITY.md) —— 原创性与团队权属声明：
+  团队主导与 AI 辅助的边界、参考项目边界、团队权属边界、第三方权利归属、AI 生成内容说明与提交前密钥清理清单。
+
+提交前可运行 `python scripts/check_submission_hygiene.py`，检查提交包是否夹带本地凭据、
+`.gitignore` 是否覆盖敏感模式，以及上述两份合规文档是否齐备。
+
+> **第三方商标声明**：本项目在文档、界面与代码中提及 GitHub、Python、OpenAI、Anthropic、Claude、
+> DeepSeek、Qwen、GLM、MiMo、OpenCode、OpenTUI、GSAP 等名称，**仅用于识别与说明**，
+> **不表示任何合作、赞助、授权或背书**。上述名称的商标权归各自所有者所有，本项目不主张
+> 任何第三方商标，也不主张任何第三方组件的所有权。

@@ -16,6 +16,7 @@
 | `docs/session-and-compaction-guide.md` | 多会话与上下文压缩操作指南 |
 | `docs/SUBMISSION_PACKAGE_PLAN.md` | 参赛提交材料清单与执行状态 |
 | `docs/COMPETITION_DEMO_SCRIPT.md` | 现场演示脚本（3 分钟主路径） |
+| `docs/COMPLIANCE_AND_ORIGINALITY.md` | 合规、原创性与团队权属声明：许可边界、团队权属边界、AI 辅助边界、提交前密钥清理清单 |
 
 ## 二、过程记录（对内 / 复盘）
 

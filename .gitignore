@@ -84,3 +84,12 @@ _p5_verify/
 # Raw transcripts from delegated agent CLIs
 _agent_out/
 .pytest_workbuddy/
+
+# 提交包密钥卫生（scripts/check_submission_hygiene.py 的必检项；只追加，不删改上面的条目）
+# 本地 web 配置（Web 工作台 settings 写入的 provider/token）
+*.web.json
+# 通用环境变量文件
+.env
+secrets.env
+# 一次性手工落盘的 Token 文件
+FIX_GITHUB_TOKEN.txt
