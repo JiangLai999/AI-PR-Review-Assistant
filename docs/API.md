@@ -783,7 +783,7 @@ curl http://127.0.0.1:8787/
 - `src/ai_pr_review/cli.py`
 - `src/ai_pr_review/review_entry.py`
 - `src/ai_pr_review/web_server.py`
-- `src/ai_pr_review/web_ui.py`
+- `src/ai_pr_review/web_ui.py`（提案，未实现：该文件从未落地，WebUI 服务端由上一行的 `src/ai_pr_review/web_server.py` 承载）
 - `src/ai_pr_review/services/review_orchestrator.py`
 - `src/ai_pr_review/services/agent/planner.py`
 - `src/ai_pr_review/services/evidence/finding_validator.py`

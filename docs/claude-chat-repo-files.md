@@ -21,14 +21,14 @@
 | 输入 | 结果 | 说明 |
 |---|---|---|
 | `website/js/main.js 里的 tab.html 从哪来` | `["website/js/main.js"]` | 实测原句；`.html` 不在源码扩展名内，忽略 |
-| `` 看下 `src/a.py` 和 src/b.ts `` | `["src/a.py", "src/b.ts"]` | 反引号/中文标点自动截断 |
+| `` 看下 `src/a.py` 和 src/b.ts `` | `["src/a.py", "src/b.ts"]` | 反引号/中文标点自动截断（示例） |
 | `frontend\tui\src\main.tsx` | `["frontend/tui/src/main.tsx"]` | Windows 分隔符折算成 `/` |
 | `see src/main.js:120 for details` | `["src/main.js"]` | `:120` 行号不进入路径 |
 | `main.js 是干嘛的` | `["main.js"]` | **裸文件名也认**（见下） |
 | `https://github.com/example/repo/pull/31` | `[]` | PR 链接不是文件路径 |
 | `看看 https://cdn.example.com/vendor/app.js` | `[]` | 网址里的 `.js` 不算（先整体剔除 URL） |
 | `https://github.com/o/r/blob/main/src/app.js#L10` | `[]` | blob URL 同样不认（保守取舍，见下） |
-| `docs/design.md` / `index.html` | `[]` | 非源码扩展名 |
+| `docs/PROJECT_DESIGN.md` / `index.html` | `[]` | 非源码扩展名（原写作 docs/design.md，该文件不存在） |
 | `版本 1.2.3 和 e.g.` | `[]` | 末段必须以字母开头，版本号/缩写不命中 |
 
 **取舍一：裸文件名也认。** 实测里用户会直接说"main.js 里的 tab.html 从哪来"，只认带

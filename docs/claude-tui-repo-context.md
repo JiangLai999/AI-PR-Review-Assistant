@@ -55,7 +55,7 @@ runtime ─┬─(cloud/hybrid)─▶ provider ─▶ base_url ─▶ api_format
 那几屏的行为——`Esc` 取消、`←` 返回、页脚用通用文案。选中态沿用现有 `select` 的像素风配色
 （`selectedBackgroundColor="#5a2e1c"` + `selectedTextColor="#ffffff"` + 说明行 `#ffd0bb`），与其它屏逐字段一致。
 
-## 4. 选项清单与双语文案（`src/setup-repo-context.ts`）
+## 4. 选项清单与双语文案（`frontend/tui/src/setup-repo-context.ts`）
 
 - **后端优先**：`repoContextChoices()`（`:76`）先读 `config.options.repo_context.options`，**前端不硬编码取值集合**；
   后端将来加档位（渲染证据脚本里用 `full-tree` 单测过）会原样出现在屏幕上。
@@ -111,11 +111,11 @@ runtime ─┬─(cloud/hybrid)─▶ provider ─▶ base_url ─▶ api_format
 | 4 | `bun --preload @opentui/solid/preload scripts/manual-route-wizard-check.tsx`（**回归**） | **ALL PASS（65 项断言）**——确认页加高与标题函数改名没有动到路由细化页 |
 | 5 | `bun --preload @opentui/solid/preload scripts/p5-app-integration-check.tsx`（**回归**） | **ALL P5 UI CHECKS PASSED**（`failures: []`）——工作台/发现/发布等既有 UI 未受 `app.tsx` 改动影响 |
 
-单测 `src/setup-repo-context.test.ts`（8 例）覆盖：后端清单优先 / 未来档位原样渲染 / 兜底表；双语 label 切分与
+单测 `frontend/tui/src/setup-repo-context.test.ts`（8 例）覆盖：后端清单优先 / 未来档位原样渲染 / 兜底表；双语 label 切分与
 单语 label 原样返回；推荐标记；预选精确匹配 → 推荐档 → 第一项（含清单里没有推荐档、空清单）；
 取值不越界；载荷字段（含 `" OFF "` 归一化、空串不发送）；"不动的助手"载荷 = 后端当前值（含 `off` 不被悄悄改回推荐档）。
 
-渲染证据脚本 `scripts/manual-repo-context-wizard-check.tsx`（fixture 渲染**真实** `SetupWizardDialog`，不 spawn Python、
+渲染证据脚本 `frontend/tui/scripts/manual-repo-context-wizard-check.tsx`（fixture 渲染**真实** `SetupWizardDialog`，不 spawn Python、
 不读配置、不联网）三个场景：
 
 | 场景 | fixture `repo_context.value` | 断言要点 |

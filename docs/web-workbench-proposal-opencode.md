@@ -130,13 +130,13 @@
 
 **防漂移机制（二选一，推荐 A）：**
 
-- **A（推荐）单源清单**：新增 `src/ai_pr_review/web_api_manifest.py`，用一个 `ROUTES: tuple[Route, ...]`（`method/path/summary/params/response/errors`）描述上表；`web_server.py` 暴露 `GET /api/endpoints`（只读、无凭据、只回元数据），`ApiPage.tsx` 改为拉取渲染。
-  同时加一条 pytest `tests/test_web_api_manifest.py`：正则扫 `web_server.py` 的路径字面量（本次已验证可扫到：`/api/benchmark|config|credentials|demo/cases|demo/run|feedback|health|history|jobs|meta|plan|report|review` 13 个字面量 + `/api/jobs/` 前缀 `:129/:153`，合起来正好 16 路径），与 manifest 双向比对，缺一即红。文档因此**不可能**再与路由表漂移，且 `ApiPage` 文案天然双语可扩展（配合 §2.5）。
+- **A（推荐）单源清单**：新增 `src/ai_pr_review/web_api_manifest.py`（提案，未实现：仓库中无此文件，`web_server.py` 也未注册 `GET /api/endpoints`），用一个 `ROUTES: tuple[Route, ...]`（`method/path/summary/params/response/errors`）描述上表；`web_server.py` 暴露 `GET /api/endpoints`（只读、无凭据、只回元数据），`ApiPage.tsx` 改为拉取渲染。
+  同时加一条 pytest `tests/test_web_api_manifest.py`（提案，未实现）：正则扫 `web_server.py` 的路径字面量（本次已验证可扫到：`/api/benchmark|config|credentials|demo/cases|demo/run|feedback|health|history|jobs|meta|plan|report|review` 13 个字面量 + `/api/jobs/` 前缀 `:129/:153`，合起来正好 16 路径），与 manifest 双向比对，缺一即红。文档因此**不可能**再与路由表漂移，且 `ApiPage` 文案天然双语可扩展（配合 §2.5）。
 - **B（最小，不动运行时）**：只加 pytest，比对 `web/src/pages/ApiPage.tsx:11-57` 的 `ENDPOINTS` 数组与 `web_server.py` 字面量；缺点是仍需人工同步 16 条描述，只能发现"漏了"，不能自动生成。
 
 ### 2.5 i18n 最小可行方案
 
-- **词典**：`web/src/i18n/zh-CN.ts` + `web/src/i18n/en-US.ts`（扁平 key，如 `nav.overview`、`settings.api_key.hint`），导出 `Dict` 类型让缺 key 编译期报错（`tsconfig` 已是 `strict`）。
+- **词典**：已实现，但**不是**单文件 zh-CN.ts/en-US.ts，而是按命名空间拆成 `web/src/i18n/shell.ts`、`web/src/i18n/overview.ts`、`web/src/i18n/settings.ts`、`web/src/i18n/review.ts`、`web/src/i18n/components.ts`，由 `web/src/i18n/index.ts` 汇总（每个命名空间文件内同时存 zh-CN 与 en-US 两份词典，扁平 key，如 `nav.overview`、`settings.api_key.hint`），导出 `Dict` 类型让缺 key 编译期报错（`tsconfig` 已是 `strict`）。
 - **接入**：`LangProvider`（React Context）+ `useLang()` 返回 `{lang, t, setLang}`；`App.tsx` 顶部挂 Provider。**没有路由级切换开销**——当前是 hash 路由单页（`App.tsx:29-32`），换语言即整树重渲染。
 - **语言来源与打通 `preferences.ui_language`**：首屏读 `GET /api/config` → `preferences.ui_language`（**依赖 §2.2 的 ConfigView 增补**），`localStorage` 仅作"本次会话覆盖"；在设置页保存 `ui_language` 时回写（`POST /api/config`），这样 TUI/CLI 改的语言 Web 会跟随，反之亦然。语言切换若要立即生效，需在 `setLang` 后回传 `POST /api/config {ui_language}`。
 - **改造面（实测数字）**：`web/src` 20 文件 / 6105 行 / **4898 汉字**，含汉字的 17 个文件。分批建议：① `App.tsx`（199 汉字，导航/状态栏/横幅）② `components/ui.tsx`(64) + `ErrorBoundary.tsx`(167) ③ `SettingsPage`(515) + `ApiPage`(372) ④ `HistoryPage`(146) + `BenchmarkPage`(360) ⑤ `OverviewPage`(852) ⑥ `ReviewPage`(977，最大，放最后)。CSS 内 814 汉字（`components.css` 550 + `tokens.css` 264）需逐条判断是注释还是 `content:` 文案。
@@ -153,7 +153,7 @@
 
 1. **补 `frontend/tui` job**：`oven-sh/setup-bun` + `bun install` + `bun run typecheck` + `bun test src`（脚本见 `frontend/tui/package.json:7-13`）。注意 `scripts/hatch_build.py:27-35` 要求**在 Windows x64 上**才允许出 wheel，所以 ubuntu CI 只做 typecheck/test，**不要**在 ubuntu 上跑 `bun run stage`/`build` 后尝试打包。
 2. **修产物校验盲区**：`ci.yml:77` 的 `git diff --quiet -- src/ai_pr_review/web_static` 对 untracked 新文件无效，改为 `git status --porcelain -- src/ai_pr_review/web_static` 非空即失败（新增 chunk 才会被抓到）。
-3. **统一 Node 版本**：CI 用 `'22'`（`ci.yml:59`），本机实测 `v24.16.0` / npm `11.15.0` → 建议加 `web/.nvmrc`（或 `package.json#engines`）并让 CI 读同一来源，避免"本地构建产物在 CI 上被判不同步"。
+3. **统一 Node 版本**：CI 用 `'22'`（`ci.yml:59`），本机实测 `v24.16.0` / npm `11.15.0` → 建议加 `web/.nvmrc`（提案，未实现：仓库中无 `.nvmrc`，`web/package.json` 也没有 `engines` 字段）（或 `package.json#engines`）并让 CI 读同一来源，避免"本地构建产物在 CI 上被判不同步"。
 4. **（可选，S）** Playwright 视觉审计 job：`npx playwright install --with-deps chromium` 后跑 `web/tools/audit-pages.mjs`（需要 `pr-review serve` 起后端，或用 `tests/test_web_server.py` 的 fixture 起服务）。建议放 nightly 而非 PR 必跑。
 
 **"源码构建结果 == 已提交产物"要不要校验**：要——`src/ai_pr_review/web_static` 是随 pip 分发的界面（`web_server.py:6-7`、`web_server.py:32`、`pyproject.toml:64` `packages = ["src/ai_pr_review"]`），`web_server.py:222-230` 已有"产物缺失 → 503 + 提示重建"的兜底，但产物**过期**没有任何兜底（用户会看到旧界面）。当前校验方向正确，只需按第 2 点补盲区。
@@ -306,7 +306,7 @@ node web/tools/audit-pages.mjs --lang=en                     # 6 页可见性断
 ## 6. 附：我建议的落地顺序（供主控排期）
 
 1. **PR-1（S/M，正确性）**：`web_config.py` 加 `EDITABLE_PREFERENCE_FIELDS` + `ignored[]` + token/枚举校验共享化 + `ConfigView.preferences/options` + 4 条新测试；同步 `types.ts`。
-2. **PR-2（S，CI）**：`ci.yml` 修 `git diff` 盲区 → `git status --porcelain`；加 `frontend/tui` job；加 `web/.nvmrc`。
+2. **PR-2（S，CI）**：`ci.yml` 修 `git diff` 盲区 → `git status --porcelain`；加 `frontend/tui` job；加 `web/.nvmrc`（提案，未实现）。
 3. **PR-3（M，ApiPage）**：`web_api_manifest.py` + `GET /api/endpoints` + 漂移测试；`ApiPage.tsx` 改为渲染清单。
 4. **PR-4（M，设置页）**：`SettingsPage` 6 阶段分组 + 新控件 + `ignored` 提示 + `local_only` 禁用提示。
 5. **PR-5（L，i18n）**：词典 + `useLang` + 按 §2.5 的 6 批顺序迁移 + 服务端消息 `code` 化。

@@ -294,7 +294,7 @@ OPTIONS /api/plan                              → HTTP/1.0 501 Unsupported meth
 | `web_server.py` | ① `:161` 白名单加 `/api/publish`；② 新 `_handle_publish(payload)`（解析 `run_id`/`confirm` → 媒体类型守卫 → `PublishService(self.config).preview/publish` → 按 `PublishError.code` 映射状态码）；③ `publish_ledger` 类属性 + `serve()` 挂载（`:599-608`） | ~45 行 |
 | `web/src/api/client.ts` | `ApiError` 加可选 `code`；`api.publish(runId, confirm)` | ~12 行 |
 | `web/src/api/types.ts` | `PublishPayload`（= §12.2 payload + `comment_url`） | ~16 行 |
-| `web/src/components/PublishDialog.tsx`（新） | 五态对话框：预览（目标/字数/条数/正文折叠预览/重复警告）→ 确认 → 结果（`text` + `comment_url`）/ 失败（按 `code` 分支） | ~150 行 |
+| `web/src/components/ReportActions.tsx`（已实现：提案里的独立 PublishDialog.tsx 未单独落地，发布对话框并入同文件的 `ReportActions`，见下一行） | 五态对话框：预览（目标/字数/条数/正文折叠预览/重复警告）→ 确认 → 结果（`text` + `comment_url`）/ 失败（按 `code` 分支） | ~150 行 |
 | `web/src/components/ReportActions.tsx`（新，与导出共用） | 参数 `runId`，渲染 4 个按钮并持有对话框 | ~120 行 |
 | `web/src/pages/ReviewPage.tsx` | 在风险总览后插 `<ReportActions runId={result.run?.id ?? null} />`——`runId` 为 `null`（计划模式）时不渲染 | ~6 行 |
 | `web/src/pages/HistoryPage.tsx` | `CardHead` 的 `extra`（`:185-188`）挂同一个组件 | ~4 行 |
@@ -379,7 +379,7 @@ OPTIONS /api/plan                              → HTTP/1.0 501 Unsupported meth
 | `web_server.py` | 新 `_handle_report_export(query)`：解析 `run_id`/`format` → `ResultStore.get_result` + `get_run_summary` → 复用 builder → `render_markdown`/json dump → JSON 包文本；`:109` 之后加一条路由（**注意必须放在 `path.startswith("/api/")` 兜底之前**，`web_server.py:132-134`） | ~55 行 |
 | `web/src/api/client.ts` | `api.exportReport(runId, format)` | ~6 行 |
 | `web/src/api/types.ts` | `ExportResponse` | ~8 行 |
-| `web/src/lib/clipboard.ts`（新） | `copyText()` 三级降级 | ~30 行 |
+| `web/src/components/ReportActions.tsx`（已实现：提案里的 web/src/lib/clipboard.ts 未单独建文件，`copyText` 是该文件内的模块级私有函数 `:53`） | `copyText()` 三级降级 | ~30 行 |
 | `web/src/components/ReportActions.tsx` | 见 §2.7（与发布共用） | — |
 
 ---
@@ -434,7 +434,7 @@ class _FakeGitHub:                       # 放在 tests/test_web_server.py 顶�
 
 **前端侧**（无单测框架，`web/package.json:7-12`）：
 - `cd web && npx tsc --noEmit`（CI 同款，`:66-67`）；
-- 新增 `web/tools/verify-report-actions.mjs`（Playwright，仿 `web/tools/audit-pages.mjs:1-30` 的可见性审计写法）：
+- 新增 `web/tools/verify-report-actions.mjs`（提案，未实现）：Playwright 验收脚本未落地，仓库 `web/tools/` 下无此文件；仿 `web/tools/audit-pages.mjs:1-30` 的可见性审计写法：
   断言未出结果时**没有**发布/导出按钮、计划模式结果下按钮**不出现**、完整审查后按钮出现且点击能打开对话框、
   对话框内"确认发布"在预览返回前保持禁用。
 

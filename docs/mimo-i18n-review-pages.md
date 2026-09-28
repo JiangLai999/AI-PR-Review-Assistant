@@ -53,7 +53,7 @@ node tools/i18n-coverage.mjs   # ReviewPage.tsx=0, HistoryPage.tsx=0  ✅ 验收
 npm run typecheck              # 本范围 0 错误；ReviewPanels.tsx(274/290/291) 报 Cannot find name 't'
 ```
 
-`typecheck` 的 3 条错误全部位于 `src/components/ReviewPanels.tsx`（**不在 write_scope**，并行 agent 正在改该文件且尚未导入 `t`）。`ReviewPage.tsx` / `HistoryPage.tsx` / `review.ts` 零错误。
+`typecheck` 的 3 条错误全部位于 `web/src/components/ReviewPanels.tsx`（**不在 write_scope**，并行 agent 正在改该文件且尚未导入 `t`）。`ReviewPage.tsx` / `HistoryPage.tsx` / `review.ts` 零错误。
 
 ## 4. 未决项
 

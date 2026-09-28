@@ -2,7 +2,7 @@
 
 - **任务**：mimo 实现（`frontend/tui/src/*` 979 行未提交改动）→ claude 接管收尾（`claude-config-wizard-fix`：修 11 条 manual 回归 + 补帧断言 + 本文件）。
 - **契约来源**：`docs/b2b3-wiring-design.md` §2.1/§2.2/§2.5/§2.6/§2.8、§3.6、§6.1（屏的位置属 TUI 体验决策）。
-- **改动文件**：`frontend/tui/src/{app,format,protocol,setup-routing}.tsx|ts`、`protocol.test.ts`、`scripts/manual-route-wizard-check.tsx`、本文件。**未碰 Python、未做 git 操作。**
+- **改动文件**：`frontend/tui/src/{app,format,protocol,setup-routing}.tsx|ts`、`protocol.test.ts`、`frontend/tui/scripts/manual-route-wizard-check.tsx`、本文件。**未碰 Python、未做 git 操作。**
 
 ---
 
@@ -69,7 +69,7 @@ config.setup ◄── setupModelSpecFields() / setupCustomEndpointFields()（�
 
 ### 2.1 现象
 
-`scripts/manual-route-wizard-check.tsx` 的 11 条断言失败，全部落在 **[B] 云端预设**与 **[E] 本地预设**两条流程的确认页/载荷上；帧证据显示流程**停在 `3/6 · 凭据与模型 · 选择模型` / `选择本地模型`**，怎么按 Enter 都不动。
+`frontend/tui/scripts/manual-route-wizard-check.tsx` 的 11 条断言失败，全部落在 **[B] 云端预设**与 **[E] 本地预设**两条流程的确认页/载荷上；帧证据显示流程**停在 `3/6 · 凭据与模型 · 选择模型` / `选择本地模型`**，怎么按 Enter 都不动。
 
 ### 2.2 根因（证据判定：既不是 select 焦点，也不是 onMount 覆盖）
 
@@ -126,14 +126,14 @@ error: EditBuffer is destroyed
 ## 3. 既有断言：一条都没改
 
 - 11 条失败断言**逐字未动**，修复后全绿 ⇒ 不是"改断言迁就实现"。
-- `scripts/manual-route-wizard-check.tsx` 的既有 [A]/[B]/[E]/[C]/[D] 五节断言原文不变；本轮只做了**追加**：
+- `frontend/tui/scripts/manual-route-wizard-check.tsx` 的既有 [A]/[B]/[E]/[C]/[D] 五节断言原文不变；本轮只做了**追加**：
   - fixture 侧：`setupOptions(language, extra)` 增加可选 `extra`（叠加 `model`/`custom_endpoint`/`routing`），`stubBackend`/`openWizard` 透传；默认不塞新块 ⇒ 旧流程仍走"旧后端形状"。
   - 新增 [F] 模型规格屏、[G] 中转站表单两节（§4）。
 - `advance()` 的 `tries = 3` 默认值**保持不变**：cloud 顺序里 `model → model_spec → custom_endpoint → github` 恰好 3 次 Enter，实测够用（这一串正是修复前卡死的地方）。[F]/[G] 里需要更多步的地方**显式传参**（`advance(view, /中转站配置/, 10)`），没有改默认值。
 
 ---
 
-## 4. 帧断言清单（`scripts/manual-route-wizard-check.tsx`）
+## 4. 帧断言清单（`frontend/tui/scripts/manual-route-wizard-check.tsx`）
 
 新增两节，帧全部落在 `TEMP/ai-pr-review-route-check/`（本任务 `TEMP/TMP=.pytest_claude`）。
 

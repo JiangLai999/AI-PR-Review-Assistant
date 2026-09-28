@@ -65,7 +65,7 @@ I18N_AUDIT {"files":20,"filesWithCjk":16,"literals":350,"top":[{"file":"web/src/
 ## 5. 全站 i18n 建议落地顺序
 
 1. **词典（dictionary）**  
-   先定 key 命名规范（建议 `page.section.element` / `common.*`），建 `web/src/i18n/zh-CN.ts`（源语言）与 `web/src/i18n/en-US.ts`（目标语言，可先空壳 + 占位）。把 `App.tsx` 的 9 条抽成 key，证明结构可行。
+   先定 key 命名规范（建议 `page.section.element` / `common.*`），建 `web/src/i18n/shell.ts`（首个命名空间，源语言）。把 `App.tsx` 的 9 条抽成 key，证明结构可行。**已实现**：不再是单文件 zh-CN.ts/en-US.ts，而是按命名空间拆成 `web/src/i18n/shell.ts`、`web/src/i18n/overview.ts`、`web/src/i18n/settings.ts`、`web/src/i18n/review.ts`、`web/src/i18n/components.ts`，由 `web/src/i18n/index.ts` 汇总，每个文件内同时存 zh-CN 与 en-US 两份词典。
 2. **hook（`useT` / `t()`）**  
    提供 `t(key, vars?)` 与语言上下文（React Context + `localStorage` 持久化）。要求：缺 key 时回退源语言并可在 dev 模式告警；支持插值（`{name}`）。hook 落地后立即在 `App.tsx` 回归。
 3. **按页面分批迁移**  

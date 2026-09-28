@@ -15,7 +15,7 @@
 | 1 | **会话生命周期** | create×3（各自 chat 一轮）→ `list` 3 条且 `current` 正确、降序、每条有 `message_count` → `switch` 回第 1 个取回其消息 → `rename` 后 list 反映新标题 → 删非当前（`next` 保持当前）→ **删当前（自动切最近）** → 重新 create（id 不冲突） |
 | 2 | **迁移 + 持久化** | 预置旧格式 `chat_session.json`（2 条消息）→ 启动 → list 含 `title="legacy"` 且 `message_count=2` → 重启 → 会话集合与消息完整保持 |
 | 3 | **索引自愈** | 删 `index.json` → 重启 → 按目录扫描仍能列出；删会话文件（索引仍引用）→ 重启 → 不崩、该条被剔除 |
-| 4 | **压缩边界** | 6 轮长消息（`tail=4000` 下限确保触发）→ `/compact` → `kind=compact`、`kept_turns≥1`、`replaced_messages` 存在；摘要首条含 `<conversation-summary`、`trigger=`、`## 已压缩对话涉及的文件` 且清单含讨论过的 `src/app.py`；**保留段以 user 开头（整轮不拆散）**；二次压缩仍成功且 ≥1 轮 |
+| 4 | **压缩边界** | 6 轮长消息（`tail=4000` 下限确保触发）→ `/compact` → `kind=compact`、`kept_turns≥1`、`replaced_messages` 存在；摘要首条含 `<conversation-summary`、`trigger=`、`## 已压缩对话涉及的文件` 且清单含讨论过的 `src/app.py`（示例路径，非真实文件）；**保留段以 user 开头（整轮不拆散）**；二次压缩仍成功且 ≥1 轮 |
 | 5 | **压力分级** | `_pressure_level`：10→low / 65→medium / 85→high / 120→critical / **None→null**（"算不出"与"很轻"是两件事）；端到端一轮 chat 后 `assistant.finished.context` 含 `pressure` 七键 |
 
 ## 2. 真实运行（主控复跑）

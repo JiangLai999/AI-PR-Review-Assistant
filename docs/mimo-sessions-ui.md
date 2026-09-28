@@ -108,7 +108,7 @@
 
 ### 未决项（blocker）
 
-- `src/backend.test.ts` 的 `unexpected backend exit invalidates old in-memory sessions`
+- `frontend/tui/src/backend.test.ts` 的 `unexpected backend exit invalidates old in-memory sessions`
   失败（1 fail）：断言「后端重启后旧 session_id 应 `not_found`」，但并行后端已把会话
   持久化到 `sessions/` 目录（`jsonl_server.py` 的 `session.get` 从磁盘恢复），重启后
   仍能命中。该文件**不在 write_scope** 内，本任务未改动；需后端/验收线确认语义后

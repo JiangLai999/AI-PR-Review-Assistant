@@ -103,7 +103,7 @@ class RepoContextProvider:
 
 | 优先级 | 规则 | 示例 |
 |---|---|---|
-| 1 | **同名测试文件**（多候选路径） | `path/to/test_mod.py`、`tests/test_mod.py`、`tests/path/to/test_mod.py`、`test/test_mod.py` |
+| 1 | **同名测试文件**（多候选路径） | `path/to/test_mod.py`、`tests/test_mod.py`、`tests/path/to/test_mod.py`、`test/test_mod.py`（示例，仓库中无同名文件） |
 | 2 | **相对导入目标**（解析 import 语句） | `from .config import X` → `path/to/config.py`；`from ..utils import y` → `path/utils.py` |
 | 3 | **同目录 `__init__.py`**（若变更文件非该文件） | `path/to/__init__.py` |
 | — | ~~同目录全部邻居~~ | **不做**（噪音大、请求数不可控） |

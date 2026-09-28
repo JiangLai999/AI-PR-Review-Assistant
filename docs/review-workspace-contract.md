@@ -757,7 +757,7 @@ Codex:
 | `claude-p5-publish` | completed | new `services/{publish_service,demo_runner,showcase_runner}.py`; `publish`/`demo`/`showcase` commands in `jsonl_server.py`; `pr_title` added to run metadata; 31 new tests; full Python suite 498 passed / 1 skipped; `docs/claude-p5-publish.md` |
 | `mimo-p5-showcase-ui` | completed | `FindingsFilterBar`, `PublishConfirmDialog`, `ShowcasePanel`, `DemoResultPanel`, `BorderedPanel`; narrow-mode closing border fixed; `bun run typecheck` exit 0; `bun test src` 102 passed / 0 failed; manual check 38 scenes at 80x24 / 120x30 |
 | `mimo-p5-publish-action` | completed | `ReviewActionBar` gained optional `onPublish` (`Alt+P`) and `onFilter` (`Ctrl+F`) via `actionBarView`; absent options stay hidden; manual check covers both layouts |
-| `codex-p5-integration` | completed | `app.tsx` wiring, `findings-filter.ts` (+11 tests), payload mappers in `review-report.ts` (+5 tests), `command-menu.ts` entries, `scripts/p5-app-integration-check.tsx`, `tui_static` rebuild |
+| `codex-p5-integration` | completed | `app.tsx` wiring, `findings-filter.ts` (+11 tests), payload mappers in `review-report.ts` (+5 tests), `command-menu.ts` entries, `frontend/tui/scripts/p5-app-integration-check.tsx`, `tui_static` rebuild |
 
 ### 13.1 Codex independent verification
 

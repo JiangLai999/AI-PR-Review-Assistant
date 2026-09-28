@@ -124,8 +124,8 @@ cloud · 就绪 · deepseek-flash · 思考 max · ONLINE · 120×30
 |---|---|
 | `cd frontend/tui && bun run typecheck` | exit 0 |
 | `bun test src` | **200 pass / 0 fail**（956 expect） |
-| `scripts/manual-chat-markdown-check.tsx` | **PASS 87 / FAIL 0**（ALL PASS） |
-| `scripts/manual-route-wizard-check.tsx` | **PASS 140 / FAIL 0**（ALL PASS） |
+| `frontend/tui/scripts/manual-chat-markdown-check.tsx` | **PASS 87 / FAIL 0**（ALL PASS） |
+| `frontend/tui/scripts/manual-route-wizard-check.tsx` | **PASS 140 / FAIL 0**（ALL PASS） |
 
 ### 新增断言覆盖
 

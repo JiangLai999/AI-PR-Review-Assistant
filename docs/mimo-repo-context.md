@@ -60,7 +60,7 @@ collect_for_file(file_path: str) -> list[RelatedFile]
 对变更文件 `path/to/mod.py`（仅 `.py/.ts/.tsx/.js/.jsx`，否则 `[]`）：
 
 1. **同名测试文件**（候选依次尝试，**首个命中即收**）  
-   `path/to/test_mod.py` → `tests/test_mod.py` → `tests/path/to/test_mod.py` → `test/test_mod.py`
+   `path/to/test_mod.py` → `tests/test_mod.py` → `tests/path/to/test_mod.py` → `test/test_mod.py`（示例）—— 以上均为示例路径，仓库中不存在同名文件  
 2. **Python 相对导入**（`from .X import` / `from ..X.Y import` / `from . import X`）  
    折算为仓库根相对模块路径，**优先 `模块.py`，其次 `模块/__init__.py`**
 3. **同目录 `__init__.py`**（变更文件本身不是它时）

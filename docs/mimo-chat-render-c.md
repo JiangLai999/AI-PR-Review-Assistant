@@ -4,8 +4,8 @@
 > 方案来源：`docs/chat-experience-plan.md` 组 C（用户已确认：15 行阈值 + 小角标展开）
 > 写集（write_scope）：`frontend/tui/src/app.tsx`、`frontend/tui/scripts/manual-chat-markdown-check.tsx`、本文件
 >
-> 注：prompt 正文写的是 `docs/mimo-chat-render.md`，write_scope 指定
-> `docs/mimo-chat-render-c.md`。按约束"只写 write_scope"，文档落在本文件。
+> 注：prompt 正文写的文档名 mimo-chat-render.md（无 -c 后缀）在仓库中从未创建，实际落点是
+> `docs/mimo-chat-render-c.md`（即 write_scope 指定名）。按约束"只写 write_scope"，文档落在本文件。
 
 ---
 
@@ -121,9 +121,9 @@ bun --preload @opentui/solid/preload \
 
 ## 4. 未决项
 
-1. **文档路径分歧**：prompt 正文写 `docs/mimo-chat-render.md`，write_scope 写
-   `docs/mimo-chat-render-c.md`；按约束只写后者。若调度方要合并到 `mimo-chat-render.md`
-   需另开任务（本任务不得越写集）。
+1. **文档路径分歧**：prompt 正文写的文档名 mimo-chat-render.md（无 -c 后缀）从未创建，
+   write_scope 写的是 `docs/mimo-chat-render-c.md`（即本文件）；按约束只写后者。若调度方要合并到
+   mimo-chat-render.md 需另开任务（本任务不得越写集）。
 2. **角标交互粒度**：当前 `Alt+L` 是"切换当前块 + 游标后移"的循环语义；若用户希望
    逐块聚焦（Tab 移动焦点 + Enter 切换）或首块常驻，可后续加 Tab 游标而不改状态键。
 3. **折叠仅对围栏代码块**：缩进式代码块（4 空格）不在折叠范围；方案未要求，暂不处理。

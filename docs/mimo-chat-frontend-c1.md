@@ -80,8 +80,8 @@
 | `cd frontend/tui && bun run typecheck` | exit 0 |
 | `bun test src/format.test.ts src/protocol.test.ts src/command-menu.test.ts` | **全绿**（本批新增/扩展单测） |
 | `bun test src` | 155 pass / 1 fail —— 失败项 `backend.test.ts`「unexpected backend exit…」，根因是并行后端 `src/ai_pr_review/backend/jsonl_server.py` 当前 `SyntaxError: 'continue' not properly in loop`（不在本任务写集，且约束禁止改 Python） |
-| `scripts/manual-chat-markdown-check.tsx` | **ALL PASS**（含 120×30 / 209×51 上下文帧、思考区折叠帧、tips 帧） |
-| `scripts/manual-route-wizard-check.tsx` | **ALL PASS** |
+| `frontend/tui/scripts/manual-chat-markdown-check.tsx` | **ALL PASS**（含 120×30 / 209×51 上下文帧、思考区折叠帧、tips 帧） |
+| `frontend/tui/scripts/manual-route-wizard-check.tsx` | **ALL PASS** |
 
 帧文件目录：`.pytest_mimo/ai-pr-review-chat-markdown/`、`.pytest_mimo/ai-pr-review-route-check/`。
 
