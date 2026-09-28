@@ -7,3 +7,8 @@
 src/ai_pr_review/web_static/*.html text eol=lf
 src/ai_pr_review/web_static/assets/*.js text eol=lf
 src/ai_pr_review/web_static/assets/*.css text eol=lf
+
+# 构建产物跨平台一致的**根因修复**：源模板本身也钉成 LF。
+# 之前 web/index.html 是 CRLF，而 vite 注入 script/link 标签时用 LF，混用会在产物里
+# 留下孤立 \r（Windows 产物多一个字节、ubuntu 没有），于是 CI 的同步守卫总差 1 行。
+web/index.html text eol=lf
