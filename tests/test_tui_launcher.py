@@ -10,6 +10,7 @@ from ai_pr_review import cli
 # 否则在 Linux CI 上会因为找不到 `pr-review-tui` 而误判启动失败。
 _PREBUILT_NAME = "pr-review-tui.exe" if os.name == "nt" else "pr-review-tui"
 
+
 def _prepare_launcher_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
     project_root = tmp_path / "proj"
     package_root = project_root / "src" / "ai_pr_review"

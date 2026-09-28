@@ -130,6 +130,9 @@ jobs:
           if ! git diff --quiet -- src/ai_pr_review/web_static; then
             echo "::error::src/ai_pr_review/web_static 与 web/ 源码不同步，请在本地执行 cd web && npm run build 并提交产物。"
             git diff --stat -- src/ai_pr_review/web_static
+            # 只打 stat 时会隐藏"到底哪一行不一致"（例如行尾/尾换行差异），
+            # 这里把实际 diff 也打出来，避免每次都靠猜。
+            git diff -- src/ai_pr_review/web_static | head -60
             exit 1
           fi
           echo "构建产物与源码同步。"
