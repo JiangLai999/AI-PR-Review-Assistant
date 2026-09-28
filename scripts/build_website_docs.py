@@ -234,6 +234,13 @@ def build_docs_data() -> dict:
             "html": markdown_to_html(extract_section(readme, "快速开始")),
         },
         {
+            "id": "cli-command-reference",
+            "label": "CLI 命令速查",
+            "title": "API 文档 · 命令概览",
+            "source": "docs/API.md",
+            "html": markdown_to_html(extract_section(api_doc, "命令概览")),
+        },
+        {
             # id 保持不变（官网用 tab.id 选中），章节已随 README 改名为「配置文件」，
             # 其中的「配置加载与覆盖规则」就是原来的「配置优先级」。
             "id": "config-priority",
@@ -266,12 +273,34 @@ def build_docs_data() -> dict:
             "html": markdown_to_html(extract_section(readme, "使用", level=3)),
         },
         {
+            "id": "chat-workspace",
+            "label": "Chat 工作区",
+            "title": "README · Chat 工作区",
+            "source": "README.md",
+            "html": markdown_to_html(extract_section(readme, "Chat 工作区")),
+        },
+        {
+            "id": "web-workbench",
+            "label": "Web 工作台",
+            "title": "README · Web 工作台",
+            "source": "README.md",
+            "html": markdown_to_html(extract_section(readme, "Web 工作台", level=3)),
+        },
+        {
             "id": "cli-api",
-            "label": "CLI API",
-            "title": "API 文档 · 主命令与配置命令",
+            "label": "CLI 详解",
+            "title": "API 文档 · 主命令、子命令与参数",
             "source": "docs/API.md",
             "html": markdown_to_html(
-                extract_section(api_doc, "主命令") + "\n\n" + extract_section(api_doc, "配置命令")
+                extract_section(api_doc, "主命令")
+                + "\n\n"
+                + extract_section(api_doc, "审查规划与反馈命令")
+                + "\n\n"
+                + extract_section(api_doc, "配置命令")
+                + "\n\n"
+                + extract_section(api_doc, "工作台与辅助命令")
+                + "\n\n"
+                + extract_section(api_doc, "历史命令")
             ),
         },
         {
@@ -310,6 +339,31 @@ def build_docs_data() -> dict:
             "title": "docs/RELEASE.md",
             "description": "发布、分发与版本管理流程。",
             "url": "https://github.com/JiangLai999/AI-PR-Review-Assistant/blob/main/docs/RELEASE.md",
+        },
+        {
+            "title": "docs/PROJECT_DESIGN.md",
+            "description": "项目设计书：架构、模块划分、数据流与关键取舍。",
+            "url": "https://github.com/JiangLai999/AI-PR-Review-Assistant/blob/main/docs/PROJECT_DESIGN.md",
+        },
+        {
+            "title": "docs/INNOVATION.md",
+            "description": "证据优先、混合路由、上下文降级等差异化能力。",
+            "url": "https://github.com/JiangLai999/AI-PR-Review-Assistant/blob/main/docs/INNOVATION.md",
+        },
+        {
+            "title": "docs/chat-features.md",
+            "description": "Chat 工作区命令、思考档位、上下文与成本说明。",
+            "url": "https://github.com/JiangLai999/AI-PR-Review-Assistant/blob/main/docs/chat-features.md",
+        },
+        {
+            "title": "docs/session-and-compaction-guide.md",
+            "description": "多会话切换、上下文压缩与恢复操作指南。",
+            "url": "https://github.com/JiangLai999/AI-PR-Review-Assistant/blob/main/docs/session-and-compaction-guide.md",
+        },
+        {
+            "title": "docs/DEV_RECORD.md",
+            "description": "2026-05-30 → 2026-09-28 的完整开发时间线与工程决策记录。",
+            "url": "https://github.com/JiangLai999/AI-PR-Review-Assistant/blob/main/docs/DEV_RECORD.md",
         },
         {
             "title": "CONTRIBUTING.md",
