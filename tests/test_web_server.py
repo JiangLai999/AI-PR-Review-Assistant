@@ -18,8 +18,8 @@ from unittest import mock
 import pytest
 
 from ai_pr_review.config import AppConfig, ResultStoreConfig
-from ai_pr_review.services.publish_service import PublishError, PublishService
 from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
+from ai_pr_review.services.publish_service import PublishError, PublishService
 from ai_pr_review.services.result_store import ResultStore
 from ai_pr_review.web_server import ReviewWebHandler
 
@@ -315,9 +315,7 @@ class TestChatHistory:
         assert status == 400
         assert "run_id" in json.loads(body)["error"]
 
-        status, body = call(
-            server["base"], "POST", "/api/chat/history/clear", {"run_id": "nope"}
-        )
+        status, body = call(server["base"], "POST", "/api/chat/history/clear", {"run_id": "nope"})
         assert status == 404
         assert "Unknown run_id" in json.loads(body)["error"]
 
@@ -758,9 +756,7 @@ class TestConfigSaveSemantics:
         assert payload["changed"] == []
 
     def test_preference_key_actually_persists(self, server):
-        status, body = call(
-            server["base"], "POST", "/api/config", {"ui_language": "en-US"}
-        )
+        status, body = call(server["base"], "POST", "/api/config", {"ui_language": "en-US"})
 
         payload = json.loads(body)
         assert status == 200, body
@@ -806,9 +802,7 @@ class TestConfigSaveSemantics:
         `message`，前端 `hasDictKey` 永远拿不到 key，于是英文界面静默回落成中文。
         这条用例锁死"键必须真的过线"。
         """
-        status, body = call(
-            server["base"], "POST", "/api/config", {"ui_language": "en-US"}
-        )
+        status, body = call(server["base"], "POST", "/api/config", {"ui_language": "en-US"})
 
         parsed = json.loads(body)
         assert status == 200, body
@@ -816,9 +810,7 @@ class TestConfigSaveSemantics:
         assert parsed["message_params"]["count"] == 1
 
         # 无改动时走 noop 分支，键也要跟着换，而不是继续复用 saved。
-        status, body = call(
-            server["base"], "POST", "/api/config", {"ui_language": "en-US"}
-        )
+        status, body = call(server["base"], "POST", "/api/config", {"ui_language": "en-US"})
 
         parsed = json.loads(body)
         assert status == 200, body
@@ -919,9 +911,7 @@ class TestPublishEndpoint:
         assert post.call_count == 0
 
     def test_unknown_run_is_not_found(self, server):
-        status, body = call(
-            server["base"], "POST", "/api/publish", {"run_id": "does-not-exist"}
-        )
+        status, body = call(server["base"], "POST", "/api/publish", {"run_id": "does-not-exist"})
 
         assert status == 404
         assert json.loads(body)["code"] == "not_found"
@@ -1105,8 +1095,6 @@ class TestReportExportEndpoint:
         assert "format must be" in json.loads(body)["error"]
 
     def test_unknown_run_is_not_found(self, server):
-        status, _ = call(
-            server["base"], "GET", "/api/report/export?run_id=nope&format=markdown"
-        )
+        status, _ = call(server["base"], "GET", "/api/report/export?run_id=nope&format=markdown")
 
         assert status == 404

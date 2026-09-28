@@ -650,17 +650,14 @@ class ChatSessionStore:
                 payload = json.loads(legacy_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError) as exc:
                 _warn(
-                    f"legacy chat session migration skipped "
-                    f"({exc.__class__.__name__}: {exc})"
+                    f"legacy chat session migration skipped " f"({exc.__class__.__name__}: {exc})"
                 )
                 return None
             messages = _sanitize_messages(payload)
             if not messages:
                 return None
             records, meta = self._load_records()
-            if meta["legacy_imported"] or any(
-                record["source"] == "legacy" for record in records
-            ):
+            if meta["legacy_imported"] or any(record["source"] == "legacy" for record in records):
                 return None
             now = _session_now()
             created = self.create(

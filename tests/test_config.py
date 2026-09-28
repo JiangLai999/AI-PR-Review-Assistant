@@ -27,10 +27,10 @@ from ai_pr_review.config import (
     CONTEXT_WINDOW_RANGE,
     DEFAULT_MODEL_CONTEXT_WINDOW,
     DEFAULT_MODEL_MAX_OUTPUT,
+    DEFAULT_REPO_CACHE_MAX_MB,
     DEFAULT_REPO_CONTEXT,
     DEFAULT_REPO_CONTEXT_BUDGET_TOKENS,
     DEFAULT_REPO_CONTEXT_MAX_FILES,
-    DEFAULT_REPO_CACHE_MAX_MB,
     DEFAULT_REVIEW_REASONING_EFFORT,
     DEFAULT_WORKBENCH_MODE,
     MAX_OUTPUT_RANGE,
@@ -373,7 +373,7 @@ def test_hybrid_is_valid_for_review_but_not_for_chat():
 
 @pytest.mark.parametrize("raw", ["cloud", "hybrid", "auto", 7, True, ["local"]])
 def test_invalid_chat_slot_falls_back_at_construction_with_warning(raw):
-    """"hybrid" 对聊天槽非法：只告警回退，绝不抛异常。"""
+    """ "hybrid" 对聊天槽非法：只告警回退，绝不抛异常。"""
     with pytest.warns(RuntimeWarning, match="chat_slot"):
         preferences = PreferencesConfig(chat_slot=raw)
     assert preferences.chat_slot == ""
@@ -463,7 +463,9 @@ def test_resolve_slots_warn_once_per_read():
         resolve_chat_slot(config)
         resolve_chat_slot(config)
 
-    assert len([item for item in recorded if "chat_slot" in str(item.message)]) == 2  # 两次读取各一次
+    assert (
+        len([item for item in recorded if "chat_slot" in str(item.message)]) == 2
+    )  # 两次读取各一次
 
 
 @pytest.mark.parametrize("bad_config", [None, {}, object(), PreferencesConfig()])
@@ -716,9 +718,7 @@ def test_set_model_spec_touches_only_the_target_model() -> None:
     )
 
     assert (
-        provider.set_model_spec(
-            "deepseek-flash", context_window=1_000_000, max_output=393_216
-        )
+        provider.set_model_spec("deepseek-flash", context_window=1_000_000, max_output=393_216)
         is True
     )
     assert (provider.models["deepseek-flash"].context_window) == 1_000_000
@@ -731,9 +731,7 @@ def test_set_model_spec_touches_only_the_target_model() -> None:
 
     # 同值重写不算"发生写入"；两个参数都 None 更不算。
     assert (
-        provider.set_model_spec(
-            "deepseek-flash", context_window=1_000_000, max_output=393_216
-        )
+        provider.set_model_spec("deepseek-flash", context_window=1_000_000, max_output=393_216)
         is False
     )
     assert provider.set_model_spec("deepseek-flash") is False
@@ -881,9 +879,9 @@ def test_review_reasoning_effort_survives_save_load_roundtrip_and_reaches_the_vi
 
     assert _preferences_of(config_path)["review_reasoning_effort"] == "max"
     assert config.preferences.__dict__["review_reasoning_effort"] == "max"
-    assert asdict(PreferencesConfig(review_reasoning_effort="max"))[
-        "review_reasoning_effort"
-    ] == "max"
+    assert (
+        asdict(PreferencesConfig(review_reasoning_effort="max"))["review_reasoning_effort"] == "max"
+    )
 
     reloaded = AppConfig.load(config_path)
     assert reloaded.preferences.review_reasoning_effort == "max"

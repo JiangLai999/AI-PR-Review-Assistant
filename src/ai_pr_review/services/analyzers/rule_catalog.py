@@ -189,9 +189,7 @@ _RULES: tuple[RuleDefinition, ...] = (
         severity="critical",
         confidence=0.9,
         title_zh="不安全的 YAML 反序列化",
-        problem_zh=(
-            "未使用安全加载器的 yaml.load 可能从不受信任输入构造任意 Python 对象。"
-        ),
+        problem_zh=("未使用安全加载器的 yaml.load 可能从不受信任输入构造任意 Python 对象。"),
         suggestion_zh="使用 yaml.safe_load，或显式传入 yaml.SafeLoader。",
     ),
     _TLS_LINE_RULE,
@@ -416,9 +414,7 @@ _TLS_AST_RULE = replace(
 )
 
 # 目录键 -> 规则定义。键通常等于 rule_id，例外见模块文档。
-RULE_CATALOG: dict[str, RuleDefinition] = {
-    definition.rule_id: definition for definition in _RULES
-}
+RULE_CATALOG: dict[str, RuleDefinition] = {definition.rule_id: definition for definition in _RULES}
 RULE_CATALOG[TLS_AST_RULE_KEY] = _TLS_AST_RULE
 
 

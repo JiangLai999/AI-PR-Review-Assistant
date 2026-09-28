@@ -515,9 +515,11 @@ def reasoning_support(provider_name: object) -> ReasoningSupport:
         state=(
             STATE_TRANSPARENT
             if spec.form == FORM_TRANSPARENT
-            else STATE_UNSUPPORTED
-            if spec.form == FORM_UNSUPPORTED or spec.confidence == CONFIDENCE_PRODUCT_DECISION
-            else STATE_SET
+            else (
+                STATE_UNSUPPORTED
+                if spec.form == FORM_UNSUPPORTED or spec.confidence == CONFIDENCE_PRODUCT_DECISION
+                else STATE_SET
+            )
         ),
         confidence=spec.confidence,
         doc_url=spec.doc_url,

@@ -27,8 +27,8 @@ from ai_pr_review.config import (
     DEFAULT_SUGGESTED_PATCH,
     AIClientConfig,
     AppConfig,
-    PRFetcherConfig,
     PreferencesConfig,
+    PRFetcherConfig,
     ResultStoreConfig,
     normalize_suggested_patch,
 )
@@ -344,9 +344,7 @@ class TestPatchGeneratorDegradation:
     async def test_a_broken_max_attempts_argument_does_not_raise(self):
         """构造参数写坏（inf / 负数 / 字符串）只降级，不抛——构造本身不该炸。"""
         for raw in (float("inf"), float("nan"), -3, "3", None):
-            generator = PatchGenerator(
-                complete=RecordingComplete([SIMPLE_DIFF]), max_attempts=raw
-            )
+            generator = PatchGenerator(complete=RecordingComplete([SIMPLE_DIFF]), max_attempts=raw)
             assert generator.max_attempts >= 1
             assert await generator.generate(make_finding(), make_context()) == SIMPLE_DIFF.strip()
 
@@ -1070,9 +1068,7 @@ class TestOrchestratorIntegration:
             ai_client=scenario_ai_client(findings, patch_responses=[SIMPLE_DIFF]),
         )
 
-        asyncio.run(
-            ReviewOrchestrator(_l3_config(tmp_path, suggested_patch=True)).review(PR_URL)
-        )
+        asyncio.run(ReviewOrchestrator(_l3_config(tmp_path, suggested_patch=True)).review(PR_URL))
 
         saved_result = StubResultStore.last.saved[1]
         assert saved_result.findings[0].suggested_patch == SIMPLE_DIFF.strip()

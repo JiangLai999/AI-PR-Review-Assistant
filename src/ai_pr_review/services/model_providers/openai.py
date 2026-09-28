@@ -89,9 +89,7 @@ class OpenAICompatibleProvider(BaseModelProvider):
         loop = asyncio.get_running_loop()
         cancel_event: threading.Event = kwargs.pop("cancel_event", threading.Event())
         active_response = _ResponseSlot()
-        on_reasoning: Callable[[str], Awaitable[None]] | None = kwargs.pop(
-            "on_reasoning", None
-        )
+        on_reasoning: Callable[[str], Awaitable[None]] | None = kwargs.pop("on_reasoning", None)
 
         def emit(delta: str) -> None:
             if cancel_event.is_set():

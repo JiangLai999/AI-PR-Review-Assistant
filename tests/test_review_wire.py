@@ -29,7 +29,7 @@ from typing import Any
 
 import pytest
 
-from ai_pr_review.config import AIClientConfig, CHAT_REASONING_TOKEN_BUDGETS
+from ai_pr_review.config import CHAT_REASONING_TOKEN_BUDGETS, AIClientConfig
 from ai_pr_review.services.ai_client import AIClient
 
 REVIEW_JSON = json.dumps({"summary": "ok", "findings": []})
@@ -146,7 +146,9 @@ async def test_anthropic_review_wire_sends_no_thinking_params() -> None:
             self.messages = _StubAnthropicMessages()
 
     client = AIClient(
-        config=AIClientConfig(provider="anthropic", api_key="key", model="claude-sonnet-4-20250514"),
+        config=AIClientConfig(
+            provider="anthropic", api_key="key", model="claude-sonnet-4-20250514"
+        ),
         client_factory=lambda _: _StubAnthropicClient(),
     )
 
@@ -214,10 +216,7 @@ async def test_deepseek_review_wire_enables_thinking_for_the_three_levels(
     assert captured["response_format"] == {"type": "json_object"}  # 结构化策略不受影响
     assert captured["thinking"] == {"type": "enabled"}
     assert captured["reasoning_effort"] == level
-    assert (
-        captured["max_tokens"]
-        == DEEPSEEK_BASE_MAX_TOKENS + CHAT_REASONING_TOKEN_BUDGETS[level]
-    )
+    assert captured["max_tokens"] == DEEPSEEK_BASE_MAX_TOKENS + CHAT_REASONING_TOKEN_BUDGETS[level]
     # 档位是**按请求计算**的：落盘字段一个字节都不该被写脏（混合编排会按文件重建配置）。
     assert client._config.extra_params == {}  # noqa: SLF001 - 落盘字段必须保持干净
     assert client._provider.config.extra_params == {}  # noqa: SLF001

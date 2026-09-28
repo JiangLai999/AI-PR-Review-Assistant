@@ -63,7 +63,8 @@ STALL_SECONDS = 600
 HEARTBEAT_SECONDS = 120
 
 CLAUDE_CANDIDATES = (
-    pathlib.Path(os.environ.get("APPDATA", "")) / "npm/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+    pathlib.Path(os.environ.get("APPDATA", ""))
+    / "npm/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
     pathlib.Path(os.environ.get("APPDATA", "")) / "npm/claude.cmd",
 )
 MIMO_CANDIDATES = (
@@ -76,16 +77,17 @@ CODEX_CANDIDATES = (
     pathlib.Path(os.environ.get("APPDATA", "")) / "npm/codex.exe",
 )
 OPENCODE_CANDIDATES = (
-    pathlib.Path(os.environ.get("APPDATA", ""))
-    / "npm/node_modules/opencode-ai/bin/opencode.exe",
+    pathlib.Path(os.environ.get("APPDATA", "")) / "npm/node_modules/opencode-ai/bin/opencode.exe",
 )
 # WorkBuddy 自带 headless agent CLI（Electron 应用 resources 下的 codebuddy）。
 # 入口是 Node 脚本，所以命令行是 `node <cli>/bin/codebuddy ...`。
 # 可用 WORKBUDDY_CLI 覆盖入口路径、WORKBUDDY_MODEL 覆盖模型（例如 deepseek 系）。
 WORKBUDDY_CANDIDATES = (
-    pathlib.Path(os.environ.get("WORKBUDDY_CLI", ""))
-    if os.environ.get("WORKBUDDY_CLI")
-    else pathlib.Path(r"G:\workbuddy\resources\app.asar.unpacked\cli\bin\codebuddy"),
+    (
+        pathlib.Path(os.environ.get("WORKBUDDY_CLI", ""))
+        if os.environ.get("WORKBUDDY_CLI")
+        else pathlib.Path(r"G:\workbuddy\resources\app.asar.unpacked\cli\bin\codebuddy")
+    ),
     pathlib.Path(os.environ.get("APPDATA", "")) / "npm/node_modules/@genie/agent-cli/bin/codebuddy",
     pathlib.Path(os.environ.get("APPDATA", "")) / "npm/codebuddy.cmd",
 )
@@ -258,9 +260,7 @@ def main(argv: list[str]) -> int:
         agent = str(task.get("agent", "")).strip().lower()
         temp_dir = ROOT / f".pytest_{agent}"
         temp_dir.mkdir(exist_ok=True)
-        prompt = DISPATCH_PROMPT.format(
-            root=ROOT, agent=agent, task_id=task_id, temp_dir=temp_dir
-        )
+        prompt = DISPATCH_PROMPT.format(root=ROOT, agent=agent, task_id=task_id, temp_dir=temp_dir)
         prepared = _agent_command(agent, prompt, temp_dir)
         if prepared is None:
             print(f"[{task_id}] SKIP: no CLI found for agent={agent}")

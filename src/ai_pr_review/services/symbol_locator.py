@@ -106,9 +106,7 @@ class RepoSymbolLocator:
         self.max_requests = max(0, max_requests)
         self.max_results_per_symbol = max(0, max_results_per_symbol)
 
-    def locate(
-        self, symbol: str, *, exclude_paths: set[str] | None = None
-    ) -> list[SymbolLocation]:
+    def locate(self, symbol: str, *, exclude_paths: set[str] | None = None) -> list[SymbolLocation]:
         """返回符号引用点；任何异常降级为已收集结果，绝不向上抛。"""
         name = (symbol or "").strip()
         if not name or self.max_results_per_symbol <= 0 or self.max_requests <= 0:
@@ -200,9 +198,7 @@ class RepoSymbolLocator:
                 pass
         return content, False
 
-    def _grep(
-        self, path: str, content: str, pattern: re.Pattern[str]
-    ) -> list[SymbolLocation]:
+    def _grep(self, path: str, content: str, pattern: re.Pattern[str]) -> list[SymbolLocation]:
         locations: list[SymbolLocation] = []
         for line_number, line in enumerate(content.splitlines(), 1):
             if pattern.search(line):

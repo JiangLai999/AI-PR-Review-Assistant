@@ -282,7 +282,9 @@ class ReviewOrchestrator:
         return ReviewArtifacts(
             pr_data=pr_data,
             filter_result=filter_result,
-            review_plan=self._planner.build_plan(pr_data, filter_result, language=self._plan_language()),
+            review_plan=self._planner.build_plan(
+                pr_data, filter_result, language=self._plan_language()
+            ),
             duration_seconds=time.perf_counter() - start_time,
         )
 

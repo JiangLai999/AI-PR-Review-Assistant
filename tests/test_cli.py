@@ -1232,8 +1232,7 @@ def test_cli_preferences_command_toggles_symbol_locate(monkeypatch, tmp_path: Pa
     assert again.exit_code == 0
     assert json.loads(again.output)["symbol_locate"] is True
     assert (
-        json.loads(config_path.read_text(encoding="utf-8"))["preferences"]["symbol_locate"]
-        is True
+        json.loads(config_path.read_text(encoding="utf-8"))["preferences"]["symbol_locate"] is True
     )
 
 
@@ -1252,9 +1251,7 @@ def test_cli_config_preferences_alias_sets_symbol_locate(monkeypatch, tmp_path: 
     assert persisted["preferences"]["symbol_locate"] is False
 
 
-def test_cli_preferences_command_echoes_symbol_locate_without_writing(
-    monkeypatch, tmp_path: Path
-):
+def test_cli_preferences_command_echoes_symbol_locate_without_writing(monkeypatch, tmp_path: Path):
     """两个开关都不传：只回显当前值（默认开启），不落盘、不创建配置文件。"""
     config_path = tmp_path / "config.json"
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", config_path)
@@ -1291,9 +1288,10 @@ def test_cli_config_export_snapshot_carries_workbench_mode(monkeypatch, tmp_path
     show_result = runner.invoke(main, ["config", "show"])
 
     assert export_result.exit_code == 0
-    assert json.loads(export_path.read_text(encoding="utf-8"))["preferences"][
-        "workbench_mode"
-    ] == "off"
+    assert (
+        json.loads(export_path.read_text(encoding="utf-8"))["preferences"]["workbench_mode"]
+        == "off"
+    )
     assert show_result.exit_code == 0
     assert json.loads(show_result.output)["preferences"]["workbench_mode"] == "off"
 
@@ -2435,9 +2433,7 @@ def test_plain_chat_disables_reasoning_for_local_provider(monkeypatch):
             return ProviderResponse(text="本地模型正常")
 
     monkeypatch.setattr(cli_module, "create_model_provider", lambda config: FakeProvider())
-    result = asyncio.run(
-        cli_module._send_chat_message(config, [{"role": "user", "content": "hi"}])
-    )
+    result = asyncio.run(cli_module._send_chat_message(config, [{"role": "user", "content": "hi"}]))
 
     assert result == "本地模型正常"
     assert captured["reasoning_effort"] == "none"
@@ -2603,8 +2599,8 @@ def test_cli_review_records_pr_title_for_later_publishing(monkeypatch, tmp_path:
 
 def test_demo_and_showcase_never_touch_the_network(monkeypatch):
     """§12.3: both commands are strictly offline — no model call, no GitHub call."""
-    import ai_pr_review.services.pr_fetcher as pr_fetcher_module
     import ai_pr_review.services.model_providers.factory as factory_module
+    import ai_pr_review.services.pr_fetcher as pr_fetcher_module
 
     def _explode(*args, **kwargs):
         raise AssertionError("offline command attempted a network client")
@@ -2684,9 +2680,7 @@ def test_config_import_round_trips_a_relay_spec(tmp_path: Path) -> None:
         "preferences": {"output_format": "terminal", "language": "zh-CN"},
     }
     import_source = tmp_path / "import.json"
-    import_source.write_text(
-        json.dumps(import_payload, ensure_ascii=False), encoding="utf-8"
-    )
+    import_source.write_text(json.dumps(import_payload, ensure_ascii=False), encoding="utf-8")
 
     result = CliRunner().invoke(
         main, ["--config", str(config_path), "config", "import", str(import_source), "--save-key"]
@@ -2724,9 +2718,7 @@ def test_config_import_ignores_unknown_preference_keys(tmp_path: Path) -> None:
         },
     }
     import_source = tmp_path / "import.json"
-    import_source.write_text(
-        json.dumps(import_payload, ensure_ascii=False), encoding="utf-8"
-    )
+    import_source.write_text(json.dumps(import_payload, ensure_ascii=False), encoding="utf-8")
 
     result = CliRunner().invoke(
         main,

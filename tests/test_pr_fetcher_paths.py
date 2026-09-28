@@ -46,9 +46,7 @@ def test_fetch_changed_file_paths_returns_paths_and_never_fetches_diff(
     with patch.object(fetcher, "_get_pull_request", return_value=Mock(number=42)):
         with patch.object(fetcher, "_fetch_files", return_value=files):
             with patch.object(fetcher, "_fetch_diff") as fetch_diff:
-                paths = fetcher.fetch_changed_file_paths(
-                    "https://github.com/owner/repo/pull/42"
-                )
+                paths = fetcher.fetch_changed_file_paths("https://github.com/owner/repo/pull/42")
 
     assert paths == ["website/index.html", "scripts/build_website_docs.py"]
     fetch_diff.assert_not_called()
@@ -70,9 +68,7 @@ def test_fetch_repo_tree_paths_keeps_blobs_only_and_skips_empty(fetcher: PRFetch
         with patch.object(fetcher, "_rate_limiter") as limiter:
             # 让重试层"执行"传入的 lambda（而不是短路返回），这样能验证
             # `get_git_tree(recursive=True)` 真的以正确参数被调用。
-            with patch.object(
-                fetcher, "_execute_with_retry", side_effect=lambda fn, **_kw: fn()
-            ):
+            with patch.object(fetcher, "_execute_with_retry", side_effect=lambda fn, **_kw: fn()):
                 paths = fetcher.fetch_repo_tree_paths("owner", "repo", "abc123")
 
     assert paths == ["website/index.html", "scripts/build_website_docs.py"]

@@ -24,7 +24,6 @@ import pytest
 from ai_pr_review.backend.jsonl_server import JsonlBackend
 from ai_pr_review.services.model_providers.base import ProviderResponse
 
-
 # ---------------------------------------------------------------------------
 # 最小 helper（复制 tests/test_jsonl_backend.py 的既有模式，不 import 私有 helper）
 # ---------------------------------------------------------------------------
@@ -60,9 +59,7 @@ def _chat_send(session_id: str, text: str = "你好") -> dict[str, Any]:
     }
 
 
-def _chat_backend_with_sink(
-    tmp_path: Path, published: list[dict[str, Any]]
-) -> JsonlBackend:
+def _chat_backend_with_sink(tmp_path: Path, published: list[dict[str, Any]]) -> JsonlBackend:
     """通过 Key 校验、事件全部进 published 列表的后端。"""
     backend = JsonlBackend(tmp_path / "config.json", event_sink=published.append)
     backend.config.provider.api_key = "test-key"
@@ -176,9 +173,7 @@ def test_contract_event_sequence_is_legal_and_reasoning_is_isolated(
             item["text"] for item in published if item["event"] == "assistant.delta"
         )
         reasoning_text = "".join(
-            item["text"]
-            for item in published
-            if item["event"] == "assistant.reasoning_delta"
+            item["text"] for item in published if item["event"] == "assistant.reasoning_delta"
         )
         # reasoning 文本不得出现在任何 assistant.delta 的累积结果中
         for chunk in ("思考第一步。", "思考第二步。"):
@@ -358,9 +353,7 @@ def test_contract_think_unsupported_state(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_contract_compact_success_shape(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_contract_compact_success_shape(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """契约 v1：/compact 成功 → {kind, kept_turns, replaced_messages, before/after_tokens,
     summary_chars}；2026-09-27 起保留口径改为 **token + 对话轮**（B 组），并新增
     trigger / omitted_messages / files 三个字段（见 docs/claude-sessions-compaction.md §2）。

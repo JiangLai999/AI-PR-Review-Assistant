@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib import request as urllib_request
 
-
 MODEL_CATALOG_URL = "https://models.dev/api.json"
 MODEL_CATALOG_TIMEOUT_SECONDS = 10
 MODEL_CATALOG_SOURCE = "models.dev"

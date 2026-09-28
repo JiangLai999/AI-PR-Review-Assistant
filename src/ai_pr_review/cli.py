@@ -69,9 +69,7 @@ from ai_pr_review.config_commands import (
     run_config_models,
     run_config_test,
 )
-from ai_pr_review.config_diagnostics import (
-    validate_provider_for_test,
-)
+from ai_pr_review.config_diagnostics import validate_provider_for_test
 from ai_pr_review.config_entry import (
     build_config_show_output,
     run_config_export,
@@ -1596,9 +1594,7 @@ def report_filtered_section(stats: Any) -> dict[str, Any]:
     the comment renderer drops a `None` fragment instead of printing 0.
     """
     return {
-        key: value
-        for key, value in comment_filter_disclosure(stats).items()
-        if value is not None
+        key: value for key, value in comment_filter_disclosure(stats).items() if value is not None
     }
 
 

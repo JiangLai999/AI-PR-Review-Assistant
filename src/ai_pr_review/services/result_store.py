@@ -382,7 +382,8 @@ class ResultStore:
     def get_statistics(self) -> dict:
         """获取统计信息。"""
         with self._connect() as connection:
-            row = connection.execute("""
+            row = connection.execute(
+                """
                 SELECT
                     COUNT(*) AS total_runs,
                     COUNT(DISTINCT pr_url) AS unique_prs,
@@ -395,14 +396,16 @@ class ResultStore:
                     COALESCE(SUM(total_cost), 0) AS total_cost,
                     MAX(created_at) AS latest_run_at
                 FROM runs
-                """).fetchone()
+                """
+            ).fetchone()
 
         return dict(row)
 
     def _initialize_database(self) -> None:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("""
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS runs (
                     id TEXT PRIMARY KEY,
                     pr_url TEXT NOT NULL,
@@ -426,11 +429,13 @@ class ResultStore:
                     result_json TEXT,
                     metadata_json TEXT
                 )
-                """)
+                """
+            )
 
             self._migrate_runs_metadata_column(connection)
 
-            connection.execute("""
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS finding_feedback (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_id TEXT NOT NULL,
@@ -440,12 +445,14 @@ class ResultStore:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (run_id) REFERENCES runs(id)
                 )
-                """)
+                """
+            )
 
             # 追问记录：同一次审查可多轮，`turn_index` 是库侧自增的稳定顺序。
             # 不加 FOREIGN KEY：run 被清理后追问记录按同样的清理策略处理，
             # 但历史库里可能存在"先写追问、后补 run"的极端顺序（导入/迁移）。
-            connection.execute("""
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS chat_turns (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_id TEXT NOT NULL,
@@ -458,11 +465,14 @@ class ResultStore:
                     duration_ms INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-                """)
-            connection.execute("""
+                """
+            )
+            connection.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_chat_turns_run
                 ON chat_turns (run_id, turn_index)
-                """)
+                """
+            )
 
     @staticmethod
     def _migrate_runs_metadata_column(connection: sqlite3.Connection) -> None:
@@ -529,6 +539,4 @@ class ResultStore:
         )
         # 追问记录跟着它所属的 run 一起清：孤儿行只会白占空间，且删掉的 run
         # 已经无法再从历史里打开，留着这些记录没有任何入口能看到它们。
-        connection.execute(
-            "DELETE FROM chat_turns WHERE run_id NOT IN (SELECT id FROM runs)"
-        )
+        connection.execute("DELETE FROM chat_turns WHERE run_id NOT IN (SELECT id FROM runs)")

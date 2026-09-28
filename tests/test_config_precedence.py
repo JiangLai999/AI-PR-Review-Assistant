@@ -165,7 +165,9 @@ class TestServeConfigIsolation:
 
     def test_second_run_keeps_web_edits(self, tmp_path: Path, monkeypatch) -> None:
         cli_config = tmp_path / "config.json"
-        cli_config.write_text(json.dumps({"preferences": {"ui_language": "en-US"}}), encoding="utf-8")
+        cli_config.write_text(
+            json.dumps({"preferences": {"ui_language": "en-US"}}), encoding="utf-8"
+        )
         web_config = tmp_path / "config.web.json"
         web_config.write_text(
             json.dumps({"preferences": {"ui_language": "zh-CN"}}), encoding="utf-8"
@@ -425,9 +427,10 @@ class TestImportCliConfigEndpoint:
         assert live.preferences.output_format == "json"
         assert live.ai_client.model == "deepseek-v4-pro"
         # 内存与磁盘必须一致，否则界面说"已导入"、下一次审查还在用旧配置
-        assert json.loads(workbench["web_config"].read_text(encoding="utf-8"))["ai_client"][
-            "model"
-        ] == "deepseek-v4-pro"
+        assert (
+            json.loads(workbench["web_config"].read_text(encoding="utf-8"))["ai_client"]["model"]
+            == "deepseek-v4-pro"
+        )
 
     def test_env_only_secret_is_not_written_to_disk(self, workbench, monkeypatch) -> None:
         """源文件里没写密钥（靠 env）时，导入也不许把 env 密钥落成第二条副本。"""
@@ -444,9 +447,7 @@ class TestImportCliConfigEndpoint:
             encoding="utf-8"
         )
 
-    def test_a_non_preset_provider_name_does_not_fail_the_whole_import(
-        self, workbench
-    ) -> None:
+    def test_a_non_preset_provider_name_does_not_fail_the_whole_import(self, workbench) -> None:
         """中转站/自建端点的供应商名不在预设表里：端点照搬，导入不该整单被拒。"""
         workbench["cli_config"].write_text(
             json.dumps(
@@ -474,4 +475,3 @@ class TestImportCliConfigEndpoint:
         assert status == 200, payload
         assert payload["config"]["base_url"] == "https://proxy.example.com/v1"
         assert payload["config"]["model"] == "proxy-model"
-

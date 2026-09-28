@@ -684,6 +684,7 @@ class ReportRenderer:
             else []
         )
         base = "\n".join([*head, note, *closing])
+
         def lay_out(budget: int) -> list[str]:
             taken: list[str] = []
             used = 0
@@ -841,11 +842,7 @@ class ReportRenderer:
         for severity in SEVERITY_ORDER:
             if counts[severity] <= 0:
                 continue
-            label = (
-                GITHUB_STATS_LABELS_ZH[severity]
-                if zh
-                else SEVERITY_LABELS[severity].lower()
-            )
+            label = GITHUB_STATS_LABELS_ZH[severity] if zh else SEVERITY_LABELS[severity].lower()
             severity_bits.append(f"{GITHUB_SEVERITY_ICONS[severity]} {counts[severity]} {label}")
         total_label = "个问题" if zh else "findings"
         head = f"**{context.total_findings} {total_label}**"
@@ -944,9 +941,7 @@ class ReportRenderer:
                 url += f"-L{finding.line_end}"
         return url
 
-    def _github_location(
-        self, finding: Finding, pr_data: PRData, meta: GitHubCommentMeta
-    ) -> str:
+    def _github_location(self, finding: Finding, pr_data: PRData, meta: GitHubCommentMeta) -> str:
         label = f"{finding.file}:{finding.line_start}"
         if finding.line_end and finding.line_end != finding.line_start:
             label = f"{finding.file}:{finding.line_start}-{finding.line_end}"
@@ -954,7 +949,9 @@ class ReportRenderer:
         if meta.from_fork:
             # The head commit is not in the base repository, so a blob URL would
             # 404; the PR files view always exists.
-            files_url = f"https://github.com/{pr_data.owner}/{pr_data.repo}/pull/{pr_data.pr_number}/files"
+            files_url = (
+                f"https://github.com/{pr_data.owner}/{pr_data.repo}/pull/{pr_data.pr_number}/files"
+            )
             link = files_url
         else:
             link = self._github_blob_link(finding, pr_data, meta.head_sha)
@@ -970,7 +967,14 @@ class ReportRenderer:
     ) -> list[str]:
         limit = 3
         heading = "🎯 优先修复" if zh else "🎯 Fix first"
-        lines = [f"### {heading}（Top {min(limit, len(ranked))}）" if zh else f"### {heading} (top {min(limit, len(ranked))})", ""]
+        lines = [
+            (
+                f"### {heading}（Top {min(limit, len(ranked))}）"
+                if zh
+                else f"### {heading} (top {min(limit, len(ranked))})"
+            ),
+            "",
+        ]
         for index, finding in enumerate(ranked[:limit], start=1):
             confidence = f"{finding.confidence * 100:.0f}%"
             lines.append(
@@ -995,7 +999,9 @@ class ReportRenderer:
         if zh:
             title = f"{GITHUB_SEVERITY_ICONS[severity]} {GITHUB_SEVERITY_LABELS_ZH[severity]} · {len(findings)} 条"
         else:
-            title = f"{GITHUB_SEVERITY_ICONS[severity]} {SEVERITY_LABELS[severity]} · {len(findings)}"
+            title = (
+                f"{GITHUB_SEVERITY_ICONS[severity]} {SEVERITY_LABELS[severity]} · {len(findings)}"
+            )
         # Only the most severe block is expanded: the shortlist above already
         # carries the headline items, so everything else stays one click away.
         opening = "<details open>" if severity == "critical" else "<details>"
@@ -1076,7 +1082,9 @@ class ReportRenderer:
             lines.extend(["</details>", ""])
             return lines
 
-        lines.extend([f"**{problem_label}**：{problem}", "", f"**{suggestion_label}**：{suggestion}", ""])
+        lines.extend(
+            [f"**{problem_label}**：{problem}", "", f"**{suggestion_label}**：{suggestion}", ""]
+        )
         if include_code_snippet and finding.code_snippet:
             lines.extend(self._github_code_block(finding.code_snippet, fence, code_label))
         return lines
@@ -1091,7 +1099,9 @@ class ReportRenderer:
 
     @staticmethod
     def _github_fence_language(filename: str) -> str:
-        suffix = str(filename or "").rsplit(".", 1)[-1].lower() if "." in str(filename or "") else ""
+        suffix = (
+            str(filename or "").rsplit(".", 1)[-1].lower() if "." in str(filename or "") else ""
+        )
         return _FENCE_LANGUAGES.get(suffix, "")
 
     @staticmethod
@@ -1143,9 +1153,7 @@ class ReportRenderer:
         lines: list[str] = []
         if overview:
             heading = "### 📌 结论摘要" if zh else "### 📌 Review summary"
-            lines.extend(
-                [heading, "", self._github_escape_prose(" ".join(overview)), ""]
-            )
+            lines.extend([heading, "", self._github_escape_prose(" ".join(overview)), ""])
         if per_file:
             heading = (
                 f"📄 模型摘要覆盖的 {len(per_file)} 个文件"

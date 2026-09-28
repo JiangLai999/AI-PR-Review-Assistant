@@ -25,9 +25,9 @@ from typing import Any, Callable, NamedTuple, cast
 from ai_pr_review.chat_session import ChatSessionStore
 from ai_pr_review.config import (
     CHAT_CONTEXT_BUDGET_RANGE,
-    CHAT_SLOT_VALUES,
     CHAT_REASONING_EFFORTS,
     CHAT_REASONING_TOKEN_BUDGETS,
+    CHAT_SLOT_VALUES,
     CONTEXT_WINDOW_RANGE,
     DEFAULT_CHAT_CONTEXT_BUDGET,
     DEFAULT_CHAT_REASONING_EFFORT,
@@ -58,6 +58,7 @@ from ai_pr_review.services.model_catalog import (
     lookup_in_index,
 )
 from ai_pr_review.services.model_providers.factory import create_model_provider
+
 # 思考参数规格表（数据源 docs/reasoning-specs-research.md）：`_chat` 按供应商注入、
 # `/think` 按三态（set/transparent/unsupported）回显都用它，两份逻辑不再各写一套映射。
 from ai_pr_review.services.reasoning_specs import (
@@ -84,9 +85,9 @@ from ai_pr_review.services.review_context import (
     build_review_context,
     build_review_context_meta,
     describe_run,
+    estimate_tokens,
     wrap_review_context,
 )
-from ai_pr_review.services.review_context import estimate_tokens
 
 # Use the orchestrator's exception class itself. A *subclass* here would NOT
 # catch a plain `ReviewCancelled` raised inside `run_review` — `except SubClass`
@@ -329,8 +330,16 @@ CHAT_REPO_TREE_MAX_CHILDREN_PER_DIR = REPO_TREE_MAX_CHILDREN_PER_DIR
 # C 的触发词：只在用户问到"仓库长什么样"时才注入目录树。每轮全量注入会持续吃
 # token（一棵拉满的树 ≈ 1.5k token），而结构类问题只占对话的少数轮次。
 CHAT_REPO_STRUCTURE_INTENT = (
-    "结构", "目录", "树", "哪些文件", "文件列表",
-    "structure", "directory", "folder", "tree", "layout",
+    "结构",
+    "目录",
+    "树",
+    "哪些文件",
+    "文件列表",
+    "structure",
+    "directory",
+    "folder",
+    "tree",
+    "layout",
 )
 # 清单 / 目录树拉取失败后的进程内冷却（秒）：同一 run 在冷却期内不再重试——
 # 网络长时间不通时，不该每一轮对话都付一次"带重试的网络等待"。
@@ -504,9 +513,7 @@ def _review_completed_fields(report: dict[str, Any]) -> dict[str, Any]:
     findings: list[Any] = findings_value if isinstance(findings_value, list) else []
 
     by_severity_value = counts.get("by_severity")
-    by_severity: dict[str, Any] = (
-        by_severity_value if isinstance(by_severity_value, dict) else {}
-    )
+    by_severity: dict[str, Any] = by_severity_value if isinstance(by_severity_value, dict) else {}
     severity = {
         level: int(_as_float(by_severity.get(level, 0)))
         for level in ("critical", "high", "medium", "low", "info")
@@ -637,9 +644,7 @@ class _ReviewEventStream:
 
     def file_started(self, filename: str, model: str = "") -> None:
         self.files_started += 1
-        self._file_starts.setdefault(filename, []).append(
-            (time.perf_counter(), self.files_started)
-        )
+        self._file_starts.setdefault(filename, []).append((time.perf_counter(), self.files_started))
         self._emit(
             "review.file_started",
             filename=filename,
@@ -686,9 +691,7 @@ class _ReviewEventStream:
         if not results:
             self._file_results.pop(filename, None)
         measured_ms = (
-            None
-            if started_at is None
-            else max(0, round((time.perf_counter() - started_at) * 1000))
+            None if started_at is None else max(0, round((time.perf_counter() - started_at) * 1000))
         )
         duration_ms = _optional_int(payload.get("duration_ms")) if payload else None
         if duration_ms is None:
@@ -721,9 +724,7 @@ class _ReviewEventStream:
         recovery: str | None = None,
     ) -> None:
         """Close the in-flight stage after a cancellation or a failure."""
-        self._close_stage(
-            time.perf_counter(), status=status, message=message, recovery=recovery
-        )
+        self._close_stage(time.perf_counter(), status=status, message=message, recovery=recovery)
         self.finished = True
 
 
@@ -757,9 +758,7 @@ class _CatalogState:
         return cls(index=None, source="builtin", reason="", fetched_at=None)
 
     @classmethod
-    def from_fetch(
-        cls, index: CatalogIndex | None, *, origin: str | None
-    ) -> "_CatalogState":
+    def from_fetch(cls, index: CatalogIndex | None, *, origin: str | None) -> "_CatalogState":
         if index is None:
             return cls(index=None, source="builtin", reason="fetch_failed", fetched_at=None)
         return cls(
@@ -917,9 +916,7 @@ class JsonlBackend:
             "custom"
             if self._has_explicit_slot()
             else ROUTE_PROFILE_BY_STRATEGY.get(
-                str(getattr(self.config.preferences, "hybrid_strategy", "") or "")
-                .strip()
-                .lower(),
+                str(getattr(self.config.preferences, "hybrid_strategy", "") or "").strip().lower(),
                 # 未知/缺失的策略与 `resolve_review_slot` 一样按远端处理。
                 "cloud",
             )
@@ -1035,9 +1032,7 @@ class JsonlBackend:
         """
         return {
             "value": self.config.preferences.symbol_locate,
-            "options": [
-                {"value": value, "label": label} for value, label in SYMBOL_LOCATE_CHOICES
-            ],
+            "options": [{"value": value, "label": label} for value, label in SYMBOL_LOCATE_CHOICES],
         }
 
     def _review_reasoning_options(self) -> dict[str, Any]:
@@ -1072,9 +1067,7 @@ class JsonlBackend:
         if not support.injects or blocked_reason:
             payload["state"] = STATE_UNSUPPORTED if blocked_reason else support.state
             payload["reason"] = (
-                blocked_reason
-                or support.reason
-                or "该供应商未提供思考参数，review 档位不会注入"
+                blocked_reason or support.reason or "该供应商未提供思考参数，review 档位不会注入"
             )
         return payload
 
@@ -1103,8 +1096,10 @@ class JsonlBackend:
             minimum = control.get("min")
             if kind == "effort" and isinstance(values, list) and values:
                 parts.append(f"{word} {'/'.join(str(value) for value in values)}")
-            elif kind == "budget_tokens" and isinstance(minimum, int) and not isinstance(
-                minimum, bool
+            elif (
+                kind == "budget_tokens"
+                and isinstance(minimum, int)
+                and not isinstance(minimum, bool)
             ):
                 parts.append(f"{word} ≥{minimum}")
             else:
@@ -1149,22 +1144,22 @@ class JsonlBackend:
             "provider": self._safe_provider_name(provider),
             "reasoning": self._reasoning_text(controls),
             "reasoning_controls": controls,
-            "catalog": None
-            if catalog_spec is None
-            else {
-                "context_window": catalog_spec.context_window,
-                "max_output": catalog_spec.max_output,
-                "source": catalog_view.source,
-                "fetched_at": catalog_spec.fetched_at.isoformat(),
-            },
+            "catalog": (
+                None
+                if catalog_spec is None
+                else {
+                    "context_window": catalog_spec.context_window,
+                    "max_output": catalog_spec.max_output,
+                    "source": catalog_view.source,
+                    "fetched_at": catalog_spec.fetched_at.isoformat(),
+                }
+            ),
             "bounds": {
                 "context_window": list(CONTEXT_WINDOW_RANGE),
                 "max_output": list(MAX_OUTPUT_RANGE),
             },
             "catalog_state": {
-                "enabled": bool(
-                    getattr(self.config.preferences, "model_catalog_fetch", True)
-                ),
+                "enabled": bool(getattr(self.config.preferences, "model_catalog_fetch", True)),
                 "source": catalog_view.source,
                 "reason": catalog_view.reason,
                 "fetched_at": catalog_view.fetched_at,
@@ -1457,9 +1452,7 @@ class JsonlBackend:
         elif isinstance(value, str) and value.strip().lstrip("+-").isdigit():
             parsed = int(value.strip())
         if parsed is None:
-            raise ConfigValidationError(
-                f"模型规格的{label}需为整数。（{key} accepts an integer.）"
-            )
+            raise ConfigValidationError(f"模型规格的{label}需为整数。（{key} accepts an integer.）")
         minimum, maximum = bounds
         if not minimum <= parsed <= maximum:
             raise ConfigValidationError(
@@ -1468,9 +1461,7 @@ class JsonlBackend:
             )
         return parsed
 
-    def _plan_model_spec_params(
-        self, params: dict[str, Any]
-    ) -> dict[str, dict[str, int | None]]:
+    def _plan_model_spec_params(self, params: dict[str, Any]) -> dict[str, dict[str, int | None]]:
         """校验 `config.setup` 的四个规格参数（§2.5）。
 
         规格是**槽位属性**，与运行模式分支无关：远端槽 `context_window`/`max_output`，
@@ -1528,9 +1519,7 @@ class JsonlBackend:
             }
         }
 
-    def _apply_model_spec_params(
-        self, plan: dict[str, dict[str, int | None]]
-    ) -> None:
+    def _apply_model_spec_params(self, plan: dict[str, dict[str, int | None]]) -> None:
         """把校验过的规格写进两个槽位（§2.5/§3.3.8）。
 
         放在**所有 profile 分支之后**：`runtime_profile="custom"` 这种只写槽位路由的档
@@ -1585,9 +1574,7 @@ class JsonlBackend:
 
     def _apply_setup(self, params: dict[str, Any]) -> dict[str, Any]:
         """Apply the TUI wizard atomically and reload the persisted result."""
-        profile = (
-            str(params.get("runtime_profile", "")).strip().lower() or self.runtime_profile
-        )
+        profile = str(params.get("runtime_profile", "")).strip().lower() or self.runtime_profile
         if profile not in {"cloud", "local", "hybrid", "offline", "custom"}:
             raise ValueError(f"Unsupported runtime profile: {profile}")
         # B1/B3：规格参数**先校验**（非法整单失败、一个字段都不写），**后写入**——
@@ -1656,18 +1643,14 @@ class JsonlBackend:
             )
         elif profile in {"local", "offline"}:
             local = self.config.local_provider
-            local_name = (
-                str(params.get("local_provider", "")).strip().lower() or local.name.lower()
-            )
+            local_name = str(params.get("local_provider", "")).strip().lower() or local.name.lower()
             if local_name not in {"ollama", "local"}:
                 raise ConfigValidationError("本地模型目前仅支持 Ollama/Local 预设。")
             model_name = str(
                 params.get("local_model", "") or local.default_model or "qwen3.5:4b"
             ).strip()
             base_url = str(
-                params.get("local_base_url", "")
-                or local.base_url
-                or "http://127.0.0.1:11434/v1"
+                params.get("local_base_url", "") or local.base_url or "http://127.0.0.1:11434/v1"
             ).strip()
             provider = ModelProviderConfig.from_name(
                 "ollama",
@@ -1879,9 +1862,7 @@ class JsonlBackend:
         snapshot = self._apply_slot_model(target, model_name)
         status = await self._model_status()
         label = ROUTE_SLOT_LABELS.get(resolved, resolved)
-        lines = [
-            f"{heading} {model_name}（{label}槽 · {target.display_name or target.name}）"
-        ]
+        lines = [f"{heading} {model_name}（{label}槽 · {target.display_name or target.name}）"]
         # 两个槽指向同一个 Provider 时，它们共用一份 default_model：改一个槽必然会
         # 改到另一个槽用的模型。明说比让用户自己发现"聊天模型怎么变了"要好。
         if shares_provider:
@@ -2171,7 +2152,9 @@ class JsonlBackend:
         """
         return self._chat_slot_config().to_model_provider()
 
-    def _chat_spec_sources(self) -> tuple[object | None, dict[str, int | str] | None, object | None]:
+    def _chat_spec_sources(
+        self,
+    ) -> tuple[object | None, dict[str, int | str] | None, object | None]:
         """聊天槽模型的三个规格来源 `(落盘条目, 内置预设, 目录命中)`。
 
         只读进程内已同步的目录索引，绝不在这里取数（`model.status`/`config.snapshot`
@@ -2525,9 +2508,7 @@ class JsonlBackend:
 
         try:
             store = ResultStore(self.config.result_store)
-            context = build_review_context(
-                store, run_id, token_budget=self._chat_context_budget()
-            )
+            context = build_review_context(store, run_id, token_budget=self._chat_context_budget())
         except Exception as exc:
             self._warn_context_unavailable(run_id, f"{exc.__class__.__name__}: {exc}")
             return None
@@ -2659,9 +2640,7 @@ class JsonlBackend:
             # 读不到文件有两种原因，说清楚是哪一种，而不是让模型以为仓库里没有这个文件：
             # 老记录可能没存 head_sha，Run 也可能已被清理。
             reason = "该 Run 未记录仓库 / head 提交" if run else "该 Run 不存在或已被清理"
-            lines.extend(
-                f"(未能读取 {path}：{reason}，无法定位文件)" for path in paths
-            )
+            lines.extend(f"(未能读取 {path}：{reason}，无法定位文件)" for path in paths)
             lines.append(self._repo_files_rules())
             return "\n\n".join(lines)
 
@@ -2680,7 +2659,9 @@ class JsonlBackend:
                 lines.append(f"(未能读取 {path}：该提交的仓库里不存在，或当前 Token 无权访问)")
                 continue
             if budget <= 0:
-                lines.append(f"(未能读取 {path}：本轮注入已达 {CHAT_REPO_FILES_TOTAL_CHARS} 字符上限)")
+                lines.append(
+                    f"(未能读取 {path}：本轮注入已达 {CHAT_REPO_FILES_TOTAL_CHARS} 字符上限)"
+                )
                 continue
             body, note, budget = self._repo_file_excerpt(
                 content,
@@ -3359,11 +3340,13 @@ class JsonlBackend:
         except Exception as exc:
             print(
                 f"chat session save failed ({exc.__class__.__name__}: {exc})",
-            file=sys.stderr,
-            flush=True,
-        )
+                file=sys.stderr,
+                flush=True,
+            )
 
-    def _chat_history_payload(self, session: Session, *, limit: int | None = None) -> dict[str, Any]:
+    def _chat_history_payload(
+        self, session: Session, *, limit: int | None = None
+    ) -> dict[str, Any]:
         """A7: default `/history` lists the chat transcript; `--runs` stays review-only."""
         shown = session.messages if limit is None else session.messages[-limit:]
         start_index = len(session.messages) - len(shown)
@@ -3467,9 +3450,7 @@ class JsonlBackend:
     @staticmethod
     def _count_turns(turns: list[list[dict[str, Any]]]) -> int:
         """对话轮数（只数含 user 的组：首条 user 之前的摘要不是一轮）。"""
-        return sum(
-            1 for turn in turns if any(str(item.get("role", "")) == "user" for item in turn)
-        )
+        return sum(1 for turn in turns if any(str(item.get("role", "")) == "user" for item in turn))
 
     def _split_compaction_tail(
         self, messages: list[dict[str, Any]]
@@ -3498,18 +3479,14 @@ class JsonlBackend:
         kept = [message for turn in kept_turns for message in turn]
         return old_messages, kept, self._count_turns(kept_turns)
 
-    def _summary_input(
-        self, messages: list[dict[str, Any]]
-    ) -> tuple[list[dict[str, Any]], int]:
+    def _summary_input(self, messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
         """§B5 安全网：待摘要正文截断到 `有效窗口 × 0.6`；返回 `(保留的消息, 省略条数)`。
 
         丢弃的是**最旧**的一段：摘要是越近越相关，且下一次压缩会把旧摘要一起重写。
         至少留一条（哪怕它自己就超预算）——否则"内容太长"会变成"没有可摘要的内容"，
         摘要调用照发，却什么也没读到。
         """
-        budget = max(
-            1, int(self._chat_effective_window() * CHAT_COMPACTION_SUMMARY_INPUT_RATIO)
-        )
+        budget = max(1, int(self._chat_effective_window() * CHAT_COMPACTION_SUMMARY_INPUT_RATIO))
         kept: list[dict[str, Any]] = []
         used = 0
         for message in reversed(messages):
@@ -3535,8 +3512,7 @@ class JsonlBackend:
             # 同一条消息里重复出现的路径只算一次："讨论过 3 次"指的是**说过 3 轮**，
             # 不是"在一段长文里刷了 3 遍"（后者会让清单里的数字随摘要在压缩间自我累加）。
             seen = {
-                token.replace("\\", "/").strip("./")
-                for token in _PATH_TOKEN_PATTERN.findall(text)
+                token.replace("\\", "/").strip("./") for token in _PATH_TOKEN_PATTERN.findall(text)
             }
             for path in seen:
                 if not path or len(path) > 120:
@@ -3625,8 +3601,7 @@ class JsonlBackend:
         provider = create_model_provider(self._chat_slot_provider())
         summary_input, omitted = self._summary_input(old_messages)
         transcript = "\n".join(
-            f"{message.get('role', '')}: {message.get('content', '')}"
-            for message in summary_input
+            f"{message.get('role', '')}: {message.get('content', '')}" for message in summary_input
         )
         user_prompt = (
             "请把以下对话历史压缩为一段中文摘要，保留事实、约束、结论和尚未完成的行动，"
@@ -3694,8 +3669,7 @@ class JsonlBackend:
             await self._compact_chat_history(session, trigger="auto")
         except Exception as exc:
             print(
-                f"auto compaction failed ({exc.__class__.__name__}: {exc}); "
-                "history kept as-is",
+                f"auto compaction failed ({exc.__class__.__name__}: {exc}); " "history kept as-is",
                 file=sys.stderr,
                 flush=True,
             )
@@ -3758,9 +3732,7 @@ class JsonlBackend:
         if not runs:
             return ""
         session.context_candidates = [
-            str(run.get("id") or "").strip()
-            for run in runs
-            if str(run.get("id") or "").strip()
+            str(run.get("id") or "").strip() for run in runs if str(run.get("id") or "").strip()
         ]
         note_lines = [
             "（当前还没有绑定审查上下文。以下是最近几次审查，"
@@ -3773,9 +3745,7 @@ class JsonlBackend:
                 f"{run.get('total_findings')} 条 findings"
                 f"{_failed_run_suffix(store, candidate_id)}"
             )
-        note_lines.append(
-            "如果用户问的是别的审查，请让他说明 PR 编号；不要替他猜是哪一次。"
-        )
+        note_lines.append("如果用户问的是别的审查，请让他说明 PR 编号；不要替他猜是哪一次。")
         return "\n".join(note_lines)
 
     def _publish(self, event: dict[str, Any], events: list[dict[str, Any]]) -> None:
@@ -4254,9 +4224,7 @@ class JsonlBackend:
                     # 用户表达不出来——直接拒绝，与 `chat.send` 的空消息同一套口径。
                     error("Title cannot be empty", "invalid_request")
                 else:
-                    renamed = self.session_store.rename(
-                        str(params.get("session_id", "")), title
-                    )
+                    renamed = self.session_store.rename(str(params.get("session_id", "")), title)
                     if renamed is None:
                         error("Session not found", "not_found")
                     else:
@@ -4553,7 +4521,9 @@ class JsonlBackend:
                     elif args[0].lower() in {"off", "none"}:
                         context_session.current_run_id = None
                         result(
-                            self._context_status(None, leading="已解除审查上下文绑定，回到普通聊天。")
+                            self._context_status(
+                                None, leading="已解除审查上下文绑定，回到普通聊天。"
+                            )
                         )
                     else:
                         try:
@@ -4634,10 +4604,7 @@ class JsonlBackend:
                     except PublishError as exc:
                         error(exc.message, exc.code)
                 elif command == "demo":
-                    from ai_pr_review.services.demo_runner import (
-                        UnknownDemoCase,
-                        demo_payload,
-                    )
+                    from ai_pr_review.services.demo_runner import UnknownDemoCase, demo_payload
 
                     raw_args = params.get("args", [])
                     args = (
@@ -4829,9 +4796,7 @@ class JsonlBackend:
                     support = reasoning_support(provider_config.name)
                     if not args:
                         result(
-                            self._think_result(
-                                support, self._chat_reasoning_effort(), query=True
-                            )
+                            self._think_result(support, self._chat_reasoning_effort(), query=True)
                         )
                     elif support.state == STATE_SET or support.state == STATE_TRANSPARENT:
                         effort = args[0]

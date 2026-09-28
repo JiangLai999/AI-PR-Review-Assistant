@@ -173,7 +173,9 @@ def test_database_uses_wal_mode(tmp_path):
 
 def _store_with_run(tmp_path, *, max_results: int = 10):
     """建一个带一条 run 的库，返回 (store, run_id)。"""
-    store = ResultStore(ResultStoreConfig(db_path=str(tmp_path / "results.db"), max_results=max_results))
+    store = ResultStore(
+        ResultStoreConfig(db_path=str(tmp_path / "results.db"), max_results=max_results)
+    )
     run_id = store.save_result(
         "https://github.com/test-owner/test-repo/pull/9",
         build_review_result(summary="chat host"),

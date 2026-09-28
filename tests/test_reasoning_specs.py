@@ -278,9 +278,7 @@ def test_auto_never_touches_the_request(provider: str) -> None:
 def test_anthropic_budget_respects_official_constraints() -> None:
     """官方约束：`budget_tokens` ≥ 1024 且 < `max_tokens`（调研 §3.1 原句）。"""
     # 默认安装：max_tokens 封顶 8_192、回答额度 4_096 → 思考只能拿 4_096。
-    high = build_reasoning_params(
-        "anthropic", "high", max_tokens=8_192, answer_tokens=4_096
-    )
+    high = build_reasoning_params("anthropic", "high", max_tokens=8_192, answer_tokens=4_096)
     assert high["thinking"] == {"type": "enabled", "budget_tokens": 4_096}
 
     # max_tokens 再小也要守住两条：≥1024、< max_tokens。

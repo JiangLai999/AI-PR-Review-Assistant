@@ -62,9 +62,7 @@ class BaseModelProvider(ABC):
             return None
         prompt_tokens = int(usage.get("prompt_tokens") or 0)
         completion_tokens = int(usage.get("completion_tokens") or 0)
-        total_tokens = int(
-            usage.get("total_tokens") or (prompt_tokens + completion_tokens) or 0
-        )
+        total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens) or 0)
         return {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,

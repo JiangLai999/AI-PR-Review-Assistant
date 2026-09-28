@@ -29,10 +29,9 @@ from ai_pr_review.services.prompt_assembler import (
     RELATED_FILE_RULES_EN,
     RELATED_FILE_RULES_ZH,
     Finding,
-    PromptAssembler as RealPromptAssembler,
-    ReviewResult,
-    related_file_system_rules,
 )
+from ai_pr_review.services.prompt_assembler import PromptAssembler as RealPromptAssembler
+from ai_pr_review.services.prompt_assembler import ReviewResult, related_file_system_rules
 from ai_pr_review.services.repo_context import FileSystemRepoCache, RelatedFile
 from ai_pr_review.services.review_orchestrator import (
     ReviewCancelled,
@@ -349,9 +348,7 @@ def _patch_standard_orchestrator(
     post_processor: type = StubPostProcessor,
 ) -> None:
     monkeypatch.setattr("ai_pr_review.services.review_orchestrator.PRFetcher", StubPRFetcher)
-    monkeypatch.setattr(
-        "ai_pr_review.services.review_orchestrator.FilterPipeline", filter_pipeline
-    )
+    monkeypatch.setattr("ai_pr_review.services.review_orchestrator.FilterPipeline", filter_pipeline)
     monkeypatch.setattr(
         "ai_pr_review.services.review_orchestrator.ContextBuilder", StubContextBuilder
     )
@@ -359,9 +356,7 @@ def _patch_standard_orchestrator(
         "ai_pr_review.services.review_orchestrator.PromptAssembler", StubPromptAssembler
     )
     monkeypatch.setattr("ai_pr_review.services.review_orchestrator.AIClient", ai_client)
-    monkeypatch.setattr(
-        "ai_pr_review.services.review_orchestrator.PostProcessor", post_processor
-    )
+    monkeypatch.setattr("ai_pr_review.services.review_orchestrator.PostProcessor", post_processor)
     monkeypatch.setattr("ai_pr_review.services.review_orchestrator.ResultStore", StubResultStore)
 
 
@@ -388,15 +383,11 @@ def _patch_hybrid_orchestrator(
         "ai_pr_review.services.hybrid_orchestrator.PythonAstAnalyzer", StubPythonAstAnalyzer
     )
     # 混合编排器直接用自己模块里的 ResultStore 名字构造，必须单独替换。
-    monkeypatch.setattr(
-        "ai_pr_review.services.hybrid_orchestrator.ResultStore", StubResultStore
-    )
+    monkeypatch.setattr("ai_pr_review.services.hybrid_orchestrator.ResultStore", StubResultStore)
     # PostProcessor 同理：hybrid 直接 import，得替换它自己模块里的名字。
     # 默认透传，让「证据校验」「回调」等用例不受后处理影响；后处理用例显式传
     # `post_processor=PostProcessor`（真实实现）。
-    monkeypatch.setattr(
-        "ai_pr_review.services.hybrid_orchestrator.PostProcessor", post_processor
-    )
+    monkeypatch.setattr("ai_pr_review.services.hybrid_orchestrator.PostProcessor", post_processor)
 
 
 def test_file_result_payload_keeps_unknown_values_null() -> None:
@@ -561,9 +552,7 @@ def test_hybrid_reports_every_file_failure_as_a_failure(monkeypatch, tmp_path):
         "ai_pr_review.services.hybrid_orchestrator.ResultStore", RecordingResultStore
     )
 
-    artifacts = asyncio.run(
-        HybridReviewOrchestrator(_standard_config(tmp_path)).review(PR_URL)
-    )
+    artifacts = asyncio.run(HybridReviewOrchestrator(_standard_config(tmp_path)).review(PR_URL))
 
     assert artifacts.review_result.findings == []
     assert artifacts.review_result.summary.startswith("审查失败：")
@@ -586,9 +575,7 @@ def test_hybrid_partial_file_failure_is_visible_in_the_summary(monkeypatch, tmp_
         "ai_pr_review.services.hybrid_orchestrator.ResultStore", RecordingResultStore
     )
 
-    artifacts = asyncio.run(
-        HybridReviewOrchestrator(_standard_config(tmp_path)).review(PR_URL)
-    )
+    artifacts = asyncio.run(HybridReviewOrchestrator(_standard_config(tmp_path)).review(PR_URL))
 
     assert artifacts.review_result.summary.startswith("审查完成（部分失败）")
     assert "1 个文件未能审查" in artifacts.review_result.summary
@@ -696,8 +683,10 @@ class ForkStubPRFetcher(StubPRFetcher):
     head_repo_full_name = "contributor/repo"
 
     def fetch(self, pr_url: str) -> PRData:
-        return super().fetch(pr_url).model_copy(
-            update={"head_repo_full_name": self.head_repo_full_name}
+        return (
+            super()
+            .fetch(pr_url)
+            .model_copy(update={"head_repo_full_name": self.head_repo_full_name})
         )
 
 
@@ -849,9 +838,7 @@ def test_hybrid_run_validates_model_and_static_findings(monkeypatch, tmp_path):
     """
     model_findings = {
         # 行号落在变更行、片段在文件里 → valid
-        "src/file_0.py": [
-            evidence_finding("src/file_0.py", title="Model issue in src/file_0.py")
-        ],
+        "src/file_0.py": [evidence_finding("src/file_0.py", title="Model issue in src/file_0.py")],
         # 片段在文件里，但第 2 行不是 diff 的变更行 → needs_review
         "src/file_1.py": [
             evidence_finding(
@@ -867,9 +854,7 @@ def test_hybrid_run_validates_model_and_static_findings(monkeypatch, tmp_path):
         ],
     }
 
-    _patch_hybrid_orchestrator(
-        monkeypatch, ai_client=scenario_ai_client_factory(model_findings)
-    )
+    _patch_hybrid_orchestrator(monkeypatch, ai_client=scenario_ai_client_factory(model_findings))
     monkeypatch.setattr(
         "ai_pr_review.services.review_orchestrator.ContextBuilder", ContentStubContextBuilder
     )
@@ -896,12 +881,10 @@ def test_hybrid_run_validates_model_and_static_findings(monkeypatch, tmp_path):
     # 校验只标注、不丢弃：7 条 finding 全在，且都带 id 与证据。
     assert len(artifacts.review_result.findings) == 7
     assert all(
-        finding.evidence_status != "unverified"
-        for finding in artifacts.review_result.findings
+        finding.evidence_status != "unverified" for finding in artifacts.review_result.findings
     )
     assert all(
-        finding.finding_id and finding.evidence
-        for finding in artifacts.review_result.findings
+        finding.finding_id and finding.evidence for finding in artifacts.review_result.findings
     )
     assert (
         "Finding line range is outside the available file content."
@@ -918,9 +901,7 @@ def test_hybrid_validates_a_finding_against_the_file_it_points_at(monkeypatch, t
         ]
     }
 
-    _patch_hybrid_orchestrator(
-        monkeypatch, ai_client=scenario_ai_client_factory(model_findings)
-    )
+    _patch_hybrid_orchestrator(monkeypatch, ai_client=scenario_ai_client_factory(model_findings))
     monkeypatch.setattr(
         "ai_pr_review.services.review_orchestrator.ContextBuilder", ContentStubContextBuilder
     )
@@ -1040,9 +1021,7 @@ def test_hybrid_local_calls_are_not_billed_at_cloud_rates(monkeypatch, tmp_path)
     assert remote_config.output_cost_per_million == remote_prices.output_cost_per_million
 
 
-def test_hybrid_orchestrator_drops_findings_below_the_configured_threshold(
-    monkeypatch, tmp_path
-):
+def test_hybrid_orchestrator_drops_findings_below_the_configured_threshold(monkeypatch, tmp_path):
     """cli.run_review 默认走 hybrid：用户配置的门槛 0.6 必须在这里生效。
 
     Codex 实测缺陷：hybrid 从不调用 PostProcessor，配置的置信度门槛与去重被
@@ -1083,9 +1062,7 @@ def test_hybrid_orchestrator_drops_findings_below_the_configured_threshold(
     assert artifacts.review_result.summary == "审查完成，发现 1 个问题"
 
 
-def test_hybrid_reports_nothing_when_the_only_finding_is_below_the_threshold(
-    monkeypatch, tmp_path
-):
+def test_hybrid_reports_nothing_when_the_only_finding_is_below_the_threshold(monkeypatch, tmp_path):
     """门槛 0.6 + 0.55 的 finding → 结果为空，且 below_threshold=1。"""
     model_findings = {
         "src/file_0.py": [
@@ -1116,9 +1093,7 @@ def test_hybrid_reports_nothing_when_the_only_finding_is_below_the_threshold(
         "severity_sorted": True,
     }
     assert artifacts.review_result.summary == "审查完成，发现 0 个问题"
-    assert (
-        RecordingResultStore.last.saved_metadata["filtered_findings"]["below_threshold"] == 1
-    )
+    assert RecordingResultStore.last.saved_metadata["filtered_findings"]["below_threshold"] == 1
 
 
 def test_hybrid_and_standard_paths_post_process_identically(monkeypatch, tmp_path):
@@ -1302,9 +1277,7 @@ def test_cancel_interrupts_a_file_review_in_flight(monkeypatch, tmp_path):
     results: list[dict[str, Any]] = []
     done: list[str] = []
 
-    _patch_standard_orchestrator(
-        monkeypatch, ai_client=_sleeping_ai_client(started, cancelled)
-    )
+    _patch_standard_orchestrator(monkeypatch, ai_client=_sleeping_ai_client(started, cancelled))
     monkeypatch.setattr(
         "ai_pr_review.services.review_orchestrator.ResultStore",
         _recording_result_store(saved),
@@ -1735,9 +1708,7 @@ class TestHybridRepoContextInjection:
         config = _standard_config(tmp_path)
         config.preferences.repo_context = "tests"
         asyncio.run(
-            HybridReviewOrchestrator(config).review(
-                "https://github.com/owner/repo/pull/42"
-            )
+            HybridReviewOrchestrator(config).review("https://github.com/owner/repo/pull/42")
         )
 
         assert captured.get("reasons") == frozenset({"test"})

@@ -4,11 +4,7 @@ import json
 
 from ai_pr_review.config import PromptAssemblerConfig
 from ai_pr_review.services.context_builder import ClassInfo, FileContext, FunctionInfo
-from ai_pr_review.services.prompt_assembler import (
-    Finding,
-    PromptAssembler,
-    finding_has_source,
-)
+from ai_pr_review.services.prompt_assembler import Finding, PromptAssembler, finding_has_source
 
 
 def build_file_context(language: str = "python") -> FileContext:

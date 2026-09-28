@@ -269,11 +269,7 @@ def _response_text(response: object) -> str:
     content = getattr(response, "content", None)
     if not content:
         return ""
-    parts = [
-        str(block.text)
-        for block in content
-        if isinstance(getattr(block, "text", None), str)
-    ]
+    parts = [str(block.text) for block in content if isinstance(getattr(block, "text", None), str)]
     return "\n".join(parts).strip()
 
 
@@ -337,9 +333,7 @@ class PatchGenerator:
                     raw = await complete(system_prompt, user_prompt)
                 except Exception as exc:
                     # 单次调用失败不致命：要么重试，要么最终降级为空串。
-                    logger.warning(
-                        "patch generation call failed for %s: %s", finding.file, exc
-                    )
+                    logger.warning("patch generation call failed for %s: %s", finding.file, exc)
                     continue
                 patch = extract_unified_diff(raw)
                 if patch:

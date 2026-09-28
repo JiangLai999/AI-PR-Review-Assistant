@@ -15,6 +15,7 @@ import pytest
 
 from ai_pr_review.backend.jsonl_server import JsonlBackend, ReviewCancelled
 from ai_pr_review.config import AppConfig
+
 # 模型规格的取值边界/来源集合（CONTEXT_WINDOW_RANGE 等）已随 C 组用例迁到
 # tests/test_config.py（docs/claude-backend-followup.md §1），本文件不再直接引用。
 from ai_pr_review.services.model_catalog import ModelCatalog
@@ -1197,11 +1198,7 @@ def test_review_stage_events_report_ids_progress_and_measured_durations(
     assert [event["event"] for event in published] == [
         "review.started",
         "review.model_routing",
-        *[
-            name
-            for stage in stages
-            for name in ("review.stage", "review.stage_done")
-        ],
+        *[name for stage in stages for name in ("review.stage", "review.stage_done")],
         "review.completed",
     ]
 
@@ -1439,10 +1436,7 @@ def test_review_file_done_falls_back_to_measured_duration_when_payload_omits_it(
 
 
 def test_review_stage_progress_table_stays_monotonic_for_both_orchestrators() -> None:
-    from ai_pr_review.backend.jsonl_server import (
-        REVIEW_STAGE_LABELS,
-        REVIEW_STAGE_PROGRESS,
-    )
+    from ai_pr_review.backend.jsonl_server import REVIEW_STAGE_LABELS, REVIEW_STAGE_PROGRESS
 
     standard = ("fetching", "filtering", "context", "reviewing", "cross_file", "persisting")
     hybrid = ("fetching", "filtering", "context", "static_rules", "reviewing", "persisting")
@@ -1602,9 +1596,7 @@ def test_review_completed_omits_filtered_when_the_run_recorded_nothing(
         await backend.handle(_review_request())
         return published
 
-    completed = next(
-        event for event in asyncio.run(run()) if event["event"] == "review.completed"
-    )
+    completed = next(event for event in asyncio.run(run()) if event["event"] == "review.completed")
     assert "filtered" not in completed
 
     from ai_pr_review.backend.jsonl_server import _review_completed_fields
@@ -2903,9 +2895,7 @@ def test_publish_prefers_the_threshold_recorded_by_the_run(
     backend.config.post_processor.confidence_threshold = 0.75
     run_id = _save_publishable_run(
         backend,
-        metadata={
-            "filtered_findings": {"below_threshold": 2, "duplicates": 0, "threshold": 0.6}
-        },
+        metadata={"filtered_findings": {"below_threshold": 2, "duplicates": 0, "threshold": 0.6}},
     )
 
     body = _execute(backend, "publish", [run_id])["result"]["comment_body"]
@@ -3341,9 +3331,9 @@ def test_config_and_model_snapshots_carry_routing(
             lambda config: OfflineProvider(),
         )
 
-        snapshot = (await backend.handle(
-            {"id": "1", "method": "config.snapshot", "params": {}}
-        ))[0]["result"]
+        snapshot = (await backend.handle({"id": "1", "method": "config.snapshot", "params": {}}))[
+            0
+        ]["result"]
         expected = {
             "profile": "custom",
             "chat": {"slot": "local", "label": "本地", "model": "local-model"},
@@ -3357,14 +3347,14 @@ def test_config_and_model_snapshots_carry_routing(
         assert snapshot["model"] == "remote-model"
         assert snapshot["runtime_profile"] == "cloud"
 
-        options = (await backend.handle(
-            {"id": "2", "method": "config.options", "params": {}}
-        ))[0]["result"]
+        options = (await backend.handle({"id": "2", "method": "config.options", "params": {}}))[0][
+            "result"
+        ]
         assert options["routing"] == expected
 
-        status = (await backend.handle(
-            {"id": "3", "method": "model.status", "params": {}}
-        ))[0]["result"]
+        status = (await backend.handle({"id": "3", "method": "model.status", "params": {}}))[0][
+            "result"
+        ]
         assert status["routing"] == expected
         # 顶层字段与 model.apply 写入的对象保持一致（仍是活跃槽）。
         assert status["model"] == "remote-model"
@@ -3546,9 +3536,7 @@ def test_config_options_and_model_status_expose_repo_context(
         ("True", True),
     ],
 )
-def test_config_setup_persists_symbol_locate(
-    raw: Any, expected: bool, tmp_path: Path
-) -> None:
+def test_config_setup_persists_symbol_locate(raw: Any, expected: bool, tmp_path: Path) -> None:
     """布尔与 config 层接受的字符串/数字写法都要能落盘，回显随值变化。"""
     from ai_pr_review.config import AppConfig
 
@@ -3649,9 +3637,7 @@ def test_protocol_config_options_and_setup_carry_symbol_locate(tmp_path: Path) -
     """协议层：`config.options` 暴露开关，`config.setup` 接受布尔与字符串写法，非法值返回错误事件。"""
     backend = JsonlBackend(tmp_path / "config.json")
 
-    options = asyncio.run(
-        backend.handle({"id": "1", "method": "config.options", "params": {}})
-    )[0]
+    options = asyncio.run(backend.handle({"id": "1", "method": "config.options", "params": {}}))[0]
     assert options["ok"] is True
     assert options["result"]["symbol_locate"]["value"] is True
     assert [item["value"] for item in options["result"]["symbol_locate"]["options"]] == [
@@ -3857,9 +3843,7 @@ def test_protocol_config_options_and_setup_carry_repo_context(tmp_path: Path) ->
 
     backend = JsonlBackend(tmp_path / "config.json")
 
-    options = asyncio.run(
-        backend.handle({"id": "1", "method": "config.options", "params": {}})
-    )[0]
+    options = asyncio.run(backend.handle({"id": "1", "method": "config.options", "params": {}}))[0]
     assert options["ok"] is True
     assert options["result"]["repo_context"]["value"] == "tests+imports"
     assert [item["value"] for item in options["result"]["repo_context"]["options"]] == list(
@@ -4039,6 +4023,8 @@ async def _execute_async(
 async def _new_session_async(backend: JsonlBackend) -> str:
     events = await backend.handle({"id": "s", "method": "session.create", "params": {}})
     return str(_reply(events)["result"]["session_id"])
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -4217,9 +4203,7 @@ def test_review_context_l3_covers_every_finding_not_just_top_three(tmp_path: Pat
         )
         for index in range(1, 13)
     ]
-    run_id = _store_context_run(
-        backend, findings=findings, summary="审查完成，发现 12 个问题"
-    )
+    run_id = _store_context_run(backend, findings=findings, summary="审查完成，发现 12 个问题")
 
     context = build_review_context(_context_store(backend), run_id)
 
@@ -4313,10 +4297,7 @@ def test_review_context_budget_drops_l4_then_l3_then_l2_but_keeps_l1(tmp_path: P
 
 def test_review_context_returns_none_when_the_run_or_store_is_unreadable(tmp_path: Path) -> None:
     """读不到就返回 None（由调用方降级），不抛异常、不返回半成品。"""
-    from ai_pr_review.services.review_context import (
-        build_review_context,
-        build_review_context_meta,
-    )
+    from ai_pr_review.services.review_context import build_review_context, build_review_context_meta
 
     class ExplodingStore:
         def get_run_summary(self, run_id: str) -> dict:
@@ -4442,7 +4423,9 @@ def test_context_command_reports_switches_and_clears_the_binding(tmp_path: Path)
         assert off["run_id"] is None
         assert backend.sessions[session_id].current_run_id is None
         assert "已解除审查上下文绑定" in off["text"]
-        assert (await _execute_async(backend, "context", [], session_id))["result"]["bound"] is False
+        assert (await _execute_async(backend, "context", [], session_id))["result"][
+            "bound"
+        ] is False
 
         # 没有会话：查看仍可回答"未绑定"，但切换/解绑没有绑定可操作
         assert (await _execute_async(backend, "context", []))["result"]["bound"] is False
@@ -4471,9 +4454,13 @@ def test_history_and_explain_bind_the_run_only_on_success(tmp_path: Path) -> Non
         assert (await _execute_async(backend, "history", [], listing_session))["ok"] is True
         assert backend.sessions[listing_session].current_run_id is None
         # 未找到的历史：返回 ok=True 的详情（run 为 None），但绝不能绑定
-        assert (await _execute_async(backend, "history", ["no-such-run"], listing_session))["ok"] is True
+        assert (await _execute_async(backend, "history", ["no-such-run"], listing_session))[
+            "ok"
+        ] is True
         assert backend.sessions[listing_session].current_run_id is None
-        assert (await _execute_async(backend, "explain", ["no-such-run"], listing_session))["ok"] is False
+        assert (await _execute_async(backend, "explain", ["no-such-run"], listing_session))[
+            "ok"
+        ] is False
         assert backend.sessions[listing_session].current_run_id is None
         # 已有绑定的会话跑一次列表，不会顺手解绑
         assert (await _execute_async(backend, "history", [], history_session))["ok"] is True
@@ -4893,9 +4880,7 @@ class _StubRepoFetcher:
         self.changed_files_calls: list[str] = []
         self.tree_calls: list[tuple[str, str, str]] = []
 
-    def fetch_file_content(
-        self, owner: str, repo: str, file_path: str, ref: str
-    ) -> str | None:
+    def fetch_file_content(self, owner: str, repo: str, file_path: str, ref: str) -> str | None:
         self.calls.append((owner, repo, file_path, ref))
         if self.error is not None:
             raise self.error
@@ -4995,9 +4980,7 @@ def test_chat_injects_the_mentioned_repo_file_from_the_run_head(
         # 只进本轮 system prompt：对话历史里不得出现源码，否则每轮都在重复计费
         messages = backend.sessions[session_id].messages
         assert [message["role"] for message in messages] == ["user", "assistant"]
-        assert all(
-            "document.getElementById" not in message["content"] for message in messages
-        )
+        assert all("document.getElementById" not in message["content"] for message in messages)
 
     asyncio.run(run())
 
@@ -5025,17 +5008,13 @@ def test_chat_without_a_mentioned_path_never_fetches_repo_file_content(
 
         # (1) 已绑定但消息里没有路径：只注入 B 的变更清单，不读任何文件内容
         backend.sessions[session_id].current_run_id = run_id
-        assert (
-            await backend.handle(_chat_send(session_id, "这次审查结论是什么"))
-        )[0]["ok"] is True
+        assert (await backend.handle(_chat_send(session_id, "这次审查结论是什么")))[0]["ok"] is True
         prompt = captured["options"]["system_prompt"]
         assert "## 本次 PR 变更文件" in prompt
         assert fetcher.changed_files_calls == ["https://github.com/example/repo/pull/31"]
         # (2) 有路径但没绑定 run：什么都不注入、什么都不拉
         backend.sessions[session_id].current_run_id = None
-        assert (
-            await backend.handle(_chat_send(session_id, "src/a.py 是干嘛的"))
-        )[0]["ok"] is True
+        assert (await backend.handle(_chat_send(session_id, "src/a.py 是干嘛的")))[0]["ok"] is True
 
         assert fetcher.calls == []
         assert "## 用户提到的仓库文件" not in captured["options"]["system_prompt"]
@@ -5538,9 +5517,7 @@ def test_chat_findings_fallback_flags_the_file_over_the_char_budget(
         prompt = captured["options"]["system_prompt"]
         assert "### src/a.py" in prompt
         assert "… [内容已截断" in prompt
-        assert (
-            f"(未能读取 src/c.py：本轮注入已达 {CHAT_REPO_FILES_TOTAL_CHARS} 字符上限)" in prompt
-        )
+        assert f"(未能读取 src/c.py：本轮注入已达 {CHAT_REPO_FILES_TOTAL_CHARS} 字符上限)" in prompt
 
     asyncio.run(run())
 
@@ -5961,7 +5938,11 @@ def test_session_switch_restores_the_review_binding(tmp_path: Path) -> None:
         )
         back = (
             await backend.handle(
-                {"id": "s", "method": "session.switch", "params": {"session_id": first["session_id"]}}
+                {
+                    "id": "s",
+                    "method": "session.switch",
+                    "params": {"session_id": first["session_id"]},
+                }
             )
         )[0]["result"]
         assert backend.sessions[first["session_id"]].current_run_id == run_id
@@ -5971,7 +5952,11 @@ def test_session_switch_restores_the_review_binding(tmp_path: Path) -> None:
         restarted = _chat_ready_backend(tmp_path)
         resumed = (
             await restarted.handle(
-                {"id": "s", "method": "session.switch", "params": {"session_id": first["session_id"]}}
+                {
+                    "id": "s",
+                    "method": "session.switch",
+                    "params": {"session_id": first["session_id"]},
+                }
             )
         )[0]["result"]
         assert restarted.sessions[first["session_id"]].current_run_id == run_id
@@ -6016,7 +6001,11 @@ def test_session_rename_and_delete_over_the_protocol(tmp_path: Path) -> None:
         # 删**当前**会话：自动切到最近一个（本例是 first，因为 rename 刷新了 updated_at）
         deleted = (
             await backend.handle(
-                {"id": "s", "method": "session.delete", "params": {"session_id": second["session_id"]}}
+                {
+                    "id": "s",
+                    "method": "session.delete",
+                    "params": {"session_id": second["session_id"]},
+                }
             )
         )[0]["result"]
         assert deleted == {"deleted": second["session_id"], "next": first["session_id"]}
@@ -6087,7 +6076,11 @@ def test_legacy_chat_session_json_is_migrated_when_the_backend_starts(
         json.dumps(
             [
                 {"role": "user", "content": "迁移前的问题", "timestamp": "2026-01-01T00:00:00"},
-                {"role": "assistant", "content": "迁移前的回答", "timestamp": "2026-01-01T00:00:01"},
+                {
+                    "role": "assistant",
+                    "content": "迁移前的回答",
+                    "timestamp": "2026-01-01T00:00:01",
+                },
             ],
             ensure_ascii=False,
         ),
@@ -6197,9 +6190,7 @@ def test_chat_context_budget_follows_a_user_written_spec(tmp_path: Path) -> None
     `preferences.chat_context_budget` 的合法上界一致（再大只是每轮多花钱）。
     """
     # 中转站模型（没有内置预设）：用户在助手里填的 200_000/16_384 就是唯一真源。
-    backend = _relay_backend_with_spec(
-        tmp_path, context_window=200_000, max_output=16_384
-    )
+    backend = _relay_backend_with_spec(tmp_path, context_window=200_000, max_output=16_384)
     assert backend._chat_context_budget_plan() == (100_000, "model_spec")
 
     # 1M 窗口按上限截到 200_000，不是 524_288。
@@ -6208,9 +6199,7 @@ def test_chat_context_budget_follows_a_user_written_spec(tmp_path: Path) -> None
 
     # 小窗口模型（8_192）算出来 4_096，比默认 8_000 更小——这类模型本来就不该按
     # 8_000 塞上下文（那会连回答一起挤掉）。
-    small = _relay_backend_with_spec(
-        tmp_path / "small", context_window=8_192, max_output=1_024
-    )
+    small = _relay_backend_with_spec(tmp_path / "small", context_window=8_192, max_output=1_024)
     assert small._chat_context_budget_plan() == (4_096, "model_spec")
 
 
@@ -6373,7 +6362,9 @@ def test_chat_reasoning_stream_is_separated_from_answer_and_history(
     asyncio.run(run())
 
 
-def test_think_persists_for_a_supported_provider(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_think_persists_for_a_supported_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """C6：`/think` 写入偏好并落盘。"""
 
     async def run() -> None:
@@ -6544,9 +6535,7 @@ def test_chat_max_tokens_follows_the_model_spec(tmp_path: Path) -> None:
     base = JsonlBackend(tmp_path / "config.json").config.ai_client.max_tokens
     assert base == 4_096
 
-    backend = _relay_backend_with_spec(
-        tmp_path, context_window=200_000, max_output=3_000
-    )
+    backend = _relay_backend_with_spec(tmp_path, context_window=200_000, max_output=3_000)
     assert backend._chat_max_tokens(reasoning_budget=0) == 3_000
     assert backend._chat_max_tokens(reasoning_budget=8_000) == 3_000
     # 只读规格，绝不改用户的 ai_client 配置（审查链路继续用它）。
@@ -6614,8 +6603,10 @@ def test_chat_spec_never_trusts_auto_written_or_malformed_entries(tmp_path: Path
     preset_model = backend.config.provider.default_model
     backend.config.provider.models[preset_model] = ProviderModelConfig(name=preset_model)
     backend.config._sync_runtime_sections()
-    assert (backend.config.provider.models[preset_model].context_window,
-            backend.config.provider.models[preset_model].max_output) == (32_768, 4_096)
+    assert (
+        backend.config.provider.models[preset_model].context_window,
+        backend.config.provider.models[preset_model].max_output,
+    ) == (32_768, 4_096)
     # 兜底数字既不算"用户写过"（预算退回 8_000），也不能反过来砍额度（封顶改用预设值）。
     assert backend._chat_context_window() is None
     assert backend._chat_context_budget_plan() == (8_000, "fallback")
@@ -6711,9 +6702,9 @@ def test_chat_skips_reasoning_params_for_unsupported_and_unknown_providers(
         )
         unknown.config._sync_runtime_sections()
         unknown.config.preferences.chat_reasoning_effort = "high"
-        unknown_session = (
-            await unknown.handle({"id": "s", "method": "session.create"})
-        )[0]["result"]
+        unknown_session = (await unknown.handle({"id": "s", "method": "session.create"}))[0][
+            "result"
+        ]
         captured.clear()
         _stub_provider(monkeypatch, captured)
 
@@ -6922,15 +6913,14 @@ def test_compact_replaces_old_messages_with_a_summary(
     asyncio.run(run())
 
 
-def test_compact_failure_preserves_history(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_compact_failure_preserves_history(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A6：摘要失败时原历史一字不动（契约 v1 §B 的"摘要失败保留原历史"）。"""
 
     async def run() -> None:
         backend = _chat_ready_backend(tmp_path)
         session_id = await _new_session_async(backend)
         from ai_pr_review.services.model_providers.base import ProviderResponse
+
         # 长消息：必须**真的走到**模型调用那一步，否则"失败被吞掉"这件事根本没被验证
         # （按条数保 10 轮的旧实现下，22 条短消息会被判成"没什么可压"直接返回）。
         original = [
@@ -7051,7 +7041,9 @@ def test_compact_summary_lists_files_from_the_messages_and_the_bound_run(
     async def run() -> None:
         backend = _chat_ready_backend(tmp_path)
         session_id = await _new_session_async(backend)
-        run_id = _store_context_run(backend)  # findings: src/medium.py、src/critical.py、src/high.py
+        run_id = _store_context_run(
+            backend
+        )  # findings: src/medium.py、src/critical.py、src/high.py
         backend.sessions[session_id].current_run_id = run_id
         backend._compaction_tail_budget = lambda: 10  # type: ignore[method-assign]
         backend.sessions[session_id].messages = [
@@ -7084,7 +7076,9 @@ def test_compact_summary_lists_files_from_the_messages_and_the_bound_run(
         assert "## 已压缩对话涉及的文件" in summary
         assert "- website/index.html（讨论过 2 次）" in summary
         assert "- website/js/main.js（讨论过 2 次）" in summary
-        assert "- src/critical.py（本次审查点名）" in summary, "finding 文件（没被讨论过）也要进清单"
+        assert (
+            "- src/critical.py（本次审查点名）" in summary
+        ), "finding 文件（没被讨论过）也要进清单"
         # URL 不是仓库文件：清单里不许出现 tps:// 这种碎片
         assert "tps://" not in summary and "http" not in summary
         assert reply["result"]["files"][0] == "- website/index.html（讨论过 2 次）"
@@ -7225,8 +7219,10 @@ def test_auto_compaction_is_off_by_default_and_runs_only_when_enabled(
         assert len(summaries) == 1
         finished = [event for event in published if event["event"] == "assistant.finished"][-1]
         assert finished["context"]["compacted"] is True
-        assert backend.sessions[session_id].messages[0]["content"].startswith(
-            '<conversation-summary trigger="auto" '
+        assert (
+            backend.sessions[session_id]
+            .messages[0]["content"]
+            .startswith('<conversation-summary trigger="auto" ')
         )
 
     asyncio.run(run())
@@ -7324,9 +7320,7 @@ def _stub_catalog(
         return StubResponse()
 
     monkeypatch.setattr(ModelCatalog, "fetch", counting_fetch)
-    monkeypatch.setattr(
-        "ai_pr_review.services.model_catalog.urllib_request.urlopen", fake_urlopen
-    )
+    monkeypatch.setattr("ai_pr_review.services.model_catalog.urllib_request.urlopen", fake_urlopen)
     ModelCatalog.reset_cache()
     return calls
 
@@ -7341,9 +7335,7 @@ def _deepseek_backend(tmp_path: Path, config_path: Path | None = None) -> JsonlB
 
     backend = JsonlBackend(config_path or (tmp_path / "config.json"))
     backend.config.provider = ProviderConfig.from_model_provider(
-        ModelProviderConfig.from_name(
-            "deepseek", model_name="deepseek-flash", api_key="test-key"
-        )
+        ModelProviderConfig.from_name("deepseek", model_name="deepseek-flash", api_key="test-key")
     )
     backend.config._sync_runtime_sections()
     return backend
@@ -7508,12 +7500,12 @@ def test_config_setup_persists_specs_and_all_exits_read_them_back(
                 "max_output": 393_216,
             }
         )
-        options = (
-            await backend.handle({"id": "1", "method": "config.options", "params": {}})
-        )[0]["result"]
-        status = (
-            await backend.handle({"id": "2", "method": "model.status", "params": {}})
-        )[0]["result"]
+        options = (await backend.handle({"id": "1", "method": "config.options", "params": {}}))[0][
+            "result"
+        ]
+        status = (await backend.handle({"id": "2", "method": "model.status", "params": {}}))[0][
+            "result"
+        ]
         return snapshot, options, status
 
     snapshot, options, status = asyncio.run(run())
@@ -7636,9 +7628,9 @@ def test_model_status_spec_key_does_not_shadow_the_model_name(
     _offline_model_provider(monkeypatch)
     backend = _deepseek_backend(tmp_path)
 
-    status = asyncio.run(
-        backend.handle({"id": "1", "method": "model.status", "params": {}})
-    )[0]["result"]
+    status = asyncio.run(backend.handle({"id": "1", "method": "model.status", "params": {}}))[0][
+        "result"
+    ]
 
     assert status["model"] == "deepseek-flash"
     assert isinstance(status["model_spec"], dict)
@@ -7658,9 +7650,9 @@ def test_model_status_and_config_snapshot_never_fetch_the_catalog(
     async def run() -> None:
         await backend.handle({"id": "1", "method": "model.status", "params": {}})
         await backend.handle({"id": "2", "method": "config.snapshot", "params": {}})
-        session = (
-            await backend.handle({"id": "3", "method": "session.create", "params": {}})
-        )[0]["result"]
+        session = (await backend.handle({"id": "3", "method": "session.create", "params": {}}))[0][
+            "result"
+        ]
         for index in range(3):
             await backend.handle(_chat_send(session["session_id"], f"你好 {index}"))
 
@@ -7743,9 +7735,9 @@ def test_protocol_config_options_and_setup_carry_model_specs(
     backend = _deepseek_backend(tmp_path)
 
     async def run() -> tuple[dict[str, Any], dict[str, Any]]:
-        options = (
-            await backend.handle({"id": "1", "method": "config.options", "params": {}})
-        )[0]["result"]
+        options = (await backend.handle({"id": "1", "method": "config.options", "params": {}}))[0][
+            "result"
+        ]
         setup = (
             await backend.handle(
                 {
@@ -7788,7 +7780,7 @@ def test_protocol_config_options_and_setup_carry_model_specs(
 def test_config_catalog_refresh_bypasses_the_process_memo(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """"重新获取"按钮的后端：忽略进程内定档，重拉一次并立刻反映到读出口。"""
+    """ "重新获取"按钮的后端：忽略进程内定档，重拉一次并立刻反映到读出口。"""
     calls = _stub_catalog(monkeypatch)
     backend = JsonlBackend(tmp_path / "config.json")
     _catalog_options(backend)
@@ -7964,6 +7956,6 @@ def test_review_reasoning_options_agree_across_the_three_exits(tmp_path: Path) -
     assert backend._config_snapshot()["review_reasoning_effort"] == "low"
     assert backend._setup_options()["review_reasoning_effort"]["value"] == "low"
     refreshed = asyncio.run(backend._model_status())
-    assert refreshed["review_reasoning_effort"] == backend._setup_options()[
-        "review_reasoning_effort"
-    ]
+    assert (
+        refreshed["review_reasoning_effort"] == backend._setup_options()["review_reasoning_effort"]
+    )

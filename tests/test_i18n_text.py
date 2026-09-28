@@ -20,11 +20,7 @@ from ai_pr_review.config import AIClientConfig, AppConfig, FilterPipelineConfig,
 from ai_pr_review.credentials import check_github, check_model, collect_status
 from ai_pr_review.models.pr_data import FileDiff, FileStatus
 from ai_pr_review.services.filter_pipeline import FileFilter, FilterPipeline, FilterReasonCode
-from ai_pr_review.services.i18n_text import (
-    filter_included_by_default,
-    is_english,
-    review_summary,
-)
+from ai_pr_review.services.i18n_text import filter_included_by_default, is_english, review_summary
 from ai_pr_review.web_config import apply_config_update
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -339,7 +335,13 @@ def test_provider_placeholder_values_match_the_branches(monkeypatch):
             (None, {"error": "timeout"}),
             "credentials.provider.unreachable",
         ),
-        ("https://api.deepseek.com/v1", "sk-ok", "m", (500, {"boom": 1}), "credentials.provider.error"),
+        (
+            "https://api.deepseek.com/v1",
+            "sk-ok",
+            "m",
+            (500, {"boom": 1}),
+            "credentials.provider.error",
+        ),
     ]
 
     dictionary = _frontend_dict()

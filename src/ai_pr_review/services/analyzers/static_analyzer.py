@@ -54,9 +54,7 @@ class StaticAnalyzer:
             r"\b(?:SECRET|TOKEN|PASSWORD|API_?KEY)_?[A-Z0-9_]*\b\s*=\s*['\"][^'\"]{8,}['\"]", line
         ):
             findings.append(
-                self._finding(
-                    filename, line_number, line, rule="hardcoded_credential_constant"
-                )
+                self._finding(filename, line_number, line, rule="hardcoded_credential_constant")
             )
         if (
             re.search(r"\bdebug\s*=\s*True\b", line, re.I)

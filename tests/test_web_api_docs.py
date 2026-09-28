@@ -85,10 +85,9 @@ def test_every_server_route_is_documented(server_paths: set[str]) -> None:
     missing = sorted(
         p for p in server_paths if p not in EXCLUDED and p not in PREFIX_LITERALS and p not in doc
     )
-    assert not missing, (
-        "docs/API.md 缺少以下 web_server.py 路由（服务端有、文档无）：\n  "
-        + "\n  ".join(missing)
-    )
+    assert (
+        not missing
+    ), "docs/API.md 缺少以下 web_server.py 路由（服务端有、文档无）：\n  " + "\n  ".join(missing)
 
 
 def test_prefix_routes_have_documented_children(server_paths: set[str]) -> None:
@@ -100,8 +99,8 @@ def test_prefix_routes_have_documented_children(server_paths: set[str]) -> None:
             continue
         if not any(p.startswith(prefix) and p != prefix for p in doc_paths):
             missing.append(prefix)
-    assert not missing, (
-        "docs/API.md 未为以下前缀路由给出任何具体子路径：\n  " + "\n  ".join(missing)
+    assert not missing, "docs/API.md 未为以下前缀路由给出任何具体子路径：\n  " + "\n  ".join(
+        missing
     )
 
 
@@ -121,9 +120,10 @@ def test_documented_concrete_paths_exist_on_server(doc_path_set: set[str]) -> No
         if any(path.startswith(prefix) for prefix in prefixes):
             continue
         orphans.append(path)
-    assert not orphans, (
-        "docs/API.md 声称存在但 web_server.py 的 do_GET/do_POST 中找不到的路径：\n  "
-        + "\n  ".join(orphans)
+    assert (
+        not orphans
+    ), "docs/API.md 声称存在但 web_server.py 的 do_GET/do_POST 中找不到的路径：\n  " + "\n  ".join(
+        orphans
     )
 
 

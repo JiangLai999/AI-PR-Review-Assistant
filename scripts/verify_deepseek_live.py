@@ -77,7 +77,9 @@ class _EventCapture:
         return None
 
 
-def _build_backend(config_path: Path, base_url: str, model: str) -> tuple[JsonlBackend, _EventCapture]:
+def _build_backend(
+    config_path: Path, base_url: str, model: str
+) -> tuple[JsonlBackend, _EventCapture]:
     """Create the product backend with an isolated config file under workdir."""
     payload: dict[str, Any] = {
         "provider": {
@@ -176,7 +178,17 @@ async def _send_turn(
     if finished is None:
         failed = capture.failed()
         return TierResult(
-            "", 0.0, 0, 0, 0, 0, None, None, None, None, None,
+            "",
+            0.0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
             error=str((failed or {}).get("message", "assistant.finished missing")),
         )
 
@@ -262,9 +274,7 @@ def main() -> int:
             _reset_persisted_session(workdir)
             _log(f"[{index}/4] tier {effort}: sending ...")
             tier_session = asyncio.run(_create_session(backend))
-            tier = asyncio.run(
-                _send_turn(backend, capture, tier_session, f"turn-{effort}")
-            )
+            tier = asyncio.run(_send_turn(backend, capture, tier_session, f"turn-{effort}"))
             tier.effort = effort
             results.append(tier)
             _log(
@@ -305,7 +315,8 @@ def main() -> int:
         )
         summary["assertions"] = {
             "off_reasoning_lt_50_and_answer_nonempty": (
-                off.reasoning_chars_finished < OFF_MAX_REASONING_CHARS and off.answer_chars_finished > 0
+                off.reasoning_chars_finished < OFF_MAX_REASONING_CHARS
+                and off.answer_chars_finished > 0
             ),
             "low_lt_high_lt_max_reasoning_chars": (
                 by_effort["low"].reasoning_chars_finished
@@ -333,4 +344,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

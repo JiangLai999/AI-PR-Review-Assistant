@@ -193,9 +193,9 @@ class TestReverseCoverage:
             produced = finding_for(key)
 
             assert produced.sources == ["static_rule"]
-            assert definition.localize(produced.title) is not None, (
-                f"{key} 的标题与目录模板不一致：{produced.title!r}"
-            )
+            assert (
+                definition.localize(produced.title) is not None
+            ), f"{key} 的标题与目录模板不一致：{produced.title!r}"
             if "{" not in definition.title:
                 assert produced.title == definition.title
             if "{" not in definition.problem:
@@ -265,8 +265,9 @@ class TestChineseRendering:
         assert rule_catalog.all_rule_ids() == {
             definition.rule_id for definition in RULE_CATALOG.values()
         }
-        assert rule_catalog.rule_for_id("tls_verification_disabled") is RULE_CATALOG[
-            "tls_verification_disabled"
-        ]
+        assert (
+            rule_catalog.rule_for_id("tls_verification_disabled")
+            is RULE_CATALOG["tls_verification_disabled"]
+        )
         assert rule_catalog.rule_for_id("") is None
         assert rule_catalog.rule_for_id("not-a-rule") is None

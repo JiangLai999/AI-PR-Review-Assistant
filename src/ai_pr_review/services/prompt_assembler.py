@@ -15,10 +15,7 @@ from pydantic import BaseModel, Field, field_validator, model_serializer
 from ai_pr_review.config import PromptAssemblerConfig
 from ai_pr_review.models.pr_data import FileDiff
 from ai_pr_review.models.review_plan import Evidence, ReviewPlan
-from ai_pr_review.services.context_builder import (
-    SUPPORTED_LANGUAGE_EXTENSIONS,
-    FileContext,
-)
+from ai_pr_review.services.context_builder import SUPPORTED_LANGUAGE_EXTENSIONS, FileContext
 
 # 用于统计 schema 中 `$defs` 的引用，便于剔除已无人引用的定义。
 _SCHEMA_REFERENCE = re.compile(r"#/\$defs/(\w+)")
@@ -94,9 +91,7 @@ def _language_for_path(path: str) -> str:
     return SUPPORTED_LANGUAGE_EXTENSIONS.get(suffix, "text")
 
 
-def render_related_files_section(
-    related_files: list[dict], response_language: str
-) -> str:
+def render_related_files_section(related_files: list[dict], response_language: str) -> str:
     """把相关文件渲染成 user prompt 末尾的固定格式段（格式冻结见测试）。"""
     zh = response_language.strip().lower().startswith("zh")
     heading = RELATED_FILES_HEADING_ZH if zh else RELATED_FILES_HEADING_EN

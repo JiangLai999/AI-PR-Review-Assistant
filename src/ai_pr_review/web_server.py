@@ -31,11 +31,7 @@ from ai_pr_review.config import (
 from ai_pr_review.credentials import collect_status
 from ai_pr_review.demo_runner import demo_cases_payload, run_demo_case
 from ai_pr_review.services.exceptions import InvalidPRURLError
-from ai_pr_review.services.publish_service import (
-    PublishError,
-    PublishService,
-    stored_run_pr_data,
-)
+from ai_pr_review.services.publish_service import PublishError, PublishService, stored_run_pr_data
 from ai_pr_review.services.report_renderer import ReportRenderer
 from ai_pr_review.services.result_store import ResultStore
 from ai_pr_review.services.review_orchestrator import ReviewOrchestrator
@@ -128,6 +124,7 @@ def _publish_response(payload: dict[str, Any]) -> dict[str, Any]:
     response.setdefault("already_published", False)
     response["message"] = str(response.get("text") or response.get("message") or "")
     return response
+
 
 # 前端构建产物目录（随包安装）
 WEB_STATIC_DIR = Path(__file__).resolve().parent / "web_static"

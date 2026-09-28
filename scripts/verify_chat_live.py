@@ -57,7 +57,9 @@ def probe_ollama(base_url: str) -> tuple[bool, list[str]]:
     return resp.status == 200, names
 
 
-async def run_chat(model: str, prompt: str, timeout: float) -> tuple[list[dict[str, Any]], dict[str, Any], float]:
+async def run_chat(
+    model: str, prompt: str, timeout: float
+) -> tuple[list[dict[str, Any]], dict[str, Any], float]:
     """跑一轮真实 chat，返回 (事件序列, chat.send 响应, 实测耗时秒)。"""
     events: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="chat-live-") as tmp:
@@ -87,7 +89,9 @@ async def run_chat(model: str, prompt: str, timeout: float) -> tuple[list[dict[s
 def analyze(events: list[dict[str, Any]], reply: dict[str, Any], elapsed: float) -> dict[str, Any]:
     """把事件序列拆成契约 v1 关心的字段。"""
     names = [str(event.get("event", "")) for event in events]
-    reasoning_parts = [str(e.get("text", "")) for e in events if e.get("event") == "assistant.reasoning_delta"]
+    reasoning_parts = [
+        str(e.get("text", "")) for e in events if e.get("event") == "assistant.reasoning_delta"
+    ]
     delta_parts = [str(e.get("text", "")) for e in events if e.get("event") == "assistant.delta"]
     finished = next((e for e in events if e.get("event") == "assistant.finished"), None)
     failed = next((e for e in events if e.get("event") == "assistant.failed"), None)
@@ -195,11 +199,19 @@ def render(report: dict[str, Any], checks: list[dict[str, Any]], model: str) -> 
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Ollama 模型名（默认 {DEFAULT_MODEL}）")
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Ollama 根地址（默认本机 11434）")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--model", default=DEFAULT_MODEL, help=f"Ollama 模型名（默认 {DEFAULT_MODEL}）"
+    )
+    parser.add_argument(
+        "--base-url", default=DEFAULT_BASE_URL, help="Ollama 根地址（默认本机 11434）"
+    )
     parser.add_argument("--prompt", default=DEFAULT_PROMPT, help="验收提示词")
-    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="单轮超时秒（默认 600）")
+    parser.add_argument(
+        "--timeout", type=float, default=DEFAULT_TIMEOUT, help="单轮超时秒（默认 600）"
+    )
     parser.add_argument("--json", action="store_true", help="只输出机器可读 JSON")
     args = parser.parse_args(argv)
 

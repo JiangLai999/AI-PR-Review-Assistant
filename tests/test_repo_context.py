@@ -5,8 +5,8 @@ from __future__ import annotations
 from ai_pr_review.services.repo_context import (
     IMPORT_INIT_MAX_LINES,
     TEST_MAX_LINES,
-    RepoContextProvider,
     RelatedFile,
+    RepoContextProvider,
     render_pr_file_list,
     render_repo_tree,
 )
@@ -426,9 +426,7 @@ class TestRenderPrFileList:
 
     def test_skip_clause_is_omitted_when_unknown_or_zero(self):
         assert "## 本次 PR 变更文件（共 2 个）" in render_pr_file_list(["a.py", "b.py"])
-        assert "## 本次 PR 变更文件（共 2 个）" in render_pr_file_list(
-            ["a.py", "b.py"], skipped=0
-        )
+        assert "## 本次 PR 变更文件（共 2 个）" in render_pr_file_list(["a.py", "b.py"], skipped=0)
         assert "跳过" not in render_pr_file_list(["a.py"], skipped=0)
 
     def test_truncates_over_the_limit_and_says_how_many_are_hidden(self):

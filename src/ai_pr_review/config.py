@@ -138,13 +138,9 @@ def resolve_save_path(path: Path | None = None, *, source_path: Path | None = No
     config exists, personal edits therefore go to the highest-precedence
     project-local file, which is private and gitignored by convention.
     """
+    # 显式 `path` 优先于环境变量（与 `resolve_config_path` 的优先级一致：显式 > env > 默认）。
     if path is not None:
         return path
-    # 显式 `path` 必须压过环境变量：与 `resolve_config_path` 的优先级一致
-    # （显式 > env > 默认）。此前这里先看 env，导致"指定了目标却写到别处"——
-    # `pr-review serve` 派生 Web 配置时就踩过：env 有值时初值会被写回 CLI 配置。
-    if path is not None:
-        return Path(path).expanduser()
     override = os.getenv(CONFIG_PATH_ENV_VAR, "").strip()
     if override:
         return Path(override).expanduser()
@@ -588,9 +584,7 @@ class ProviderConfig:
             if not name:
                 continue
             entry = dict(models.get(name) or {"name": name})
-            entry.update(
-                {key: value for key, value in override.items() if value is not None}
-            )
+            entry.update({key: value for key, value in override.items() if value is not None})
             # 重新赋值而不是原地改：`models` 可能是模块级预设表本身（浅拷贝）。
             models = {**models, name: entry}
         return cls(
@@ -723,22 +717,16 @@ def resolve_model_spec(
     context_window = (
         stored.context_window
         if stored is not None
-        else int(preset["context_window"])
-        if preset is not None
-        else DEFAULT_MODEL_CONTEXT_WINDOW
+        else int(preset["context_window"]) if preset is not None else DEFAULT_MODEL_CONTEXT_WINDOW
     )
     max_output = (
         stored.max_output
         if stored is not None
-        else int(preset["max_output"])
-        if preset is not None
-        else DEFAULT_MODEL_MAX_OUTPUT
+        else int(preset["max_output"]) if preset is not None else DEFAULT_MODEL_MAX_OUTPUT
     )
     # 端点是否就是官方端点（§2.8 硬规则 2）。预设 `base_url` 为空（custom）视为
     # "无官方端点可比"，不因此置位：models.dev 本来就不区分端点。
-    preset_base_url = str(
-        MODEL_PROVIDER_PRESETS.get(provider_key, {}).get("base_url", "") or ""
-    )
+    preset_base_url = str(MODEL_PROVIDER_PRESETS.get(provider_key, {}).get("base_url", "") or "")
     endpoint_matches_preset = bool(preset_base_url) and (
         str(provider.base_url or "") == preset_base_url
     )
@@ -767,12 +755,14 @@ def resolve_model_spec(
         "source": source,
         "needs_verification": needs_verification,
         "endpoint_matches_preset": endpoint_matches_preset,
-        "preset": None
-        if preset is None
-        else {
-            "context_window": int(preset["context_window"]),
-            "max_output": int(preset["max_output"]),
-        },
+        "preset": (
+            None
+            if preset is None
+            else {
+                "context_window": int(preset["context_window"]),
+                "max_output": int(preset["max_output"]),
+            }
+        ),
     }
 
 
@@ -997,9 +987,7 @@ def normalize_symbol_locate(value: object) -> bool:
     非法值只回退到 ``True`` 并记录一次 warning，不抛异常（与
     ``normalize_workbench_mode`` 同风格）。提示里不回显原值。
     """
-    return _normalize_bool_preference(
-        value, field="symbol_locate", default=DEFAULT_SYMBOL_LOCATE
-    )
+    return _normalize_bool_preference(value, field="symbol_locate", default=DEFAULT_SYMBOL_LOCATE)
 
 
 def normalize_suggested_patch(value: object) -> bool:
@@ -1083,7 +1071,8 @@ def normalize_compaction_trigger_ratio(value: object) -> float:
         candidate = None
     if candidate is None or not minimum - 1e-9 <= candidate <= maximum + 1e-9:
         _warn_invalid_preference(
-            "compaction_trigger_ratio", f"已回退为 {DEFAULT_COMPACTION_TRIGGER_RATIO}（允许范围：0.5..1.0）"
+            "compaction_trigger_ratio",
+            f"已回退为 {DEFAULT_COMPACTION_TRIGGER_RATIO}（允许范围：0.5..1.0）",
         )
         return DEFAULT_COMPACTION_TRIGGER_RATIO
     return min(max(candidate, minimum), maximum)
@@ -1160,9 +1149,7 @@ class PreferencesConfig:
         self.chat_slot = normalize_chat_slot(self.chat_slot)
         self.review_slot = normalize_review_slot(self.review_slot)
         self.repo_context = normalize_repo_context(self.repo_context)
-        self.repo_context_max_files = normalize_repo_context_max_files(
-            self.repo_context_max_files
-        )
+        self.repo_context_max_files = normalize_repo_context_max_files(self.repo_context_max_files)
         self.repo_context_budget_tokens = normalize_repo_context_budget_tokens(
             self.repo_context_budget_tokens
         )
@@ -1170,9 +1157,7 @@ class PreferencesConfig:
         self.symbol_locate = normalize_symbol_locate(self.symbol_locate)
         self.suggested_patch = normalize_suggested_patch(self.suggested_patch)
         self.model_catalog_fetch = normalize_model_catalog_fetch(self.model_catalog_fetch)
-        self.chat_reasoning_effort = normalize_chat_reasoning_effort(
-            self.chat_reasoning_effort
-        )
+        self.chat_reasoning_effort = normalize_chat_reasoning_effort(self.chat_reasoning_effort)
         self.review_reasoning_effort = normalize_review_reasoning_effort(
             self.review_reasoning_effort
         )
@@ -1182,9 +1167,7 @@ class PreferencesConfig:
             default=DEFAULT_CHAT_CONTEXT_BUDGET,
             bounds=CHAT_CONTEXT_BUDGET_RANGE,
         )
-        self.compaction_tail_tokens = normalize_compaction_tail_tokens(
-            self.compaction_tail_tokens
-        )
+        self.compaction_tail_tokens = normalize_compaction_tail_tokens(self.compaction_tail_tokens)
         self.compaction_trigger_ratio = normalize_compaction_trigger_ratio(
             self.compaction_trigger_ratio
         )

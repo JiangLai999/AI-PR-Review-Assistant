@@ -241,9 +241,7 @@ def test_render_github_comment_localizes_for_chinese():
 def test_render_github_comment_folds_per_file_summary_and_long_details():
     result = build_review_result()
     result.summary = (
-        "整体结论：两处问题需要修复。\n"
-        "src/a.py: 文件 A 的结论。\n"
-        "src/b.py: 文件 B 的结论。"
+        "整体结论：两处问题需要修复。\n" "src/a.py: 文件 A 的结论。\n" "src/b.py: 文件 B 的结论。"
     )
     result.findings[0].problem = "P" * 400
     result.findings[0].suggestion = "S" * 20
@@ -481,9 +479,10 @@ def _build_finding(severity: str, index: int) -> Finding:
 def test_render_github_comment_folds_only_critical_open_across_severities():
     """折叠策略：critical 块 open，其余严重级块折叠，顺序 critical→high→medium→low→info。"""
     result = build_review_result()
-    result.findings = [_build_finding(severity, index) for index, severity in enumerate(
-        ["critical", "high", "medium", "low", "info"]
-    )]
+    result.findings = [
+        _build_finding(severity, index)
+        for index, severity in enumerate(["critical", "high", "medium", "low", "info"])
+    ]
 
     output = ReportRenderer().render_github_comment(result, build_pr_data())
     openings = _severity_block_openings(output)
@@ -681,9 +680,7 @@ def test_render_github_comment_compact_drops_per_file_then_counts_within_soft_li
 
     result = build_review_result()
     result.summary = (
-        "Overall conclusion.\n"
-        "src/a.py: file A conclusion.\n"
-        "src/b.py: file B conclusion."
+        "Overall conclusion.\n" "src/a.py: file A conclusion.\n" "src/b.py: file B conclusion."
     )
     template = result.findings[0]
     result.findings = []
@@ -716,9 +713,7 @@ def test_render_github_comment_compact_cut_marker_is_the_last_resort_and_last_se
 
     result = build_review_result()
     result.summary = (
-        "Overall conclusion.\n"
-        "src/a.py: file A conclusion.\n"
-        "src/b.py: file B conclusion."
+        "Overall conclusion.\n" "src/a.py: file A conclusion.\n" "src/b.py: file B conclusion."
     )
     result.findings = []
     for severity in ("critical", "high", "medium", "low", "info"):
@@ -896,12 +891,7 @@ def test_cli_comment_report_reads_the_filter_audit_from_the_run_artifacts():
     """CLI 的 `--publish-comment` 路径：计数取自 artifacts.filtered_findings，
     门槛取本次进程生效的配置值。"""
     from ai_pr_review.cli import render_github_comment_report
-    from ai_pr_review.config import (
-        AIClientConfig,
-        AppConfig,
-        PostProcessorConfig,
-        PRFetcherConfig,
-    )
+    from ai_pr_review.config import AIClientConfig, AppConfig, PostProcessorConfig, PRFetcherConfig
     from ai_pr_review.services.filter_pipeline import FilterPipelineResult, FilterResult
     from ai_pr_review.services.review_orchestrator import ReviewArtifacts
 

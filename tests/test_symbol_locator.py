@@ -6,11 +6,7 @@ import warnings
 
 import pytest
 
-from ai_pr_review.config import (
-    DEFAULT_SYMBOL_LOCATE,
-    PreferencesConfig,
-    normalize_symbol_locate,
-)
+from ai_pr_review.config import DEFAULT_SYMBOL_LOCATE, PreferencesConfig, normalize_symbol_locate
 from ai_pr_review.models.pr_data import FileDiff, FileStatus, PRData
 from ai_pr_review.services.analyzers.symbol_index import SymbolIndex
 from ai_pr_review.services.context_builder import ContextBuilder
@@ -141,9 +137,7 @@ class TestLocateBasics:
 
 class TestLimits:
     def test_max_requests_caps_file_reads(self):
-        files = {
-            f"src/f{i}.py": f"v{i} = {i}\n" for i in range(10)
-        }
+        files = {f"src/f{i}.py": f"v{i} = {i}\n" for i in range(10)}
         # 只有最后一个文件含符号；上限 3 次读取时永远到不了它。
         files["src/f9.py"] = "target = 1\n"
         locator, reader = make_locator(files, max_requests=3)
@@ -201,9 +195,7 @@ class TestExcludeAndCache:
 
     def test_cache_miss_reads_then_writes_back(self):
         cache = DictCache()
-        locator, reader = make_locator(
-            {"src/a.py": "target = 1\n"}, cache=cache
-        )
+        locator, reader = make_locator({"src/a.py": "target = 1\n"}, cache=cache)
 
         results = locator.locate("target")
 
@@ -236,9 +228,7 @@ class TestDegradation:
 
     def test_read_file_error_on_all_files_returns_empty(self):
         files = {"src/a.py": "target = 1\n", "src/b.py": "target = 2\n"}
-        locator, _ = make_locator(
-            files, fail_on={"src/a.py", "src/b.py"}
-        )
+        locator, _ = make_locator(files, fail_on={"src/a.py", "src/b.py"})
 
         assert locator.locate("target") == []
 
@@ -250,9 +240,7 @@ class TestDegradation:
             def put(self, key: str, content: str) -> None:
                 raise RuntimeError("cache put")
 
-        locator, reader = make_locator(
-            {"src/a.py": "target = 1\n"}, cache=BrokenCache()
-        )
+        locator, reader = make_locator({"src/a.py": "target = 1\n"}, cache=BrokenCache())
 
         results = locator.locate("target")
 
@@ -270,9 +258,10 @@ class TestChangedSymbolsFromImpacts:
             def __init__(self, symbol: str) -> None:
                 self.change = Change(symbol)
 
-        assert changed_symbols_from_impacts(
-            [Impact("alpha"), Impact("beta"), Impact("alpha")]
-        ) == ["alpha", "beta"]
+        assert changed_symbols_from_impacts([Impact("alpha"), Impact("beta"), Impact("alpha")]) == [
+            "alpha",
+            "beta",
+        ]
 
     def test_empty_when_no_impacts(self):
         assert changed_symbols_from_impacts([]) == []
@@ -355,9 +344,7 @@ class TestSignatureChangeTrigger:
         import ai_pr_review.services.review_orchestrator as ro
 
         stub_cache = DictCache()
-        monkeypatch.setattr(
-            ro, "FileSystemRepoCache", lambda *args, **kwargs: stub_cache
-        )
+        monkeypatch.setattr(ro, "FileSystemRepoCache", lambda *args, **kwargs: stub_cache)
         orchestrator = ReviewOrchestrator.__new__(ReviewOrchestrator)
         orchestrator._config = type(
             "Cfg", (), {"preferences": PreferencesConfig(symbol_locate=True)}

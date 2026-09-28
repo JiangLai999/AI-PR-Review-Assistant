@@ -198,7 +198,11 @@ async def case_migration(tmp: Path) -> Result:
     r = Result("2 旧单会话数据迁移为 legacy + 重启保持")
     legacy_messages = [
         {"role": "user", "content": "老版本里问过的问题", "timestamp": "2026-01-01T00:00:00+00:00"},
-        {"role": "assistant", "content": "老版本里的回答", "timestamp": "2026-01-01T00:00:01+00:00"},
+        {
+            "role": "assistant",
+            "content": "老版本里的回答",
+            "timestamp": "2026-01-01T00:00:01+00:00",
+        },
     ]
     (tmp / "chat_session.json").write_text(
         json.dumps(legacy_messages, ensure_ascii=False), encoding="utf-8"
@@ -209,7 +213,9 @@ async def case_migration(tmp: Path) -> Result:
     sessions = listing.get("result", {}).get("sessions", [])
     r.check(len(sessions) >= 1, "启动后 list 至少含迁移进来的会话")
     legacy = sessions[0] if sessions else {}
-    r.check(legacy.get("title") == "legacy", f"迁移会话标题为 legacy（实际 {legacy.get('title')!r}）")
+    r.check(
+        legacy.get("title") == "legacy", f"迁移会话标题为 legacy（实际 {legacy.get('title')!r}）"
+    )
     r.check(legacy.get("message_count") == 2, "迁移会话保留 2 条消息")
 
     # 重启：会话与 current 保持
@@ -298,7 +304,9 @@ async def case_compaction(tmp: Path) -> Result:
     r.check("src/app.py" in first, "文件清单包含讨论过的路径")
     if messages and isinstance(messages[-1], dict):
         tail = [m for m in messages[1:] if m.get("role") == "user"]
-        r.check(all("请分析" in str(m.get("content", "")) for m in tail), "保留段是完整轮（user 开头）")
+        r.check(
+            all("请分析" in str(m.get("content", "")) for m in tail), "保留段是完整轮（user 开头）"
+        )
 
     # 极小预算：至少保 1 轮（预算已是下限；此处复核二次压缩仍成立）
     tiny = await compact(backend, sid)

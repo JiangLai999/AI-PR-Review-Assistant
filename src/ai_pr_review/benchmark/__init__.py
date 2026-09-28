@@ -10,11 +10,7 @@ from ai_pr_review.benchmark.models import (
     CaseOutcome,
     ExpectedFinding,
 )
-from ai_pr_review.benchmark.runner import (
-    STRATEGIES,
-    run_all_strategies,
-    run_benchmark,
-)
+from ai_pr_review.benchmark.runner import STRATEGIES, run_all_strategies, run_benchmark
 
 __all__ = [
     "BENCHMARK_CASES",

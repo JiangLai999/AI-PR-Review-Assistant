@@ -45,8 +45,8 @@ from ai_pr_review.config import (
     ModelProviderConfig,
     resolve_chat_slot,
 )
-from ai_pr_review.services.model_providers.factory import create_model_provider
 from ai_pr_review.services.i18n_text import response_language_instruction
+from ai_pr_review.services.model_providers.factory import create_model_provider
 from ai_pr_review.services.result_store import ResultStore
 from ai_pr_review.services.review_context import (
     answer_format_rules,
@@ -192,7 +192,6 @@ def _persist_turn(
     payload["question_turn_id"] = question_turn.get("turn_id")
     payload["turn_id"] = answer_turn.get("turn_id")
     payload["created_at"] = answer_turn.get("created_at")
-
 
 
 # ---------------------------------------------------------------------------

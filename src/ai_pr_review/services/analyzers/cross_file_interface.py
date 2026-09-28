@@ -15,11 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ai_pr_review.models.pr_data import FileDiff
-from ai_pr_review.models.review_plan import (
-    CrossFileImpact,
-    CrossFileReference,
-    InterfaceChange,
-)
+from ai_pr_review.models.review_plan import CrossFileImpact, CrossFileReference, InterfaceChange
 from ai_pr_review.services.analyzers.symbol_index import SymbolDefinition, SymbolIndex
 from ai_pr_review.services.context_builder import FileContext
 

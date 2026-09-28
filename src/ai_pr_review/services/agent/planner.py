@@ -105,6 +105,8 @@ class ReviewPlanner:
         )
         return score, filename
 
-    def _infer_intent(self, title: str, description: str | None, language: str | None = None) -> str:
+    def _infer_intent(
+        self, title: str, description: str | None, language: str | None = None
+    ) -> str:
         text = " ".join(value.strip() for value in (title, description or "") if value.strip())
         return text or plan_default_intent(language)

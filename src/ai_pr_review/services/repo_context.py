@@ -121,7 +121,9 @@ def _relative_import_targets(file_path: str, source: str) -> list[str]:
         parts = base_parts[: len(base_parts) - up] if up else list(base_parts)
 
         if module:
-            candidates = ["/".join(parts + module.split(".")) if parts else module.replace(".", "/")]
+            candidates = [
+                "/".join(parts + module.split(".")) if parts else module.replace(".", "/")
+            ]
         else:
             # `from . import a, b`：导入名可能是子模块
             candidates = []
@@ -256,7 +258,9 @@ class RepoContextProvider:
             self._cache.put(key, content)
         return content, False
 
-    def _resolve_module(self, module_path: str, load: Callable[[str], tuple[str | None, bool]]) -> str | None:
+    def _resolve_module(
+        self, module_path: str, load: Callable[[str], tuple[str | None, bool]]
+    ) -> str | None:
         """模块路径 → 文件：优先 ``.py``，其次目录下 ``__init__.py``。"""
         for candidate in (f"{module_path}.py", _join(module_path, "__init__.py")):
             content, _ = load(candidate)
@@ -380,11 +384,33 @@ REPO_TREE_MAX_CHILDREN_PER_DIR = 25
 # 目录树里不进注入的噪声目录 / 文件（对"仓库结构"没有信息量，只会吃 token）。
 TREE_NOISE_DIRS = frozenset(
     {
-        ".git", ".hg", ".svn", ".idea", ".vscode", ".cache", ".eggs",
-        ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox", ".venv",
-        ".next", ".nuxt", ".svelte-kit", "__pycache__", "build", "coverage",
-        "dist", "env", "htmlcov", "node_modules", "out", "site-packages",
-        "target", "venv", "vendor",
+        ".git",
+        ".hg",
+        ".svn",
+        ".idea",
+        ".vscode",
+        ".cache",
+        ".eggs",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        ".next",
+        ".nuxt",
+        ".svelte-kit",
+        "__pycache__",
+        "build",
+        "coverage",
+        "dist",
+        "env",
+        "htmlcov",
+        "node_modules",
+        "out",
+        "site-packages",
+        "target",
+        "venv",
+        "vendor",
     }
 )
 TREE_NOISE_FILES = frozenset({".DS_Store", "Thumbs.db"})

@@ -357,12 +357,9 @@ class HybridReviewOrchestrator:
             system_prompt = self.prompt_assembler.build_system_prompt(context.language)
             # 相关文件注入时追加诚实约束（模块级函数，不依赖 stub 是否实现新方法）。
             if getattr(context, "related_files", None):
-                response_language = str(
-                    getattr(self.config.preferences, "language", "zh-CN")
-                )
-                system_prompt = (
-                    f"{system_prompt}\n\n"
-                    + related_file_system_rules(response_language)
+                response_language = str(getattr(self.config.preferences, "language", "zh-CN"))
+                system_prompt = f"{system_prompt}\n\n" + related_file_system_rules(
+                    response_language
                 )
             user_prompt = self.prompt_assembler.build_user_prompt(context)
 
@@ -391,9 +388,7 @@ class HybridReviewOrchestrator:
                 # 该文件的模型调用失败：如实上报 failed（findings_count 未知，
                 # 不是 0），再按本编排器原有语义吞掉异常继续处理下一个文件。
                 failure_message = str(e) or e.__class__.__name__
-                failed_files.append(
-                    {"filename": file_diff.filename, "error": failure_message}
-                )
+                failed_files.append({"filename": file_diff.filename, "error": failure_message})
                 standard_review.emit_file_result(
                     file_result_callback,
                     file_diff.filename,
@@ -512,8 +507,13 @@ class HybridReviewOrchestrator:
         # Describe the routing that actually happened (honest metadata).
         # `getattr` keeps custom/test selectors (which may only implement the
         # public `select_model_for_task` surface) working.
-        local_model = getattr(self.model_selector, "local_model", "") or self.config.local_provider.default_model
-        remote_model = getattr(self.model_selector, "remote_model", "") or self.config.ai_client.model
+        local_model = (
+            getattr(self.model_selector, "local_model", "")
+            or self.config.local_provider.default_model
+        )
+        remote_model = (
+            getattr(self.model_selector, "remote_model", "") or self.config.ai_client.model
+        )
         if stats["local_calls"] and stats["remote_calls"]:
             routing_model_used = f"{local_model} + {remote_model}"
         elif stats["local_calls"]:

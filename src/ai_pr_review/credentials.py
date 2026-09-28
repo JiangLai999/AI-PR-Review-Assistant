@@ -310,11 +310,7 @@ def _provider_ok_key(owner: str | None, available: list[str]) -> str:
     四种组合各有一条词条，这样中英文都不会拼出「已连接 。」/「Connected to .」。
     """
     if available:
-        return (
-            "credentials.provider.ok_named_models"
-            if owner
-            else "credentials.provider.ok_models"
-        )
+        return "credentials.provider.ok_named_models" if owner else "credentials.provider.ok_models"
     return "credentials.provider.ok_named" if owner else "credentials.provider.ok"
 
 

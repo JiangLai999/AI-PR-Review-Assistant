@@ -275,7 +275,7 @@ def build_long_file(modern: bool) -> str:
     lines = list(_LONG_HEADER)
     if modern:
         # 全局可变缓存：真实 PR 里常见，也是被审代码里的一处并发隐患。
-        lines += ['_SEEN: dict[str, int] = {}', "", ""]
+        lines += ["_SEEN: dict[str, int] = {}", "", ""]
     for index, (name, noun, path, key_field) in enumerate(_LONG_HANDLERS):
         lines += _long_handler(index, name, noun, path, key_field, modern)
     lines += _long_tail(modern)
@@ -487,9 +487,7 @@ def install_wire_probe() -> None:
             except (UnicodeDecodeError, json.JSONDecodeError):
                 payload = None
             if isinstance(payload, dict):
-                WIRE_CAPTURE.append(
-                    {key: payload.get(key, "<absent>") for key in WIRE_FIELDS}
-                )
+                WIRE_CAPTURE.append({key: payload.get(key, "<absent>") for key in WIRE_FIELDS})
         return original(req, *args, **kwargs)
 
     urllib.request.urlopen = recording_urlopen  # type: ignore[assignment]
@@ -652,9 +650,7 @@ def run_planned(
             + (f"，diff {scenario.diff_lines} 行" if scenario.diff_lines else "")
             + "）..."
         )
-        done = asyncio.run(
-            run_scenario(scenario, key, model, base_url, system_prompt, user_prompt)
-        )
+        done = asyncio.run(run_scenario(scenario, key, model, base_url, system_prompt, user_prompt))
         results[scenario.name] = done
         log(
             f"    thinking={_wire_thinking(done)} effort={done.wire_keys.get('reasoning_effort', '-')} "
@@ -814,13 +810,19 @@ def evaluate_levels(
     wire_ok = True
     wire_detail: list[str] = []
     for level, item in by_level.items():
-        expected_thinking = {"type": "disabled"} if level in {"off", "auto"} else {"type": "enabled"}
+        expected_thinking = (
+            {"type": "disabled"} if level in {"off", "auto"} else {"type": "enabled"}
+        )
         expected_effort = "<absent>" if level in {"off", "auto"} else level
         expected_max = _expected_max_tokens(model, level, prompt_chars, cap)
         got_thinking = item.wire_keys.get("thinking", "<absent>")
         got_effort = item.wire_keys.get("reasoning_effort", "<absent>")
         got_max = item.wire_keys.get("max_tokens")
-        ok = got_thinking == expected_thinking and got_effort == expected_effort and got_max == expected_max
+        ok = (
+            got_thinking == expected_thinking
+            and got_effort == expected_effort
+            and got_max == expected_max
+        )
         wire_ok = wire_ok and ok
         wire_detail.append(
             f"{level}: thinking={_wire_thinking(item)} effort={got_effort} "
@@ -913,7 +915,9 @@ def evaluate_long(
         checks.append(
             _check(
                 "b2. 长 diff × off 对照：answer JSON 可解析、reasoning=0、额度=基础额度（成本基线）",
-                control.ok and control.reasoning_chars == 0 and control.wire_keys.get("max_tokens") == base,
+                control.ok
+                and control.reasoning_chars == 0
+                and control.wire_keys.get("max_tokens") == base,
                 True,
                 f"max_tokens={control.wire_keys.get('max_tokens')}(期望 {base}), "
                 f"reasoning={control.reasoning_chars} 字符, content={control.content_chars} 字符, "
@@ -968,7 +972,8 @@ def evaluate_long(
             ),
             True,
             f"封顶来源={cap_source}({cap}), 基础额度={base}, 期望预留=min({reserve}, {cap}-{base})"
-            f"={expected_reserve}；实测 " + "；".join(
+            f"={expected_reserve}；实测 "
+            + "；".join(
                 f"#{index}: max_tokens={item.wire_keys.get('max_tokens')}"
                 for index, item in enumerate(runs, start=1)
             ),
@@ -1062,7 +1067,9 @@ def render_live(summary: dict[str, Any]) -> None:
                 log(f"{'':<16}error: {item['error']}")
 
     log("")
-    log(f"封顶来源：{summary['cap_source']} = {summary['cap_tokens']} tokens（`_review_max_output` 同口径）")
+    log(
+        f"封顶来源：{summary['cap_source']} = {summary['cap_tokens']} tokens（`_review_max_output` 同口径）"
+    )
     log(f"总耗时：{summary['elapsed_seconds']}s · 总调用：{summary['total_provider_calls']}")
     log(
         "ProviderResponse.reasoning 字段非空："
@@ -1141,8 +1148,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"DeepSeek 模型名（默认 {DEFAULT_MODEL}）")
-    parser.add_argument("--base-url", default="", help="覆盖 base_url（默认取 DEEPSEEK_BASE_URL 或官方）")
+    parser.add_argument(
+        "--model", default=DEFAULT_MODEL, help=f"DeepSeek 模型名（默认 {DEFAULT_MODEL}）"
+    )
+    parser.add_argument(
+        "--base-url", default="", help="覆盖 base_url（默认取 DEEPSEEK_BASE_URL 或官方）"
+    )
     parser.add_argument(
         "--scenario",
         choices=("all", "levels", "long", "legacy"),
@@ -1160,8 +1171,12 @@ def main(argv: list[str] | None = None) -> int:
         default="short",
         help="四档（levels）用哪份 prompt：short=最小 diff（默认）；long=200-400 行 patch（此时 max 档同时充当长 diff 边界样本）",
     )
-    parser.add_argument("--long-samples", type=int, default=2, help="长 diff × 高档位的采样次数（默认 2）")
-    parser.add_argument("--no-long-control", action="store_true", help="跳过长 diff × off 对照（省一次调用）")
+    parser.add_argument(
+        "--long-samples", type=int, default=2, help="长 diff × 高档位的采样次数（默认 2）"
+    )
+    parser.add_argument(
+        "--no-long-control", action="store_true", help="跳过长 diff × off 对照（省一次调用）"
+    )
     parser.add_argument("--json", action="store_true", help="只输出机器可读 JSON")
     args = parser.parse_args(argv)
 
@@ -1169,7 +1184,9 @@ def main(argv: list[str] | None = None) -> int:
     if not key:
         log("错误：DEEPSEEK_API_KEY 未设置（只从环境变量读取，不落盘）")
         return 2
-    base_url = args.base_url.strip() or os.environ.get("DEEPSEEK_BASE_URL", "").strip() or DEFAULT_BASE_URL
+    base_url = (
+        args.base_url.strip() or os.environ.get("DEEPSEEK_BASE_URL", "").strip() or DEFAULT_BASE_URL
+    )
 
     level_filter = [item.strip().lower() for item in args.level.split(",") if item.strip()]
     invalid_levels = [item for item in level_filter if item not in REVIEW_REASONING_EFFORTS]
@@ -1194,8 +1211,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         if args.scenario in {"all", "levels"}:
             planned += [
-                Scenario(name=f"level_{lvl}", level=lvl, prompt_kind=args.prompt)
-                for lvl in levels
+                Scenario(name=f"level_{lvl}", level=lvl, prompt_kind=args.prompt) for lvl in levels
             ]
         if args.scenario in {"all", "long"}:
             for lvl in level_filter or ["max"]:
@@ -1210,7 +1226,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if len(planned) > CALL_BUDGET:
         # 硬预算：探针不能因为参数组合悄悄多花调用。
-        log(f"错误：本次计划 {len(planned)} 次真实调用，超过预算 {CALL_BUDGET} 次；请缩小 --long-samples")
+        log(
+            f"错误：本次计划 {len(planned)} 次真实调用，超过预算 {CALL_BUDGET} 次；请缩小 --long-samples"
+        )
         return 2
 
     prompts: dict[str, tuple[str, str]] = {}
@@ -1266,7 +1284,9 @@ def main(argv: list[str] | None = None) -> int:
             level_results, args.model, prompt_chars[levels_kind], cap, cap_source
         )
     long_control = results.get("long_off")
-    long_runs = [i for name, i in results.items() if name.startswith("long_") and i is not long_control]
+    long_runs = [
+        i for name, i in results.items() if name.startswith("long_") and i is not long_control
+    ]
     if not long_runs:
         # 四档直接跑在长 diff 上（`--scenario levels --prompt long`）时，max 档本身就是
         # "长 diff × max"的边界样本：同一份数据再按边界口径过一遍断言。
@@ -1285,9 +1305,8 @@ def main(argv: list[str] | None = None) -> int:
         "scenario": args.scenario,
         "cap_tokens": cap,
         "cap_source": cap_source,
-        "prompt_stats": {
-            k: v for k, v in prompt_stats.items()
-        } | {"short_prompt_chars": prompt_chars.get("short", 0)},
+        "prompt_stats": {k: v for k, v in prompt_stats.items()}
+        | {"short_prompt_chars": prompt_chars.get("short", 0)},
         "elapsed_seconds": round(time.monotonic() - started, 1),
         "total_provider_calls": sum(item.provider_calls for item in results.values()),
         "scenarios": [item.to_json() for item in results.values()],
