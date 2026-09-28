@@ -161,14 +161,20 @@ pr-review config show
 # 测试配置有效性
 pr-review config test
 
-# 检查供应商健康状态
+# 检查供应商健康状态（--probe 会真实发起一次最小请求）
 pr-review config health
+pr-review config health --probe
 
-# 发现可用模型
+# 发现可用模型并设为默认
 pr-review config models
+pr-review config models --set-first
 
 # 切换默认模型
 pr-review config model --name "模型名称"
+
+# 查看或修改个人偏好
+pr-review preferences
+pr-review preferences --review-reasoning-effort high
 
 # 预览审查计划（不调用 AI）
 pr-review plan https://github.com/owner/repo/pull/123
@@ -194,6 +200,8 @@ pr-review https://github.com/owner/repo/pull/123 --dry-run
 
 # 查看历史记录
 pr-review history
+pr-review history --json
+pr-review history --table
 
 # 查看统计信息
 pr-review stats
@@ -210,7 +218,22 @@ pr-review showcase --json-output
 
 # 启动本地 Web 工作台
 pr-review serve
+
+# 体检当前环境（配置 / Token / 模型 / 存储 / Web 资产）
+pr-review doctor
+
+# 输出规划流水线耗时，排查慢在哪一步
+pr-review trace https://github.com/owner/repo/pull/123
+
+# 检查本地 Ollama 模型
+pr-review local-model check
+
+# 导出或解释历史 Run
+pr-review export-run <run-id> --format markdown --output review.md
+pr-review explain <run-id>
 ```
+
+完整的命令、参数与退出行为见 [`docs/API.md`](docs/API.md)。
 
 ---
 

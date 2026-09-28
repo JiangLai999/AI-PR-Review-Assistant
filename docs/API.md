@@ -1,6 +1,6 @@
 # API 文档
 
-本文档描述 `ai-pr-review` 的命令行接口与 Web 工作台 HTTP 接口（18 条 API + 静态资源）。
+本文档描述 `ai-pr-review` 的命令行接口与 Web 工作台 HTTP 接口（22 条 API + 静态资源）。
 
 ## 命令概览
 
@@ -16,6 +16,28 @@ pr-review
 pr-review review <PR_URL>
 ```
 
+`pr-review --help` 与 `pr-review <子命令> --help` 始终是参数口径的最终来源；下表给出当前推荐入口：
+
+| 命令 | 用途 |
+|------|------|
+| `pr-review <PR_URL>` | 执行完整 PR 审查 |
+| `pr-review plan <PR_URL>` | 生成透明审查计划，不调用模型 |
+| `pr-review demo` | 运行离线 Demo，不需要 Token / Key / 网络 |
+| `pr-review doctor` | 体检 CLI、配置、模型、存储与 Web 资产 |
+| `pr-review serve` | 启动本地 Web 工作台 |
+| `pr-review showcase` | 输出比赛现场推荐演示路径 |
+| `pr-review benchmark` | 评估 static / ast / combined 策略准确率 |
+| `pr-review history` | 查看历史 Run 与聚合统计 |
+| `pr-review stats` | 查看历史库聚合统计 |
+| `pr-review explain <RUN_ID>` | 解释历史 Run 的问题与证据校验 |
+| `pr-review export-run <RUN_ID>` | 离线导出历史 Run 报告 |
+| `pr-review feedback <RUN_ID> <FINDING_ID>` | 记录 finding 的人工反馈 |
+| `pr-review chat` | 打开 OpenTUI / Plain Chat 工作区 |
+| `pr-review preferences` | 查看或修改 CLI 个人偏好 |
+| `pr-review local-model check` | 检查本地 Ollama 可用性与模型 |
+| `pr-review trace <PR_URL>` | 输出规划流水线耗时 |
+| `pr-review config` | 配置向导与配置子命令 |
+
 ## 主命令
 
 ### `pr-review <PR_URL>`
@@ -29,6 +51,8 @@ pr-review review <PR_URL>
 选项：
 
 - `--model TEXT`：覆盖配置中的模型名。
+- `--mode [auto|quality|balanced|cost|local|remote]`：选择混合路由模式，默认 `auto`。
+- `--max-cost FLOAT`：覆盖单次运行的本地预算上限（美元）。
 - `--format [terminal|markdown|json]`：报告输出格式，默认 `terminal`。
 - `--output FILE`：把报告写入目标文件。若文件后缀为 `.md` 或 `.json`，会自动推断输出格式。
 - `--publish-comment`：将 GitHub 评论格式的报告发布到对应 PR。
@@ -135,6 +159,123 @@ pr-review https://github.com/owner/repo/pull/123 --publish-comment
 
 成功时输出 provider、model 和 format；失败时以 CLI 错误退出。
 
+### `pr-review config health`
+
+检查当前 provider 是否已具备可用条件。默认只做本地配置检查：
+
+- `--discover-models`：尝试通过远端 `/models` 端点发现模型；
+- `--probe`：发送一次最小 chat 请求，验证真实连通性。
+
+### `pr-review config models`
+
+发现当前 provider 的远端模型列表。
+
+- `--set TEXT`：发现后把指定模型设为当前模型；
+- `--set-first`：发现后把第一个模型设为当前模型；
+- `--json`：输出机器可读 JSON。
+
+### `pr-review config model --name <MODEL>`
+
+直接把当前配置中的模型名更新为 `<MODEL>`，不访问网络。
+
+### `pr-review config init`
+
+在项目目录初始化共享配置模板 `.ai_pr_review/config.json`：
+
+- `--provider [preset]`：选择供应商预设，默认 `deepseek`；
+- `--model TEXT`：覆盖模板里的默认模型；
+- `--base-url TEXT`：覆盖模板里的 API Base URL；
+- `--api-format [anthropic|openai|custom]`：覆盖协议格式；
+- `--directory DIRECTORY`：指定生成模板的项目目录；
+- `--force`：覆盖已存在的生成文件；
+- `--local-example / --no-local-example`：是否同时生成 `config.local.json.example`；
+- `--update-gitignore / --no-update-gitignore`：是否把私有配置加入 `.gitignore`。
+
+### `pr-review config import <INPUT_PATH>`
+
+把导出的 JSON 配置导入当前用户配置路径。
+
+- `--save-key`：同时持久化 API Key 与 GitHub Token；不传时保留环境变量占位。
+
+### `pr-review config export --output <FILE>`
+
+导出当前解析后的配置 JSON。
+
+- `--output FILE`：输出文件路径（必填）；
+- `--include-secrets`：连同 API Key、GitHub Token 一起导出；默认脱敏。
+
+### `pr-review config preferences`
+
+与顶层 `pr-review preferences` 等价，用于查看或修改个人偏好。
+
+## 工作台与辅助命令
+
+### `pr-review doctor`
+
+检查 Python、配置、GitHub Token、模型供应商、SQLite 存储、AST 增强、离线 Demo 与 Web 工作台资产是否就绪。
+
+- `--json-output`：输出 JSON 诊断报告，便于 CI 或脚本消费。
+
+### `pr-review serve`
+
+启动本地 Web 工作台，默认 `http://127.0.0.1:8787/`。
+
+- `--host TEXT`：监听地址，默认 `127.0.0.1`；
+- `--port INTEGER`：监听端口，默认 `8787`。
+
+Web 设置写入独立的 `*.web.json`，不会改掉 CLI 的配置与偏好。
+
+### `pr-review showcase`
+
+输出比赛现场推荐的离线演示路径，不改变项目状态。
+
+- `--json-output`：输出 JSON；
+- `--interactive`：打开交互式本地 Demo 菜单。
+
+### `pr-review chat`
+
+打开 Chat 工作区，支持 OpenTUI 与纯文本回退。
+
+- `--message TEXT`：发送一条消息后退出；
+- `--model TEXT`：本次会话覆盖模型；
+- `--layout [compact|split|plain]`：本次会话覆盖布局；
+- `--tui / --plain`：强制使用 OpenTUI 或纯文本模式。
+
+### `pr-review preferences`
+
+查看或更新 CLI 个人偏好；不带选项时只展示当前值。
+
+- `--ui-language [zh-CN|en-US]`：CLI 界面语言；
+- `--response-language [zh-CN|en-US]`：模型回复语言；
+- `--chat-layout [compact|split|plain]`：Chat 布局；
+- `--output-format [terminal|markdown|json]`：默认报告格式；
+- `--workbench [auto|always|off]`：审查工作台展开策略；
+- `--repo-context [off|tests|tests+imports]`：仓库上下文预取范围；
+- `--symbol-locate / --no-symbol-locate`：是否定位签名变更的跨文件调用点；
+- `--review-reasoning-effort [off|low|high|max|auto]`：审查思考档位。
+
+### `pr-review local-model check`
+
+检查本地 Ollama 是否可用，并列出已安装模型。
+
+- `--json-output`：输出 JSON；
+- `--timeout INTEGER`：请求超时秒数，默认 `5`。
+
+### `pr-review trace <PR_URL>`
+
+输出审查规划阶段的轻量耗时链路，用于定位 PR 拉取、过滤、上下文构建等步骤的瓶颈；不调用模型。
+
+### `pr-review explain <RUN_ID>`
+
+读取 SQLite 中一次历史 Run，解释 finding、行号、代码片段和证据校验结果；不访问 GitHub，也不调用模型。
+
+### `pr-review export-run <RUN_ID>`
+
+离线导出历史 Run 报告，适合在断网或模型不可用时复现结果。
+
+- `--format [markdown|json]`：导出格式，默认 `markdown`；
+- `--output PATH`：输出文件（必填）。
+
 ## 历史命令
 
 ### `pr-review history`
@@ -145,6 +286,8 @@ pr-review https://github.com/owner/repo/pull/123 --publish-comment
 
 - `--pr-url TEXT`：按 PR URL 过滤。
 - `--limit INTEGER`：返回记录数量上限，默认 `10`。
+- `--json`：强制输出机器可读 JSON（在管道中也是默认行为）。
+- `--table`：强制输出终端表格。
 
 返回 JSON，包含：
 
@@ -202,7 +345,7 @@ pr-review serve            # 默认 http://127.0.0.1:8787
 - **凭据**：接口只回掩码，绝不明文返回 GitHub Token 或模型 API Key。
 - **编码**：所有 JSON 响应为 `application/json; charset=utf-8`。
 
-## 端点总表（19 条 API + 静态资源）
+## 端点总表（22 条 API + 静态资源）
 
 | # | 方法 | 路径 | 说明 |
 |---|------|------|------|
