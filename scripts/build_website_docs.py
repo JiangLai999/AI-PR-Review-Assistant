@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import posixpath
 import re
 from pathlib import Path
 
@@ -15,12 +16,45 @@ OUTPUT = ROOT / "website" / "assets" / "docs-data.js"
 
 DATA_PREFIX = "window.__WEBSITE_DOCS__ = "
 
+#: 文档里的相对链接在官网上要指回仓库（站点目录里没有这些文件）。
+REPO_BLOB_BASE = "https://github.com/JiangLai999/AI-PR-Review-Assistant/blob/main/"
+
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 _TABLE_ROW_RE = re.compile(r"^\|.*\|$")
 # 分隔行只由 `-` 和对其冒号组成；缺了它，竖线行只是普通段落。
 _TABLE_DELIMITER_RE = re.compile(r"^\|(?:\s*:?-+:?\s*\|)+$")
 # 顶层章节之间的分隔线（README 用 `---`）：是版面分隔，不是章节正文。
 _SECTION_SEPARATORS = {"---", "***", "___"}
+
+# 行内 token：代码段（反引号）或链接 `[文本](链接)`。两者互斥匹配，
+# 因此 `[x](y)` 写在代码段里不会被当成链接。
+_INLINE_TOKEN_RE = re.compile(r"(`[^`\n]+`)|\[([^\]\n]+)\]\(([^()\s]+)\)")
+_URL_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
+_SAFE_URL_PREFIXES = ("http://", "https://", "mailto:")
+
+
+def _render_code_and_bold(text: str) -> str:
+    """`code` → `<code>`、`**粗体**` → `<strong>`；不处理链接，避免递归。"""
+    escaped = html.escape(text)
+    rendered: list[str] = []
+    for part in re.split(r"(`[^`]+`)", escaped):
+        if len(part) > 2 and part.startswith("`") and part.endswith("`"):
+            rendered.append(f"<code>{part[1:-1]}</code>")
+        else:
+            rendered.append(re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", part))
+    return "".join(rendered)
+
+
+def _resolve_relative_link(url: str, source_path: str | None) -> str:
+    """把文档里的相对链接改写成仓库里的绝对链接。
+
+    官网把 README / docs 的章节搬到站点上，`docs/API.md`、`../THIRD_PARTY_NOTICES.md`
+    这类相对路径在站点目录里并不存在，必须指回 GitHub；锚点与外链原样保留。
+    """
+    if source_path is None or url.startswith("#") or _URL_SCHEME_RE.match(url):
+        return url
+    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(source_path), url))
+    return f"{REPO_BLOB_BASE}{resolved}"
 
 
 def read_text(path: Path) -> str:
@@ -74,19 +108,33 @@ def extract_section(markdown: str, heading: str, level: int = 2) -> str:
     return "\n".join(body_lines).strip()
 
 
-def inline_format(text: str) -> str:
-    """行内格式：反引号 → ``<code>``，``**粗体**`` → ``<strong>``。
+def inline_format(text: str, *, source_path: str | None = None) -> str:
+    """行内格式：反引号 → ``<code>``，``**粗体**`` → ``<strong>``，``[文本](链接)`` → ``<a>``。
 
-    代码段优先：先按反引号切分，粗体只在**代码段之外**生效 ——
-    否则 `` `**x**` ``（文档里按字面量写）会被误渲染成强调。
+    代码段优先：`` `**x**` `` 按字面量保留；链接的标签里可以再写 `` `code` ``。
+
+    链接只放行 ``http`` / ``https`` / ``mailto`` 与相对路径；``javascript:``
+    这类协议原样保留，不会进入 ``href``。给出 ``source_path`` 时，相对链接会按
+    文档所在目录解析并指回仓库（官网目录里没有这些文件）。
     """
-    text = html.escape(text)
     rendered: list[str] = []
-    for part in re.split(r"(`[^`]+`)", text):
-        if len(part) > 2 and part.startswith("`") and part.endswith("`"):
-            rendered.append(f"<code>{part[1:-1]}</code>")
+    position = 0
+    for match in _INLINE_TOKEN_RE.finditer(text):
+        rendered.append(_render_code_and_bold(text[position : match.start()]))
+        code, label, url = match.group(1), match.group(2), match.group(3)
+        if code is not None:
+            rendered.append(f"<code>{html.escape(code[1:-1])}</code>")
+        elif _URL_SCHEME_RE.match(url) and not url.startswith(_SAFE_URL_PREFIXES):
+            # 不安全协议：整段按字面量输出，不生成 href。
+            rendered.append(_render_code_and_bold(match.group(0)))
         else:
-            rendered.append(re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", part))
+            href = html.escape(_resolve_relative_link(url, source_path), quote=True)
+            rendered.append(
+                f'<a href="{href}" target="_blank" rel="noopener">'
+                f"{_render_code_and_bold(label)}</a>"
+            )
+        position = match.end()
+    rendered.append(_render_code_and_bold(text[position:]))
     return "".join(rendered)
 
 
@@ -94,17 +142,20 @@ def _split_table_row(line: str) -> list[str]:
     return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
-def _render_cells(line: str, tag: str) -> str:
-    return "".join(f"<{tag}>{inline_format(cell)}</{tag}>" for cell in _split_table_row(line))
+def _render_cells(line: str, tag: str, source_path: str | None = None) -> str:
+    return "".join(
+        f"<{tag}>{inline_format(cell, source_path=source_path)}</{tag}>"
+        for cell in _split_table_row(line)
+    )
 
 
-def render_table(header_line: str, body_lines: list[str]) -> str:
+def render_table(header_line: str, body_lines: list[str], source_path: str | None = None) -> str:
     """表头行 + 表体行渲染成 ``<table>``。
 
     单元格只做 html.escape 与反引号转 ``<code>``，不解析其它行内 markdown。
     """
-    head = _render_cells(header_line, "th")
-    body = "".join(f"<tr>{_render_cells(line, 'td')}</tr>" for line in body_lines)
+    head = _render_cells(header_line, "th", source_path)
+    body = "".join(f"<tr>{_render_cells(line, 'td', source_path)}</tr>" for line in body_lines)
     # 外面套一层可横向滚动的容器：窄屏下宁可让表格自己滚，也不要撑破文档面板。
     return (
         '<div class="docs-table-wrap">'
@@ -113,7 +164,7 @@ def render_table(header_line: str, body_lines: list[str]) -> str:
     )
 
 
-def markdown_to_html(markdown: str) -> str:
+def markdown_to_html(markdown: str, *, source_path: str | None = None) -> str:
     lines = markdown.replace("\r\n", "\n").split("\n")
     parts: list[str] = []
     i = 0
@@ -153,11 +204,11 @@ def markdown_to_html(markdown: str) -> str:
             while i < len(lines) and _TABLE_ROW_RE.match(lines[i].strip()):
                 body_lines.append(lines[i].strip())
                 i += 1
-            parts.append(render_table(header_line, body_lines))
+            parts.append(render_table(header_line, body_lines, source_path))
             continue
 
         if stripped.startswith("### "):
-            parts.append(f"<h4>{inline_format(stripped[4:])}</h4>")
+            parts.append(f"<h4>{inline_format(stripped[4:], source_path=source_path)}</h4>")
             i += 1
             continue
 
@@ -169,19 +220,21 @@ def markdown_to_html(markdown: str) -> str:
                 quote_lines.append(lines[i].strip().lstrip(">").strip())
                 i += 1
             body = " ".join(line for line in quote_lines if line)
-            parts.append(f"<blockquote><p>{inline_format(body)}</p></blockquote>")
+            parts.append(
+                f"<blockquote><p>{inline_format(body, source_path=source_path)}</p></blockquote>"
+            )
             continue
 
         # 只支持到 ### 的话，`# 标题` / `## 小节` 会落进下面的段落分支，
         # 在官网上渲染成字面量 "<p># 标题</p>"。docs/PR_WORKFLOW.md 整篇
         # 都是这种标题，所以这里补上 h2/h3。
         if stripped.startswith("## "):
-            parts.append(f"<h3>{inline_format(stripped[3:])}</h3>")
+            parts.append(f"<h3>{inline_format(stripped[3:], source_path=source_path)}</h3>")
             i += 1
             continue
 
         if stripped.startswith("# "):
-            parts.append(f"<h2>{inline_format(stripped[2:])}</h2>")
+            parts.append(f"<h2>{inline_format(stripped[2:], source_path=source_path)}</h2>")
             i += 1
             continue
 
@@ -194,7 +247,11 @@ def markdown_to_html(markdown: str) -> str:
                 items.append(re.sub(r"^\d+\.\s+", "", current))
                 i += 1
             parts.append(
-                "<ol>" + "".join(f"<li>{inline_format(item)}</li>" for item in items) + "</ol>"
+                "<ol>"
+                + "".join(
+                    f"<li>{inline_format(item, source_path=source_path)}</li>" for item in items
+                )
+                + "</ol>"
             )
             continue
 
@@ -207,7 +264,11 @@ def markdown_to_html(markdown: str) -> str:
                 items.append(current[2:])
                 i += 1
             parts.append(
-                "<ul>" + "".join(f"<li>{inline_format(item)}</li>" for item in items) + "</ul>"
+                "<ul>"
+                + "".join(
+                    f"<li>{inline_format(item, source_path=source_path)}</li>" for item in items
+                )
+                + "</ul>"
             )
             continue
 
@@ -224,7 +285,7 @@ def markdown_to_html(markdown: str) -> str:
                 break
             paragraph_lines.append(current)
             i += 1
-        parts.append(f"<p>{inline_format(' '.join(paragraph_lines))}</p>")
+        parts.append(f"<p>{inline_format(' '.join(paragraph_lines), source_path=source_path)}</p>")
 
     return "\n".join(parts)
 
@@ -242,14 +303,16 @@ def build_docs_data() -> dict:
             "label": "快速开始",
             "title": "README · 快速开始",
             "source": "README.md",
-            "html": markdown_to_html(extract_section(readme, "快速开始")),
+            "html": markdown_to_html(extract_section(readme, "快速开始"), source_path="README.md"),
         },
         {
             "id": "cli-command-reference",
             "label": "CLI 命令速查",
             "title": "API 文档 · 命令概览",
             "source": "docs/API.md",
-            "html": markdown_to_html(extract_section(api_doc, "命令概览")),
+            "html": markdown_to_html(
+                extract_section(api_doc, "命令概览"), source_path="docs/API.md"
+            ),
         },
         {
             # id 保持不变（官网用 tab.id 选中），章节已随 README 改名为「配置文件」，
@@ -258,7 +321,7 @@ def build_docs_data() -> dict:
             "label": "配置文件",
             "title": "README · 配置文件",
             "source": "README.md",
-            "html": markdown_to_html(extract_section(readme, "配置文件")),
+            "html": markdown_to_html(extract_section(readme, "配置文件"), source_path="README.md"),
         },
         {
             # README 已无「必需环境变量」章节，环境要求（含 GITHUB_TOKEN）现落在 API 文档。
@@ -266,14 +329,18 @@ def build_docs_data() -> dict:
             "label": "环境要求",
             "title": "API 文档 · 环境要求",
             "source": "docs/API.md",
-            "html": markdown_to_html(extract_section(api_doc, "环境要求")),
+            "html": markdown_to_html(
+                extract_section(api_doc, "环境要求"), source_path="docs/API.md"
+            ),
         },
         {
             "id": "provider-config",
             "label": "Provider 配置",
             "title": "README · 支持的模型供应商",
             "source": "README.md",
-            "html": markdown_to_html(extract_section(readme, "支持的模型供应商")),
+            "html": markdown_to_html(
+                extract_section(readme, "支持的模型供应商"), source_path="README.md"
+            ),
         },
         {
             # 「使用」是「快速开始」下的三级标题，所以要按 level=3 取。
@@ -281,21 +348,27 @@ def build_docs_data() -> dict:
             "label": "使用示例",
             "title": "README · 使用",
             "source": "README.md",
-            "html": markdown_to_html(extract_section(readme, "使用", level=3)),
+            "html": markdown_to_html(
+                extract_section(readme, "使用", level=3), source_path="README.md"
+            ),
         },
         {
             "id": "chat-workspace",
             "label": "Chat 工作区",
             "title": "README · Chat 工作区",
             "source": "README.md",
-            "html": markdown_to_html(extract_section(readme, "Chat 工作区")),
+            "html": markdown_to_html(
+                extract_section(readme, "Chat 工作区"), source_path="README.md"
+            ),
         },
         {
             "id": "web-workbench",
             "label": "Web 工作台",
             "title": "README · Web 工作台",
             "source": "README.md",
-            "html": markdown_to_html(extract_section(readme, "Web 工作台", level=3)),
+            "html": markdown_to_html(
+                extract_section(readme, "Web 工作台", level=3), source_path="README.md"
+            ),
         },
         {
             "id": "cli-api",
@@ -311,7 +384,8 @@ def build_docs_data() -> dict:
                 + "\n\n"
                 + extract_section(api_doc, "工作台与辅助命令")
                 + "\n\n"
-                + extract_section(api_doc, "历史命令")
+                + extract_section(api_doc, "历史命令"),
+                source_path="docs/API.md",
             ),
         },
         {
@@ -319,14 +393,14 @@ def build_docs_data() -> dict:
             "label": "项目结构",
             "title": "README · 项目结构",
             "source": "README.md",
-            "html": markdown_to_html(extract_section(readme, "项目结构")),
+            "html": markdown_to_html(extract_section(readme, "项目结构"), source_path="README.md"),
         },
         {
             "id": "workflow-guide",
             "label": "PR 工作流",
             "title": "PR Workflow Guide",
             "source": "docs/PR_WORKFLOW.md",
-            "html": markdown_to_html(workflow_doc),
+            "html": markdown_to_html(workflow_doc, source_path="docs/PR_WORKFLOW.md"),
         },
         {
             # 合规与许可：只取声明类章节（许可/权属/第三方权利/原创性/免责），
@@ -346,7 +420,8 @@ def build_docs_data() -> dict:
                         "六、参赛作品的原创性口径",
                         "八、参赛免责条款确认栏",
                     )
-                )
+                ),
+                source_path="docs/COMPLIANCE_AND_ORIGINALITY.md",
             ),
         },
     ]

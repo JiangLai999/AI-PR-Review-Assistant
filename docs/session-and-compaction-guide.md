@@ -1,5 +1,7 @@
 # 多会话与压缩操作指南 / Multi-session & Compaction Guide
 
+> 最后更新：2026-09-28 · 状态：对外文档
+>
 > 教程向：按场景给分步操作（命令 + 预期界面反馈）。**中英双语**：每节先中文，后英文。
 > Tutorial-style: step-by-step operations per scenario (command + expected UI feedback).
 > Each section is written in Chinese first, then English.
@@ -113,7 +115,7 @@ file list.
 
 多会话数据与配置文件同目录：
 
-```
+```text
 <config 同目录>/
 ├── sessions/
 │   ├── index.json          # 会话索引（id、标题、时间戳、消息数，以实现为准）
@@ -132,7 +134,7 @@ file list.
 
 Multi-session data lives next to the config file:
 
-```
+```text
 <same dir as the config>/
 ├── sessions/
 │   ├── index.json          # session index (id, title, timestamps, message count — see the implementation)

@@ -1,8 +1,6 @@
 # AI PR Review Assistant — 项目设计书
 
-> 📅 版本：v1.0
-> 📅 更新日期：2026-05-31
-> 📝 状态：已完成
+> 最后更新：2026-05-31 · 版本：v1.0 · 状态：对外文档
 
 ---
 
@@ -54,7 +52,7 @@ AI PR Review Assistant 是一个基于 AI 的 GitHub Pull Request 代码审查�
 
 ### 1.4 项目结构
 
-```
+```text
 AI-PR-Review-Assistant/
 ├── src/ai_pr_review/
 │   ├── cli.py                    # CLI 入口
@@ -94,7 +92,7 @@ AI-PR-Review-Assistant/
 
 采用**真单体架构**，所有模块运行在单一进程中，通过函数调用进行模块间通信。
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                        CLI Entry (Click)                        │
 ├─────────────────────────────────────────────────────────────────┤
@@ -133,7 +131,7 @@ AI-PR-Review-Assistant/
 
 ### 2.2 数据流
 
-```
+```text
 GitHub PR URL
     │
     ▼
@@ -363,7 +361,7 @@ class FilterPipeline:
 
 #### 三级 Fallback 策略
 
-```
+```text
 Level 1: tree-sitter 全量解析（最准确）
     ├── 提取函数声明、参数、返回类型
     ├── 提取类定义、方法、继承关系
@@ -444,7 +442,7 @@ class ContextBuilder:
 
 #### 双层 Prompt 结构
 
-```
+```text
 ┌─────────────────────────────────────────┐
 │           System Prompt (~400 tokens)   │
 │  ┌─────────────────────────────────────┐│
@@ -537,7 +535,7 @@ def get_json_schema(self) -> dict:
 
 #### 多供应商架构
 
-```
+```text
 ┌─────────────────────────────────────────────┐
 │              AI Client                       │
 │  ┌───────────────────────────────────────┐  │
@@ -644,7 +642,7 @@ for attempt in range(MAX_RETRIES):
 
 #### 四阶段处理流程
 
-```
+```text
 原始 ReviewResult
     │
     ▼
@@ -782,7 +780,7 @@ class ResultStore:
 
 #### 三级成本控制
 
-```
+```text
 ┌─────────────────────────────────────────────────┐
 │                Cost Controller                   │
 │                                                  │
@@ -1002,7 +1000,7 @@ class ReportRenderer:
 
 ### 4.2 配置优先级
 
-```
+```text
 1. CLI 参数 (--config <path>)
 2. 环境变量 (AI_PR_REVIEW_*)
 3. 用户级配置 (~/.ai_pr_review/config.json)
@@ -1042,7 +1040,7 @@ pr-review config model --name <model>
 
 ### 5.1 命令结构
 
-```
+```text
 pr-review
 ├── <PR_URL>              # 审查 PR
 │   ├── --model           # 覆盖模型
@@ -1185,7 +1183,7 @@ class AppConfig(BaseModel):
 
 ### 7.3 tree-sitter 三级 Fallback
 
-```
+```text
 Level 1: tree-sitter 全量解析（最准确）
 Level 2: 正则表达式提取（次准确）
 Level 3: 仅提供 diff context（保底）
