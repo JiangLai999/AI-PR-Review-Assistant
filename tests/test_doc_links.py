@@ -97,7 +97,9 @@ def test_every_referenced_path_exists_or_is_exempted(
     ]
     ignored = _gitignored_paths(sorted({path for _, _, path, _ in candidates}))
     broken = [
-        f"{doc}:{lineno} → {path}" for doc, lineno, path, _ in candidates if path not in ignored
+        f"{doc}:{lineno} → {path}"
+        for doc, lineno, path, _ in candidates
+        if path.rstrip("/") not in ignored
     ]
     assert not broken, (
         "docs 里有指向不存在文件的路径引用（无豁免标记）：\n  "
@@ -109,18 +111,34 @@ def test_every_referenced_path_exists_or_is_exempted(
 
 
 def _gitignored_paths(paths: list[str]) -> set[str]:
-    """批量判断哪些路径被 .gitignore 覆盖（一次 git 调用，避免逐条开销）。"""
+    """批量判断哪些路径被 .gitignore 覆盖（一次 git 调用，避免逐条开销）。
+
+    两个平台坑（本机 Windows 实测，只有干净检出才会走到这条路）：
+
+    * stdin 必须用 **bytes**：`text=True` 会把 "\\n" 翻译成 CRLF，git 收到带 `\\r`
+      的路径并以 C 风格引号回显（`"dir/\\r"`），于是永远匹配不上；
+    * git 会对含特殊字符的路径加引号，解析时要先解引号；
+    * `.gitignore` 里的目录规则（`dir/`）匹配不到"不存在且不带斜杠"的路径 ——
+      干净检出里这些目录本来就不存在，git 无法判定它是目录，所以要**同时探测**
+      `dir` 与 `dir/` 两种写法，返回时统一去掉尾斜杠。
+    """
     if not paths:
         return set()
+    probes = sorted({p for path in paths for p in (path.rstrip("/"), path.rstrip("/") + "/")})
     try:
         proc = subprocess.run(
             ["git", "check-ignore", "--stdin"],
-            input="\n".join(paths),
+            input="\n".join(probes).encode("utf-8"),
             capture_output=True,
-            text=True,
             cwd=ROOT,
             check=False,
         )
     except OSError:
         return set()
-    return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+    ignored: set[str] = set()
+    for raw in proc.stdout.decode("utf-8", "replace").splitlines():
+        candidate = raw.strip()
+        if len(candidate) >= 2 and candidate.startswith('"') and candidate.endswith('"'):
+            candidate = candidate[1:-1].replace("\\\\", "\\").replace('\\"', '"')
+        ignored.add(candidate.replace("\\r", "").replace("\r", "").rstrip("/"))
+    return ignored
