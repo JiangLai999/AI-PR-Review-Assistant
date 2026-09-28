@@ -4360,7 +4360,7 @@ class JsonlBackend:
                 elif command == "help":
                     result(
                         {
-                            "text": "/help 显示此帮助信息\n/status 查看运行状态\n/setup 打开配置助手\n/model status|chat|review <模型ID>|local|cloud|hybrid 查看/切换模型与运行时\n/think off|low|high|max|auto 设置思考档位（本地端点置灰）\n/review <PR URL> 开始 PR 审查\n/cancel 取消当前对话或审查\n/retry 重试上一次审查\n/report 查看当前报告\n/export json|markdown [路径] 导出当前报告\n/history [N] 查看审查历史\n/history <run_id> 载入该 Run 并绑定为当前上下文\n/history --chat [N] 查看最近的对话消息\n/context [run_id|off] 查看/切换/解除审查上下文绑定\n/explain <run_id> 解释 Finding 与证据\n/feedback <run_id> <finding_id> <status> [note] 记录 Finding 反馈\n/publish [run_id] [--confirm] 预览并发布审查评论到 GitHub\n/new 新建会话（旧会话保留，可在会话列表里切回）\n/compact [指令] 压缩会话历史（按 token 预算保留最近若干轮原文）\n/demo [case_key|list] 运行离线 Demo\n/showcase 查看参赛演示路径\n/workbench 展开/收起审查工作台"
+                            "text": "/help 显示此帮助信息\n/status 查看运行状态\n/setup 打开配置助手\n/model status|chat|review <模型ID>|local|cloud|hybrid 查看/切换模型与运行时\n/think off|low|high|max|auto 设置思考档位（本地端点置灰）\n/review <PR URL> 开始 PR 审查\n/cancel 取消当前对话或审查\n/retry 重试上一次审查\n/report 查看当前报告\n/export json|markdown [路径] 导出当前报告\n/history [N] 查看审查历史\n/history <run_id> 载入该 Run 并绑定为当前上下文\n/history --chat [N] 查看最近的对话消息\n/context [run_id|off] 查看/切换/解除审查上下文绑定\n/explain <run_id> 解释 Finding 与证据\n/feedback <run_id> <finding_id> <status> [note] 记录 Finding 反馈\n/publish [run_id] [--confirm] 预览并发布审查评论到 GitHub\n/new 新建会话（旧会话保留，可在会话列表里切回）\n/sessions 打开会话列表（切换/重命名/删除）\n/rename <新标题> 重命名当前会话\n/compact [指令] 压缩会话历史（按 token 预算保留最近若干轮原文）\n/demo [case_key|list] 运行离线 Demo\n/showcase 查看参赛演示路径\n/workbench 展开/收起审查工作台"
                         }
                     )
                 elif command == "setup":
