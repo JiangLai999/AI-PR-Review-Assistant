@@ -25,8 +25,11 @@ __pycache__/
 # 兜底：任何 agent / 人工自建的 TEMP 目录（.pytest_c1/、.pytest_tui/ …）都不入库。
 # 具体名单会随 agent 增删而漂移，所以这里按前缀收口。
 .pytest_*/
-# Agent bus run logs (belt-and-braces: the bus has its own .gitignore too)
-.agent-bus/runs/
+# AI collaboration bus local state (tasks / reports / prompts / runs stay local)
+.agent-bus/
+# Local image-generation and scratch artifacts
+tmp/
+output/
 .coverage
 htmlcov/
 
