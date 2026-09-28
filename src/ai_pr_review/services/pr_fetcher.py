@@ -153,12 +153,6 @@ class PRFetcher:
             head_repo_full_name=self._head_repo_full_name(pr),
         )
 
-    def fetch_diff_only(self, pr_url: str) -> str:
-        """仅获取 PR 的 unified diff 文本。"""
-        parsed = parse_pr_url(pr_url)
-        pr = self._get_pull_request(parsed.owner, parsed.repo, parsed.pr_number)
-        return self._fetch_diff(pr)
-
     def fetch_changed_file_paths(self, pr_url: str) -> list[str]:
         """仅取本次 PR 的变更文件**路径**清单（不拉 diff）。
 

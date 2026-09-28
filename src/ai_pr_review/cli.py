@@ -2591,10 +2591,6 @@ def _extract_github_pr_url(text: str) -> str | None:
     return match.group(0).rstrip(".,;:，。；：")
 
 
-def _is_github_pr_url(text: str) -> bool:
-    return _extract_github_pr_url(text) is not None
-
-
 def _handle_chat_slash_command(
     console: Console,
     config: AppConfig,
@@ -2731,17 +2727,6 @@ def _doctor_status(ok: bool | None) -> str:
     if ok is False:
         return "[red]✗ unavailable[/red]"
     return "[yellow]! not configured[/yellow]"
-
-
-def _path_writable(path: Path) -> bool:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        probe = path.parent / ".doctor-write-test"
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink(missing_ok=True)
-        return True
-    except OSError:
-        return False
 
 
 @main.command("doctor")

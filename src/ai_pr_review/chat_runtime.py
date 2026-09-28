@@ -149,18 +149,6 @@ def _render_assistant_message(
     )
 
 
-def _render_message(
-    role: str, text: str, timestamp: str | None = None, duration_seconds: float | None = None
-) -> Panel:
-    """渲染消息 - 根据角色选择不同样式."""
-    time_str = timestamp or datetime.now().strftime("%H:%M")
-
-    if role == "user":
-        return _render_user_message(text, time_str)
-    else:
-        return _render_assistant_message(text, time_str, duration_seconds)
-
-
 def _render_welcome(language: str = "zh-CN") -> Panel:
     """Pixel welcome card with language-consistent copy."""
     english = str(language).lower().startswith("en")
@@ -199,65 +187,6 @@ def _render_welcome(language: str = "zh-CN") -> Panel:
         padding=(0, 2),
         style="white on black",
         box=ROUNDED,
-    )
-
-
-def _render_transcript(messages: list[dict[str, Any]], language: str = "zh-CN") -> Panel:
-    """渲染消息历史."""
-    if not messages:
-        return _render_welcome(language)
-
-    recent = messages[-12:]
-    renderables: list[Any] = []
-    for i, message in enumerate(recent):
-        role = str(message.get("role", "assistant")).lower()
-        content = str(message.get("content", ""))
-        timestamp = str(message.get("timestamp", ""))
-        duration_seconds = message.get("duration_seconds")
-        duration = float(duration_seconds) if isinstance(duration_seconds, (int, float)) else None
-        renderables.append(
-            _render_message(role, content, timestamp if timestamp else None, duration)
-        )
-        if i < len(recent) - 1:
-            renderables.append(Text(""))
-
-    return Panel(
-        Group(*renderables),
-        title=" Transcript ",
-        title_align="left",
-        border_style="grey58",
-        padding=(1, 1),
-        style="white on black",
-        box=SQUARE,
-    )
-
-
-def _render_input_area(current_input: str = "") -> Panel:
-    """渲染输入区 - 用户输入在上，提示文字在下."""
-    content = Text()
-    if current_input:
-        content.append(f"  {current_input}\n", style="bold white")
-    content.append("  ▶ ", style="bold green")
-    content.append("Type your message or paste a PR URL...", style="grey50")
-    return Panel(
-        content,
-        border_style="grey42",
-        padding=(0, 1),
-        style="white on black",
-        box=ROUNDED,
-    )
-
-
-def _render_workspace(
-    config: AppConfig,
-    messages: list[dict[str, Any]],
-    session_path: str | None,
-) -> Group:
-    """渲染完整工作区."""
-    return Group(
-        _render_header(config),
-        _render_status_bar(config, len(messages)),
-        _render_transcript(messages, getattr(config.preferences, "ui_language", "zh-CN")),
     )
 
 

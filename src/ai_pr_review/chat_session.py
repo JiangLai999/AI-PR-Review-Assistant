@@ -156,13 +156,6 @@ def save_chat_context(config_path: Path | None, context: dict[str, Any]) -> None
     )
 
 
-def clear_chat_context(config_path: Path | None) -> None:
-    """清除 ChatContext"""
-    context_path = chat_context_path(config_path)
-    if context_path.exists():
-        context_path.unlink()
-
-
 # ---------------------------------------------------------------------------
 # 多会话存储（契约 v1 §A）
 # ---------------------------------------------------------------------------

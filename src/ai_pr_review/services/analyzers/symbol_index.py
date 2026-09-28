@@ -140,13 +140,6 @@ class SymbolIndex:
             definition for file_symbols in self._files for definition in file_symbols.definitions
         ]
 
-    def definition_owner(self, symbol: str) -> str | None:
-        for file_symbols in self._files:
-            for definition in file_symbols.definitions:
-                if definition.name == symbol:
-                    return file_symbols.file
-        return None
-
     def cross_file_references(self) -> list[CrossFileReference]:
         """返回引用了其他文件所定义符号的位置。"""
         results: list[CrossFileReference] = []

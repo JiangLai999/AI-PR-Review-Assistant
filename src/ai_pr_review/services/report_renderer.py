@@ -38,14 +38,6 @@ SEVERITY_ICONS = {
     "low": "[LOW]",
     "info": "[INFO]",
 }
-MARKDOWN_HEADING_ICONS = {
-    "critical": "❌",
-    "high": "⚠️",
-    "medium": "🔎",
-    "low": "ℹ️",
-    "info": "📝",
-}
-
 #: GitHub comment layout (v2). Kept separate from the terminal/markdown
 #: renderers so those outputs stay byte-stable.
 GITHUB_SEVERITY_ICONS = {
@@ -1302,27 +1294,6 @@ class ReportRenderer:
             f"- **File**: `{finding.file}:{finding.line_start}-{finding.line_end}`",
             f"- **Confidence**: {finding.confidence:.2f}",
             f"- **Severity**: {SEVERITY_LABELS[finding.severity]}",
-            "",
-            f"**Problem**: {finding.problem}",
-            "",
-        ]
-
-        if include_code_snippet and finding.code_snippet:
-            lines.extend(["**Code**:", "```python", finding.code_snippet, "```", ""])
-
-        lines.extend([f"**Suggestion**: {finding.suggestion}", ""])
-        return lines
-
-    def _render_github_finding(
-        self,
-        finding: Finding,
-        *,
-        include_code_snippet: bool,
-    ) -> list[str]:
-        lines = [
-            f"#### {MARKDOWN_HEADING_ICONS[finding.severity]} {finding.title}",
-            f"**File**: `{finding.file}:{finding.line_start}-{finding.line_end}`  ",
-            f"**Confidence**: {finding.confidence:.2f}",
             "",
             f"**Problem**: {finding.problem}",
             "",
