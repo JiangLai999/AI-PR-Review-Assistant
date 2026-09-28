@@ -24,6 +24,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
+        # 本包的 wheel 钩子（scripts/hatch_build.py）只负责给 Windows x64 专用产物打标签，
+        # 在非 Windows 平台会直接抛错。本 job 只跑与平台无关的测试与静态检查，不需要该钩子，
+        # 因此这里禁用它以完成可编辑安装；真正的发布构建在下面 windows-latest 的 build job 完成。
+        env:
+          HATCH_BUILD_NO_HOOKS: "1"
         run: |
           python -m pip install --upgrade pip
           pip install -e .[dev]
@@ -40,8 +45,41 @@ jobs:
       - name: Run mypy
         run: mypy src
 
+  build:
+    # tui_static 内含 Windows x64 专用 opentui.dll（scripts/hatch_build.py），wheel 标签
+    # 固定为 py3-none-win_amd64，因此构建必须在 Windows x64 上执行；在 ubuntu 上必然失败。
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
       - name: Build package
         run: python -m build
+
+      - name: Verify wheel platform tag
+        # 钩子失效时会产出 py3-none-any 的错标 wheel，必须在 CI 就断掉而不是发到 PyPI。
+        shell: bash
+        run: |
+          ls -l dist/
+          if ls dist/*-py3-none-any.whl >/dev/null 2>&1; then
+            echo "::error::构建出了 py3-none-any wheel，说明 scripts/hatch_build.py 钩子未生效。"
+            exit 1
+          fi
+          if ! ls dist/*-py3-none-win_amd64.whl >/dev/null 2>&1; then
+            echo "::error::未找到 py3-none-win_amd64 wheel，构建产物与平台不符。"
+            exit 1
+          fi
 
   frontend:
     runs-on: ubuntu-latest
@@ -63,6 +101,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # web/tools 下的自测脚本直接用 Node 的类型剥离跑 .ts 源码，不需要测试框架；
+      # 前三个是门禁（失败即退出码 1），跑在 npm ci 之后因为它们要用到 vite / react-dom。
+      - name: Self-check markdown-lite renderer
+        run: node tools/markdown-lite-check.mjs
+
+      - name: Self-check finding links
+        run: node tools/finding-links-check.mjs
+
+      - name: Self-check plan rationale localization
+        run: node tools/plan-rationale-check.mjs
+
+      - name: Audit i18n coverage
+        # 审计工具，恒退出 0，不构成门禁，只输出 CJK 字面量分布。
+        run: node tools/i18n-coverage.mjs
+
       - name: Type check
         run: npx tsc --noEmit
 
@@ -80,3 +133,26 @@ jobs:
             exit 1
           fi
           echo "构建产物与源码同步。"
+
+  tui:
+    # frontend/tui（OpenTUI 终端界面）此前完全不在 CI 覆盖范围内，与 web/ 分开构建与测试。
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend/tui
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Type check
+        run: bun run typecheck
+
+      - name: Run tests
+        run: bun test src

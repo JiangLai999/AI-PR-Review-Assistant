@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-270%20Passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-1497%20Passed-brightgreen.svg)]()
 [![Coverage](https://img.shields.io/badge/Coverage-87%25-green.svg)]()
 
 🌐 **[在线演示](https://jianglai999.github.io/AI-PR-Review-Assistant-web/)** | 📖 **[完整文档](docs/PROJECT_DESIGN.md)** | 💡 **[创新点](docs/INNOVATION.md)**
