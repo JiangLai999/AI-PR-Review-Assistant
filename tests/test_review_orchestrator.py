@@ -1785,3 +1785,161 @@ def test_post_processor_merges_same_location_findings_across_categories() -> Non
     assert stats["duplicates"] == 1
     assert stats["before"] == 2
     assert stats["after"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 双模型路由 / 成本三处缺陷的回归（2026-09-28）
+#
+# 这三条都由外部审计发现、主控复核后修复，共同点是"功能看起来在跑，配置/预算却
+# 静默失效"。测试都写成**判别性**的：改回旧实现就会红。
+# ---------------------------------------------------------------------------
+
+
+class RecordingModelSelector(StubModelSelector):
+    """记录每次路由评估时收到的 static_findings 数量，用来验证"只看本文件"。"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.seen_by_file: dict[str, int] = {}
+
+    def evaluate_file_complexity(self, **kwargs):
+        self.seen_by_file[str(kwargs.get("file_path"))] = len(kwargs.get("static_findings") or [])
+        return "low"
+
+
+class HighFindingForFirstFileAnalyzer(StubStaticAnalyzer):
+    """只对 src/file_0.py 报一条高危 finding，其余文件干干净净。"""
+
+    def analyze(self, file_diff: FileDiff, file_context: FileContext) -> list[Finding]:
+        if file_diff.filename != "src/file_0.py":
+            return []
+        return [
+            Finding(
+                severity="high",
+                category="security",
+                file=file_diff.filename,
+                line_start=1,
+                line_end=1,
+                title="hardcoded credential",
+                problem="problem",
+                suggestion="suggestion",
+                confidence=0.9,
+                code_snippet="pass",
+            )
+        ]
+
+
+class CountingAIClient(StubAIClient):
+    """统计 AIClient 被实例化了几次。"""
+
+    instances = 0
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        CountingAIClient.instances += 1
+
+
+class CumulativeCostAIClient(StubAIClient):
+    """像真实 ``AIClient`` 那样把 ``total_run_cost`` 做成**累计值**。"""
+
+    COST_PER_CALL = 0.25
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.total_run_cost = 0.0
+
+    async def review_code(self, system_prompt: str, user_prompt: str) -> ReviewResult:
+        result = await super().review_code(system_prompt, user_prompt)
+        self.total_run_cost += self.COST_PER_CALL
+        return result
+
+
+def test_hybrid_routes_on_current_files_findings_only(monkeypatch, tmp_path):
+    """复杂度评估/模型选择只应看到**本文件**的静态发现。
+
+    回归点：原先把全局累计 ``all_findings`` 当单文件 ``static_findings`` 传入，
+    于是第一个文件的高危发现会把后续所有文件都推向远程模型（判定随处理顺序放大）。
+    """
+    selector = RecordingModelSelector()
+    # 顺序要紧：`_patch_hybrid_orchestrator` 自己会把 ModelSelector / StaticAnalyzer
+    # 换成默认桩，所以自定义桩必须在它**之后**打上去。
+    _patch_hybrid_orchestrator(monkeypatch)
+    monkeypatch.setattr(
+        "ai_pr_review.services.hybrid_orchestrator.ModelSelector", lambda *a, **k: selector
+    )
+    monkeypatch.setattr(
+        "ai_pr_review.services.hybrid_orchestrator.StaticAnalyzer",
+        HighFindingForFirstFileAnalyzer,
+    )
+
+    asyncio.run(HybridReviewOrchestrator(_standard_config(tmp_path)).review(PR_URL))
+
+    assert selector.seen_by_file["src/file_0.py"] == 1, selector.seen_by_file
+    assert selector.seen_by_file["src/file_1.py"] == 0, selector.seen_by_file
+    assert selector.seen_by_file["src/file_2.py"] == 0, selector.seen_by_file
+    assert selector.seen_by_file["src/file_3.py"] == 0, selector.seen_by_file
+
+
+def test_hybrid_reuses_one_client_per_model(monkeypatch, tmp_path):
+    """同一 provider/model 全程只应建一个 AIClient（run 级预算的载体）。
+
+    回归点：原先在逐文件循环里 ``AIClient(selected_ai_config)``，
+    每个客户端各持一份 CostController ⇒ ``max_cost_per_run`` / 24h 预算被按文件数稀释。
+    """
+    CountingAIClient.instances = 0
+    _patch_hybrid_orchestrator(monkeypatch, ai_client=CountingAIClient)
+
+    artifacts = asyncio.run(HybridReviewOrchestrator(_standard_config(tmp_path)).review(PR_URL))
+
+    assert artifacts.run_id == "run-123"
+    assert (
+        CountingAIClient.instances == 1
+    ), f"应为 4 个文件复用 1 个客户端，实际建了 {CountingAIClient.instances} 个"
+
+
+def test_hybrid_bills_cost_incrementally_with_a_reused_client(monkeypatch, tmp_path):
+    """复用客户端后成本必须按**增量**结算，不能把累计值反复相加。
+
+    回归点：``total_run_cost`` 在真实实现里是累计值；若复用客户端却仍
+    ``total_cost += client.total_run_cost``，4 个文件会算成 0.25+0.5+0.75+1.0=2.5。
+    """
+    _patch_hybrid_orchestrator(monkeypatch, ai_client=CumulativeCostAIClient)
+
+    artifacts = asyncio.run(HybridReviewOrchestrator(_standard_config(tmp_path)).review(PR_URL))
+
+    assert artifacts.total_cost == pytest.approx(4 * CumulativeCostAIClient.COST_PER_CALL)
+
+
+def test_model_selector_reads_budget_from_preferences(tmp_path):
+    """路由用的成本上限必须来自 ``preferences.max_cost_per_review``。
+
+    回归点：``ModelSelector`` 原先读 ``self.ai_config``（``AIClientConfig`` 上根本没有
+    这个字段），``getattr(..., 0.5)`` 永远返回默认值 —— 用户配的成本上限完全不生效。
+    这里用"预算耗尽后本会走远程的 auth 路径"来判别：预算生效 → 本地，预算失效 → 远程。
+    """
+    from ai_pr_review.services.model_selector import ModelSelector
+
+    config = AppConfig.from_env()
+    config.ai_client = AIClientConfig(api_key="api-key")
+    config.preferences.max_cost_per_review = 0.01
+    selector = ModelSelector(config)
+
+    # 已花 0.02 > 上限 0.01 → 一律本地（即使文件路径命中高危模式）
+    selector.total_cost = 0.02
+    assert selector._should_use_remote({"file_path": "src/auth_service.py"}) is False
+
+    # 没花钱 → 同一 context 会走远程，证明上面的 False 确实来自预算而非路径判定
+    selector.total_cost = 0.0
+    assert selector._should_use_remote({"file_path": "src/auth_service.py"}) is True
+
+
+def test_model_selector_treats_zero_budget_as_no_remote_spend(tmp_path):
+    """``max_cost_per_review = 0`` 是合法配置：不该被 ``or 0.5`` 之类的写法吞成 0.5。"""
+    from ai_pr_review.services.model_selector import ModelSelector
+
+    config = AppConfig.from_env()
+    config.ai_client = AIClientConfig(api_key="api-key")
+    config.preferences.max_cost_per_review = 0
+    selector = ModelSelector(config)
+
+    assert selector._should_use_remote({"file_path": "src/auth_service.py"}) is False

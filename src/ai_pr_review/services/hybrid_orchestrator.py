@@ -278,9 +278,19 @@ class HybridReviewOrchestrator:
         # 阶段 4: 运行确定性规则（所有文件）
         stage("static_rules", "运行静态安全规则和 AST 分析")
         all_findings: list[Finding] = []
+        # 路由用的"本文件静态发现"分桶。此前直接把全局 all_findings 当单文件 static_findings
+        # 传给复杂度评估与模型选择，于是「第 2 个文件」起会看到前面所有文件的发现，
+        # 判定随处理顺序放大（前一个文件有高危 → 后续文件全部被判为需要远程）。
+        static_findings_by_file: dict[str, list[Finding]] = {}
         validation_counts = {"valid": 0, "needs_review": 0, "invalid": 0}
 
-        def record(finding: Finding, file_diff: FileDiff, context: FileContext) -> None:
+        def record(
+            finding: Finding,
+            file_diff: FileDiff,
+            context: FileContext,
+            *,
+            routing_bucket: dict[str, list[Finding]] | None = None,
+        ) -> None:
             """本地化 + 证据校验后收录一条 finding。
 
             与标准编排器同一条路径（`review_orchestrator.py:265-271`）：先按 `rule_id`
@@ -303,16 +313,21 @@ class HybridReviewOrchestrator:
                 )
             all_findings.append(self.finding_validator.annotate(localized, evidence))
             validation_counts[evidence.validation_status] += 1
+            if routing_bucket is not None:
+                # 只登记"属于该文件"的发现；跨文件 finding 的 file 不是本文件时不入桶，
+                # 否则同一个文件的路由依据会被别的文件污染。
+                if localized.file == file_diff.filename:
+                    routing_bucket.setdefault(file_diff.filename, []).append(all_findings[-1])
 
         for file_diff, context in file_contexts:
             # 静态规则
             for finding in self.static_analyzer.analyze(file_diff, context):
-                record(finding, file_diff, context)
+                record(finding, file_diff, context, routing_bucket=static_findings_by_file)
 
             # AST 分析
             if file_diff.filename.endswith(".py"):
                 for finding in self.ast_analyzer.analyze(file_diff, context):
-                    record(finding, file_diff, context)
+                    record(finding, file_diff, context, routing_bucket=static_findings_by_file)
 
         # 阶段 5: 智能分级审查
         stage("reviewing", f"开始智能分级审查，共 {len(file_contexts)} 个文件")
@@ -322,17 +337,26 @@ class HybridReviewOrchestrator:
         # 数量，一把坏掉的 API Key 会被读成“审查完成，发现 0 个问题”。
         failed_files: list[dict[str, str]] = []
         total_cost = 0.0
+        # 同一 (provider, model, local/remote) 只建一个 AIClient 并全程复用：
+        # 它内部的 CostController 才是 run 级预算（max_cost_per_run / 24h）的真正载体。
+        # 此前逐文件新建 ⇒ 每个客户端各持一份计数器，预算被按文件数反复"重置"，
+        # run 级上限等于失效。
+        clients: dict[tuple[str, str, bool], Any] = {}
+        # 复用客户端后 `total_run_cost` 是**累计值**，必须按差值计入本轮；
+        # 否则第 2 个文件起会把前面积累的成本再加一遍（成本越算越多）。
+        observed_client_cost: dict[tuple[str, str, bool], float] = {}
         for file_diff, context in file_contexts:
             # 每个文件开始前检查：已请求取消立即抛出，剩余文件不再发起模型调用。
             if cancel_check is not None and cancel_check():
                 raise ReviewCancelled()
 
             # 评估文件复杂度
+            file_static_findings = static_findings_by_file.get(file_diff.filename, [])
             complexity = self.model_selector.evaluate_file_complexity(
                 file_path=file_diff.filename,
                 additions=file_diff.additions,
                 deletions=file_diff.deletions,
-                static_findings=all_findings,
+                static_findings=file_static_findings,
             )
 
             # 选择模型
@@ -343,7 +367,7 @@ class HybridReviewOrchestrator:
                     "file_path": file_diff.filename,
                     "additions": file_diff.additions,
                     "deletions": file_diff.deletions,
-                    "static_findings": all_findings,
+                    "static_findings": file_static_findings,
                 },
             )
 
@@ -364,6 +388,8 @@ class HybridReviewOrchestrator:
             user_prompt = self.prompt_assembler.build_user_prompt(context)
 
             call_started_at = time.perf_counter()
+            selected_client: Any = None
+            client_key: tuple[str, str, bool] | None = None
             try:
                 selected_config = self.config.ai_client.model_provider
                 if is_local:
@@ -371,16 +397,17 @@ class HybridReviewOrchestrator:
                 selected_ai_config = self._client_config_for(
                     selected_config, model_name, is_local=is_local
                 )
-                selected_client = standard_review.AIClient(selected_ai_config)
+                client_key = (selected_config.name, model_name, is_local)
+                selected_client = clients.get(client_key)
+                if selected_client is None:
+                    selected_client = standard_review.AIClient(selected_ai_config)
+                    clients[client_key] = selected_client
                 # 在飞的调用同样要能被取消：否则按了 Esc 还得等这次调用跑完。
                 response = await standard_review.call_with_cancellation(
                     lambda: selected_client.review_code(system_prompt, user_prompt),
                     cancel_check,
                 )
                 result = response
-                call_cost = getattr(selected_client, "total_run_cost", 0.0)
-                total_cost += call_cost
-                self.model_selector.record_cost(call_cost)
             except ReviewCancelled:
                 # 取消不是"这个文件审查失败"：不报 failed，也不继续下一个文件。
                 raise
@@ -415,6 +442,16 @@ class HybridReviewOrchestrator:
                 # 计数把失败也算了进去，summary 会同时报"N 个已审查"和
                 # "N 个未能审查"，自相矛盾。
                 reviewed_count += 1
+
+            # 成本按"该客户端累计成本的增量"记账：正常返回与失败分支都要结算
+            # （失败的上游调用同样可能已经计费），取消则由上面的 `raise` 直接跳出。
+            if selected_client is not None and client_key is not None:
+                observed = float(getattr(selected_client, "total_run_cost", 0.0))
+                previous = observed_client_cost.get(client_key, 0.0)
+                call_cost = max(0.0, observed - previous)
+                observed_client_cost[client_key] = observed
+                total_cost += call_cost
+                self.model_selector.record_cost(call_cost)
 
             # 模型产出与确定性规则产出走同一条校验路径：调用点就在该文件的
             # (file_diff, context) 旁边，校验必然拿到正确的文件内容。

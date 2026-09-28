@@ -232,7 +232,18 @@ class ModelSelector:
             return True
 
         # 2. 检查成本预算
-        max_cost = getattr(self.ai_config, "max_cost_per_review", 0.5)
+        #
+        # 预算字段在 `PreferencesConfig.max_cost_per_review`（用户在设置页配的"单次审查
+        # 成本上限"），**不在** `AIClientConfig` 上。这里曾经读 `self.ai_config`
+        # （= config.ai_client），`getattr(..., 0.5)` 于是永远返回默认值 0.5 ——
+        # 用户的成本上限在路由决策里完全不生效。
+        #
+        # 注意不能用 `raw or 0.5`：`max_cost_per_review = 0` 是合法配置（表示"不允许
+        # 花任何远程费用 → 一律走本地"），被 `or` 吞掉会变成 0.5 的相反语义。
+        try:
+            max_cost = float(getattr(self.config.preferences, "max_cost_per_review", 0.5))
+        except (TypeError, ValueError):
+            max_cost = 0.5
         if self.total_cost >= max_cost:
             return False  # 预算用完，用本地
 
