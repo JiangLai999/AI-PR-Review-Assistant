@@ -155,3 +155,13 @@ def _gitignored_paths(paths: list[str]) -> set[str]:
             candidate = candidate[1:-1].replace("\\\\", "\\").replace('\\"', '"')
         ignored.add(candidate.replace("\\r", "").replace("\r", "").rstrip("/"))
     return ignored
+
+
+def test_readme_gallery_images_exist() -> None:
+    """README 图集与中文架构图不能在重命名/清理时悄悄失效。"""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    paths = re.findall(r"!\[[^\]]*\]\((docs/(?:screenshots|assets/p2)/[^)]+)\)", readme)
+    assert len(paths) == 24, "当前 README 应展示 22 张实际截图和 2 张架构/流程图"
+    assert len(set(paths)) == len(paths), "README 图集里有重复图片"
+    missing = [path for path in paths if not (ROOT / path).is_file()]
+    assert not missing, f"README 图片链接失效：{missing}"
