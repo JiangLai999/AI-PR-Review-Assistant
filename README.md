@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-1497%20Passed-brightgreen.svg)]()
+[![CI](https://github.com/JiangLai999/AI-PR-Review-Assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/JiangLai999/AI-PR-Review-Assistant/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/badge/Coverage-87%25-green.svg)]()
 
 🌐 **[在线演示](https://jianglai999.github.io/AI-PR-Review-Assistant-web/)** | 📖 **[完整文档](docs/PROJECT_DESIGN.md)** | 💡 **[创新点](docs/INNOVATION.md)**
@@ -469,24 +469,16 @@ mypy src
 
 ### 测试覆盖率
 
-以下测试数按 `pytest --collect-only` 统计，覆盖率为 `pytest --cov` 实测结果。
+下表是 2026-09-28 在本机按第二列命令实测的结果；**CI 是最终口径**，徽章与 CI 输出为准。
 
-| 模块 | 测试数 | 说明 |
-|------|--------|------|
-| CLI | 54 | 命令入口、报告渲染、聊天斜杠命令 |
-| PR Fetcher | 48 | 分页、限流、错误分类 |
-| Filter Pipeline | 14 | 黑白名单、过滤原因 |
-| Context Builder | 9 | tree-sitter / 正则 / 降级三态 |
-| Python AST Analyzer | 18 | 可变默认参数、裸异常、资源泄漏等 |
-| Cross-file Interface | 17 | 符号索引、签名对比、外部引用 |
-| Benchmark | 25 | 指标计算、样例库、回归保护 |
-| Web Server | 23 | HTTP 接口、错误码、反馈写入 |
-| PR Fetcher / AI Client | 12 | 重试、成本、JSON 解析 |
-| Prompt Assembler | 6 | 双层 prompt、schema |
-| Post Processor | 5 | 置信度、去重、排序 |
-| Cost Controller | 6 | 单次与 24 小时预算 |
-| Result Store | 6 | 持久化、元数据、反馈 |
-| Report Renderer | 6 | 四种输出格式 |
-| Model Providers | 8 | 供应商适配 |
-| Review Orchestrator | 2 | 并发、空过滤摘要 |
-| **总计** | **270** | 全量通过，覆盖率 87% |
+| 层 | 命令 | 实测结果 |
+|----|------|----------|
+| Python 全量 | `pytest`（默认带 `--cov`） | **1514 passed + 1 xfailed**（1515 collected），语句覆盖率 **87%**（12,947 statements / 1,677 miss） |
+| 类型检查 | `mypy src` | clean（89 source files） |
+| 格式门禁 | `black --check src tests` / `isort --check-only src tests`（pin `24.10.0` / `5.13.2`） | 138 files clean |
+| TUI（OpenTUI） | `bun test src` | 222 pass / 0 fail（13 files / 1101 断言） |
+| Web 自测门禁 | `node tools/markdown-lite-check.mjs` 等三道 | 118 断言 ALL PASS（53 + 45 + 20） |
+| 文档 / 官网守卫 | `pytest tests/test_doc_links.py tests/test_website_docs.py` | 6 passed + 1 xfailed |
+
+> 历史上这里有一张按模块手写的用例数表（合计 270），它早已与实际套件脱节、容易误导，已删除；
+> 需要更细的口径请直接看 CI 里 `pytest` 的输出与 `pytest --cov` 的逐文件表。

@@ -22,6 +22,9 @@ __pycache__/
 .pytest_mimo/
 .pytest_codex/
 .pytest_opencode/
+# 兜底：任何 agent / 人工自建的 TEMP 目录（.pytest_c1/、.pytest_tui/ …）都不入库。
+# 具体名单会随 agent 增删而漂移，所以这里按前缀收口。
+.pytest_*/
 # Agent bus run logs (belt-and-braces: the bus has its own .gitignore too)
 .agent-bus/runs/
 .coverage
@@ -41,6 +44,12 @@ env/
 *.db
 *.sqlite
 *.sqlite3
+
+# 工具缓存（mypy / ruff / MiMo CLI 各自会在目录里写 .gitignore 自忽略，
+# 但那份文件一旦被清理，缓存就会变成未跟踪文件，故在仓库层再钉一次）
+.mypy_cache/
+.ruff_cache/
+.mimocode/
 
 # Frontend toolchain (web/)
 # 注意：src/ai_pr_review/web_static/ 是构建产物，但需要提交——
