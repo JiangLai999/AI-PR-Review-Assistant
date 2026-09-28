@@ -1,13 +1,13 @@
 # AI PR Review Assistant
 
-> AI 驱动的 GitHub Pull Request 代码审查 CLI 工具
+> 证据优先的 GitHub Pull Request 智能审查工作台 · CLI / OpenTUI / 本地 Web
 
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/JiangLai999/AI-PR-Review-Assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/JiangLai999/AI-PR-Review-Assistant/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/badge/Coverage-87%25-green.svg)]()
 
-🌐 **[在线演示](https://jianglai999.github.io/AI-PR-Review-Assistant-web/)** | 📖 **[完整文档](docs/PROJECT_DESIGN.md)** | 💡 **[创新点](docs/INNOVATION.md)**
+🌐 **[项目官网（静态展示）](https://jianglai999.github.io/AI-PR-Review-Assistant-web/)** | 📖 **[完整文档](docs/PROJECT_DESIGN.md)** | 💡 **[创新点](docs/INNOVATION.md)**
 
 🎬 **视频演示：** [抖音](https://v.douyin.com/wBSy8yxLcEg/) | [哔哩哔哩](https://www.bilibili.com/video/BV1v9VZ6bE2G/?share_source=copy_web&vd_source=96df5919ae9bf8f3dc432bc3085a328f)
 
@@ -31,19 +31,93 @@ AI PR Review Assistant 是一个基于 AI 的代码审查工具，通过智能�
 
 ---
 
+## 零密钥体验（推荐先试）
+
+```bash
+pr-review doctor
+pr-review demo --case sql-injection   # 内置样例：过滤、规划、静态规则、证据校验
+pr-review serve                      # 本地启动 Web 工作台
+```
+
+在浏览器打开 `http://127.0.0.1:8787/`，于概览页运行离线 Demo。**这一步不需要 GitHub Token 或模型 API Key**；离线 Demo 不调用模型或 GitHub，也不会写入正式审查历史。上方官网链接只是静态展示站点，不是托管的审查后端。
+
+要审查真实 PR，请先用下方配置助手填入**自己的** GitHub 与模型凭据，再输入 PR URL；CLI 与 Web 是同一审查能力的两种入口，不必对同一个 PR 重复审查。
+
+---
+
 ## 项目截图
 
-### 配置向导
+以下是实际运行界面截图（共 22 张；示例 PR 与审查记录仅用于展示交互，不代表基准准确率）。点击图片可查看原始分辨率。Web 设置页中的凭据局部信息已遮盖。
 
-![配置向导](docs/screenshots/screenshot-config.png)
+### 本地 Web 工作台
 
-### PR 审查输出
+| 概览与演示入口 | 审查工作台 |
+|:---:|:---:|
+| [![Web 工作台概览](docs/screenshots/web-overview.png)](docs/screenshots/web-overview.png) | [![Web 审查工作台](docs/screenshots/web-review-workbench.png)](docs/screenshots/web-review-workbench.png) |
 
-![PR 审查](docs/screenshots/screenshot-review.png)
+<details>
+<summary>展开其余 Web 工作台截图（报告 / Finding / 历史 / 追问 / 设置 / 准确率 / 接口）</summary>
 
-### 聊天工作区
+#### 审查报告与 Finding
 
-![聊天工作区](docs/screenshots/screenshot-chat.png)
+![Web 审查报告](docs/screenshots/web-review-report.png)
+
+![Web Finding 详情](docs/screenshots/web-finding-detail.png)
+
+#### 历史、追问与统计
+
+![Web 历史审查列表](docs/screenshots/web-history.png)
+
+![Web 历史审查报告](docs/screenshots/web-history-report.png)
+
+![Web 历史审查追问](docs/screenshots/web-review-followup.png)
+
+![Web 准确率页面](docs/screenshots/web-benchmark.png)
+
+#### 配置与接口
+
+![Web 设置页（凭据局部信息已遮盖）](docs/screenshots/web-settings-redacted.png)
+
+![Web 接口页面](docs/screenshots/web-api.png)
+
+</details>
+
+### OpenTUI 终端工作台
+
+| 启动首页 | 审查工作台 |
+|:---:|:---:|
+| [![OpenTUI 首页](docs/screenshots/tui-home.jpg)](docs/screenshots/tui-home.jpg) | [![OpenTUI 审查工作台](docs/screenshots/tui-review-workbench.jpg)](docs/screenshots/tui-review-workbench.jpg) |
+
+<details>
+<summary>展开其余 OpenTUI 截图（会话 / Finding / Chat / 设置 / 发布评论）</summary>
+
+#### 会话与审查发现
+
+![OpenTUI 会话列表](docs/screenshots/tui-sessions.jpg)
+
+![OpenTUI Findings 列表](docs/screenshots/tui-findings-list.jpg)
+
+![OpenTUI Finding 详情](docs/screenshots/tui-finding-detail.jpg)
+
+#### Chat 与模型配置
+
+![OpenTUI Chat 对话](docs/screenshots/tui-chat.jpg)
+
+![OpenTUI 审查报告对话分析](docs/screenshots/tui-review-chat.jpg)
+
+![OpenTUI 配置运行模式](docs/screenshots/tui-setup-mode.jpg)
+
+![OpenTUI 设置确认页](docs/screenshots/tui-setup-summary.jpg)
+
+#### GitHub 发布
+
+![OpenTUI 发布评论预览](docs/screenshots/tui-publish-preview.jpg)
+
+![OpenTUI 发布成功](docs/screenshots/tui-publish-success.jpg)
+
+![GitHub 评论展示](docs/screenshots/github-review-comment.png)
+
+</details>
 
 ---
 
@@ -140,39 +214,36 @@ pr-review serve
 
 ---
 
-## 参赛版架构与审查流水线
+## 系统架构与审查流水线
 
-### 项目架构图
+CLI、OpenTUI 与本地 Web 工作台共用 Python 审查内核；项目官网是**静态展示入口**，不是托管的审查服务。下图为当前架构的可视化示意。
 
-![AI PR Review Assistant 项目架构图](docs/assets/p2/project-architecture.png)
+### 系统架构
 
-### 审查流水线图
+![AI PR Review Assistant 当前系统架构：三种本地入口、共享审查内核、模型与规则分析、证据校验和结果存储](docs/assets/p2/project-architecture.png)
 
-![AI PR Review Assistant 审查流水线图](docs/assets/p2/review-pipeline.png)
+### PR 审查流程
 
-## 审查流水线
+![PR 审查流程：获取变更、过滤、上下文、规划、规则与模型分析、证据校验、报告和历史](docs/assets/p2/review-pipeline.png)
 
+> 两张图使用 `gpt-image-2.5-sunburst` 生成，依据当前源码整理；具体步骤、边界与实现以源码和下方文字流程为准。
+
+<details>
+<summary>展开精确流程（文字版）</summary>
+
+```text
+真实 PR：GitHub PR URL
+  → 获取变更 → 文件过滤 → 构建上下文 → 生成审查计划
+  → 静态规则 / AST / 跨文件分析  ┐
+  → AI 模型审查（可配置本地/云端、成本预算）┘ → 汇总 Findings
+  → 文件 / 行号 / 代码片段证据校验 → 后处理
+  → 终端、Markdown、JSON 或 GitHub 评论；SQLite 历史与人工反馈
+
+离线 Demo：内置样例 → 文件过滤 → 审查规划 → 静态规则 → 证据校验
+  （不调用 GitHub、不调用模型、不写入正式审查历史）
 ```
-PR URL
-  │
-  ▼
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│  PR Fetcher  │───▶│    Filter    │───▶│   Context    │
-│  获取 PR 数据 │    │  智能过滤    │    │  构建上下文  │
-└──────────────┘    └──────────────┘    └──────────────┘
-                                               │
-                                               ▼
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│    Post      │◀───│  AI Client   │◀───│   Prompt     │
-│  Processor   │    │  调用 AI 模型 │    │  组装 Prompt │
-└──────────────┘    └──────────────┘    └──────────────┘
-       │
-       ▼
-┌──────────────┐    ┌──────────────┐
-│ Result Store │    │   Report     │
-│  持久化存储   │    │  渲染报告    │
-└──────────────┘    └──────────────┘
-```
+
+</details>
 
 ---
 
