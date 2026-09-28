@@ -199,7 +199,7 @@ class AIClient:
     ) -> tuple[int, dict[str, Any], dict[str, Any]]:
         """按档位算出 (本轮 max_tokens, 直传 kwargs, extra_params)。
 
-        规则（docs/review-reasoning-assessment.md §4.3 第二步）：
+        规则（docs/DEV_RECORD.md §4.3 第二步）：
 
         - ``off``（默认）/ ``auto`` → 不注入、不预留：**完全维持现状**——deepseek 仍由
           policy 追加显式 `thinking: {"type": "disabled"}`（`review_policy.py`），
@@ -255,7 +255,7 @@ class AIClient:
         """把思考预留加进 review 的输出额度，并受模型规格 `max_output` 封顶。
 
         与 chat 的 `_chat_max_tokens` 同一思路：回答与思考**共用同一份 completion 额度**
-        （docs/reasoning-effort-probe.md 的教训是预算是真的会顶满），因此总额度取
+        （docs/DEV_RECORD.md 的教训是预算是真的会顶满），因此总额度取
         `min(基础额度 + 预留, max_output)`；`max_output` 的来源见 `_review_max_output`。
         """
         requested = base_max_tokens + max(0, reasoning_budget)

@@ -32,12 +32,12 @@ POST /api/chat  { "run_id": "<可选>", "text": "<问题>" }
    （打开某条报告、`report.run_id` 存在时）各渲染一个 `<AskPanel runId=... />`，放在你 Phase 1 那个
    `ReportActions` 附近，保持视觉一致。
 5. `web/src/styles/components.css`：补 `ask-panel` 相关样式（沿用 design tokens；危险/警告色用既有语义变量）。
-6. `docs/claude-web-ask-panel.md`：组件契约、状态机、错误映射表、改动点 file:line、验证与未决项。
+6. `docs/DEV_RECORD.md`：组件契约、状态机、错误映射表、改动点 file:line、验证与未决项。
 
 ## 约束
 - 只写：`web/src/components/AskPanel.tsx`、`web/src/api/types.ts`、`web/src/api/client.ts`、
   `web/src/pages/ReviewPage.tsx`、`web/src/pages/HistoryPage.tsx`、`web/src/styles/components.css`、
-  `docs/claude-web-ask-panel.md`；
+  `docs/DEV_RECORD.md`；
 - 禁止改 `src/ai_pr_review/**`；禁止 git；禁止读取/输出凭据；不新增第三方依赖；
 - **禁止 `npm run build`**（主控统一重建）；允许 `npm run typecheck`。
 

@@ -158,7 +158,7 @@ test("compact command result keeps token counts and failure emphasis fields", ()
 })
 
 // ---------------------------------------------------------------------
-// B2/B3 模型规格契约（docs/b2b3-wiring-design.md §2.2/§2.6）
+// B2/B3 模型规格契约（docs/DEV_RECORD.md §2.2/§2.6）
 // ---------------------------------------------------------------------
 
 test("model spec block parses the full §2.2 shape including slots", () => {
@@ -255,7 +255,7 @@ test("catalog refresh result extracts the model block", () => {
 })
 
 // ---------------------------------------------------------------------
-// review 思考档位（docs/mimo-review-effort-ui.md）
+// review 思考档位（docs/DEV_RECORD.md）
 // ---------------------------------------------------------------------
 
 test("review reasoning options parses value, options, state and reason", () => {
@@ -374,7 +374,7 @@ test("session rename/delete/create parse their contract fields", () => {
   expect(renamed?.id).toBe("s1")
   expect(renamed?.title).toBe("新标题")
   // 后端契约返回被删会话 **id（string）**；早期实现用 boolean，两者都要放行
-  // （docs/claude-sessions-compaction.md §协议：deleted=<id>）。
+  // （docs/DEV_RECORD.md §协议：deleted=<id>）。
   const deletedById = parseSessionDeleteResult({ deleted: "s1", next: "s2" })
   expect(deletedById?.deleted).toBe("s1")
   expect(deletedById?.next).toBe("s2")

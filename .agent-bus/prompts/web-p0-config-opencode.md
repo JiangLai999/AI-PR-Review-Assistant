@@ -1,5 +1,5 @@
 你是本项目的协作 agent（opencode）。这是**实现任务**（写代码）：修掉你在
-`docs/web-workbench-proposal-opencode.md` §3.1/§3.2/§3.3 里**已实测复现**的三个配置写入缺陷，
+`docs/DEV_RECORD.md` §3.1/§3.2/§3.3 里**已实测复现**的三个配置写入缺陷，
 让 Web 设置页"保存成功"与磁盘真实一致。
 
 ## 已复现的三个缺陷（你的探针结论，作为验收基线）
@@ -28,10 +28,10 @@
    - `test_ui_language_and_review_effort_persist_and_read_back`
    - `test_local_only_does_not_override_explicit_base_url_and_model`
    - （可再加：`test_blank_api_key_keeps_existing`）
-3. `docs/opencode-web-config-fix.md`：缺陷 → 根因（file:line）→ 修复 → 用例 → 验证数字 → 未决项。
+3. `docs/DEV_RECORD.md`：缺陷 → 根因（file:line）→ 修复 → 用例 → 验证数字 → 未决项。
 
 ## 约束
-- 只写 write_scope：`src/ai_pr_review/web_config.py`、`tests/test_web_config_writes.py`、`docs/opencode-web-config-fix.md`
+- 只写 write_scope：`src/ai_pr_review/web_config.py`、`tests/test_web_config_writes.py`、`docs/DEV_RECORD.md`
   （若确需动 `src/ai_pr_review/config.py`，先确认改动最小且不改变 CLI 语义，并在文档与报告里显式声明）；
 - 禁止改 `web_server.py` / `web_config.py` 之外的 Web 层、禁止改 `web/src/**`（另一 agent 的）、禁止 git 操作；
 - 禁止读取/输出任何凭据；不确定写"未确认"。

@@ -1,6 +1,6 @@
 """回归：Web 设置页配置写入的三个静默缺陷。
 
-对应 docs/opencode-web-config-fix.md：
+对应 docs/DEV_RECORD.md：
 
 1. 白名单外的键被静默丢弃（``ok=True, changed=[]``）；
 2. ``hybrid_strategy=local_only`` 时提交的 ``base_url``/``model`` 被 Ollama 值覆盖；

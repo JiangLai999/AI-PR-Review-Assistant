@@ -11,7 +11,7 @@
  *      `|---|---|`；
  *   D. 渲染宽度受限于给定 width（120x30 下不溢出）。
  *
- * 追加（C1/C2，docs/mimo-chat-render-c.md）：
+ * 追加（C1/C2，docs/DEV_RECORD.md）：
  *
  *   E. 【C1 表格分档】同一张 3 列表格在 120x30（窄档 <100 列 →
  *      content/cellPadding 0）与 209x51（宽档 ≥100 列 → full/cellPadding 0，
@@ -19,21 +19,21 @@
  *   F. 【C2 代码折叠】30 行代码块默认只渲染前 15 行 + `▸ 展开（共 30 行）`，
  *      不出现第 16 行内容；Alt+L 切开后全文可见并给出 `▾ 收起`；短块不变。
  *
- * 追加（C3 批次，docs/mimo-chat-render-c3.md）：
+ * 追加（C3 批次，docs/DEV_RECORD.md）：
  *
  *   G. 【角标可点击】折叠角标是独立 `<text onMouseDown>` 元素（方案 A）；
  *      对 onMouseDown 处理函数做行为断言：调用后折叠态翻转、帧内容切换；
  *   H. 【用户消息样式】120×30 与 209×51 帧都出现 `›` 前缀 + 左色条 + 深色底；
  *   I. 【宽档表格紧凑】209×51 帧数据行相邻、行间无空行。
  *
- * 追加（mimo-message-metrics，docs/mimo-message-metrics.md）：
+ * 追加（mimo-message-metrics，docs/DEV_RECORD.md）：
  *
  *   K. 【消息指标行】120×30 与 209×51 帧出现完整指标行
  *      `· deepseek-flash · 1.6s · 61 字 · 14:32`（MessageMetricsLine）；
  *   L. 【思考区可展开】header 绑 onMouseDown：行为断言点击展开/折叠；
  *      Alt+T 键盘循环切换；折叠态 `▸ 思考（N 行）` 行数标注正确。
  *
- * 追加（mimo-sessions-ui，docs/mimo-sessions-ui.md）：
+ * 追加（mimo-sessions-ui，docs/DEV_RECORD.md）：
  *
  *   N. 【会话 UI】会话弹窗 120×30 / 209×51、重命名态、空态、
  *      状态栏会话名（≥100 列显示 / <100 列隐藏）、pressure=high 黄段与提示。
@@ -724,7 +724,7 @@ check(tipsFrame.includes("/new"), "A4 tips：提到 /new")
 check(tipsFrame.toLowerCase().includes("context near limit"), "A4 tips：en 文案可见")
 
 // ---------------------------------------------------------------------
-// N. 【会话 UI · docs/mimo-sessions-ui.md】会话弹窗 / 重命名态 / 空态 /
+// N. 【会话 UI · docs/DEV_RECORD.md】会话弹窗 / 重命名态 / 空态 /
 //    状态栏会话名 / pressure=high 黄段与提示
 // ---------------------------------------------------------------------
 

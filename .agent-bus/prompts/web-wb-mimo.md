@@ -13,7 +13,7 @@
   `components/` 含 `HeroKnot`（Hero 视觉）、`ParticleBackground`(21K)（粒子背景）；`styles/components.css` 57K。
 - 后端：`web_server.py`（手写路由 + SSE + 静态托管）、`web_jobs.py`（线程 + queue，取消在文件边界生效）、`web_config.py`。
 - CLI 侧已有能力：`pr-review chat`（TUI 会话聊天）、`jsonl_server.py` 的 `chat.send` / `session.*` / `/context`（把审查 run 绑定进对话）、
-  仓库结构注入（`_repo_files_for_chat` + PR 变更清单 + 目录树，见 `docs/claude-repo-structure-context.md`）、
+  仓库结构注入（`_repo_files_for_chat` + PR 变更清单 + 目录树，见 `docs/DEV_RECORD.md`）、
   思考档位（`/think`）、压缩（`/compact`）。
 - 测试：`tests/test_web_server.py`（13 个测试类）、`tests/test_jsonl_backend.py`；`web/.shots/` 40+ 张多视口截图；
   `web/tools/*.mjs` 9 个 Playwright 脚本（截图/可见性审计/布局探测/参考站对照）。
@@ -39,7 +39,7 @@
 2. 给出改进清单（每条：现象 → 改法 → 影响文件 → 验证方式），并按"性价比"排序。
 
 ## 交付物（只写这一个文件；其它文件一律只读）
-`docs/web-workbench-proposal-mimo.md`，包含：
+`docs/DEV_RECORD.md`，包含：
 1. **现状核对**（file:line）＋**主控审计遗漏项**（若有）
 2. **A 方案**（接口契约/上下文装配/降级/测试点）＋**B 改进清单**（现象→改法→文件→验证）
 3. **风险与坑**（来自代码证据：jsonl_server 的进程内状态、SSE 与线程模型、token 预算等）
@@ -47,7 +47,7 @@
 5. **验收方式**：可执行命令与断言
 
 ## 约束
-- 只写 `docs/web-workbench-proposal-mimo.md`；**禁止修改任何源码、配置、其它文档**；禁止 git 操作；
+- 只写 `docs/DEV_RECORD.md`；**禁止修改任何源码、配置、其它文档**；禁止 git 操作；
 - 禁止读取/输出任何凭据；结论必须给 `文件:行号`；不确定写"未确认"。
 
 完成后按总线报告：

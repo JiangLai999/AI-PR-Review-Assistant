@@ -175,7 +175,7 @@ function preferencePayload(
  * 只读响应体的 `error` 键，而本端点 `ok:false` 的 400 body 是
  * `{ok, changed, message, save_key_used, config}`（`src/ai_pr_review/web_server.py:409-419`），
  * 走统一通道会把 `message` 丢掉、界面只剩 "HTTP 400"。client.ts 不在本任务
- * write_scope 内，故就地适配一处（见 docs/claude-web-settings-parity.md 未决项）。
+ * write_scope 内，故就地适配一处（见 docs/DEV_RECORD.md 未决项）。
  */
 async function postConfig(payload: Record<string, unknown>): Promise<SaveConfigResponse> {
   let response: Response
@@ -642,7 +642,7 @@ export function SettingsPage({ onSaved }: { onSaved?: () => void }) {
           />
           <div className="card-body stack">
             {/* 配置隔离说明 + 「从 CLI 配置导入」：紧贴上方那个路径 Chip，
-                说明的就是它指向的那份文件（docs/config-isolation.md）。 */}
+                说明的就是它指向的那份文件（docs/DEV_RECORD.md）。 */}
             <div className="stack" style={{ gap: 'var(--ds-space-2)' }}>
               <p className="muted" style={{ fontSize: 'var(--ds-text-md)', lineHeight: 1.65 }}>
                 {t('settings.configPath.isolation', { file: configFileName })}

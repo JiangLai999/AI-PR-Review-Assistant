@@ -1,6 +1,6 @@
 """review 思考语义的 **wire 级**加锁（第一步加锁 → 第二步按新语义修订）。
 
-背景与结论见 `docs/review-reasoning-assessment.md`：
+背景与结论见 `docs/DEV_RECORD.md`：
 
 - 默认档 ``off``（= 现状）：review 对支持关闭思考的供应商（deepseek）是**显式关闭**——
   `structured_output=True` 会经 `structured_review_params()` 追加
@@ -92,7 +92,7 @@ async def test_deepseek_review_wire_disables_thinking(monkeypatch: pytest.Monkey
     assert result.summary == "ok"
     # a. 结构化输出（审查必须是 JSON）
     assert captured["response_format"] == {"type": "json_object"}
-    # b. 现状语义：显式关闭思考（docs/review-reasoning-assessment.md §0.1）
+    # b. 现状语义：显式关闭思考（docs/DEV_RECORD.md §0.1）
     assert captured["thinking"] == {"type": "disabled"}
     # c. 默认档 off 不注入 effort——"缺省即现状"是第二步的核心约束
     assert "reasoning_effort" not in captured
@@ -165,7 +165,7 @@ async def test_patch_generator_path_wire_snapshot(monkeypatch: pytest.MonkeyPatc
 
     ⚠️ 这是**现状快照，不是期望语义**：同一轮 review 里主路径显式关思考、
     建议 patch 生成路径（`structured_output=False`）却可能让思考型模型**默认开启**。
-    该差异已记入 `docs/review-reasoning-assessment.md` §1.2 的风险项；
+    该差异已记入 `docs/DEV_RECORD.md` §1.2 的风险项；
     若产品决定统一，请先更新本快照再改产品代码。
     """
     captured = _capture_review_body(monkeypatch)
@@ -204,7 +204,7 @@ async def test_deepseek_review_wire_enables_thinking_for_the_three_levels(
 ) -> None:
     """`low/high/max`：**同时**覆盖 policy 的 disabled 并传 effort，预算随档位增加。
 
-    真机依据（docs/review-reasoning-assessment.md §0.2）：只传 `reasoning_effort` 而
+    真机依据（docs/DEV_RECORD.md §0.2）：只传 `reasoning_effort` 而
     `thinking` 仍是 disabled 时 reasoning 恒为 0 字符，所以两个参数必须一起出现。
     """
     captured = _capture_review_body(monkeypatch)

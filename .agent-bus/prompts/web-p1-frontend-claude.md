@@ -2,7 +2,7 @@
 发布审查评论到 GitHub + 报告导出/复制的 UI。后端由主控（codex）**并行**实现，接口契约下面已冻结，你按它写前端即可。
 
 ## 背景（已定稿）
-主控已批准你的提案 `docs/web-workbench-proposal-claude.md` 的 Phase 1 设计（①发布 + ②导出，成对做）。
+主控已批准你的提案 `docs/DEV_RECORD.md` 的 Phase 1 设计（①发布 + ②导出，成对做）。
 Phase 0 的跨站守卫由主控在 `web_server.py` 落地（写端点要求 `Content-Type: application/json` +
 同源；否则 415）。你**不要**改后端。
 
@@ -44,7 +44,7 @@ Phase 0 的跨站守卫由主控在 `web_server.py` 落地（写端点要求 `Co
    计划模式结果不渲染或渲染禁用态（二选一，说明理由）。
 5. `web/src/pages/HistoryPage.tsx`：打开某条历史报告（`/api/report` 成功后）渲染同一个 `<ReportActions runId=... />`。
 6. `web/src/styles/components.css`：给上述组件补样式（沿用现有 design tokens，别写死颜色；危险动作按钮用现有 danger 语义类）。
-7. `docs/claude-web-report-actions.md`：改动点（file:line）、五态与错误映射表、验证命令与数字、未决项。
+7. `docs/DEV_RECORD.md`：改动点（file:line）、五态与错误映射表、验证命令与数字、未决项。
 
 ## 约束
 - **只写 write_scope 里的文件**；禁止改 `src/ai_pr_review/**`（后端是主控的）、禁止改 `ApiPage.tsx`（另一 agent 的）、禁止 git 操作；

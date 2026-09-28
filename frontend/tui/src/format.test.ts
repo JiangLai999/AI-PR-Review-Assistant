@@ -402,7 +402,7 @@ test("splitFoldableMarkdown handles leading and consecutive foldable blocks", ()
 })
 
 // ---------------------------------------------------------------------
-// review 思考档位（docs/mimo-review-effort-ui.md）
+// review 思考档位（docs/DEV_RECORD.md）
 // ---------------------------------------------------------------------
 
 test("review effort cost hint shows baseline for off and measured multiplier for thinking levels", () => {
@@ -432,7 +432,7 @@ test("review effort bilingual label splits on the backend's zh / en separator", 
 })
 
 // ---------------------------------------------------------------------
-// 小 max_output × high/max 封顶提示（docs/mimo-review-budget-hint.md）
+// 小 max_output × high/max 封顶提示（docs/DEV_RECORD.md）
 // ---------------------------------------------------------------------
 
 test("review budget cap hint triggers only on high/max with a small max_output", () => {
@@ -497,7 +497,7 @@ test("reviewSlotMaxOutput reads the review slot's max_output from model spec slo
 })
 
 // ---------------------------------------------------------------------
-// 会话 UI（docs/mimo-sessions-ui.md）：相对时间 / 标题截断 / 列表行 / 压力
+// 会话 UI（docs/DEV_RECORD.md）：相对时间 / 标题截断 / 列表行 / 压力
 // ---------------------------------------------------------------------
 
 test("formatRelativeTime renders relative buckets and never throws", () => {

@@ -168,12 +168,12 @@ intuitively means this tool's core record; session-level management lives in `/s
 不带参数时只回显当前档位。
 
 **为什么本地 Ollama 上档位是灰的**：本地走 OpenAI 兼容端点，端点会**收下** `reasoning_effort` 但**忽略**它。
-`docs/model-reasoning-probe.md` 的结论是：
+`docs/DEV_RECORD.md` 的结论是：
 
 > **端点收下参数 ≠ 参数生效**：只有 reasoning 长度（或行为）出现可复现的、单调的差异才算生效；否则一律按"忽略"处理。
 
 该文档对本机 Ollama `qwen3.5:4b` 的**非流式**探测判定是 `NOT-SUPPORTED / none`；后续产品链路
-的**流式**实测（`docs/chat-live-verification.md`）发现 `think=false` 在流式下**生效**。据此产品
+的**流式**实测（`docs/DEV_RECORD.md`）发现 `think=false` 在流式下**生效**。据此产品
 做出明确决策（2026-09-26 用户裁定）：**本地固定快速模式、不展示思考**，档位**置灰**并如实说明
 （`state = "unsupported"`，文案：「本地模型固定使用快速模式（不展示思考），档位不可调；
 需要思考强度请切换云端模型」），而不是假装可以切换。
@@ -184,8 +184,8 @@ intuitively means this tool's core record; session-level management lives in `/s
 persisted to the config). Without arguments it only reports the current level.
 
 **Why the levels are greyed out on local Ollama**: the probe below classified the local model as
-`NOT-SUPPORTED / none` on the **non-streaming** path (`docs/model-reasoning-probe.md`), while a later
-**streaming** measurement (`docs/chat-live-verification.md`) showed `think=false` *does* take effect
+`NOT-SUPPORTED / none` on the **non-streaming** path (`docs/DEV_RECORD.md`), while a later
+**streaming** measurement (`docs/DEV_RECORD.md`) showed `think=false` *does* take effect
 on the wire. The product therefore made an explicit decision (user ruling, 2026-09-26): **local chat
 is fixed to fast mode and never shows thinking**, with the levels greyed out and stated honestly:
 
@@ -220,7 +220,7 @@ review 与 chat 是**两个独立的档位**（`preferences.review_reasoning_eff
   `preferences.review_reasoning_effort`，或走配置助手的后端字段
   （`config.options.review_reasoning_effort` / `config.setup`；**TUI 界面尚未接入**，另行排期）。
 - **成本**：开启档位会给审查的输出额度加思考预留（`low/high/max` → **+4000/+8000/+12000**
-  tokens，仍受模型规格的 `max_output` 封顶）。真机实测（`docs/review-reasoning-assessment.md` §2）：
+  tokens，仍受模型规格的 `max_output` 封顶）。真机实测（`docs/DEV_RECORD.md` §2）：
   `max` 档约 **3.6× 输出 tokens、2.9× 单文件耗时**；按逐文件 × 并发 × 文件数放大，请按需选择。
 - **本地与不支持思考参数的供应商**：本地 `ollama`/`local` 固定快速模式，档位**不生效**；
   官方文档没有思考参数的供应商（如 baichuan）、未收录的供应商，以及**配成 Anthropic 协议

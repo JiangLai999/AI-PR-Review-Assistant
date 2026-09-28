@@ -59,7 +59,7 @@ from ai_pr_review.services.model_catalog import (
 )
 from ai_pr_review.services.model_providers.factory import create_model_provider
 
-# 思考参数规格表（数据源 docs/reasoning-specs-research.md）：`_chat` 按供应商注入、
+# 思考参数规格表（数据源 docs/DEV_RECORD.md）：`_chat` 按供应商注入、
 # `/think` 按三态（set/transparent/unsupported）回显都用它，两份逻辑不再各写一套映射。
 from ai_pr_review.services.reasoning_specs import (
     STATE_SET,
@@ -149,7 +149,7 @@ REVIEW_ROUTING_REASONS: dict[str, dict[str, str]] = {
 }
 
 
-# CHAT/REVIEW 双槽路由（docs/dual-model-roles-plan.md §3、§5.4）。
+# CHAT/REVIEW 双槽路由（docs/DEV_RECORD.md §3、§5.4）。
 # 槽位是**角色名**，不是"provider 一定在远端"的断言：`remote` 槽永远是持久化的
 # 主 Provider（可能是 Ollama），`local` 槽永远是 `local_provider`。
 ROUTE_SLOT_LABELS: dict[str, str] = {"remote": "云端", "local": "本地", "hybrid": "混合"}
@@ -174,13 +174,13 @@ REPO_CONTEXT_LABELS: dict[str, str] = {
     "tests": "仅测试文件 / Tests only",
     "tests+imports": "测试与依赖 / Tests + imports",
 }
-# L2 符号定位开关（preferences.symbol_locate，docs/mimo-l2-symbol-locator.md）：取值是布尔，
+# L2 符号定位开关（preferences.symbol_locate，docs/DEV_RECORD.md）：取值是布尔，
 # 顺序固定为 开启 → 关闭。与 repo_context 同惯例——后端给 value + label，TUI 不硬编码文案。
 SYMBOL_LOCATE_CHOICES: tuple[tuple[bool, str], ...] = (
     (True, "开启 / On"),
     (False, "关闭 / Off"),
 )
-# review 思考档位（preferences.review_reasoning_effort，docs/review-reasoning-assessment.md
+# review 思考档位（preferences.review_reasoning_effort，docs/DEV_RECORD.md
 # §4.3 第二步）的展示文案。取值本身由 config.REVIEW_REASONING_EFFORTS 拥有（= chat 词表，
 # 默认 off），这里只补 label + 成本提示——同 repo_context，TUI 不硬编码中文。
 # `usage` 那一句是**真机实测**的代价（该文档 §0.3）：max 档约 3.6× completion tokens、
@@ -198,7 +198,7 @@ REVIEW_REASONING_LABELS: dict[str, str] = {
 # `tests/test_jsonl_backend.py::test_symbol_locate_vocabulary_matches_the_config_layer` 钉住。
 SYMBOL_LOCATE_TRUE_VALUES: frozenset[str] = frozenset({"true", "1", "yes", "on"})
 SYMBOL_LOCATE_FALSE_VALUES: frozenset[str] = frozenset({"false", "0", "no", "off"})
-# `config.options.model.source` 的取值口径（docs/b2b3-wiring-design.md §2.8）。
+# `config.options.model.source` 的取值口径（docs/DEV_RECORD.md §2.8）。
 # 判定算法唯一真源在 `config.resolve_model_spec`，这里只把取值表钉住供 TUI 对照；
 # MODEL_SPEC_SOURCES 直接复用 config 的那一份，两处不会各存一套后漂移。
 CATALOG_SOURCES: frozenset[str] = frozenset({"models.dev", "cache", "builtin"})
@@ -309,13 +309,13 @@ def _budget_literal(value: Any) -> int | None:
     return number if low <= number <= high else None
 
 
-# 用户消息里提到的仓库文件（Review-Aware Chat 的按需读源码，docs/claude-chat-repo-files.md）。
+# 用户消息里提到的仓库文件（Review-Aware Chat 的按需读源码，docs/DEV_RECORD.md）。
 # 上限按**字符**计：8000 字符 ≈ 2k token，够放下一个中等规模的源文件；总量 12000 保证
 # 两个文件也不会挤爆聊天上下文预算。识别出的路径最多 2 条——再多就不是"问某个文件"了。
 CHAT_REPO_FILE_MAX_CHARS = 8000
 CHAT_REPO_FILES_TOTAL_CHARS = 12000
 CHAT_REPO_FILES_LIMIT = 2
-# A2（docs/claude-repo-structure-context.md）：findings 兜底读文件的**条数**上限。
+# A2（docs/DEV_RECORD.md）：findings 兜底读文件的**条数**上限。
 # 原来是写死的 2；实测 12 条 finding 涉及 3 个文件时，第三个文件从未进入注入，
 # 模型只能回"我没有那个文件的内容"。这里放宽到 8；真正的闸门仍是
 # CHAT_REPO_FILES_TOTAL_CHARS——超预算的条目会被逐条标注"本轮注入已达上限"，
@@ -344,13 +344,13 @@ CHAT_REPO_STRUCTURE_INTENT = (
 # 清单 / 目录树拉取失败后的进程内冷却（秒）：同一 run 在冷却期内不再重试——
 # 网络长时间不通时，不该每一轮对话都付一次"带重试的网络等待"。
 CHAT_INVENTORY_RETRY_SECONDS = 60.0
-# A1（docs/chat-experience-plan.md §A1）：被本次 run 的 finding 点名的文件不再从文件头
+# A1（docs/DEV_RECORD.md §A1）：被本次 run 的 finding 点名的文件不再从文件头
 # 截断——头部截断会让 finding 行（实测 index.html:237，而文件只给到 ~200 行）根本不在
 # 注入内容里，模型于是把整轮输出花在"数行号"上。改成取 finding 行号 ± 该值行的窗口。
 CHAT_REPO_FINDING_WINDOW_LINES = 80
 # A3：对话历史窗口（原为硬编码的 40 条）。裁剪时必须明确告知用户，不再静默丢弃。
 CHAT_HISTORY_MESSAGE_LIMIT = 80
-# 压缩保留策略（docs/session-and-compaction-plan.md §B2，契约 v1）：
+# 压缩保留策略（docs/DEV_RECORD.md §B2，契约 v1）：
 # `tail_budget = min(preferences.compaction_tail_tokens, effective_window × 0.25)`，
 # 从最新往回**按对话轮**累加估算 token，直到超预算。下面这个常量是"极端配置兜底"：
 # 预算比一轮还小时也只丢更早的历史，绝不清空对话（旧实现按条数保 10 轮，硬编码）。
@@ -370,9 +370,9 @@ CHAT_PRESSURE_CRITICAL_PERCENT = 100.0
 # 档位 → 思考 token 预算表已挪到 `config.CHAT_REASONING_TOKEN_BUDGETS`：本模块与
 # `services/reasoning_specs`（预算型供应商的 budget_tokens）共用同一份数字，上面的
 # import 把它带进来，名字保持不变（既有调用点与文档都按这个名字写）。
-# 本地/自建端点（Ollama 等）：不对输出上限做规格封顶，理由见 docs/claude-backend-followup.md §2.3。
+# 本地/自建端点（Ollama 等）：不对输出上限做规格封顶，理由见 docs/DEV_RECORD.md §2.3。
 CHAT_LOCAL_PROVIDER_NAMES: frozenset[str] = frozenset({"ollama", "local"})
-# chat 上下文预算的推荐系数与上限（docs/claude-backend-followup.md §4.6）：
+# chat 上下文预算的推荐系数与上限（docs/DEV_RECORD.md §4.6）：
 # 预算是"注入审查上下文"的额度，prompt 骨架 / 对话历史 / 回答同样占用同一个窗口，
 # 因此只取模型窗口的一半；上限直接沿用 `preferences.chat_context_budget` 的合法上界
 # （用户手填得出来的最大值就是它），不再写第二份数字。
@@ -403,7 +403,7 @@ def _mentioned_repo_paths(text: str) -> list[str]:
     两种形态都接受：`path/to/name.ext` 与裸文件名 `name.ext`。实测里用户会直接说
     "main.js 里的 tab.html 从哪来"，只认带目录的形态会漏掉最常见的问法；裸名若在
     仓库根不存在，会如实渲染成"(未能读取 main.js：…)"，不会拿同名文件顶替
-    （取舍与理由见 docs/claude-chat-repo-files.md）。
+    （取舍与理由见 docs/DEV_RECORD.md）。
     """
     if not text:
         return []
@@ -556,7 +556,7 @@ class _ReviewEventStream:
     the run finishes. Per-file outcomes arrive through `file_result_callback`
     (`file_result`, contract §10.2) and are used verbatim; when an orchestrator
     does not report them, the previous null/measured fallback still applies —
-    values are never invented. See `docs/claude-review-actions.md`.
+    values are never invented. See `docs/DEV_RECORD.md`.
     """
 
     def __init__(
@@ -736,7 +736,7 @@ def _catalog_fetched_at(index: CatalogIndex) -> str | None:
 
 @dataclass(frozen=True)
 class _CatalogState:
-    """进程内**定档一次**的模型目录状态（docs/b2b3-wiring-design.md §2.1/§3.3.3）。
+    """进程内**定档一次**的模型目录状态（docs/DEV_RECORD.md §2.1/§3.3.3）。
 
     `index` 为 `None` = 没有可用目录（关闭或取数失败），调用方一律回退内置预设，
     绝不抛错。`source` 取值恒在 `CATALOG_SOURCES` 内。
@@ -867,7 +867,7 @@ class JsonlBackend:
 
     @staticmethod
     def _has_explicit_value(preferences: object, field: str, allowed: tuple[str, ...]) -> bool:
-        """字段是否是**合法**的显式取值（docs/dual-model-roles-plan.md §3.3）。
+        """字段是否是**合法**的显式取值（docs/DEV_RECORD.md §3.3）。
 
         只有合法值算显式：非法值在 config 层会被回退成"跟随运行模式预设"，
         这里若按"字段非空就算"会让确认页显示 custom、实际却按预设路由。
@@ -979,7 +979,7 @@ class JsonlBackend:
             # Workbench Phase 1: the TUI needs this to decide whether a review
             # opens the side panels automatically (auto | always | off).
             "workbench_mode": getattr(self.config.preferences, "workbench_mode", "auto"),
-            # 仓库上下文（docs/repo-aware-review-plan.md §4.6）：与 workbench_mode 一样
+            # 仓库上下文（docs/DEV_RECORD.md §4.6）：与 workbench_mode 一样
             # 是"当前档位"，配置助手提交后要能在同一个快照里回显（§5.4 的三个出口同源）。
             "repo_context": self.config.preferences.repo_context,
             "api_format": provider.api_format,
@@ -1381,13 +1381,13 @@ class JsonlBackend:
             },
             # 确认页/状态栏显示"用户选的是哪一档预设"以及两个槽各用什么模型（方案 §4.1/§5.4）。
             "routing": self._routing_snapshot(),
-            # 仓库上下文（docs/repo-aware-review-plan.md §4.6）：配置助手第 5 阶段的三选一，
+            # 仓库上下文（docs/DEV_RECORD.md §4.6）：配置助手第 5 阶段的三选一，
             # 与 routing 同级，供前端预选并回填到 config.setup。
             "repo_context": self._repo_context_options(),
-            # L2 符号定位开关（docs/mimo-l2-symbol-locator.md）：同样与 routing 同级，
+            # L2 符号定位开关（docs/DEV_RECORD.md）：同样与 routing 同级，
             # 供前端预选并回填到 config.setup。
             "symbol_locate": self._symbol_locate_options(),
-            # review 思考档位（docs/review-reasoning-assessment.md §4.3 第二步）：与
+            # review 思考档位（docs/DEV_RECORD.md §4.3 第二步）：与
             # repo_context / symbol_locate 同级，供配置助手读写（前端接入另行排期，
             # 这里只保证后端字段可读可写）。
             "review_reasoning_effort": self._review_reasoning_options(),
@@ -1410,7 +1410,7 @@ class JsonlBackend:
         current: str,
         label: str,
     ) -> str:
-        """读出路由细化页的一个槽位（docs/dual-model-roles-plan.md §4.2）。
+        """读出路由细化页的一个槽位（docs/DEV_RECORD.md §4.2）。
 
         字段缺失（或为 null）= 部分更新，保留已落盘的值；显式空串 = 清除该槽覆盖，
         重新跟随运行模式预设（与 config 层 `""` 的语义一致）。非法值必须报错而不是
@@ -1732,12 +1732,12 @@ class JsonlBackend:
                 )
             preferences.repo_context = repo_context
         if "symbol_locate" in params and params.get("symbol_locate") is not None:
-            # L2 符号定位开关（docs/mimo-l2-symbol-locator.md §2）：`null`/缺失与其它偏好
+            # L2 符号定位开关（docs/DEV_RECORD.md §2）：`null`/缺失与其它偏好
             # 一样是"保持不变"（部分更新），给了值就必须能解析成布尔，否则整单失败。
             preferences.symbol_locate = self._coerce_symbol_locate(params["symbol_locate"])
         review_effort = str(params.get("review_reasoning_effort") or "").strip().lower()
         if review_effort:
-            # review 思考档位（docs/review-reasoning-assessment.md §4.3 第二步）：取值由
+            # review 思考档位（docs/DEV_RECORD.md §4.3 第二步）：取值由
             # config.REVIEW_REASONING_EFFORTS 定义（= chat 词表）。非法值必须整单失败，
             # 与 repo_context 同理由：这是向导里刚做出的选择，静默回退比报错更糟。
             if review_effort not in REVIEW_REASONING_EFFORTS:
@@ -1902,7 +1902,7 @@ class JsonlBackend:
             "repo_context": self._repo_context_options(),
             # L2 符号定位开关同理（与 config.options 同键同形），状态栏/TUI 读同一份。
             "symbol_locate": self._symbol_locate_options(),
-            # review 思考档位同理（docs/review-reasoning-assessment.md §4.3 第二步）：
+            # review 思考档位同理（docs/DEV_RECORD.md §4.3 第二步）：
             # 三个出口同键同形是既有约定（repo_context/symbol_locate 都这么做的），
             # 否则前端接完 `config.options` 仍无法从状态出口读到当前档位。
             "review_reasoning_effort": self._review_reasoning_options(),
@@ -2134,7 +2134,7 @@ class JsonlBackend:
         }
 
     def _chat_slot_provider(self) -> ModelProviderConfig:
-        """聊天槽位的 provider 配置（docs/dual-model-roles-plan.md §5.1 #4）。
+        """聊天槽位的 provider 配置（docs/DEV_RECORD.md §5.1 #4）。
 
         聊天不再隐含跟随"活跃槽"（`ai_client`）：显式 `chat_slot` 必须能选到与
         审查不同的模型。`remote` 槽 = 持久化的主 Provider，`local` 槽 = `local_provider`
@@ -2240,7 +2240,7 @@ class JsonlBackend:
     def _chat_context_budget_plan(self) -> tuple[int, str]:
         """聊天上下文预算 `(预算, 来源)`，来源 ∈ `CHAT_BUDGET_SOURCES`。
 
-        优先级（docs/claude-backend-followup.md §4）：
+        优先级（docs/DEV_RECORD.md §4）：
         1. `config`：用户把 `preferences.chat_context_budget` 设成了**非默认值**；
         2. `model_spec`：否则按聊天槽模型的 `context_window`（来源与优先级见
            `_chat_context_window`：用户真写过的条目 → 目录命中）推算
@@ -2354,7 +2354,7 @@ class JsonlBackend:
     ) -> dict[str, Any]:
         """`/think` 的结果体（契约 v1：`kind`/`state`/`effort` 三个键保持不变）。
 
-        三态（数据源 `services.reasoning_specs`，字段语义见 docs/reasoning-specs.md）：
+        三态（数据源 `services.reasoning_specs`，字段语义见 docs/DEV_RECORD.md）：
 
         - `set`：参数形态明确，档位已生效；
         - `transparent`：已写入档位，但只是把 `reasoning_effort` 透传给上游，是否生效
@@ -2423,7 +2423,7 @@ class JsonlBackend:
         否则历史会随每一轮对话重复膨胀并重复计费。构建失败/run 读不到时降级为普通聊天
         并记 warning，绝不因为"解读不了这次审查"而让对话失败。
 
-        段落顺序（docs/claude-repo-structure-context.md §3）：审查上下文 → 仓库结构
+        段落顺序（docs/DEV_RECORD.md §3）：审查上下文 → 仓库结构
         （PR 变更清单 + 目录树）→ 用户点名的源码。结构段比源码更"外围"，放在源码之前；
         源码放最后，最贴近本轮要回答的那个文件。
         """
@@ -2456,7 +2456,7 @@ class JsonlBackend:
             language_instruction,
             capability_note,
             wrap_review_context(run_id, context),
-            # B/C（docs/claude-repo-structure-context.md）：PR 变更清单 + 目录树。
+            # B/C（docs/DEV_RECORD.md）：PR 变更清单 + 目录树。
             repo_inventory,
             # 审查上下文之后才是源码：后者直接回答"这个文件是干嘛的"，
             # 放在最后也能让"其它可切换的审查"这类元信息保持在最外层。
@@ -2832,7 +2832,7 @@ class JsonlBackend:
         )
 
     # ── 仓库结构注入：PR 变更清单（B）+ 目录树（C）──────────────────────────
-    # docs/claude-repo-structure-context.md：绑定 run 之后，模型不只要读得到 finding
+    # docs/DEV_RECORD.md：绑定 run 之后，模型不只要读得到 finding
     # 点名的文件，还得知道"这个 PR 动了哪些文件、仓库长什么样"——用户实测里它两样都没有。
 
     async def _chat_repo_inventory(self, session: Session, text: str) -> str:
@@ -3092,7 +3092,7 @@ class JsonlBackend:
             # 本地是**产品决策**下的置灰档位（reasoning_specs：ollama/local 形态 switch、
             # confidence=product-decision）：不按档位映射，恒发快速模式兜底
             # `reasoning_effort: "none"` + 预留 `high` 档思考量。Ollama 的 OpenAI 兼容
-            # 端点会忽略该参数（docs/model-reasoning-probe.md 的 R1/R2 实测），传参只是
+            # 端点会忽略该参数（docs/DEV_RECORD.md 的 R1/R2 实测），传参只是
             # "尽力而为"；真正的兜底是这份预留——实测思考吃满 max_tokens 时答案恒为空（R3）。
             chat_options["reasoning_effort"] = "none"
             if reasoning_effort != "off":
@@ -3100,7 +3100,7 @@ class JsonlBackend:
         elif reasoning_effort != "auto":
             # `auto` 的语义是"不碰参数"（现状保持）。其余档位按供应商规格表注入：
             # unsupported/未收录 → 空 dict（不编造参数），transparent → 透传 reasoning_effort。
-            # 预留（思考与回答共用同一份 completion 额度，docs/reasoning-effort-probe.md）
+            # 预留（思考与回答共用同一份 completion 额度，docs/DEV_RECORD.md）
             # 只在"真的会思考"的供应商上做：置灰的供应商不要白占额度。
             if support.injects:
                 reasoning_budget = CHAT_REASONING_TOKEN_BUDGETS.get(reasoning_effort, 0)
@@ -3379,7 +3379,7 @@ class JsonlBackend:
             "text": "\n".join(lines) if lines else "当前会话还没有对话消息。",
         }
 
-    # -- 压缩（契约 v1 §B；docs/session-and-compaction-plan.md §B2-B5）--------
+    # -- 压缩（契约 v1 §B；docs/DEV_RECORD.md §B2-B5）--------
 
     def _compaction_preferences(self) -> tuple[int, float, bool]:
         """`(tail_tokens, trigger_ratio, auto)`；三个值都由 `PreferencesConfig` 归一化。"""

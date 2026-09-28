@@ -1,6 +1,6 @@
 """L2 符号级定位：trees + 按需 contents + 本地 grep。
 
-设计依据见 ``docs/mimo-l2-recon.md``：GitHub code search 在实测窗口内恒 0 命中
+设计依据见 ``docs/DEV_RECORD.md``：GitHub code search 在实测窗口内恒 0 命中
 且只有 10/min 配额，主路径必须是 trees + 逐文件读取 + 本地标识符边界匹配。
 
 本模块刻意不接触 GitHub API、不读配置：文件树与文件内容全部通过构造注入，

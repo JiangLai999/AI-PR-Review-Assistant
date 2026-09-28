@@ -429,10 +429,10 @@ class ReviewOrchestrator:
                 update={"summary": self._build_empty_summary(filter_result)}
             )
 
-        # L3 修复建议（docs/repo-aware-review-plan.md §6）：写库前给达标 finding 生成
+        # L3 修复建议（docs/DEV_RECORD.md §6）：写库前给达标 finding 生成
         # unified diff 片段。开关默认关闭；关闭时不构造生成器、零模型调用。
         # 刻意不新增 stage id：CLI/TUI 的 stage 标签表不在本任务写集内，未知 id 会
-        # 显示成裸 id 且进度条回退（见 docs/claude-l3-patch.md）。
+        # 显示成裸 id 且进度条回退（见 docs/DEV_RECORD.md）。
         review_result, suggested_patch_stats = await self._attach_suggested_patches(
             review_result, file_contexts, ai_client, cancel_check
         )

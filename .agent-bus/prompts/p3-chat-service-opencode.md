@@ -58,11 +58,11 @@ POST /api/chat   { "run_id": "<可选>", "text": "<问题>" }
    - `test_upstream_failure_becomes_chat_failed`
    模型调用**必须打桩**（`monkeypatch.setattr` 替换 provider 工厂或答案函数内部调用点），
    **绝不发起真实网络请求**。
-3. `docs/opencode-web-chat-service.md`：设计（复用了哪些既有函数，file:line）、降级矩阵、
+3. `docs/DEV_RECORD.md`：设计（复用了哪些既有函数，file:line）、降级矩阵、
    截断策略、用例清单、验证数字、未决项。
 
 ## 约束
-- 只写：`src/ai_pr_review/web_chat.py`、`tests/test_web_chat.py`、`docs/opencode-web-chat-service.md`；
+- 只写：`src/ai_pr_review/web_chat.py`、`tests/test_web_chat.py`、`docs/DEV_RECORD.md`；
 - 禁止改 `web_server.py` / `web_config.py` / `web/src/**`；禁止 git；禁止读取或输出任何真实凭据（测试里用假串）。
 
 ## 验证（必须真跑，报数字）

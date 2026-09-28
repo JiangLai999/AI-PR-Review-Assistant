@@ -12,3 +12,7 @@ src/ai_pr_review/web_static/assets/*.css text eol=lf
 # 之前 web/index.html 是 CRLF，而 vite 注入 script/link 标签时用 LF，混用会在产物里
 # 留下孤立 \r（Windows 产物多一个字节、ubuntu 没有），于是 CI 的同步守卫总差 1 行。
 web/index.html text eol=lf
+
+# `.gitignore` 必须 LF：曾因编辑引入 CRLF 混行，其中一行只剩 \r，
+# 被 git 当成"能匹配一切带斜杠路径"的规则，直接让文档守卫失效。
+.gitignore text eol=lf

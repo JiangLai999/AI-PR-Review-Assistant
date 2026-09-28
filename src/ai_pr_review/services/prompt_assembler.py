@@ -59,7 +59,7 @@ LANGUAGE_SPECIFIC_PROMPTS = {
 
 # ---------------------------------------------------------------------------
 # 仓库感知（L1-b）：相关文件注入段 + 诚实约束。段格式冻结，改动即测试失败。
-# 见 docs/repo-aware-review-plan.md §4.5。
+# 见 docs/DEV_RECORD.md §4.5。
 # ---------------------------------------------------------------------------
 
 RELATED_FILES_HEADING_ZH = "## 相关仓库文件（未被本次修改）"
@@ -164,7 +164,7 @@ class Finding(BaseModel):
     evidence_issues: list[str] = Field(default_factory=list)
     # 确定性规则身份，由 rule_catalog 写入；模型产出一律被置空。
     rule_id: str = ""
-    # L3 修复建议（docs/repo-aware-review-plan.md §6）：unified diff 片段，默认空。
+    # L3 修复建议（docs/DEV_RECORD.md §6）：unified diff 片段，默认空。
     # 可选字段——旧 run / 未生成的 finding 不带它也能校验通过；只由
     # PatchGenerator 在写库前对 critical/high 且 evidence_status=="valid" 的
     # finding 填写，只展示、绝不自动提交。

@@ -290,7 +290,7 @@ def test_preference_controls_configuration_assistant_fetch():
 
 
 def test_last_load_origin_reports_network_then_cache(monkeypatch: pytest.MonkeyPatch):
-    """B2 的来源判定（docs/b2b3-wiring-design.md §3.1）：真拉一次，之后如实报缓存。
+    """B2 的来源判定（docs/DEV_RECORD.md §3.1）：真拉一次，之后如实报缓存。
 
     配置助手要靠这个把 `source` 标成 models.dev 还是 cache；翻转（"明明没发请求
     却宣称刚拉过"或反之）会让用户对新鲜度产生错误判断。

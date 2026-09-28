@@ -1,4 +1,4 @@
-"""L3 修复建议 patch 测试（docs/repo-aware-review-plan.md §6）。
+"""L3 修复建议 patch 测试（docs/DEV_RECORD.md §6）。
 
 覆盖四层：
 
@@ -598,7 +598,7 @@ class TestFindingField:
 
 
 # ---------------------------------------------------------------------------
-# 5. 编排器集成（标准编排器：单 run 级 AIClient，见 docs/claude-l3-patch.md）
+# 5. 编排器集成（标准编排器：单 run 级 AIClient，见 docs/DEV_RECORD.md）
 # ---------------------------------------------------------------------------
 
 #: 与 test_review_orchestrator 同一套事实：第 1 行是 diff 的变更行，第 2 行不是，

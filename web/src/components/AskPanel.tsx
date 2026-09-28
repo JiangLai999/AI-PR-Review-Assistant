@@ -10,7 +10,7 @@ import { t, useT } from '../i18n'
  *
  * 绑定 `runId` 时问答**落库**，进入面板先拉 `GET /api/chat/history` 再渲染；
  * 未绑定 run 的普通对话不落库、不拉历史，仍是当前挂载期内存。
- * 请求体严格是 `{run_id?, text}`（契约见 docs/claude-web-ask-panel.md），所以
+ * 请求体严格是 `{run_id?, text}`（契约见 docs/DEV_RECORD.md），所以
  * `language` 只落到容器的 `lang` 属性上，不会混进请求体。
  *
  * 回答用受限 Markdown 渲染器（`<CollapsibleText>` 内是 `<MarkdownLite>`，无

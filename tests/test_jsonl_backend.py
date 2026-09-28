@@ -17,12 +17,12 @@ from ai_pr_review.backend.jsonl_server import JsonlBackend, ReviewCancelled
 from ai_pr_review.config import AppConfig
 
 # 模型规格的取值边界/来源集合（CONTEXT_WINDOW_RANGE 等）已随 C 组用例迁到
-# tests/test_config.py（docs/claude-backend-followup.md §1），本文件不再直接引用。
+# tests/test_config.py（docs/DEV_RECORD.md §1），本文件不再直接引用。
 from ai_pr_review.services.model_catalog import ModelCatalog
 
 # 聊天上下文预算的兜底值（= review_context.DEFAULT_TOKEN_BUDGET）：没有目录数据、
 # 也没有用户写过的规格时用它。按模型规格推算的路径要显式造数据才会走到
-# （docs/claude-backend-followup.md §4）。
+# （docs/DEV_RECORD.md §4）。
 DEFAULT_CHAT_BUDGET = 8_000
 
 
@@ -1059,7 +1059,7 @@ def test_config_setup_persists_github_and_interface_preferences(tmp_path: Path) 
 
 
 # ---------------------------------------------------------------------------
-# Review workspace event contract (docs/review-workspace-contract.md §3)
+# Review workspace event contract (docs/DEV_RECORD.md §3)
 # ---------------------------------------------------------------------------
 
 
@@ -2053,7 +2053,7 @@ def test_local_chat_disables_reasoning_channel(monkeypatch, tmp_path: Path) -> N
 
 
 # ---------------------------------------------------------------------------
-# explain / feedback 审查动作（docs/review-workspace-contract.md §10.3）
+# explain / feedback 审查动作（docs/DEV_RECORD.md §10.3）
 # ---------------------------------------------------------------------------
 
 
@@ -3051,7 +3051,7 @@ def test_demo_and_showcase_commands_are_strictly_offline(
 
 
 # ---------------------------------------------------------------------------
-# CHAT/REVIEW 双槽路由（docs/dual-model-roles-plan.md §5.1 / §5.4）
+# CHAT/REVIEW 双槽路由（docs/DEV_RECORD.md §5.1 / §5.4）
 # ---------------------------------------------------------------------------
 
 
@@ -3441,7 +3441,7 @@ def test_runtime_switch_clears_the_slot_overrides(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 仓库上下文配置助手（docs/repo-aware-review-plan.md §4.6）
+# 仓库上下文配置助手（docs/DEV_RECORD.md §4.6）
 # ---------------------------------------------------------------------------
 
 
@@ -3519,7 +3519,7 @@ def test_config_options_and_model_status_expose_repo_context(
 
 
 # ---------------------------------------------------------------------------
-# L2 符号定位开关的配置入口（docs/mimo-l2-symbol-locator.md）
+# L2 符号定位开关的配置入口（docs/DEV_RECORD.md）
 # ---------------------------------------------------------------------------
 
 
@@ -3763,7 +3763,7 @@ def test_symbol_locate_switch_reaches_the_orchestrator_predicate(tmp_path: Path)
 
 
 # ---------------------------------------------------------------------------
-# `/model` 子命令（docs/dual-model-roles-plan.md §5.3）
+# `/model` 子命令（docs/DEV_RECORD.md §5.3）
 # ---------------------------------------------------------------------------
 
 
@@ -3927,7 +3927,7 @@ def test_model_command_chat_with_a_primary_ollama_writes_the_primary_provider(
     assert backend.config.provider.base_url == "http://127.0.0.1:9999/v1"
     assert backend.config.local_provider.default_model == "preset-local-model"
     assert "对话模型已切换为 custom-endpoint-model" in reply["result"]["text"]
-    # 已知边界（docs/claude-repo-config.md §6.4）：`routing.chat.model` 仍按槽位名报
+    # 已知边界（docs/DEV_RECORD.md §6.4）：`routing.chat.model` 仍按槽位名报
     # `local_provider` 的模型，与实际被写入的主槽不一致——`_slot_model` 的既有行为，
     # 本任务刻意没改（改它会影响状态栏对既有配置的显示）。此断言把该差异钉住。
     assert reply["result"]["config"]["routing"]["chat"]["model"] == "preset-local-model"
@@ -4827,7 +4827,7 @@ def test_history_command_reports_whether_the_session_was_really_bound(
 
 
 # ---------------------------------------------------------------------------
-# 按需读仓库文件（docs/claude-chat-repo-files.md）
+# 按需读仓库文件（docs/DEV_RECORD.md）
 # ---------------------------------------------------------------------------
 
 
@@ -4858,7 +4858,7 @@ def _seed_run_with_head(
 class _StubRepoFetcher:
     """`PRFetcher` 替身：记录 (owner, repo, path, ref) 并按路径返回内容。
 
-    B/C（docs/claude-repo-structure-context.md）另走两个方法：变更清单与目录树。
+    B/C（docs/DEV_RECORD.md）另走两个方法：变更清单与目录树。
     三者各自记录调用、各自可注入失败——"文件内容没被拉"与"清单没被拉"才分得开。
     """
 
@@ -4990,7 +4990,7 @@ def test_chat_without_a_mentioned_path_never_fetches_repo_file_content(
 ) -> None:
     """没点名文件就不拉文件内容（未绑定同理）：不为源码多付一次请求。
 
-    B（docs/claude-repo-structure-context.md）之后，**绑定 run 本身**会带来一次变更
+    B（docs/DEV_RECORD.md）之后，**绑定 run 本身**会带来一次变更
     清单拉取（只在首轮，之后命中进程内缓存）。这里把"文件内容"与"清单"分开断言，
     别让两种请求混进同一个 `calls` 计数里。
     """
@@ -5258,7 +5258,7 @@ def test_chat_falls_back_to_the_findings_files_when_the_user_just_asks_for_code(
 
 
 # ---------------------------------------------------------------------------
-# A1-A3（docs/chat-experience-plan.md 组 A 第一批）：
+# A1-A3（docs/DEV_RECORD.md 组 A 第一批）：
 # 按 finding 行号取窗口 / 会话落盘 / 历史窗口与预算
 # ---------------------------------------------------------------------------
 
@@ -5445,7 +5445,7 @@ def test_chat_keeps_the_finding_line_when_the_window_overflows_the_budget(
 
 
 # ---------------------------------------------------------------------------
-# A2/B/C（docs/claude-repo-structure-context.md）：
+# A2/B/C（docs/DEV_RECORD.md）：
 # finding 文件放开 / PR 变更清单 / 仓库目录树
 # ---------------------------------------------------------------------------
 
@@ -5841,7 +5841,7 @@ def test_new_command_creates_and_switches_without_dropping_the_old_session(
 
 
 # ---------------------------------------------------------------------------
-# 会话协议 v1（docs/session-and-compaction-plan.md §A3；四条线共用的字段名不可改）
+# 会话协议 v1（docs/DEV_RECORD.md §A3；四条线共用的字段名不可改）
 # ---------------------------------------------------------------------------
 
 
@@ -6155,7 +6155,7 @@ def test_chat_context_budget_can_be_set_in_the_config_file(tmp_path: Path) -> No
 
     `AppConfig.load` 会过滤未知键、也会把非法值归一化成默认值，所以后端另外读一次文件
     字面量：为的是把"没配"和"配坏了"分开——配坏了照旧退回默认，绝不因为读不懂配置
-    就把预算放大（docs/claude-backend-followup.md §4.4）。
+    就把预算放大（docs/DEV_RECORD.md §4.4）。
     """
     config_path = tmp_path / "config.json"
 
@@ -6390,7 +6390,7 @@ def test_think_is_unsupported_for_ollama(monkeypatch: pytest.MonkeyPatch, tmp_pa
         assert reply["ok"] is True
         assert reply["result"]["state"] == "unsupported"
         # 2026-09-26 用户裁定"不开放"：本地固定快速模式是产品决策，不是端点限制
-        # （实测流式 think=false 生效，见 docs/chat-live-verification.md）。
+        # （实测流式 think=false 生效，见 docs/DEV_RECORD.md）。
         assert "本地模型固定使用快速模式" in reply["result"]["reason"]
         payload = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
         assert payload["preferences"]["chat_reasoning_effort"] == "auto"
@@ -6947,7 +6947,7 @@ def test_compact_failure_preserves_history(monkeypatch: pytest.MonkeyPatch, tmp_
 
 
 # ---------------------------------------------------------------------------
-# 压缩保留策略的边界（契约 v1 §B；docs/session-and-compaction-plan.md §B2/B5）
+# 压缩保留策略的边界（契约 v1 §B；docs/DEV_RECORD.md §B2/B5）
 # ---------------------------------------------------------------------------
 
 
@@ -7230,11 +7230,11 @@ def test_auto_compaction_is_off_by_default_and_runs_only_when_enabled(
 
 # ---------------------------------------------------------------------------
 # B1/B2/B3：models.dev 接进配置助手 + 规格可编辑 + 中转站逐项自定义
-# （docs/b2b3-wiring-design.md §4.1；全部离线，不发真实网络请求）
+# （docs/DEV_RECORD.md §4.1；全部离线，不发真实网络请求）
 #
 # A/B 组在本文件；C 组（ProviderConfig.set_model_spec / 取值边界）已归位
 # tests/test_config.py、D 组（config show/export/import/health）已归位 tests/test_cli.py，
-# 见 docs/claude-backend-followup.md §1。
+# 见 docs/DEV_RECORD.md §1。
 # ---------------------------------------------------------------------------
 
 # 真实的 models.dev 片段（2026-09-26 只读抓取）：deepseek 的 1000000/393216 +
@@ -7798,7 +7798,7 @@ def test_config_catalog_refresh_bypasses_the_process_memo(
 
 # ---------------------------------------------------------------------------
 # review 思考档位的出口（config.snapshot / config.options / config.setup）
-# 背景：docs/review-reasoning-assessment.md §4.3 第二步
+# 背景：docs/DEV_RECORD.md §4.3 第二步
 # ---------------------------------------------------------------------------
 
 

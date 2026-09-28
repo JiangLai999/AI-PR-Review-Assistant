@@ -567,7 +567,7 @@ class ProviderConfig:
 
         调用方（配置助手）知道用户为**中转站自定义模型**逐项填的规格时按模型名覆盖，
         否则下面那条写死的 32_768/4_096 就是中转站模型的"死数字"
-        （docs/b2b3-wiring-design.md §3.2）。只覆盖传入的 key，其它条目照旧；
+        （docs/DEV_RECORD.md §3.2）。只覆盖传入的 key，其它条目照旧；
         不传参数 = 与改造前逐字节一致。
         """
         models = PROVIDER_MODEL_PRESETS.get(provider.name, {})
@@ -629,7 +629,7 @@ class ProviderConfig:
         """把配置助手提交的规格写到 `model_name` 的条目上；返回是否改动了条目。
 
         两个参数都是 `None` = 不动任何东西。**不**改 `default_model`、**不**碰其它模型
-        条目：规格是"这个模型"的属性，不是 provider 的属性（docs/b2b3-wiring-design.md
+        条目：规格是"这个模型"的属性，不是 provider 的属性（docs/DEV_RECORD.md
         §2.5）。条目不存在时新建（只有用户显式提交规格才会走到这里）。
         """
         target = str(model_name or "").strip()
@@ -699,7 +699,7 @@ def resolve_model_spec(
     catalog_spec: object | None = None,
     catalog_source: str | None = None,
 ) -> dict[str, object]:
-    """模型规格的判定（docs/b2b3-wiring-design.md §2.8，**唯一真源**）。
+    """模型规格的判定（docs/DEV_RECORD.md §2.8，**唯一真源**）。
 
     生效值（`context_window`/`max_output`）永远是**落盘条目**的值（没有条目才退到预设，
     再没有才是 `ProviderModelConfig` 的默认值）；目录值只出现在调用方另外拼的
@@ -773,7 +773,7 @@ DEFAULT_WORKBENCH_MODE = "auto"
 
 CHAT_REASONING_EFFORTS: tuple[str, ...] = ("off", "low", "high", "max", "auto")
 DEFAULT_CHAT_REASONING_EFFORT = "auto"
-# review 思考档位（preferences.review_reasoning_effort，docs/review-reasoning-assessment.md §4.3
+# review 思考档位（preferences.review_reasoning_effort，docs/DEV_RECORD.md §4.3
 # 第二步）：**词表与 chat 同一份**（顺序也一致，入口/文档直接引用），只有默认值不同——
 # review 的默认是 `off`（= 现状：对 deepseek 仍由 policy 显式 `thinking: disabled`），
 # 因为审查是"成本/质量取舍"而不是聊天那种体验旋钮（该文档 §5）。
@@ -787,7 +787,7 @@ DEFAULT_CHAT_CONTEXT_BUDGET = 8000
 # `preferences.chat_context_budget` 的合法闭区间。后端推算预算时也用它判断"配置文件里
 # 那个字面量算不算配坏了"——两处各写一套数字迟早漂移（同 CONTEXT_WINDOW_RANGE 的做法）。
 CHAT_CONTEXT_BUDGET_RANGE: tuple[int, int] = (1, 200_000)
-# 上下文压缩（docs/session-and-compaction-plan.md §B；契约 v1）。三个数字都由
+# 上下文压缩（docs/DEV_RECORD.md §B；契约 v1）。三个数字都由
 # `jsonl_server._compact_chat_history` 消费：保留多少、何时提示/自动压缩、是否自动。
 # 默认值与方案一致：尾部预算对齐 mimocode 的 40k；触发线 0.9；**自动压缩默认关闭**
 # （自动会多花一次模型调用，且本地小模型摘要质量不稳定——默认只提示）。
@@ -818,7 +818,7 @@ def normalize_workbench_mode(value: object) -> str:
     return DEFAULT_WORKBENCH_MODE
 
 
-# CHAT/REVIEW 双槽路由（docs/dual-model-roles-plan.md §3）。
+# CHAT/REVIEW 双槽路由（docs/DEV_RECORD.md §3）。
 # 两个槽都是**可选覆盖**：`""` 表示"跟随运行模式预设"（即按 hybrid_strategy 推导），
 # 因此旧配置文件不需要任何改动就能加载。
 CHAT_SLOT_VALUES: tuple[str, ...] = ("remote", "local")
@@ -838,27 +838,27 @@ REVIEW_STRATEGY_TO_SLOT: dict[str, str] = {
     "balanced": "hybrid",
 }
 
-# 仓库感知审查的偏好项（docs/repo-aware-review-plan.md §4.6）。
+# 仓库感知审查的偏好项（docs/DEV_RECORD.md §4.6）。
 REPO_CONTEXT_MODES: tuple[str, ...] = ("off", "tests", "tests+imports")
 DEFAULT_REPO_CONTEXT = "tests+imports"
 DEFAULT_REPO_CONTEXT_MAX_FILES = 3
 DEFAULT_REPO_CONTEXT_BUDGET_TOKENS = 4000
 DEFAULT_REPO_CACHE_MAX_MB = 200
-# L2 符号级定位开关（docs/mimo-l2-symbol-locator.md）：默认开启，
+# L2 符号级定位开关（docs/DEV_RECORD.md）：默认开启，
 # 仅在签名变化时触发 trees+grep，异常一律降级。
 DEFAULT_SYMBOL_LOCATE = True
-# L3 修复建议 patch 开关（docs/repo-aware-review-plan.md §6）：**默认关闭**。
+# L3 修复建议 patch 开关（docs/DEV_RECORD.md §6）：**默认关闭**。
 # 打开后每条 critical/high 且证据校验通过的 finding 都会额外发起一次模型调用
 # （真实成本），因此只有用户明确开启才跑；关闭时零构造、零调用。
 DEFAULT_SUGGESTED_PATCH = False
-# 模型目录自动同步开关（docs/chat-experience-plan.md §B2）：配置助手打开时可
+# 模型目录自动同步开关（docs/DEV_RECORD.md §B2）：配置助手打开时可
 # 拉一次 models.dev；chat/review 等高频路径不触发网络请求。
 DEFAULT_MODEL_CATALOG_FETCH = True
 # 合法闭区间（含端点）；越界一律回退默认值。
 REPO_CONTEXT_MAX_FILES_RANGE: tuple[int, int] = (1, 10)
 REPO_CONTEXT_BUDGET_TOKENS_RANGE: tuple[int, int] = (500, 32000)
 REPO_CACHE_MAX_MB_RANGE: tuple[int, int] = (10, 10000)
-# 模型规格（docs/b2b3-wiring-design.md §2.5）的合法闭区间：上下文窗口 / 最大输出。
+# 模型规格（docs/DEV_RECORD.md §2.5）的合法闭区间：上下文窗口 / 最大输出。
 # 配置助手（jsonl_server）与诊断出口（provider_diagnostics）共用这一份，避免两处各写
 # 一套数字后漂移；越界由 `config.setup` 报错整单失败，绝不静默回退。
 CONTEXT_WINDOW_RANGE: tuple[int, int] = (1_024, 10_000_000)
@@ -1118,7 +1118,7 @@ class PreferencesConfig:
     # CHAT/REVIEW 双槽路由：空 = 跟随运行模式预设（由 resolve_* 推导）。
     chat_slot: str = DEFAULT_CHAT_SLOT
     review_slot: str = DEFAULT_REVIEW_SLOT
-    # 仓库感知审查：预取范围 + 上限（见 docs/repo-aware-review-plan.md §4.6）。
+    # 仓库感知审查：预取范围 + 上限（见 docs/DEV_RECORD.md §4.6）。
     repo_context: str = DEFAULT_REPO_CONTEXT
     repo_context_max_files: int = DEFAULT_REPO_CONTEXT_MAX_FILES
     repo_context_budget_tokens: int = DEFAULT_REPO_CONTEXT_BUDGET_TOKENS
@@ -1130,13 +1130,13 @@ class PreferencesConfig:
     suggested_patch: bool = DEFAULT_SUGGESTED_PATCH
     # 模型目录：配置助手打开时可同步一次 models.dev；断网/关闭时回退内置预设。
     model_catalog_fetch: bool = DEFAULT_MODEL_CATALOG_FETCH
-    # Chat 思考档位与上下文预算（docs/chat-experience-plan.md §A5/§C6）。
+    # Chat 思考档位与上下文预算（docs/DEV_RECORD.md §A5/§C6）。
     chat_reasoning_effort: str = DEFAULT_CHAT_REASONING_EFFORT
     chat_context_budget: int = DEFAULT_CHAT_CONTEXT_BUDGET
-    # Review 思考档位（docs/review-reasoning-assessment.md §4.3 第二步）：与 chat 分开，
+    # Review 思考档位（docs/DEV_RECORD.md §4.3 第二步）：与 chat 分开，
     # 默认 off = 现状；`auto` 表示"不干预，由 policy / 供应商默认决定"。
     review_reasoning_effort: str = DEFAULT_REVIEW_REASONING_EFFORT
-    # 上下文压缩（docs/session-and-compaction-plan.md §B；契约 v1）：尾部保留预算、
+    # 上下文压缩（docs/DEV_RECORD.md §B；契约 v1）：尾部保留预算、
     # 压力触发线、是否自动压缩。三个键都在这里归一化，读侧（jsonl_server）只消费。
     compaction_tail_tokens: int = DEFAULT_COMPACTION_TAIL_TOKENS
     compaction_trigger_ratio: float = DEFAULT_COMPACTION_TRIGGER_RATIO
@@ -1703,7 +1703,7 @@ class AppConfig:
         if active is self.provider:
             # B1/B3：这次重建会把模型表退回预设表（写死的 32_768/4_096 也在这条路上），
             # 用户刚在配置助手里填的规格会当场丢失。把**当前生效模型**的规格带过去；
-            # 其它条目仍按预设重建，与改造前逐字节一致（docs/b2b3-wiring-design.md §3.3.8）。
+            # 其它条目仍按预设重建，与改造前逐字节一致（docs/DEV_RECORD.md §3.3.8）。
             rebuilt_model = str(self.ai_client.model or self.provider.default_model)
             current_entry = self.provider.models.get(self.provider.default_model)
             spec_overrides = (

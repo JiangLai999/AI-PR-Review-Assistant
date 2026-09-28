@@ -34,11 +34,11 @@
    - 保存时把 6 个键**一并提交**（即 `payload.ui_language = ...` 等），并在成功后用返回的 `config` 重新 hydrate；
    - 保存失败时（后端 400 带 `ok:false` + `message`）显示 message，不要假装成功；
    - **不要**提交 `auto_publish_comment` / `response_language`（后端刻意不给 Web，提交会 400）。
-3. `docs/claude-web-settings-parity.md`：CLI 6 阶段 ↔ Web 分组/控件的对照表、改动点 file:line、
+3. `docs/DEV_RECORD.md`：CLI 6 阶段 ↔ Web 分组/控件的对照表、改动点 file:line、
    验证命令与数字、未决项（例如 i18n 全站化留到 Phase 3）。
 
 ## 约束
-- 只写：`web/src/pages/SettingsPage.tsx`、`web/src/api/types.ts`、`docs/claude-web-settings-parity.md`；
+- 只写：`web/src/pages/SettingsPage.tsx`、`web/src/api/types.ts`、`docs/DEV_RECORD.md`；
 - 禁止改 `src/ai_pr_review/**`（后端是 opencode/主控的）、`web/src/styles/components.css`（mimo 的）、
   `web/src/api/client.ts`（接口形状没变，不需要动）、禁止 git；禁止读取/输出凭据；
 - **禁止 `npm run build`**（主控统一重建）；允许 `npm run typecheck`。

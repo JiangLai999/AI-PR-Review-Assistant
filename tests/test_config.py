@@ -8,8 +8,8 @@
 仓库上下文配置项（repo_context 及其三个上限）。
 
 模型规格（`ProviderConfig.set_model_spec` / 取值边界 / 未知键过滤）的用例按设计
-`docs/b2b3-wiring-design.md` §4.1-C 归位到本文件（原落在 tests/test_jsonl_backend.py，
-理由见 `docs/claude-backend-followup.md` §1）。
+`docs/DEV_RECORD.md` §4.1-C 归位到本文件（原落在 tests/test_jsonl_backend.py，
+理由见 `docs/DEV_RECORD.md` §1）。
 """
 
 from __future__ import annotations
@@ -782,7 +782,7 @@ def test_filter_dataclass_payload_is_shared_by_load_and_import(tmp_path: Path) -
 
 # ---------------------------------------------------------------------------
 # review 思考档位（preferences.review_reasoning_effort，
-# docs/review-reasoning-assessment.md §4.3 第二步）
+# docs/DEV_RECORD.md §4.3 第二步）
 # ---------------------------------------------------------------------------
 
 

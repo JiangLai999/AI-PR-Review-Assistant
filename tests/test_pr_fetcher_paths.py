@@ -1,6 +1,6 @@
 """轻量路径获取单测：`fetch_changed_file_paths` / `fetch_repo_tree_paths`。
 
-背景（`docs/claude-repo-structure-context.md` §B/§C）：聊天侧"本次 PR 变更文件"
+背景（`docs/DEV_RECORD.md` §B/§C）：聊天侧"本次 PR 变更文件"
 与"仓库目录树"两段注入只需要**路径清单**；大 PR 上 `fetch()` 会把整个 diff 一并
 拉下来（几十万字符的浪费），这两个方法刻意走轻量路径。
 

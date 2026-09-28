@@ -8,7 +8,7 @@
 3. 写入前可选做连通性校验，失败则拒绝落盘并把原因带回界面。
 4. 键位与取值都必须"出声"：白名单外的键、词表外的取值一律 ``ok=False``，
    绝不"界面显示保存成功、磁盘却什么都没写"
-   （docs/opencode-web-config-fix.md）。
+   （docs/DEV_RECORD.md）。
 """
 
 from __future__ import annotations
@@ -117,7 +117,7 @@ PREFERENCE_OPTION_LABELS: dict[str, dict[str, str]] = {
 # 前端据此渲染 input 的 min/max/step（web/src/pages/SettingsPage.tsx:677-689）——
 # 前端不再各存一份数字，"前端允许、后端拒绝"的分叉因此不存在。
 # `step` 只服务 UI（不参与后端判定：0.1 步进的浮点用 == 判对齐会踩二进制误差）。
-# 取值口径与前端离线契约一致（docs/claude-web-settings-parity.md §5 [5]）；
+# 取值口径与前端离线契约一致（docs/DEV_RECORD.md §5 [5]）；
 # 要放宽只能改这张表一处。
 NUMERIC_FIELD_RANGES: dict[str, dict[str, float]] = {
     "max_tokens": {"min": 1, "max": 128000, "step": 1},
@@ -287,7 +287,7 @@ class SaveResult:
     changed: list[str] = field(default_factory=list)
     message: str = ""
     save_key_used: bool = False
-    # 结构化文案键（契约见 docs/opencode-backend-i18n.md）：前端按当前语言渲染，
+    # 结构化文案键（契约见 docs/DEV_RECORD.md）：前端按当前语言渲染，
     # `message` 保留原文给 CLI / 旧前端 / 未收录 key 时回落。
     message_key: str = ""
     message_params: dict[str, Any] = field(default_factory=dict)
@@ -340,7 +340,7 @@ def apply_config_update(
 ) -> SaveResult:
     """把界面提交的改动写入配置并落盘。
 
-    契约（docs/opencode-web-config-fix.md）：
+    契约（docs/DEV_RECORD.md）：
 
     - 空字符串的密钥字段视为"不修改"；掩码（``•`` 开头）同样不写回。
     - **键位**：只接受 ``ACCEPTED_PAYLOAD_KEYS``。白名单外的键返回

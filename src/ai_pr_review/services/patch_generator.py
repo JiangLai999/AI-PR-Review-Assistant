@@ -1,4 +1,4 @@
-"""L3 修复建议 patch 生成（docs/repo-aware-review-plan.md §6）。
+"""L3 修复建议 patch 生成（docs/DEV_RECORD.md §6）。
 
 对「critical/high 且证据校验通过（``evidence_status == "valid"``）」的 finding
 单独发起一次模型调用，让它输出一个 unified diff 片段。片段**只用于展示**：

@@ -1,4 +1,4 @@
-"""审查上下文构建器（docs/dual-model-roles-plan.md §9 · Review-Aware Chat）。
+"""审查上下文构建器（docs/DEV_RECORD.md §9 · Review-Aware Chat）。
 
 把一次**已落库**的审查渲染成分层纯文本，供 `_chat` 注入 system prompt：
 

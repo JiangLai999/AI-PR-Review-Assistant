@@ -28,10 +28,10 @@
    `/api/...` 路径字符串，与 `docs/API.md` 中列出的路径集合比较，缺失即失败（允许文档包含 `/api/` 前缀的说明性条目，
    用注释排除；实现要稳，不依赖行号）。测试要能独立通过：
    `TEMP=.pytest_mimo TMP=.pytest_mimo python -m pytest tests/test_web_api_docs.py -q --no-cov`。
-5. `docs/mimo-web-api-docs.md`：改动点、清单对照表（服务端路径 ↔ 文档位置）、防漂移测试原理、验证数字、未决项。
+5. `docs/DEV_RECORD.md`：改动点、清单对照表（服务端路径 ↔ 文档位置）、防漂移测试原理、验证数字、未决项。
 
 ## 约束
-- 只写 write_scope：`web/src/pages/ApiPage.tsx`、`docs/API.md`、`README.md`、`tests/test_web_api_docs.py`、`docs/mimo-web-api-docs.md`；
+- 只写 write_scope：`web/src/pages/ApiPage.tsx`、`docs/API.md`、`README.md`、`tests/test_web_api_docs.py`、`docs/DEV_RECORD.md`；
 - 禁止改 `src/ai_pr_review/**`（后端与守卫是主控的）、禁止改 `web/src` 里的其它文件（另一 agent 在改 ReviewPage/HistoryPage/client.ts）、禁止 git 操作；
 - **禁止运行 `npm run build`**（`web_static/` 由主控统一重建）；允许 `cd web && npm run typecheck`；
 - 禁止读取/输出任何凭据。

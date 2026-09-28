@@ -1007,7 +1007,7 @@ const showcaseDemoCases: PanelCase[] = [
     forbidLabels: ["undefined"],
   },
   {
-    // Vocabulary contract (docs/P6_PLAN_2026-09-25.md §1): the four evidence
+    // Vocabulary contract (docs/DEV_RECORD.md §1): the four evidence
     // terms must be identical in the terminal, the TUI and the GitHub comment.
     name: "evidence-vocabulary-zh",
     width: 100,

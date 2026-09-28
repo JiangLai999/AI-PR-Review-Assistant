@@ -43,7 +43,7 @@ POST（**全部要求 `Content-Type: application/json` 且同源**，否则 415�
 3. `README.md`：修正 `:408`/`:416` 两处不实表述（"五个视图"/"全部 HTTP 接口"），指向 `docs/API.md`。
 4. `tests/test_web_api_docs.py`（新）：**防漂移**测试——正则解析 `web_server.py` 的 `do_GET`/`do_POST` 里的 `/api/...` 字面量，
    与 `docs/API.md` 中出现的路径集合比较，缺一个就失败（注释里允许出现 `/api/` 前缀示例，用显式排除集合处理）。
-5. `docs/mimo-web-api-docs.md`：改动点、18 条对照表（服务端 ↔ 文档位置）、防漂移测试原理、验证数字、未决项。
+5. `docs/DEV_RECORD.md`：改动点、18 条对照表（服务端 ↔ 文档位置）、防漂移测试原理、验证数字、未决项。
 
 ## 验证（必须真跑，报数字）
 ```bash

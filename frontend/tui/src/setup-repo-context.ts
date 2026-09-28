@@ -1,6 +1,6 @@
 /**
  * 配置助手第 5 阶段的「仓库上下文」（`repo_context`）三选一
- * （docs/repo-aware-review-plan.md §4.6；协议见 docs/claude-repo-config.md §1/§2）。
+ * （docs/DEV_RECORD.md §4.6；协议见 docs/DEV_RECORD.md §1/§2）。
  *
  * 三个约定，与 `setup-routing.ts` 同源：
  *
@@ -75,7 +75,7 @@ export function bilingualLabel(label: string, language?: string): string {
 /**
  * 快照侧当前值的归一化。
  *
- * 同名键在后端有两种形状（刻意，见 docs/claude-repo-config.md §6.2）：
+ * 同名键在后端有两种形状（刻意，见 docs/DEV_RECORD.md §6.2）：
  * `config.snapshot.repo_context` 是纯字符串，`model.status.repo_context` 是
  * `{value, options}`。而 App 会把 `model.status` 的结果并进同一个 `RuntimeSnapshot`
  * （`app.tsx` 的 `onApplied` 分支），所以 `runtime.repo_context` 两种形状都可能出现——

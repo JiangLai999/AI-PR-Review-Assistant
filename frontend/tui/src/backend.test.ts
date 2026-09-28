@@ -26,7 +26,7 @@ localTest("unexpected backend exit keeps persisted sessions alive (multi-session
     expect((await client.request("health")).ok).toBe(true)
     expect(client.generation).toBe(firstGeneration + 1)
     const stale = await client.request("session.get", { session_id: original.result.session_id })
-    // 2026-09-27 多会话存储落地（docs/claude-sessions-compaction.md）：会话持久化到
+    // 2026-09-27 多会话存储落地（docs/DEV_RECORD.md）：会话持久化到
     // `sessions/` 目录，后端重启后旧 session_id **仍然有效**——这是行为升级
     // （重启不再丢会话），不是回归。generation 递增仍证明是新进程。
     expect(stale.ok).toBe(true)

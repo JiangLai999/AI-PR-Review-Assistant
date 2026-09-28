@@ -1,15 +1,15 @@
 """供应商"思考档位 → 请求体参数"规格表（数据驱动）。
 
-数据源：`docs/reasoning-specs-research.md`（opencode 联网调研，抓取日期 2026-09-26，
+数据源：`docs/DEV_RECORD.md`（opencode 联网调研，抓取日期 2026-09-26，
 覆盖 `config.PROVIDER_MODEL_PRESETS` 的 19 家 + 本地 `local`）。每条规格都带
 `doc_url` / `captured_at` / `confidence`，本模块**只做查表与组装**：不联网、不做真机
 验证、不猜测。
 
 与调研文档/代码不一致的地方，一律以调研文档为准，取舍写在 `ReasoningSpec.note` 与
-`docs/reasoning-specs.md`：
+`docs/DEV_RECORD.md`：
 
 - `deepseek` 的 `max` 是**兼容映射**（官方枚举为 low/medium/high），保留是因为本机
-  实测过单调性（`docs/reasoning-effort-probe.md`：disabled 0 < low 2624 < high 4509
+  实测过单调性（`docs/DEV_RECORD.md`：disabled 0 < low 2624 < high 4509
   < max 6834），属于既有行为，不属"编造参数"；
 - `qwen` / `siliconflow` 用 `thinking_budget` 通道表达四档（qwen3.8 系
   `reasoning_effort` 与 `thinking_budget` 不可同传，官方原文见调研 §3.4）；
@@ -57,7 +57,7 @@ CONFIDENCE_UNKNOWN = "unknown"
 # 统一四档（不含 `auto`：auto 的语义是"不碰参数"，不映射）。
 REASONING_LEVELS: tuple[str, ...] = ("off", "low", "high", "max")
 # 本地（ollama/local）置灰时给出的人类可读原因：产品决策，不是端点限制
-# （实测流式 `think=false` 生效，见 docs/chat-live-verification.md）。
+# （实测流式 `think=false` 生效，见 docs/DEV_RECORD.md）。
 LOCAL_PRODUCT_REASON = (
     "本地模型固定使用快速模式（不展示思考），档位不可调；需要思考强度请切换云端模型"
 )
@@ -149,7 +149,7 @@ def _passthrough_levels() -> dict[str, Mapping[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# 19 家规格表（+ 本地 `local`，见 docs/reasoning-specs-research.md §6.2）
+# 19 家规格表（+ 本地 `local`，见 docs/DEV_RECORD.md §6.2）
 # ---------------------------------------------------------------------------
 
 REASONING_SPECS: dict[str, ReasoningSpec] = {
@@ -212,7 +212,7 @@ REASONING_SPECS: dict[str, ReasoningSpec] = {
         confidence=CONFIDENCE_DOCUMENTED,
         note=(
             "官方 effort 枚举为 low/medium/high（示例用 high）；`max` 是兼容映射，"
-            "保留是因为本机实测单调有效（docs/reasoning-effort-probe.md："
+            "保留是因为本机实测单调有效（docs/DEV_RECORD.md："
             "disabled 0 < low 2624 < high 4509 < max 6834）——既有行为，非编造参数"
         ),
         model_caveat="预设 deepseek-flash / deepseek-v4-pro 为混合思考模型；deepseek-chat 为非思考模型",
@@ -419,7 +419,7 @@ REASONING_SPECS: dict[str, ReasoningSpec] = {
         note=(
             "官方 API 支持 think: bool|low|medium|high|max（能力存在，非端点不支持）；"
             "本项目产品决策置灰（2026-09-26 用户裁定），`_chat` 另发快速模式兜底——"
-            "实测流式 think=false 生效，见 docs/chat-live-verification.md"
+            "实测流式 think=false 生效，见 docs/DEV_RECORD.md"
         ),
         model_caveat=(
             "预设 qwen3.5:4b / qwen3:4b 具备思考能力，"
