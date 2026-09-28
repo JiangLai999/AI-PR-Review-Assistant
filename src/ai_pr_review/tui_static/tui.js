@@ -34766,6 +34766,7 @@ class BackendClient {
     const cwd = process.env.AI_PR_REVIEW_ROOT ?? process.cwd();
     const spawned = Bun.spawn([python, "-m", "ai_pr_review.backend.jsonl_server"], {
       cwd,
+      env: process.env,
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe"
@@ -34899,12 +34900,309 @@ ${this.backendErrors.join(`
 }
 
 // src/protocol.ts
+var asFiniteNumber = (value) => typeof value === "number" && Number.isFinite(value) ? value : undefined;
+var asOptionalString = (value) => typeof value === "string" && value.length > 0 ? value : undefined;
+var PRESSURE_VALUES = ["low", "medium", "high", "critical"];
+function parsePressure(raw) {
+  if (raw === null)
+    return null;
+  if (typeof raw === "string" && PRESSURE_VALUES.includes(raw)) {
+    return raw;
+  }
+  return;
+}
+function parseUsage(raw) {
+  if (!raw || typeof raw !== "object")
+    return;
+  const record = raw;
+  const usage = {
+    prompt_tokens: asFiniteNumber(record.prompt_tokens),
+    completion_tokens: asFiniteNumber(record.completion_tokens),
+    total_tokens: asFiniteNumber(record.total_tokens)
+  };
+  if (usage.prompt_tokens === undefined && usage.completion_tokens === undefined && usage.total_tokens === undefined) {
+    return;
+  }
+  return usage;
+}
+function parseContext(raw) {
+  if (!raw || typeof raw !== "object")
+    return;
+  const record = raw;
+  const context = {
+    used_tokens: asFiniteNumber(record.used_tokens),
+    budget_tokens: asFiniteNumber(record.budget_tokens),
+    used_percent: asFiniteNumber(record.used_percent),
+    trimmed_messages: asFiniteNumber(record.trimmed_messages),
+    compacted: typeof record.compacted === "boolean" ? record.compacted : undefined,
+    pressure: parsePressure(record.pressure)
+  };
+  if (context.used_tokens === undefined && context.budget_tokens === undefined && context.used_percent === undefined && context.trimmed_messages === undefined && context.compacted === undefined && context.pressure === undefined) {
+    return;
+  }
+  return context;
+}
+function parseAssistantFinishMeta(event) {
+  const warningRaw = event.warning;
+  return {
+    durationSeconds: asFiniteNumber(event.duration_seconds),
+    usage: parseUsage(event.usage),
+    context: parseContext(event.context),
+    reasoning: asOptionalString(event.reasoning),
+    warning: warningRaw === "over_budget" ? "over_budget" : undefined,
+    model: asOptionalString(event.model)
+  };
+}
+function parseReasoningDelta(event) {
+  if (event.event !== "assistant.reasoning_delta")
+    return;
+  return typeof event.text === "string" ? event.text : undefined;
+}
+var THINK_LEVELS = ["off", "low", "high", "max", "auto"];
+function hasDedicatedCommandRenderer(result) {
+  return Boolean(parseThinkCommandResult(result) || parseCompactCommandResult(result));
+}
+function parseThinkCommandResult(result) {
+  if (!result || typeof result !== "object")
+    return;
+  const record = result;
+  if (record.kind !== "think")
+    return;
+  const levelRaw = typeof record.effort === "string" ? record.effort : typeof record.level === "string" ? record.level : undefined;
+  return {
+    kind: "think",
+    state: typeof record.state === "string" ? record.state : undefined,
+    level: levelRaw && THINK_LEVELS.includes(levelRaw) ? levelRaw : levelRaw,
+    reason: asOptionalString(record.reason)
+  };
+}
+function parseCompactCommandResult(result) {
+  if (!result || typeof result !== "object")
+    return;
+  const record = result;
+  if (record.kind !== "compact")
+    return;
+  return {
+    kind: "compact",
+    ok: typeof record.ok === "boolean" ? record.ok : undefined,
+    before_tokens: asFiniteNumber(record.before_tokens),
+    after_tokens: asFiniteNumber(record.after_tokens),
+    kept_turns: asFiniteNumber(record.kept_turns),
+    replaced_messages: asFiniteNumber(record.replaced_messages),
+    summary_chars: asFiniteNumber(record.summary_chars),
+    error: asOptionalString(record.error),
+    message: asOptionalString(record.message)
+  };
+}
+function parseContextBudgetInfo(raw) {
+  if (!raw || typeof raw !== "object")
+    return {};
+  const record = raw;
+  return {
+    budget_tokens: asFiniteNumber(record.token_budget) ?? asFiniteNumber(record.budget_tokens),
+    budget_source: asOptionalString(record.budget_source)
+  };
+}
 function isCurrentAssistantEvent(event, sessionId, requestId) {
   return Boolean(event.event?.startsWith("assistant.") && sessionId && requestId && event.session_id === sessionId && event.request_id === requestId);
 }
 function isForeignSessionEvent(event, sessionId) {
   const eventSession = typeof event.session_id === "string" ? event.session_id : "";
   return Boolean(eventSession && eventSession !== sessionId);
+}
+var asOptionalNumber = (value) => typeof value === "number" && Number.isFinite(value) ? value : undefined;
+function parseCatalogView(raw) {
+  if (raw === null)
+    return null;
+  if (!raw || typeof raw !== "object")
+    return;
+  const record = raw;
+  return {
+    context_window: asOptionalNumber(record.context_window),
+    max_output: asOptionalNumber(record.max_output),
+    source: typeof record.source === "string" ? record.source : undefined,
+    fetched_at: typeof record.fetched_at === "string" ? record.fetched_at : undefined
+  };
+}
+function parseBoundsPair(raw) {
+  if (!Array.isArray(raw) || raw.length < 2)
+    return;
+  const lo = asOptionalNumber(raw[0]);
+  const hi = asOptionalNumber(raw[1]);
+  return lo !== undefined && hi !== undefined ? [lo, hi] : undefined;
+}
+function parseBounds(raw) {
+  if (!raw || typeof raw !== "object")
+    return;
+  const record = raw;
+  const context = parseBoundsPair(record.context_window);
+  const output = parseBoundsPair(record.max_output);
+  if (!context && !output)
+    return;
+  return { context_window: context, max_output: output };
+}
+function parseCatalogState(raw) {
+  if (!raw || typeof raw !== "object")
+    return;
+  const record = raw;
+  return {
+    enabled: typeof record.enabled === "boolean" ? record.enabled : undefined,
+    source: typeof record.source === "string" ? record.source : undefined,
+    reason: typeof record.reason === "string" ? record.reason : undefined,
+    fetched_at: typeof record.fetched_at === "string" ? record.fetched_at : undefined
+  };
+}
+function parsePresetPair(raw) {
+  if (raw === null)
+    return null;
+  if (!raw || typeof raw !== "object")
+    return;
+  const record = raw;
+  return {
+    context_window: asOptionalNumber(record.context_window),
+    max_output: asOptionalNumber(record.max_output)
+  };
+}
+function parseModelSpecBlock(raw) {
+  if (!raw || typeof raw !== "object")
+    return;
+  const record = raw;
+  const block = {
+    provider: asOptionalString(record.provider),
+    model: asOptionalString(record.model),
+    source: asOptionalString(record.source),
+    context_window: asOptionalNumber(record.context_window),
+    max_output: asOptionalNumber(record.max_output),
+    reasoning: typeof record.reasoning === "string" ? record.reasoning : undefined,
+    needs_verification: typeof record.needs_verification === "boolean" ? record.needs_verification : undefined,
+    endpoint_matches_preset: typeof record.endpoint_matches_preset === "boolean" ? record.endpoint_matches_preset : undefined,
+    catalog: parseCatalogView(record.catalog),
+    preset: parsePresetPair(record.preset),
+    bounds: parseBounds(record.bounds),
+    catalog_state: parseCatalogState(record.catalog_state)
+  };
+  if (Array.isArray(record.reasoning_controls)) {
+    block.reasoning_controls = record.reasoning_controls.filter((item) => Boolean(item) && typeof item === "object");
+  }
+  if (record.slots && typeof record.slots === "object") {
+    const slots = record.slots;
+    const remote = parseModelSpecBlock(slots.remote);
+    const local = parseModelSpecBlock(slots.local);
+    if (remote || local)
+      block.slots = { remote, local };
+  }
+  return block;
+}
+function parseCustomEndpointOptions(raw) {
+  if (!raw || typeof raw !== "object")
+    return;
+  const record = raw;
+  return {
+    name: asOptionalString(record.name),
+    display_name: asOptionalString(record.display_name),
+    base_url: typeof record.base_url === "string" ? record.base_url : undefined,
+    api_format: asOptionalString(record.api_format),
+    default_model: asOptionalString(record.default_model),
+    api_key_configured: typeof record.api_key_configured === "boolean" ? record.api_key_configured : undefined,
+    models: Array.isArray(record.models) ? record.models.filter((item) => typeof item === "string") : undefined,
+    context_window: asOptionalNumber(record.context_window),
+    max_output: asOptionalNumber(record.max_output),
+    source: asOptionalString(record.source),
+    needs_verification: typeof record.needs_verification === "boolean" ? record.needs_verification : undefined
+  };
+}
+function parseCatalogRefreshResult(raw) {
+  if (!raw || typeof raw !== "object")
+    return;
+  const record = raw;
+  return parseModelSpecBlock(record.model);
+}
+function parseSessionSummary(raw) {
+  if (!raw || typeof raw !== "object")
+    return;
+  const record = raw;
+  const id = asOptionalString(record.id) ?? asOptionalString(record.session_id);
+  if (!id)
+    return;
+  return {
+    id,
+    title: typeof record.title === "string" ? record.title : undefined,
+    updated_at: asOptionalString(record.updated_at),
+    message_count: asFiniteNumber(record.message_count),
+    current: typeof record.current === "boolean" ? record.current : undefined
+  };
+}
+function parseSessionMessages(raw) {
+  if (!Array.isArray(raw))
+    return;
+  return raw.flatMap((item) => {
+    if (!item || typeof item !== "object")
+      return [];
+    const entry = item;
+    const role = entry.role === "user" || entry.role === "assistant" ? entry.role : undefined;
+    const content = typeof entry.content === "string" ? entry.content : undefined;
+    if (!role && content === undefined)
+      return [];
+    return [
+      {
+        role,
+        content,
+        thinking: typeof entry.thinking === "string" ? entry.thinking : undefined,
+        timestamp: asOptionalString(entry.timestamp)
+      }
+    ];
+  });
+}
+function parseSessionListResult(raw) {
+  if (!raw || typeof raw !== "object")
+    return;
+  const record = raw;
+  const sessions = Array.isArray(record.sessions) ? record.sessions.flatMap((item) => {
+    const parsed = parseSessionSummary(item);
+    return parsed ? [parsed] : [];
+  }) : [];
+  return {
+    sessions,
+    current: asOptionalString(record.current) ?? sessions.find((item) => item.current)?.id
+  };
+}
+function parseSessionSwitchResult(raw) {
+  if (!raw || typeof raw !== "object")
+    return;
+  const record = raw;
+  return {
+    session: parseSessionSummary(record.session),
+    messages: parseSessionMessages(record.messages)
+  };
+}
+function parseSessionRenameResult(raw) {
+  if (!raw || typeof raw !== "object")
+    return;
+  const record = raw;
+  return {
+    id: asOptionalString(record.id) ?? asOptionalString(record.session_id),
+    title: typeof record.title === "string" ? record.title : undefined
+  };
+}
+function parseSessionDeleteResult(raw) {
+  if (!raw || typeof raw !== "object")
+    return;
+  const record = raw;
+  return {
+    deleted: typeof record.deleted === "string" ? record.deleted : typeof record.deleted === "boolean" ? record.deleted : undefined,
+    next: asOptionalString(record.next)
+  };
+}
+function parseSessionCreateResult(raw) {
+  if (!raw || typeof raw !== "object")
+    return;
+  const record = raw;
+  const session = parseSessionSummary(record.session);
+  return {
+    session_id: asOptionalString(record.session_id) ?? asOptionalString(record.id) ?? session?.id,
+    session,
+    title: typeof record.title === "string" ? record.title : session?.title
+  };
 }
 
 // src/session-recovery.ts
@@ -34917,25 +35215,102 @@ async function sendWithSessionRecovery(ensureSession, send) {
 
 // src/command-menu.ts
 var chatCommands = [
-  { name: "/help", description: "\u67E5\u770B\u53EF\u7528\u547D\u4EE4" },
-  { name: "/status", description: "\u67E5\u770B\u8FD0\u884C\u72B6\u6001" },
-  { name: "/model", description: "\u67E5\u770B\u6216\u5207\u6362\u5F53\u524D\u6A21\u578B", argument: "<\u6A21\u578B\u6216 local/cloud/hybrid>" },
-  { name: "/model status", description: "\u68C0\u67E5\u6A21\u578B\u8FDE\u901A\u6027" },
-  { name: "/setup", description: "\u6253\u5F00\u914D\u7F6E\u52A9\u624B" },
-  { name: "/review", description: "\u5F00\u59CB PR \u5BA1\u67E5", argument: "<GitHub PR URL>" },
-  { name: "/cancel", description: "\u53D6\u6D88\u5F53\u524D\u5BA1\u67E5" },
-  { name: "/retry", description: "\u91CD\u8BD5\u4E0A\u4E00\u6B21\u5BA1\u67E5" },
-  { name: "/report", description: "\u67E5\u770B\u5F53\u524D\u62A5\u544A" },
-  { name: "/export", description: "\u5BFC\u51FA\u5F53\u524D\u62A5\u544A", argument: "<json|markdown> [\u8DEF\u5F84]" },
-  { name: "/history", description: "\u67E5\u770B\u5386\u53F2\u8BB0\u5F55", argument: "[\u6570\u91CF\u6216 Run ID]" },
-  { name: "/explain", description: "\u89E3\u91CA\u5F53\u524D Run \u7684\u95EE\u9898\u4E0E\u8BC1\u636E", argument: "<run_id>" },
-  { name: "/feedback", description: "\u8BB0\u5F55\u95EE\u9898\u53CD\u9988", argument: "<run_id> <finding_id> <status>" },
-  { name: "/publish", description: "\u9884\u89C8\u5E76\u53D1\u5E03\u5BA1\u67E5\u8BC4\u8BBA\u5230 GitHub", argument: "[run_id] [--confirm]" },
-  { name: "/demo", description: "\u8FD0\u884C\u79BB\u7EBF\u6F14\u793A\u7528\u4F8B", argument: "[case_key|list]" },
-  { name: "/showcase", description: "\u67E5\u770B\u53C2\u8D5B\u6F14\u793A\u8DEF\u5F84" },
-  { name: "/workbench", description: "\u5C55\u5F00 / \u6536\u8D77\u5BA1\u67E5\u5DE5\u4F5C\u53F0" },
-  { name: "/new", description: "\u5F00\u59CB\u65B0\u4F1A\u8BDD" }
+  { name: "/help", description: "\u67E5\u770B\u53EF\u7528\u547D\u4EE4", description_en: "List available commands" },
+  { name: "/status", description: "\u67E5\u770B\u8FD0\u884C\u72B6\u6001", description_en: "Show runtime status" },
+  {
+    name: "/model",
+    description: "\u67E5\u770B\u6216\u5207\u6362\u5F53\u524D\u6A21\u578B",
+    description_en: "Show or switch the current model",
+    argument: "<\u6A21\u578B\u6216 local/cloud/hybrid>",
+    argument_en: "<model or local/cloud/hybrid>"
+  },
+  { name: "/model status", description: "\u68C0\u67E5\u6A21\u578B\u8FDE\u901A\u6027", description_en: "Check model connectivity" },
+  { name: "/setup", description: "\u6253\u5F00\u914D\u7F6E\u52A9\u624B", description_en: "Open the setup wizard" },
+  {
+    name: "/review",
+    description: "\u5F00\u59CB PR \u5BA1\u67E5",
+    description_en: "Start a PR review",
+    argument: "<GitHub PR URL>"
+  },
+  { name: "/cancel", description: "\u53D6\u6D88\u5F53\u524D\u5BA1\u67E5", description_en: "Cancel the running review" },
+  { name: "/retry", description: "\u91CD\u8BD5\u4E0A\u4E00\u6B21\u5BA1\u67E5", description_en: "Retry the last review" },
+  { name: "/report", description: "\u67E5\u770B\u5F53\u524D\u62A5\u544A", description_en: "Show the current report" },
+  {
+    name: "/export",
+    description: "\u5BFC\u51FA\u5F53\u524D\u62A5\u544A",
+    description_en: "Export the current report",
+    argument: "<json|markdown> [\u8DEF\u5F84]",
+    argument_en: "<json|markdown> [path]"
+  },
+  {
+    name: "/history",
+    description: "\u67E5\u770B\u5BF9\u8BDD\u6D88\u606F\u5217\u8868",
+    description_en: "Show the conversation message list",
+    argument: "[--runs|\u6570\u91CF\u6216 Run ID]",
+    argument_en: "[--runs|count or Run ID]"
+  },
+  {
+    name: "/explain",
+    description: "\u89E3\u91CA\u5F53\u524D Run \u7684\u95EE\u9898\u4E0E\u8BC1\u636E",
+    description_en: "Explain findings and evidence for the current run",
+    argument: "<run_id>"
+  },
+  {
+    name: "/feedback",
+    description: "\u8BB0\u5F55\u95EE\u9898\u53CD\u9988",
+    description_en: "Record finding feedback",
+    argument: "<run_id> <finding_id> <status>"
+  },
+  {
+    name: "/publish",
+    description: "\u9884\u89C8\u5E76\u53D1\u5E03\u5BA1\u67E5\u8BC4\u8BBA\u5230 GitHub",
+    description_en: "Preview and publish review comments to GitHub",
+    argument: "[run_id] [--confirm]"
+  },
+  {
+    name: "/demo",
+    description: "\u8FD0\u884C\u79BB\u7EBF\u6F14\u793A\u7528\u4F8B",
+    description_en: "Run an offline demo case",
+    argument: "[case_key|list]"
+  },
+  { name: "/showcase", description: "\u67E5\u770B\u53C2\u8D5B\u6F14\u793A\u8DEF\u5F84", description_en: "Show the contest demo path" },
+  { name: "/workbench", description: "\u5C55\u5F00 / \u6536\u8D77\u5BA1\u67E5\u5DE5\u4F5C\u53F0", description_en: "Expand or collapse the review workbench" },
+  {
+    name: "/think",
+    description: "\u8C03\u6574\u601D\u8003\u6DF1\u5EA6\u6863\u4F4D",
+    description_en: "Set the reasoning effort level",
+    argument: "<off|low|high|max|auto>",
+    argument_en: "<off|low|high|max|auto>"
+  },
+  {
+    name: "/compact",
+    description: "\u538B\u7F29\u4E0A\u4E0B\u6587",
+    description_en: "Compress conversation context",
+    argument: "[\u6307\u4EE4]",
+    argument_en: "[instruction]"
+  },
+  {
+    name: "/sessions",
+    description: "\u6253\u5F00\u4F1A\u8BDD\u5217\u8868\uFF08\u5207\u6362/\u91CD\u547D\u540D/\u5220\u9664\uFF09",
+    description_en: "Open the session list (switch / rename / delete)"
+  },
+  { name: "/new", description: "\u5F00\u59CB\u65B0\u4F1A\u8BDD", description_en: "Start a new session" },
+  {
+    name: "/rename",
+    description: "\u91CD\u547D\u540D\u5F53\u524D\u4F1A\u8BDD",
+    description_en: "Rename the current session",
+    argument: "<\u65B0\u6807\u9898>",
+    argument_en: "<new title>"
+  }
 ];
+function commandDescription(command, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  return (en ? command.description_en : command.description) ?? command.description;
+}
+function commandArgumentLabel(command, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  return (en ? command.argument_en : command.argument) ?? command.argument ?? "";
+}
 function commandMatches(draft, commands = chatCommands) {
   if (!draft.startsWith("/") || draft.includes(`
 `))
@@ -34981,6 +35356,440 @@ function workspaceRootLabel(root = typeof process !== "undefined" ? process.env?
     return "";
   const display = home && root.toLowerCase().startsWith(home.toLowerCase()) ? `~${root.slice(home.length)}` : root;
   return compactPath(display, max);
+}
+function formatDurationSeconds(seconds) {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0)
+    return "";
+  if (seconds < 10)
+    return `${seconds.toFixed(1)}s`;
+  return `${Math.round(seconds)}s`;
+}
+function formatTokenCount(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
+    return "";
+  if (value < 1000)
+    return String(Math.round(value));
+  const thousands = value / 1000;
+  if (!Number.isInteger(thousands))
+    return `${thousands.toFixed(1)}k`;
+  return `${thousands}k`;
+}
+function formatContextUsage(context, language) {
+  if (!context)
+    return "";
+  const used = context.used_tokens;
+  const budget = context.budget_tokens;
+  const percent = typeof context.used_percent === "number" && Number.isFinite(context.used_percent) ? context.used_percent : typeof used === "number" && typeof budget === "number" && budget > 0 ? used / budget * 100 : undefined;
+  if (percent === undefined && used === undefined)
+    return "";
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  const label = en ? "context" : "\u4E0A\u4E0B\u6587";
+  const percentText = percent === undefined ? "" : `${Math.round(percent)}%`;
+  const tokensText = used === undefined ? "" : budget === undefined ? formatTokenCount(used) : `${formatTokenCount(used)}/${formatTokenCount(budget)}`;
+  const tail = [percentText, tokensText].filter(Boolean).join(" \xB7 ");
+  return tail ? `${label} ${tail}` : "";
+}
+function overBudgetTip(language) {
+  return String(language ?? "zh-CN").toLowerCase().startsWith("en") ? "Context near limit: run /compact to compress, or /new to start over" : "\u4E0A\u4E0B\u6587\u63A5\u8FD1\u4E0A\u9650\uFF1A\u53EF\u7528 /compact \u538B\u7F29\uFF0C\u6216 /new \u91CD\u65B0\u5F00\u59CB";
+}
+function formatOutputLength(data, language) {
+  const tokens = data.completionTokens;
+  if (typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0) {
+    return `${Math.round(tokens)} tok`;
+  }
+  const chars = data.contentLength;
+  if (typeof chars === "number" && Number.isFinite(chars) && chars >= 0) {
+    const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+    return `${Math.round(chars)} ${en ? "chars" : "\u5B57"}`;
+  }
+  return "";
+}
+function formatMessageMetrics(data, language) {
+  const parts = [];
+  if (data.model)
+    parts.push(data.model);
+  const duration = formatDurationSeconds(data.durationSeconds);
+  if (duration)
+    parts.push(duration);
+  const length = formatOutputLength(data, language);
+  if (length)
+    parts.push(length);
+  if (data.timestamp)
+    parts.push(data.timestamp);
+  return parts.length > 0 ? `\xB7 ${parts.join(" \xB7 ")}` : "";
+}
+function formatEffortBadge(level, language) {
+  if (!level)
+    return "";
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  return `${en ? "THINK" : "\u601D\u8003"} ${level}`;
+}
+var CURSOR_FRAMES = ["\u258C", "\u258D", " "];
+var SPINNER_FRAMES = ["\u280B", "\u2819", "\u2839", "\u2838", "\u283C", "\u2834", "\u2826", "\u2827", "\u2807", "\u280F"];
+function cursorFrame(tick) {
+  return CURSOR_FRAMES[Math.abs(tick) % CURSOR_FRAMES.length];
+}
+function spinnerFrame(tick) {
+  return SPINNER_FRAMES[Math.abs(tick) % SPINNER_FRAMES.length];
+}
+function thinkingPlaceholder(tick, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  return `${spinnerFrame(tick)} ${en ? "Thinking\u2026" : "\u601D\u8003\u4E2D"}`;
+}
+var THINK_LEVEL_LABELS = {
+  off: ["\u5173\u95ED", "off"],
+  low: ["\u4F4E", "low"],
+  high: ["\u9AD8", "high"],
+  max: ["\u6700\u5927", "max"],
+  auto: ["\u81EA\u52A8", "auto"]
+};
+function formatThinkLevel(level, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  const label = level ? THINK_LEVEL_LABELS[level]?.[en ? 1 : 0] ?? level : "\u2014";
+  return en ? `Thinking level: ${label}` : `\u601D\u8003\u6863\u4F4D\uFF1A${label}`;
+}
+function formatThinkUnsupported(reason, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  const fallback = en ? "This backend does not support /think" : "\u5F53\u524D\u540E\u7AEF\u4E0D\u652F\u6301 /think";
+  return reason || fallback;
+}
+function formatThinkTransparent(level, reason, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  const base = formatThinkLevel(level, language);
+  const note = reason || (en ? "Whether it takes effect depends on the upstream provider" : "\u662F\u5426\u751F\u6548\u53D6\u51B3\u4E8E\u4E0A\u6E38\u670D\u52A1");
+  return `${base} \xB7 ${note}`;
+}
+function formatCompactSummary(data, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  const parts = [];
+  if (typeof data.before_tokens === "number" && typeof data.after_tokens === "number") {
+    parts.push(`${formatTokenCount(data.before_tokens)} \u2192 ${formatTokenCount(data.after_tokens)}`);
+  }
+  if (typeof data.kept_turns === "number") {
+    parts.push(en ? `kept ${data.kept_turns} turns` : `\u4FDD\u7559 ${data.kept_turns} \u8F6E`);
+  }
+  if (typeof data.replaced_messages === "number" && data.replaced_messages > 0) {
+    parts.push(en ? `${data.replaced_messages} messages summarized` : `\u5DF2\u538B\u7F29 ${data.replaced_messages} \u6761`);
+  }
+  if (parts.length === 0)
+    return en ? "Context compressed" : "\u4E0A\u4E0B\u6587\u5DF2\u538B\u7F29";
+  return parts.join(" \xB7 ");
+}
+function formatCompactFailure(error, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  const detail = error || (en ? "compact failed" : "\u538B\u7F29\u5931\u8D25");
+  return en ? `${detail} \u2014 original history is unchanged` : `${detail} \u2014 \u539F\u5386\u53F2\u672A\u53D8`;
+}
+var CODE_FOLD_LINE_THRESHOLD = 15;
+function codeFoldBadge(lineCount, expanded) {
+  return expanded ? "\u25BE \u6536\u8D77" : `\u25B8 \u5C55\u5F00\uFF08\u5171 ${lineCount} \u884C\uFF09`;
+}
+function codeFoldStateKey(messageKey, blockIndex) {
+  return `${messageKey}#${blockIndex}`;
+}
+function foldableCodeBlocks(content) {
+  const lines = content.split(`
+`);
+  const blocks = [];
+  let blockIndex = 0;
+  let i = 0;
+  while (i < lines.length) {
+    if (!/^```/.test(lines[i])) {
+      i += 1;
+      continue;
+    }
+    const body = [];
+    let j = i + 1;
+    while (j < lines.length && !/^```[ \t]*$/.test(lines[j])) {
+      body.push(lines[j]);
+      j += 1;
+    }
+    if (body.length > CODE_FOLD_LINE_THRESHOLD) {
+      blocks.push({ index: blockIndex, lineCount: body.length });
+    }
+    blockIndex += 1;
+    i = j < lines.length ? j + 1 : lines.length;
+  }
+  return blocks;
+}
+function splitFoldableMarkdown(content, isExpanded) {
+  const lines = content.split(`
+`);
+  const segments = [];
+  let buffer = [];
+  let blockIndex = 0;
+  let i = 0;
+  const flushMarkdown = () => {
+    if (buffer.length > 0) {
+      segments.push({ kind: "markdown", content: buffer.join(`
+`) });
+      buffer = [];
+    }
+  };
+  while (i < lines.length) {
+    const open = lines[i];
+    if (!/^```/.test(open)) {
+      buffer.push(open);
+      i += 1;
+      continue;
+    }
+    const body = [];
+    let j = i + 1;
+    while (j < lines.length && !/^```[ \t]*$/.test(lines[j])) {
+      body.push(lines[j]);
+      j += 1;
+    }
+    const closed = j < lines.length;
+    const idx = blockIndex;
+    blockIndex += 1;
+    if (body.length > CODE_FOLD_LINE_THRESHOLD) {
+      flushMarkdown();
+      const expanded = isExpanded(idx);
+      const visible = expanded ? body : body.slice(0, CODE_FOLD_LINE_THRESHOLD);
+      const blockLines = [open, ...visible];
+      if (closed)
+        blockLines.push(lines[j]);
+      segments.push({ kind: "markdown", content: blockLines.join(`
+`), foldable: true });
+      segments.push({
+        kind: "foldBadge",
+        blockIndex: idx,
+        lineCount: body.length,
+        expanded
+      });
+    } else {
+      buffer.push(open, ...body);
+      if (closed)
+        buffer.push(lines[j]);
+    }
+    i = closed ? j + 1 : lines.length;
+  }
+  flushMarkdown();
+  return segments;
+}
+function formatChatHistoryLines(messages, options = {}) {
+  const maxLines = options.maxLines ?? 40;
+  const contentWidth = options.contentWidth ?? 56;
+  const en = String(options.language ?? "zh-CN").toLowerCase().startsWith("en");
+  const label = (role) => role === "user" ? en ? "user" : "\u7528\u6237" : en ? "assistant" : "\u52A9\u624B";
+  return messages.slice(0, maxLines).map((message, index) => {
+    const body = message.content.replace(/\s+/g, " ").trim();
+    const truncated = body.length > contentWidth ? `${body.slice(0, contentWidth - 1)}\u2026` : body;
+    return `${String(index + 1).padStart(2, " ")}  [${label(message.role)}] ${truncated}`;
+  });
+}
+function formatSourceBadge(source, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  const value = String(source ?? "").trim().toLowerCase();
+  if (value === "models.dev")
+    return "models.dev \u2713";
+  if (value === "cache")
+    return en ? "cache" : "\u7F13\u5B58";
+  if (value === "builtin")
+    return en ? "builtin" : "\u5185\u7F6E";
+  return en ? "unknown" : "\u672A\u77E5";
+}
+function formatNeedsVerification(block, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  const current = block.context_window;
+  const catalog = block.catalog?.context_window;
+  if (typeof current !== "number" || typeof catalog !== "number") {
+    return en ? "Differs from models.dev (values unavailable)" : "\u4E0E\u5B98\u65B9\u6570\u636E\u4E0D\u4E00\u81F4\uFF08\u6570\u503C\u4E0D\u53EF\u7528\uFF09";
+  }
+  return en ? `Differs from models.dev: current ${current} / models.dev ${catalog}` : `\u4E0E\u5B98\u65B9\u6570\u636E\u4E0D\u4E00\u81F4\uFF1A\u5F53\u524D ${current} / models.dev ${catalog}`;
+}
+function formatSpecBoundHint(bounds, language) {
+  if (!bounds)
+    return "";
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  return en ? `range ${bounds[0]}\u2013${bounds[1]}` : `\u8303\u56F4 ${bounds[0]}\u2013${bounds[1]}`;
+}
+function formatModelHeadline(block, language) {
+  const provider = String(block.provider ?? "").trim();
+  const model = String(block.model ?? "").trim();
+  if (!provider && !model)
+    return "";
+  return [provider, model].filter(Boolean).join(" \xB7 ");
+}
+function formatCatalogRefreshStatus(state, detail, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  if (state === "refreshing")
+    return en ? "Refreshing catalog\u2026" : "\u76EE\u5F55\u5237\u65B0\u4E2D\u2026";
+  if (state === "success") {
+    const badge = detail ? ` \xB7 ${detail}` : "";
+    return en ? `Catalog refreshed${badge}` : `\u76EE\u5F55\u5DF2\u5237\u65B0${badge}`;
+  }
+  if (state === "error") {
+    const reason = detail ? ` \xB7 ${detail}` : "";
+    return en ? `Catalog refresh failed, previous values kept${reason}` : `\u76EE\u5F55\u5237\u65B0\u5931\u8D25\uFF0C\u5DF2\u4FDD\u7559\u65E7\u503C${reason}`;
+  }
+  return "";
+}
+var BUDGET_SOURCE_LABELS = {
+  config: ["\u914D\u7F6E", "config"],
+  model_spec: ["\u6A21\u578B\u89C4\u683C", "model spec"],
+  fallback: ["\u515C\u5E95", "fallback"]
+};
+function formatBudgetSource(budget, source, language) {
+  if (typeof budget !== "number" || !Number.isFinite(budget) || budget < 0)
+    return "";
+  const key = String(source ?? "").trim();
+  if (!key)
+    return "";
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  const label = BUDGET_SOURCE_LABELS[key]?.[en ? 1 : 0] ?? key;
+  return en ? `Context budget ${budget} (source: ${label})` : `\u4E0A\u4E0B\u6587\u9884\u7B97 ${budget}\uFF08\u6765\u6E90\uFF1A${label}\uFF09`;
+}
+function customEndpointFieldLabels(language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  return en ? [
+    { key: "base_url", label: "Base URL" },
+    { key: "api_key", label: "API Key" },
+    { key: "model", label: "Model" },
+    { key: "context_window", label: "Context window" },
+    { key: "max_output", label: "Max output" }
+  ] : [
+    { key: "base_url", label: "Base URL" },
+    { key: "api_key", label: "API Key" },
+    { key: "model", label: "\u6A21\u578B\u540D" },
+    { key: "context_window", label: "\u4E0A\u4E0B\u6587\u957F\u5EA6" },
+    { key: "max_output", label: "\u6700\u5927\u8F93\u51FA" }
+  ];
+}
+function reviewEffortBilingualLabel(label, language) {
+  const parts = String(label ?? "").split(" / ");
+  if (parts.length < 2)
+    return String(label ?? "");
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  return (en ? parts[parts.length - 1] : parts[0]).trim();
+}
+function formatReviewEffortCost(level, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  const key = String(level ?? "").trim().toLowerCase();
+  if (key === "off")
+    return en ? "same as today (baseline)" : "\u4E0E\u73B0\u72B6\u76F8\u540C\uFF08\u57FA\u7EBF\uFF09";
+  if (key === "low" || key === "high" || key === "max") {
+    return en ? "\u2248\xD73.6 output tokens, \u2248\xD72.9 latency (measured at max)" : "\u8F93\u51FA tokens \u7EA6 \xD73.6\u3001\u8017\u65F6\u7EA6 \xD72.9\uFF08\u771F\u673A\u5B9E\u6D4B\uFF0Cmax \u6863\uFF09";
+  }
+  if (key === "auto") {
+    return en ? "up to the provider default" : "\u4E0D\u5E72\u9884\uFF0C\u7531\u4F9B\u5E94\u5546\u9ED8\u8BA4\u51B3\u5B9A";
+  }
+  return "";
+}
+function formatReviewEffortDisabled(reason, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  const fallback = en ? "The review-slot provider does not accept thinking parameters; the level will not take effect" : "\u5BA1\u67E5\u69FD\u4F9B\u5E94\u5546\u4E0D\u63A5\u53D7\u601D\u8003\u53C2\u6570\uFF0C\u6863\u4F4D\u4E0D\u4F1A\u751F\u6548";
+  return reason || fallback;
+}
+var REVIEW_BUDGET_CAP_MAX_OUTPUT = 16384;
+function formatReviewBudgetCapHint(maxOutput, level, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  const key = String(level ?? "").trim().toLowerCase();
+  if (key !== "high" && key !== "max")
+    return "";
+  if (typeof maxOutput !== "number" || !Number.isFinite(maxOutput))
+    return "";
+  if (maxOutput > REVIEW_BUDGET_CAP_MAX_OUTPUT)
+    return "";
+  const n = String(maxOutput);
+  return en ? `This model caps output at ${n}; the thinking budget for high tiers will be capped. Prefer low or switch models.` : `\u8BE5\u6A21\u578B\u8F93\u51FA\u4E0A\u9650 ${n}\uFF0C\u9AD8\u6863\u4F4D\u7684\u601D\u8003\u9884\u7B97\u4F1A\u88AB\u5C01\u9876\uFF1B\u5EFA\u8BAE low \u6216\u66F4\u6362\u6A21\u578B`;
+}
+function reviewSlotMaxOutput(slot, spec) {
+  const key = String(slot ?? "").trim().toLowerCase();
+  if (key === "remote")
+    return spec?.slots?.remote?.max_output;
+  if (key === "local")
+    return spec?.slots?.local?.max_output;
+  return;
+}
+function formatRelativeTime(updatedAt, now = new Date, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  const fallback = en ? "unknown time" : "\u65F6\u95F4\u672A\u77E5";
+  if (!updatedAt)
+    return fallback;
+  const parsed = new Date(updatedAt);
+  if (Number.isNaN(parsed.getTime()))
+    return fallback;
+  const deltaMs = now.getTime() - parsed.getTime();
+  if (deltaMs < 60000)
+    return en ? "just now" : "\u521A\u521A";
+  const minutes = Math.floor(deltaMs / 60000);
+  if (minutes < 60)
+    return en ? `${minutes}m ago` : `${minutes} \u5206\u949F\u524D`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24)
+    return en ? `${hours}h ago` : `${hours} \u5C0F\u65F6\u524D`;
+  const days = Math.floor(hours / 24);
+  if (days < 30)
+    return en ? `${days}d ago` : `${days} \u5929\u524D`;
+  return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}`;
+}
+function formatSessionTitle(title, max = 24) {
+  const raw = (title ?? "").trim();
+  if (!raw)
+    return "\u672A\u547D\u540D\u4F1A\u8BDD";
+  return truncateMiddle(raw, max);
+}
+function formatSessionListItem(session, now = new Date, language) {
+  const marker = session.current ? "\u25CF" : "\u25B8";
+  const parts = [formatSessionTitle(session.title, 28)];
+  const when = formatRelativeTime(session.updated_at, now, language);
+  if (when)
+    parts.push(when);
+  if (typeof session.message_count === "number" && Number.isFinite(session.message_count)) {
+    const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+    parts.push(en ? `${Math.round(session.message_count)} msgs` : `${Math.round(session.message_count)} \u6761`);
+  }
+  return `${marker} ${parts.join(" \xB7 ")}`;
+}
+function formatSessionListEmpty(language) {
+  return String(language ?? "zh-CN").toLowerCase().startsWith("en") ? "This backend does not support the session list" : "\u5F53\u524D\u540E\u7AEF\u4E0D\u652F\u6301\u4F1A\u8BDD\u5217\u8868";
+}
+function formatSessionListNoSessions(language) {
+  return String(language ?? "zh-CN").toLowerCase().startsWith("en") ? "No saved sessions yet \u2014 send a message to create one" : "\u6682\u65E0\u4F1A\u8BDD\uFF1A\u53D1\u9001\u4E00\u6761\u6D88\u606F\u5373\u53EF\u521B\u5EFA";
+}
+function formatSessionListLoading(language) {
+  return String(language ?? "zh-CN").toLowerCase().startsWith("en") ? "Loading sessions\u2026" : "\u6B63\u5728\u8BFB\u53D6\u4F1A\u8BDD\u5217\u8868\u2026";
+}
+function formatSessionListError(reason, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  const detail = (reason ?? "").trim() || (en ? "unknown reason" : "\u672A\u77E5\u539F\u56E0");
+  return en ? `Could not refresh the session list: ${detail}` : `\u4F1A\u8BDD\u5217\u8868\u8BFB\u53D6\u5931\u8D25\uFF1A${detail}`;
+}
+function formatSessionListFooter(language) {
+  return String(language ?? "zh-CN").toLowerCase().startsWith("en") ? "\u2191\u2193 select \xB7 Enter switch \xB7 r rename \xB7 d delete \xB7 Esc close" : "\u2191\u2193 \u9009\u62E9 \xB7 Enter \u5207\u6362 \xB7 r \u91CD\u547D\u540D \xB7 d \u5220\u9664 \xB7 Esc \u5173\u95ED";
+}
+function formatSessionSwitched(title, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  const label = formatSessionTitle(title, 32);
+  return en ? `Switched to "${label}"` : `\u5DF2\u5207\u6362\u5230\u300A${label}\u300B`;
+}
+function formatSessionDeleteConfirm(title, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  const label = formatSessionTitle(title, 24);
+  return en ? `Delete "${label}"? Enter/y confirm \xB7 Esc cancel` : `\u5220\u9664\u300A${label}\u300B\uFF1FEnter/y \u786E\u8BA4 \xB7 Esc \u53D6\u6D88`;
+}
+function formatSessionRenamePrompt(language) {
+  return String(language ?? "zh-CN").toLowerCase().startsWith("en") ? "Enter save \xB7 Esc cancel" : "Enter \u4FDD\u5B58 \xB7 Esc \u53D6\u6D88";
+}
+function formatSessionBadge(title, max = 20, language) {
+  const raw = (title ?? "").trim();
+  if (!raw)
+    return "";
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  return en ? `session ${formatSessionTitle(title, max)}` : `\u4F1A\u8BDD\u300A${formatSessionTitle(title, max)}\u300B`;
+}
+function formatPressureTip(pressure, language) {
+  if (pressure !== "high" && pressure !== "critical")
+    return "";
+  return String(language ?? "zh-CN").toLowerCase().startsWith("en") ? "Context near limit: run /compact to compress" : "\u4E0A\u4E0B\u6587\u63A5\u8FD1\u4E0A\u9650\uFF1A\u53EF\u7528 /compact \u538B\u7F29";
+}
+function contextPressureColor(pressure) {
+  if (pressure === "critical")
+    return "#ff6b6b";
+  if (pressure === "medium" || pressure === "high")
+    return "#f3c742";
+  return "#808080";
 }
 
 // src/keymap.ts
@@ -36119,7 +36928,7 @@ function ReviewSummaryPanel(props) {
     return bits.join(" \xB7 ");
   };
   return (() => {
-    var _el$ = createElement("box"), _el$2 = createElement("box"), _el$3 = createElement("text"), _el$4 = createElement("text"), _el$5 = createElement("text"), _el$6 = createElement("span"), _el$7 = createElement("span"), _el$8 = createElement("span"), _el$9 = createElement("span"), _el$0 = createElement("text"), _el$1 = createElement("text"), _el$10 = createElement("span"), _el$11 = createElement("span"), _el$12 = createTextNode(` `), _el$13 = createElement("text"), _el$14 = createElement("text"), _el$15 = createElement("text"), _el$16 = createElement("text");
+    var _el$ = createElement("box"), _el$2 = createElement("box"), _el$3 = createElement("text"), _el$4 = createElement("text"), _el$6 = createElement("text"), _el$7 = createElement("span"), _el$8 = createElement("span"), _el$9 = createElement("span"), _el$0 = createElement("span"), _el$1 = createElement("text"), _el$10 = createElement("text"), _el$11 = createElement("span"), _el$12 = createElement("span"), _el$13 = createTextNode(` `), _el$14 = createElement("text"), _el$15 = createElement("text"), _el$16 = createElement("text"), _el$17 = createElement("text");
     insertNode(_el$, _el$2);
     setProp(_el$, "width", "100%");
     setProp(_el$, "backgroundColor", "#1e1e1e");
@@ -36133,13 +36942,13 @@ function ReviewSummaryPanel(props) {
     setProp(_el$, "minHeight", 0);
     insertNode(_el$2, _el$3);
     insertNode(_el$2, _el$4);
-    insertNode(_el$2, _el$5);
-    insertNode(_el$2, _el$0);
+    insertNode(_el$2, _el$6);
     insertNode(_el$2, _el$1);
-    insertNode(_el$2, _el$13);
+    insertNode(_el$2, _el$10);
     insertNode(_el$2, _el$14);
     insertNode(_el$2, _el$15);
     insertNode(_el$2, _el$16);
+    insertNode(_el$2, _el$17);
     setProp(_el$2, "flexGrow", 1);
     setProp(_el$2, "minHeight", 0);
     setProp(_el$2, "overflow", "hidden");
@@ -36150,97 +36959,109 @@ function ReviewSummaryPanel(props) {
     setProp(_el$4, "height", 1);
     setProp(_el$4, "fg", "#eeeeee");
     insert(_el$4, identityLine);
-    insertNode(_el$5, _el$6);
-    insertNode(_el$5, _el$7);
-    insertNode(_el$5, _el$8);
-    insertNode(_el$5, _el$9);
-    setProp(_el$5, "height", 1);
-    setProp(_el$5, "marginTop", 1);
-    setProp(_el$6, "style", {
+    insert(_el$2, createComponent2(Show, {
+      get when() {
+        return props.url;
+      },
+      get children() {
+        var _el$5 = createElement("text");
+        setProp(_el$5, "height", 1);
+        setProp(_el$5, "fg", "#808080");
+        insert(_el$5, () => String(props.url));
+        return _el$5;
+      }
+    }), _el$6);
+    insertNode(_el$6, _el$7);
+    insertNode(_el$6, _el$8);
+    insertNode(_el$6, _el$9);
+    insertNode(_el$6, _el$0);
+    setProp(_el$6, "height", 1);
+    setProp(_el$6, "marginTop", 1);
+    setProp(_el$7, "style", {
       fg: "#f3c742"
     });
-    insert(_el$6, () => en() ? "Severity " : "\u4E25\u91CD\u7EA7\u522B ");
-    setProp(_el$7, "style", {
+    insert(_el$7, () => en() ? "Severity " : "\u4E25\u91CD\u7EA7\u522B ");
+    setProp(_el$8, "style", {
       fg: "#fb8147"
     });
-    insert(_el$7, () => severityBar(severity(), 16));
-    setProp(_el$8, "style", {
+    insert(_el$8, () => severityBar(severity(), 16));
+    setProp(_el$9, "style", {
       fg: "#eeeeee"
     });
-    insert(_el$8, () => ` ${severityPercent(severity())}%`);
-    setProp(_el$9, "style", {
+    insert(_el$9, () => ` ${severityPercent(severity())}%`);
+    setProp(_el$0, "style", {
       fg: "#808080"
     });
-    insert(_el$9, () => en() ? " high+" : " \u9AD8\u5371\u53CA\u4EE5\u4E0A");
-    setProp(_el$0, "height", 1);
-    insert(_el$0, createComponent2(For, {
+    insert(_el$0, () => en() ? " high+" : " \u9AD8\u5371\u53CA\u4EE5\u4E0A");
+    setProp(_el$1, "height", 1);
+    insert(_el$1, createComponent2(For, {
       each: SEVERITY_KEYS,
       children: (key, index) => (() => {
-        var _el$18 = createElement("span"), _el$19 = createTextNode(` `);
-        insertNode(_el$18, _el$19);
-        insert(_el$18, () => index() > 0 ? "  " : "", _el$19);
-        insert(_el$18, key, _el$19);
-        insert(_el$18, () => severity()[key] ?? 0, null);
-        effect((_$p) => setProp(_el$18, "style", {
+        var _el$19 = createElement("span"), _el$20 = createTextNode(` `);
+        insertNode(_el$19, _el$20);
+        insert(_el$19, () => index() > 0 ? "  " : "", _el$20);
+        insert(_el$19, key, _el$20);
+        insert(_el$19, () => severity()[key] ?? 0, null);
+        effect((_$p) => setProp(_el$19, "style", {
           fg: severityColor(key)
         }, _$p));
-        return _el$18;
+        return _el$19;
       })()
     }));
-    insertNode(_el$1, _el$10);
-    insertNode(_el$1, _el$11);
-    setProp(_el$1, "height", 1);
-    setProp(_el$1, "marginTop", 1);
-    setProp(_el$10, "style", {
+    insertNode(_el$10, _el$11);
+    insertNode(_el$10, _el$12);
+    setProp(_el$10, "height", 1);
+    setProp(_el$10, "marginTop", 1);
+    setProp(_el$11, "style", {
       fg: "#f3c742"
     });
-    insert(_el$10, () => en() ? "Evidence " : "\u8BC1\u636E\u6821\u9A8C ");
-    insertNode(_el$11, _el$12);
-    setProp(_el$11, "style", {
+    insert(_el$11, () => en() ? "Evidence " : "\u8BC1\u636E\u6821\u9A8C ");
+    insertNode(_el$12, _el$13);
+    setProp(_el$12, "style", {
       fg: "#808080"
     });
-    insert(_el$11, () => en() ? "total" : "\u5408\u8BA1", _el$12);
-    insert(_el$11, () => evidenceTotals(evidence()), null);
-    setProp(_el$13, "height", 1);
-    insert(_el$13, createComponent2(For, {
+    insert(_el$12, () => en() ? "total" : "\u5408\u8BA1", _el$13);
+    insert(_el$12, () => evidenceTotals(evidence()), null);
+    setProp(_el$14, "height", 1);
+    insert(_el$14, createComponent2(For, {
       each: EVIDENCE_KEYS,
       children: (key, index) => {
         const meta = EVIDENCE_LABEL[key];
         return (() => {
-          var _el$20 = createElement("span"), _el$21 = createTextNode(` `);
-          insertNode(_el$20, _el$21);
-          insert(_el$20, () => index() > 0 ? "  " : "", _el$21);
-          insert(_el$20, () => evidenceBadge(meta.status, props.language), _el$21);
-          insert(_el$20, () => evidence()[key] ?? 0, null);
-          effect((_$p) => setProp(_el$20, "style", {
+          var _el$21 = createElement("span"), _el$22 = createTextNode(` `);
+          insertNode(_el$21, _el$22);
+          insert(_el$21, () => index() > 0 ? "  " : "", _el$22);
+          insert(_el$21, () => evidenceBadge(meta.status, props.language), _el$22);
+          insert(_el$21, () => evidence()[key] ?? 0, null);
+          effect((_$p) => setProp(_el$21, "style", {
             fg: evidenceColor(meta.status)
           }, _$p));
-          return _el$20;
+          return _el$21;
         })();
       }
     }));
-    setProp(_el$14, "height", 1);
-    setProp(_el$14, "fg", "#808080");
-    setProp(_el$14, "marginTop", 1);
-    insert(_el$14, filesLine);
     setProp(_el$15, "height", 1);
     setProp(_el$15, "fg", "#808080");
-    insert(_el$15, metaLine);
+    setProp(_el$15, "marginTop", 1);
+    insert(_el$15, filesLine);
     setProp(_el$16, "height", 1);
-    setProp(_el$16, "fg", "#f3c742");
-    setProp(_el$16, "marginTop", 1);
-    insert(_el$16, () => en() ? "Top findings" : "\u91CD\u70B9\u95EE\u9898");
+    setProp(_el$16, "fg", "#808080");
+    insert(_el$16, metaLine);
+    setProp(_el$17, "height", 1);
+    setProp(_el$17, "fg", "#f3c742");
+    setProp(_el$17, "marginTop", 1);
+    insert(_el$17, () => en() ? "Top findings" : "\u91CD\u70B9\u95EE\u9898");
     insert(_el$2, createComponent2(Show, {
       get when() {
         return ranked().length > 0;
       },
       get fallback() {
         return (() => {
-          var _el$22 = createElement("text");
-          setProp(_el$22, "height", 1);
-          setProp(_el$22, "fg", "#808080");
-          insert(_el$22, () => en() ? "No findings." : "\u6682\u65E0\u95EE\u9898\u3002");
-          return _el$22;
+          var _el$23 = createElement("text");
+          setProp(_el$23, "height", 1);
+          setProp(_el$23, "fg", "#808080");
+          insert(_el$23, () => en() ? "No findings." : "\u6682\u65E0\u95EE\u9898\u3002");
+          return _el$23;
         })();
       },
       get children() {
@@ -36255,56 +37076,56 @@ function ReviewSummaryPanel(props) {
               return typeof finding.line_start === "number" ? `${base}:${finding.line_start}` : base;
             };
             return (() => {
-              var _el$23 = createElement("box"), _el$24 = createElement("text"), _el$25 = createElement("span"), _el$26 = createElement("span"), _el$27 = createElement("span"), _el$28 = createElement("text");
-              insertNode(_el$23, _el$24);
-              insertNode(_el$23, _el$28);
-              setProp(_el$23, "flexDirection", "column");
+              var _el$24 = createElement("box"), _el$25 = createElement("text"), _el$26 = createElement("span"), _el$27 = createElement("span"), _el$28 = createElement("span"), _el$29 = createElement("text");
               insertNode(_el$24, _el$25);
-              insertNode(_el$24, _el$26);
-              insertNode(_el$24, _el$27);
-              setProp(_el$24, "height", 1);
-              setProp(_el$25, "style", {
+              insertNode(_el$24, _el$29);
+              setProp(_el$24, "flexDirection", "column");
+              insertNode(_el$25, _el$26);
+              insertNode(_el$25, _el$27);
+              insertNode(_el$25, _el$28);
+              setProp(_el$25, "height", 1);
+              setProp(_el$26, "style", {
                 fg: "#808080"
               });
-              insert(_el$25, () => `${index() + 1}. `);
-              insert(_el$26, () => `[${String(finding.severity ?? "info").toUpperCase()}]`);
-              setProp(_el$27, "style", {
+              insert(_el$26, () => `${index() + 1}. `);
+              insert(_el$27, () => `[${String(finding.severity ?? "info").toUpperCase()}]`);
+              setProp(_el$28, "style", {
                 fg: "#eeeeee"
               });
-              insert(_el$27, () => ` ${finding.title ?? finding.message ?? (en() ? "Untitled" : "\u672A\u547D\u540D\u95EE\u9898")}`);
-              setProp(_el$28, "height", 1);
-              setProp(_el$28, "fg", "#808080");
-              insert(_el$28, location, null);
-              insert(_el$28, createComponent2(Show, {
+              insert(_el$28, () => ` ${finding.title ?? finding.message ?? (en() ? "Untitled" : "\u672A\u547D\u540D\u95EE\u9898")}`);
+              setProp(_el$29, "height", 1);
+              setProp(_el$29, "fg", "#808080");
+              insert(_el$29, location, null);
+              insert(_el$29, createComponent2(Show, {
                 get when() {
                   return confidence();
                 },
                 get children() {
-                  var _el$29 = createElement("span");
-                  setProp(_el$29, "style", {
+                  var _el$30 = createElement("span");
+                  setProp(_el$30, "style", {
                     fg: "#7edc92"
                   });
-                  insert(_el$29, () => ` \xB7 ${confidence()}`);
-                  return _el$29;
+                  insert(_el$30, () => ` \xB7 ${confidence()}`);
+                  return _el$30;
                 }
               }), null);
-              insert(_el$28, createComponent2(Show, {
+              insert(_el$29, createComponent2(Show, {
                 get when() {
                   return finding.evidence_status;
                 },
                 get children() {
-                  var _el$30 = createElement("span");
-                  insert(_el$30, () => ` \xB7 ${evidenceBadge(finding.evidence_status ?? "", props.language)}`);
-                  effect((_$p) => setProp(_el$30, "style", {
+                  var _el$31 = createElement("span");
+                  insert(_el$31, () => ` \xB7 ${evidenceBadge(finding.evidence_status ?? "", props.language)}`);
+                  effect((_$p) => setProp(_el$31, "style", {
                     fg: evidenceColor(finding.evidence_status ?? "")
                   }, _$p));
-                  return _el$30;
+                  return _el$31;
                 }
               }), null);
-              effect((_$p) => setProp(_el$26, "style", {
+              effect((_$p) => setProp(_el$27, "style", {
                 fg: severityColor(finding.severity ?? "info")
               }, _$p));
-              return _el$23;
+              return _el$24;
             })();
           }
         });
@@ -36315,12 +37136,12 @@ function ReviewSummaryPanel(props) {
         return Boolean(props.onOpenFindings);
       },
       get children() {
-        var _el$17 = createElement("text");
-        setProp(_el$17, "height", 1);
-        setProp(_el$17, "fg", "#808080");
-        setProp(_el$17, "marginTop", 1);
-        insert(_el$17, () => en() ? "Ctrl+O Open findings" : "Ctrl+O \u6253\u5F00 Findings");
-        return _el$17;
+        var _el$18 = createElement("text");
+        setProp(_el$18, "height", 1);
+        setProp(_el$18, "fg", "#808080");
+        setProp(_el$18, "marginTop", 1);
+        insert(_el$18, () => en() ? "Ctrl+O Open findings" : "Ctrl+O \u6253\u5F00 Findings");
+        return _el$18;
       }
     }), null);
     return _el$;
@@ -36909,9 +37730,384 @@ function emptyFindingsMessage(entry, context = {}) {
   return en ? "No findings yet. Run /review <PR_URL>, or open a stored report with /history <run_id>." : "\u5F53\u524D\u6CA1\u6709 Findings\u3002\u8BF7\u5148\u6267\u884C /review <PR_URL>\uFF0C\u6216\u7528 /history <run_id> \u6253\u5F00\u5386\u53F2\u62A5\u544A\u3002";
 }
 
+// src/setup-routing.ts
+var CHAT_SLOT_VALUES = ["remote", "local"];
+var REVIEW_SLOT_VALUES = ["remote", "local", "hybrid"];
+var SLOT_LABELS = {
+  remote: { zh: "\u4E91\u7AEF", en: "Cloud" },
+  local: { zh: "\u672C\u5730", en: "Local" },
+  hybrid: { zh: "\u6DF7\u5408", en: "Hybrid" }
+};
+var PRESET_LABELS = {
+  cloud: { zh: "\u4E91\u7AEF", en: "Cloud" },
+  local: { zh: "\u672C\u5730", en: "Local" },
+  hybrid: { zh: "\u6DF7\u5408", en: "Hybrid" },
+  custom: { zh: "\u81EA\u5B9A\u4E49", en: "Custom" },
+  offline: { zh: "\u79BB\u7EBF", en: "Offline" }
+};
+var PRESET_DESCRIPTIONS = {
+  cloud: { zh: "\u5BF9\u8BDD\u4E0E\u5BA1\u67E5\u90FD\u4F7F\u7528\u4E91\u7AEF\u6A21\u578B\uFF08\u8D28\u91CF\u4F18\u5148\uFF09", en: "Chat and review both use the cloud model (quality first)" },
+  local: { zh: "\u5BF9\u8BDD\u4E0E\u5BA1\u67E5\u90FD\u4F7F\u7528\u672C\u5730\u6A21\u578B\uFF08\u79BB\u7EBF\u53EF\u7528\uFF09", en: "Chat and review both use the local model (works offline)" },
+  hybrid: { zh: "\u5BF9\u8BDD\u7528\u4E91\u7AEF\uFF1B\u5BA1\u67E5\u6309\u590D\u6742\u5EA6\u81EA\u52A8\u5206\u6D41", en: "Chat on the cloud; review auto-routes by complexity" },
+  custom: { zh: "\u5206\u522B\u6307\u5B9A\u300C\u5BF9\u8BDD\u6A21\u578B\u300D\u548C\u300C\u5BA1\u67E5\u6A21\u578B\u300D", en: "Pick the chat model and the review model separately" },
+  offline: { zh: "\u79BB\u7EBF\u4F18\u5148\uFF1A\u53EA\u4F7F\u7528\u672C\u5730\u8FD0\u884C\u65F6", en: "Offline first: local runtime only" }
+};
+var isEnglish2 = (language) => String(language ?? "zh-CN").toLowerCase().startsWith("en");
+function slotLabel(slot, language) {
+  const entry = SLOT_LABELS[slot];
+  if (!entry)
+    return String(slot ?? "");
+  return isEnglish2(language) ? entry.en : entry.zh;
+}
+function presetLabel(preset, language) {
+  const table = PRESET_LABELS[preset.value];
+  if (isEnglish2(language))
+    return table?.en ?? preset.label ?? preset.value;
+  return preset.label ?? table?.zh ?? preset.value;
+}
+function presetDescription(value, language) {
+  const table = PRESET_DESCRIPTIONS[value];
+  if (!table)
+    return "";
+  return isEnglish2(language) ? table.en : table.zh;
+}
+function slotIndexOf(choices, slot) {
+  const index = choices.findIndex((choice) => choice.value === slot);
+  return index >= 0 ? index : 0;
+}
+function presetIndexOf(values, routingProfile, runtimeProfile) {
+  const index = values.indexOf(String(routingProfile ?? ""));
+  if (index >= 0)
+    return index;
+  const fallback = values.indexOf(String(runtimeProfile ?? ""));
+  return fallback >= 0 ? fallback : 0;
+}
+var notConfigured = (language) => isEnglish2(language) ? "not configured" : "\u672A\u914D\u7F6E";
+function slotDetail(slot, models, language) {
+  const remote = String(models.remote ?? "").trim();
+  const local = String(models.local ?? "").trim();
+  if (slot === "hybrid") {
+    return isEnglish2(language) ? "auto-route by complexity" : "\u6309\u6587\u4EF6\u590D\u6742\u5EA6\u81EA\u52A8\u5206\u6D41";
+  }
+  const model = slot === "local" ? local : remote;
+  return model || notConfigured(language);
+}
+function routeBoxes(models, language) {
+  const choice = (value) => ({
+    value,
+    label: slotLabel(value, language),
+    detail: slotDetail(value, models, language)
+  });
+  return [
+    {
+      key: "chat",
+      title: isEnglish2(language) ? "Chat model \xB7 used by the chat pane" : "\u5BF9\u8BDD\u6A21\u578B \xB7 \u804A\u5929\u533A\u4F7F\u7528",
+      choices: CHAT_SLOT_VALUES.map(choice)
+    },
+    {
+      key: "review",
+      title: isEnglish2(language) ? "Review model \xB7 used by /review" : "\u5BA1\u67E5\u6A21\u578B \xB7 /review \u4F7F\u7528",
+      choices: REVIEW_SLOT_VALUES.map(choice)
+    }
+  ];
+}
+function setupSlotFields(profile, selection) {
+  if (String(profile).trim().toLowerCase() !== "custom")
+    return {};
+  return { chat_slot: selection.chat, review_slot: selection.review };
+}
+function routeSummary(profile, selection, models, language) {
+  const value = String(profile).trim().toLowerCase();
+  const selected = value === "custom" ? selection : value === "hybrid" ? { chat: "remote", review: "hybrid" } : value === "cloud" ? { chat: "remote", review: "remote" } : { chat: "local", review: "local" };
+  const render = (slot) => slot === "hybrid" ? `${slotLabel(slot, language)} (local\u2194remote)` : `${slotLabel(slot, language)} ${slotDetail(slot, models, language)}`;
+  return { chat: render(selected.chat), review: render(selected.review) };
+}
+function routingStatusText(routing, language) {
+  const chat = routing?.chat;
+  const review = routing?.review;
+  if (!chat && !review)
+    return "";
+  const detail = (slot) => {
+    if (!slot)
+      return "";
+    if (slot.slot === "hybrid")
+      return `${slotLabel("hybrid", language)} (local\u2194remote)`;
+    return String(slot.model ?? "").trim() || slotLabel(slot.slot, language);
+  };
+  const parts = [];
+  const chatText = detail(chat);
+  const reviewText = detail(review);
+  if (chatText)
+    parts.push(`CHAT ${chatText}`);
+  if (reviewText)
+    parts.push(`REVIEW ${reviewText}`);
+  return parts.join(" \xB7 ");
+}
+function setupModelSpecFields(values) {
+  const payload = {};
+  if (typeof values.context_window === "number" && Number.isFinite(values.context_window)) {
+    payload.context_window = Math.trunc(values.context_window);
+  }
+  if (typeof values.max_output === "number" && Number.isFinite(values.max_output)) {
+    payload.max_output = Math.trunc(values.max_output);
+  }
+  if (typeof values.local_context_window === "number" && Number.isFinite(values.local_context_window)) {
+    payload.local_context_window = Math.trunc(values.local_context_window);
+  }
+  if (typeof values.local_max_output === "number" && Number.isFinite(values.local_max_output)) {
+    payload.local_max_output = Math.trunc(values.local_max_output);
+  }
+  return payload;
+}
+function setupCustomEndpointFields(values, apiFormat = "openai") {
+  const payload = { provider_name: "custom", api_format: apiFormat };
+  const baseUrl = String(values.base_url ?? "").trim();
+  if (baseUrl)
+    payload.base_url = baseUrl;
+  if (values.api_key !== undefined) {
+    payload.api_key = String(values.api_key).trim();
+  }
+  const modelName = String(values.model_name ?? "").trim();
+  if (modelName)
+    payload.model_name = modelName;
+  if (typeof values.context_window === "number" && Number.isFinite(values.context_window)) {
+    payload.context_window = Math.trunc(values.context_window);
+  }
+  if (typeof values.max_output === "number" && Number.isFinite(values.max_output)) {
+    payload.max_output = Math.trunc(values.max_output);
+  }
+  return payload;
+}
+function interpretApiKeyInput(raw) {
+  const trimmed = String(raw ?? "").trim();
+  if (!trimmed)
+    return;
+  if (trimmed === "-")
+    return "";
+  return trimmed;
+}
+function validateSpecInput(raw, bounds, language) {
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  const trimmed = String(raw ?? "").trim();
+  if (!trimmed)
+    return "";
+  if (!/^-?\d+$/.test(trimmed)) {
+    return en ? "must be an integer" : "\u9700\u4E3A\u6574\u6570";
+  }
+  const value = Number(trimmed);
+  if (!Number.isFinite(value)) {
+    return en ? "must be an integer" : "\u9700\u4E3A\u6574\u6570";
+  }
+  if (bounds && (value < bounds[0] || value > bounds[1])) {
+    return en ? `must be between ${bounds[0]} and ${bounds[1]}` : `\u9700\u5728 ${bounds[0]}\u2013${bounds[1]} \u4E4B\u95F4`;
+  }
+  return "";
+}
+var DEFAULT_REVIEW_EFFORT = "off";
+var FALLBACK_REVIEW_EFFORT_OPTIONS = [
+  { value: "off", label: "\u5173\u95ED / Off\uFF08\u4E0D\u601D\u8003\uFF0C\u9ED8\u8BA4\uFF09" },
+  { value: "low", label: "\u4F4E / Low\uFF08\u9884\u7559 4000 \u601D\u8003 tokens\uFF09" },
+  { value: "high", label: "\u9AD8 / High\uFF08\u9884\u7559 8000 \u601D\u8003 tokens\uFF09" },
+  { value: "max", label: "\u6700\u9AD8 / Max\uFF08\u9884\u7559 12000\uFF1B\u5B9E\u6D4B\u7EA6 3.6\xD7 \u8F93\u51FA tokens\u30012.9\xD7 \u8017\u65F6\uFF09" },
+  { value: "auto", label: "\u81EA\u52A8 / Auto\uFF08\u4E0D\u5E72\u9884\uFF0C\u7531\u4F9B\u5E94\u5546\u9ED8\u8BA4\u51B3\u5B9A\uFF09" }
+];
+function reviewEffortChoices(source) {
+  const fromBackend = source?.options ?? [];
+  return fromBackend.length > 0 ? fromBackend : FALLBACK_REVIEW_EFFORT_OPTIONS;
+}
+function reviewEffortIndexOf(list, value) {
+  const exact = list.findIndex((option) => option.value === String(value ?? "").trim().toLowerCase());
+  if (exact >= 0)
+    return exact;
+  const fallback = list.findIndex((option) => option.value === DEFAULT_REVIEW_EFFORT);
+  return fallback >= 0 ? fallback : 0;
+}
+function reviewEffortValue(list, index) {
+  const bounded = Math.min(Math.max(index, 0), Math.max(0, list.length - 1));
+  return list[bounded]?.value ?? DEFAULT_REVIEW_EFFORT;
+}
+function reviewEffortStoredValue(source) {
+  if (typeof source === "string")
+    return source.trim().toLowerCase();
+  if (source && typeof source === "object") {
+    const value = source.value;
+    return typeof value === "string" ? value.trim().toLowerCase() : "";
+  }
+  return "";
+}
+function reviewEffortSummary(list, value, language) {
+  const option = list.find((item) => item.value === value);
+  const label = option?.label ?? FALLBACK_REVIEW_EFFORT_OPTIONS.find((item) => item.value === value)?.label;
+  if (!label)
+    return value;
+  const parts = String(label).split(" / ");
+  if (parts.length < 2)
+    return label;
+  const en = String(language ?? "zh-CN").toLowerCase().startsWith("en");
+  return (en ? parts[parts.length - 1] : parts[0]).trim();
+}
+function setupReviewEffortField(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized ? { review_reasoning_effort: normalized } : {};
+}
+function reviewEffortIsDisabled(source) {
+  return String(source?.state ?? "").trim().toLowerCase() === "unsupported";
+}
+
+// src/setup-repo-context.ts
+var RECOMMENDED_REPO_CONTEXT = "tests+imports";
+var FALLBACK_REPO_CONTEXT_OPTIONS = [
+  { value: "off", label: "\u5173\u95ED / Off" },
+  { value: "tests", label: "\u4EC5\u6D4B\u8BD5\u6587\u4EF6 / Tests only" },
+  { value: "tests+imports", label: "\u6D4B\u8BD5\u4E0E\u4F9D\u8D56 / Tests + imports" }
+];
+var REPO_CONTEXT_NOTES = {
+  off: {
+    zh: "\u4E0D\u8BFB\u53D6\u4EFB\u4F55\u4ED3\u5E93\u6587\u4EF6\uFF0C\u96F6\u989D\u5916\u8BF7\u6C42\uFF08\u884C\u4E3A\u4E0E\u6539\u9020\u524D\u4E00\u81F4\uFF09",
+    en: "no repository files are read, zero extra requests"
+  },
+  tests: {
+    zh: "\u53EA\u5E26\u8FDB\u8BE5 PR \u7684\u6D4B\u8BD5\u6587\u4EF6",
+    en: "only the test files touched by this PR"
+  },
+  "tests+imports": {
+    zh: "\u6D4B\u8BD5\u6587\u4EF6 + \u5B83\u4EEC\u5BFC\u5165\u7684\u6A21\u5757\uFF08\u63A8\u8350\uFF09",
+    en: "test files + their imports (recommended)"
+  }
+};
+var isEnglish3 = (language) => String(language ?? "zh-CN").toLowerCase().startsWith("en");
+function bilingualLabel(label, language) {
+  const parts = String(label ?? "").split(" / ");
+  if (parts.length < 2)
+    return String(label ?? "");
+  return (isEnglish3(language) ? parts[parts.length - 1] : parts[0]).trim();
+}
+function repoContextStoredValue(source) {
+  if (typeof source === "string")
+    return source;
+  if (source && typeof source === "object") {
+    const value = source.value;
+    return typeof value === "string" ? value : "";
+  }
+  return "";
+}
+function repoContextChoices(source) {
+  const fromBackend = source?.options ?? [];
+  return fromBackend.length > 0 ? fromBackend : FALLBACK_REPO_CONTEXT_OPTIONS;
+}
+function repoContextLabel(option, language) {
+  return bilingualLabel(option.label, language);
+}
+function repoContextDescription(option, language) {
+  const note = REPO_CONTEXT_NOTES[option.value];
+  if (!note)
+    return option.value;
+  return `${option.value} \xB7 ${isEnglish3(language) ? note.en : note.zh}`;
+}
+function repoContextIndexOf(list, value) {
+  const exact = list.findIndex((option) => option.value === String(value ?? ""));
+  if (exact >= 0)
+    return exact;
+  const recommended = list.findIndex((option) => option.value === RECOMMENDED_REPO_CONTEXT);
+  return recommended >= 0 ? recommended : 0;
+}
+function repoContextValue(list, index) {
+  const bounded = Math.min(Math.max(index, 0), Math.max(0, list.length - 1));
+  return list[bounded]?.value ?? RECOMMENDED_REPO_CONTEXT;
+}
+function repoContextSummary(list, value, language) {
+  const option = list.find((item) => item.value === value);
+  if (option)
+    return repoContextLabel(option, language);
+  const fallback = FALLBACK_REPO_CONTEXT_OPTIONS.find((item) => item.value === value);
+  return fallback ? repoContextLabel(fallback, language) : value;
+}
+function setupRepoContextField(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized ? { repo_context: normalized } : {};
+}
+
 // src/app.tsx
 var orange = "#fb8147";
 var muted = "#808080";
+var chatMarkdownStyleCache;
+var chatMarkdownStyle = () => {
+  if (chatMarkdownStyleCache === undefined) {
+    chatMarkdownStyleCache = SyntaxStyle.fromTheme([{
+      scope: ["default"],
+      style: {
+        foreground: "#eeeeee"
+      }
+    }, {
+      scope: ["markup.strong"],
+      style: {
+        foreground: "#ffffff",
+        bold: true
+      }
+    }, {
+      scope: ["markup.italic"],
+      style: {
+        foreground: "#e8e8e8",
+        italic: true
+      }
+    }, {
+      scope: ["markup.raw"],
+      style: {
+        foreground: orange
+      }
+    }, {
+      scope: ["markup.strikethrough"],
+      style: {
+        foreground: muted,
+        dim: true
+      }
+    }, {
+      scope: ["markup.link", "markup.link.label"],
+      style: {
+        foreground: "#7ec8ff",
+        underline: true
+      }
+    }, {
+      scope: ["markup.link.url"],
+      style: {
+        foreground: "#5a9fd4",
+        underline: true
+      }
+    }, {
+      scope: ["markup.heading", "markup.heading.1", "markup.heading.2", "markup.heading.3"],
+      style: {
+        foreground: orange,
+        bold: true
+      }
+    }, {
+      scope: ["markup.list"],
+      style: {
+        foreground: orange
+      }
+    }, {
+      scope: ["markup.quote"],
+      style: {
+        foreground: muted,
+        italic: true
+      }
+    }]);
+  }
+  return chatMarkdownStyleCache;
+};
+var CHAT_TABLE_WIDE_BREAKPOINT = 100;
+function chatTableOptions(renderWidth) {
+  return renderWidth < CHAT_TABLE_WIDE_BREAKPOINT ? {
+    widthMode: "content",
+    cellPadding: 0,
+    wrapMode: "word",
+    borders: true
+  } : {
+    widthMode: "full",
+    cellPadding: 0,
+    wrapMode: "word",
+    borders: true
+  };
+}
 var CHAT_TIMEOUT_MS = 15 * 60000;
 var REVIEW_TIMEOUT_MS = 40 * 60000;
 var PROBE_TIMEOUT_MS = 30000;
@@ -36941,64 +38137,278 @@ var statusColors = {
 var modes = ["Build", "Plan", "Compose"];
 var BRAND_PIXEL = ["\u2588\u2588\u2588\u2588\u2588\u2588  \u2588\u2588\u2588\u2588\u2588\u2588      \u2588\u2588\u2588\u2588\u2588\u2588  \u2588\u2588\u2588\u2588\u2588\u2588\u2588 \u2588\u2588    \u2588\u2588 \u2588\u2588 \u2588\u2588\u2588\u2588\u2588\u2588\u2588 \u2588\u2588  \u2588\u2588", "\u2588\u2588   \u2588\u2588 \u2588\u2588   \u2588\u2588     \u2588\u2588   \u2588\u2588 \u2588\u2588      \u2588\u2588    \u2588\u2588 \u2588\u2588 \u2588\u2588      \u2588\u2588  \u2588\u2588", "\u2588\u2588\u2588\u2588\u2588\u2588  \u2588\u2588\u2588\u2588\u2588\u2588      \u2588\u2588\u2588\u2588\u2588\u2588  \u2588\u2588\u2588\u2588\u2588   \u2588\u2588    \u2588\u2588 \u2588\u2588 \u2588\u2588\u2588\u2588\u2588   \u2588\u2588\u2588\u2588\u2588\u2588", "\u2588\u2588      \u2588\u2588   \u2588\u2588     \u2588\u2588   \u2588\u2588 \u2588\u2588       \u2588\u2588  \u2588\u2588  \u2588\u2588 \u2588\u2588      \u2588\u2588  \u2588\u2588", "\u2588\u2588      \u2588\u2588   \u2588\u2588     \u2588\u2588   \u2588\u2588 \u2588\u2588\u2588\u2588\u2588\u2588\u2588   \u2588\u2588\u2588\u2588   \u2588\u2588 \u2588\u2588\u2588\u2588\u2588\u2588\u2588 \u2588\u2588  \u2588\u2588"];
 var isEn = (language) => String(language ?? "zh-CN").toLowerCase().startsWith("en");
+function RuntimeStatusLine(props) {
+  const routingLabel = () => routingStatusText(props.runtime.routing, props.runtime.ui_language) || (props.runtime.model ?? "model");
+  const effortBadge = () => props.width >= 90 ? formatEffortBadge(props.runtime.chat_reasoning_effort, props.runtime.ui_language) : "";
+  const sessionBadge = () => {
+    if (props.width < 100)
+      return "";
+    const title = props.runtime.session_title ?? props.runtime.session_name ?? props.sessionTitle;
+    return formatSessionBadge(title, 20, props.runtime.ui_language);
+  };
+  return (() => {
+    var _el$ = createElement("text"), _el$2 = createTextNode(` \xB7 `), _el$3 = createTextNode(` \xB7 `), _el$4 = createTextNode(` \xB7 `), _el$6 = createTextNode(` \xB7 `), _el$8 = createTextNode(`\xD7`);
+    insertNode(_el$, _el$2);
+    insertNode(_el$, _el$3);
+    insertNode(_el$, _el$4);
+    insertNode(_el$, _el$6);
+    insertNode(_el$, _el$8);
+    insert(_el$, () => props.runtime.runtime_profile ?? "RUNTIME", _el$2);
+    insert(_el$, () => statusLabels[props.status], _el$3);
+    insert(_el$, routingLabel, _el$4);
+    insert(_el$, (() => {
+      var _c$ = memo2(() => !!effortBadge());
+      return () => _c$() ? ` \xB7 ${effortBadge()}` : "";
+    })(), _el$4);
+    insert(_el$, (() => {
+      var _c$2 = memo2(() => !!sessionBadge());
+      return () => _c$2() ? ` \xB7 ${sessionBadge()}` : "";
+    })(), _el$4);
+    insert(_el$, (() => {
+      var _c$3 = memo2(() => props.runtime.available === false);
+      return () => _c$3() ? "OFFLINE" : props.runtime.available === true ? "ONLINE" : "0.1.0";
+    })(), _el$6);
+    insert(_el$, () => props.width, _el$8);
+    insert(_el$, () => props.height, null);
+    effect((_$p) => setProp(_el$, "fg", statusColors[props.status], _$p));
+    return _el$;
+  })();
+}
 function PixelLogo(props) {
   return (() => {
-    var _el$ = createElement("box"), _el$2 = createElement("text");
-    insertNode(_el$, _el$2);
-    setProp(_el$, "width", 76);
-    setProp(_el$, "height", 8);
-    setProp(_el$, "flexDirection", "column");
-    setProp(_el$, "alignItems", "center");
-    setProp(_el$, "marginTop", 1);
-    insert(_el$, createComponent2(For, {
+    var _el$9 = createElement("box"), _el$0 = createElement("text");
+    insertNode(_el$9, _el$0);
+    setProp(_el$9, "width", 76);
+    setProp(_el$9, "height", 8);
+    setProp(_el$9, "flexDirection", "column");
+    setProp(_el$9, "alignItems", "center");
+    setProp(_el$9, "marginTop", 1);
+    insert(_el$9, createComponent2(For, {
       each: BRAND_PIXEL,
       children: (line) => (() => {
-        var _el$3 = createElement("text");
-        setProp(_el$3, "width", 66);
-        setProp(_el$3, "height", 1);
-        setProp(_el$3, "fg", "#fb8147");
-        setProp(_el$3, "attributes", 1);
-        insert(_el$3, line);
-        return _el$3;
+        var _el$1 = createElement("text");
+        setProp(_el$1, "width", 66);
+        setProp(_el$1, "height", 1);
+        setProp(_el$1, "fg", "#fb8147");
+        setProp(_el$1, "attributes", 1);
+        insert(_el$1, line);
+        return _el$1;
       })()
-    }), _el$2);
-    setProp(_el$2, "width", 66);
-    setProp(_el$2, "height", 1);
-    setProp(_el$2, "marginTop", 1);
-    setProp(_el$2, "fg", "#808080");
-    insert(_el$2, () => isEn(props.language) ? "AI PR REVIEW ASSISTANT \xB7 EVIDENCE-FIRST \xB7 MULTI-MODEL" : "AI PR \u5BA1\u67E5\u667A\u80FD\u4F53 \xB7 \u8BC1\u636E\u4F18\u5148 \xB7 \u591A\u6A21\u578B\u534F\u4F5C");
-    return _el$;
+    }), _el$0);
+    setProp(_el$0, "width", 66);
+    setProp(_el$0, "height", 1);
+    setProp(_el$0, "marginTop", 1);
+    setProp(_el$0, "fg", "#808080");
+    insert(_el$0, () => isEn(props.language) ? "AI PR REVIEW ASSISTANT \xB7 EVIDENCE-FIRST \xB7 MULTI-MODEL" : "AI PR \u5BA1\u67E5\u667A\u80FD\u4F53 \xB7 \u8BC1\u636E\u4F18\u5148 \xB7 \u591A\u6A21\u578B\u534F\u4F5C");
+    return _el$9;
   })();
 }
 function QuickStartPanel(props) {
   const rows = () => isEn(props.language) ? [["/review <PR_URL>", "Run an AI review on a pull request"], ["/model", "Switch model (local Ollama / cloud)"], ["/history", "Review history and insights"], ["/setup", "Configuration wizard"]] : [["/review <PR_URL>", "\u53D1\u8D77 PR \u667A\u80FD\u5BA1\u67E5"], ["/model", "\u6A21\u578B\u5207\u6362\uFF08\u672C\u5730 Ollama \u21C4 \u4E91\u7AEF\uFF09"], ["/history", "\u5BA1\u67E5\u5386\u53F2\u4E0E\u590D\u76D8"], ["/setup", "\u914D\u7F6E\u5411\u5BFC"]];
   return (() => {
-    var _el$4 = createElement("box"), _el$5 = createElement("text");
-    insertNode(_el$4, _el$5);
-    setProp(_el$4, "width", 76);
-    setProp(_el$4, "marginTop", 1);
-    setProp(_el$4, "flexDirection", "column");
-    setProp(_el$5, "fg", "#f3c742");
-    insert(_el$5, () => isEn(props.language) ? "QUICK START" : "\u5FEB\u901F\u5F00\u59CB");
-    insert(_el$4, createComponent2(For, {
+    var _el$10 = createElement("box"), _el$11 = createElement("text");
+    insertNode(_el$10, _el$11);
+    setProp(_el$10, "width", 76);
+    setProp(_el$10, "marginTop", 1);
+    setProp(_el$10, "flexDirection", "column");
+    setProp(_el$11, "fg", "#f3c742");
+    insert(_el$11, () => isEn(props.language) ? "QUICK START" : "\u5FEB\u901F\u5F00\u59CB");
+    insert(_el$10, createComponent2(For, {
       get each() {
         return rows();
       },
       children: (row) => (() => {
-        var _el$6 = createElement("box"), _el$7 = createElement("text"), _el$8 = createElement("text");
-        insertNode(_el$6, _el$7);
-        insertNode(_el$6, _el$8);
-        setProp(_el$6, "flexDirection", "row");
-        setProp(_el$6, "gap", 2);
-        setProp(_el$7, "width", 18);
-        setProp(_el$7, "fg", "#fb8147");
-        insert(_el$7, () => row[0]);
-        setProp(_el$8, "fg", "#808080");
-        insert(_el$8, () => row[1]);
-        return _el$6;
+        var _el$12 = createElement("box"), _el$13 = createElement("text"), _el$14 = createElement("text");
+        insertNode(_el$12, _el$13);
+        insertNode(_el$12, _el$14);
+        setProp(_el$12, "flexDirection", "row");
+        setProp(_el$12, "gap", 2);
+        setProp(_el$13, "width", 18);
+        setProp(_el$13, "fg", "#fb8147");
+        insert(_el$13, () => row[0]);
+        setProp(_el$14, "fg", "#808080");
+        insert(_el$14, () => row[1]);
+        return _el$12;
       })()
     }), null);
-    return _el$4;
+    return _el$10;
+  })();
+}
+function ThinkingBlock(props) {
+  const width = () => Math.max(24, props.width ?? 72);
+  const en = () => String(props.language ?? "zh-CN").toLowerCase().startsWith("en");
+  const header = () => props.expanded ? en() ? "\u25BE Thinking" : "\u25BE \u601D\u8003" : en() ? `\u25B8 Thinking (${props.text.split(`
+`).length} lines)` : `\u25B8 \u601D\u8003\uFF08${props.text.split(`
+`).length} \u884C\uFF09`;
+  return (() => {
+    var _el$15 = createElement("box"), _el$16 = createElement("text");
+    insertNode(_el$15, _el$16);
+    setProp(_el$15, "flexDirection", "column");
+    setProp(_el$15, "marginBottom", 1);
+    setProp(_el$15, "paddingLeft", 1);
+    setProp(_el$15, "paddingRight", 1);
+    setProp(_el$15, "backgroundColor", "#121212");
+    setProp(_el$15, "border", ["left"]);
+    setProp(_el$15, "borderColor", "#555555");
+    setProp(_el$16, "fg", "#808080");
+    setProp(_el$16, "attributes", 2);
+    insert(_el$16, header);
+    insert(_el$15, createComponent2(Show, {
+      get when() {
+        return props.expanded;
+      },
+      get children() {
+        var _el$17 = createElement("text");
+        setProp(_el$17, "fg", "#9a9a9a");
+        setProp(_el$17, "attributes", 2);
+        insert(_el$17, () => props.text);
+        effect((_$p) => setProp(_el$17, "width", width() - 2, _$p));
+        return _el$17;
+      }
+    }), null);
+    effect((_p$) => {
+      var _v$ = width(), _v$2 = props.onToggle;
+      _v$ !== _p$.e && (_p$.e = setProp(_el$15, "width", _v$, _p$.e));
+      _v$2 !== _p$.t && (_p$.t = setProp(_el$16, "onMouseDown", _v$2, _p$.t));
+      return _p$;
+    }, {
+      e: undefined,
+      t: undefined
+    });
+    return _el$15;
+  })();
+}
+function MessageMetricsLine(props) {
+  const text = () => formatMessageMetrics({
+    model: props.model || props.fallbackModel,
+    durationSeconds: props.seconds,
+    completionTokens: props.completionTokens,
+    contentLength: props.contentLength,
+    timestamp: props.timestamp
+  }, props.language);
+  return createComponent2(Show, {
+    get when() {
+      return text();
+    },
+    get children() {
+      var _el$18 = createElement("text");
+      setProp(_el$18, "fg", "#808080");
+      insert(_el$18, text);
+      return _el$18;
+    }
+  });
+}
+function OverBudgetTip(props) {
+  return (() => {
+    var _el$19 = createElement("box"), _el$20 = createElement("text");
+    insertNode(_el$19, _el$20);
+    setProp(_el$19, "marginTop", 1);
+    setProp(_el$19, "flexDirection", "column");
+    setProp(_el$20, "fg", "#f3c742");
+    insert(_el$20, () => overBudgetTip(props.language));
+    effect((_$p) => setProp(_el$19, "width", Math.max(24, props.width ?? 72), _$p));
+    return _el$19;
+  })();
+}
+function ContextUsageLine(props) {
+  const label = () => formatContextUsage(props.context, props.language);
+  const color = () => contextPressureColor(props.context?.pressure);
+  const tip = () => formatPressureTip(props.context?.pressure, props.language);
+  return createComponent2(Show, {
+    get when() {
+      return label();
+    },
+    get children() {
+      var _el$21 = createElement("box"), _el$22 = createElement("text");
+      insertNode(_el$21, _el$22);
+      setProp(_el$21, "flexDirection", "column");
+      insert(_el$22, label);
+      insert(_el$21, createComponent2(Show, {
+        get when() {
+          return tip();
+        },
+        get children() {
+          var _el$23 = createElement("text");
+          insert(_el$23, tip);
+          effect((_$p) => setProp(_el$23, "fg", color(), _$p));
+          return _el$23;
+        }
+      }), null);
+      effect((_$p) => setProp(_el$22, "fg", color(), _$p));
+      return _el$21;
+    }
+  });
+}
+function FoldableMarkdownBlock(props) {
+  return (() => {
+    var _el$24 = createElement("box");
+    setProp(_el$24, "flexDirection", "column");
+    insert(_el$24, createComponent2(For, {
+      get each() {
+        return splitFoldableMarkdown(props.content, props.isExpanded);
+      },
+      children: (seg, index) => seg.kind === "markdown" ? (() => {
+        var _el$25 = createElement("box"), _el$26 = createElement("markdown");
+        insertNode(_el$25, _el$26);
+        setProp(_el$25, "flexDirection", "row");
+        setProp(_el$25, "gap", 1);
+        insert(_el$25, (() => {
+          var _c$4 = memo2(() => index() === 0);
+          return () => _c$4() ? (() => {
+            var _el$27 = createElement("text");
+            insertNode(_el$27, createTextNode(`\u25CF`));
+            effect((_$p) => setProp(_el$27, "fg", props.bulletFg, _$p));
+            return _el$27;
+          })() : (() => {
+            var _el$29 = createElement("text");
+            insertNode(_el$29, createTextNode(` `));
+            setProp(_el$29, "width", 1);
+            return _el$29;
+          })();
+        })(), _el$26);
+        setProp(_el$26, "conceal", true);
+        setProp(_el$26, "renderNode", (token, ctx) => {
+          if (token.type !== "code")
+            return;
+          const code = ctx.defaultRender();
+          if (code) {
+            const styled = code;
+            styled.bg = "#141414";
+            styled.paddingLeft = 1;
+            styled.marginBottom = seg.foldable ? 0 : 1;
+          }
+          return code;
+        });
+        effect((_p$) => {
+          var _v$3 = props.width, _v$4 = seg.content, { syntaxStyle: _v$5, fg: _v$6, streaming: _v$7, tableOptions: _v$8 } = props;
+          _v$3 !== _p$.e && (_p$.e = setProp(_el$26, "width", _v$3, _p$.e));
+          _v$4 !== _p$.t && (_p$.t = setProp(_el$26, "content", _v$4, _p$.t));
+          _v$5 !== _p$.a && (_p$.a = setProp(_el$26, "syntaxStyle", _v$5, _p$.a));
+          _v$6 !== _p$.o && (_p$.o = setProp(_el$26, "fg", _v$6, _p$.o));
+          _v$7 !== _p$.i && (_p$.i = setProp(_el$26, "streaming", _v$7, _p$.i));
+          _v$8 !== _p$.n && (_p$.n = setProp(_el$26, "tableOptions", _v$8, _p$.n));
+          return _p$;
+        }, {
+          e: undefined,
+          t: undefined,
+          a: undefined,
+          o: undefined,
+          i: undefined,
+          n: undefined
+        });
+        return _el$25;
+      })() : (() => {
+        var _el$31 = createElement("box"), _el$32 = createElement("text");
+        insertNode(_el$31, _el$32);
+        setProp(_el$31, "flexDirection", "row");
+        setProp(_el$31, "paddingLeft", 2);
+        setProp(_el$32, "onMouseDown", () => props.onToggleAt(props.messageKey, seg.blockIndex));
+        setProp(_el$32, "fg", "#808080");
+        insert(_el$32, () => codeFoldBadge(seg.lineCount, seg.expanded));
+        return _el$31;
+      })()
+    }));
+    return _el$24;
   })();
 }
 var REVIEW_STAGE_ORDER = [{
@@ -37180,6 +38590,16 @@ function Composer(props) {
       submitLock = false;
       return;
     }
+    if (text === "/history --runs" || text === "/history --runs ") {
+      props.onOpenHistory();
+      submitLock = false;
+      return;
+    }
+    if (text === "/history --chat" || text === "/history --chat ") {
+      props.onOpenChatHistory();
+      submitLock = false;
+      return;
+    }
     if (text === "/retry") {
       props.onRetry();
       submitLock = false;
@@ -37193,6 +38613,64 @@ function Composer(props) {
     if (text === "/workbench") {
       props.onToggleWorkbench();
       submitLock = false;
+      return;
+    }
+    if (text === "/sessions") {
+      props.onOpenSessions();
+      submitLock = false;
+      return;
+    }
+    if (text === "/rename" || text.startsWith("/rename ")) {
+      const title = text.slice("/rename".length).trim();
+      props.onMessage({
+        role: "user",
+        content: text
+      });
+      if (!title) {
+        props.onMessage({
+          role: "assistant",
+          content: "\u7528\u6CD5\uFF1A/rename <\u65B0\u6807\u9898>\uFF08\u6216\u5728\u4F1A\u8BDD\u5F39\u7A97 /sessions \u91CC\u6309 r \u6539\u540D\uFF09"
+        });
+      } else {
+        props.onRenameSession(title);
+      }
+      submitLock = false;
+      return;
+    }
+    if (text === "/new") {
+      props.onMessage({
+        role: "user",
+        content: text
+      });
+      props.onStatus("THINKING");
+      try {
+        const created = await props.backend.request("session.create", {}, {
+          timeoutMs: CHAT_TIMEOUT_MS
+        });
+        if (created.ok) {
+          const parsed = parseSessionCreateResult(created.result);
+          const nextId = parsed?.session_id ?? String(created.result?.session_id ?? "");
+          if (nextId)
+            props.onSessionChange(nextId);
+          props.onNewSession();
+          const title = parsed?.session?.title ?? parsed?.title ?? "";
+          if (title) {
+            props.onMessage({
+              role: "assistant",
+              content: formatSessionSwitched(title, props.runtime.ui_language)
+            });
+          }
+        } else {
+          props.onNewSession();
+        }
+        props.onStatus("READY");
+      } catch {
+        props.onNewSession();
+        props.onStatus("READY");
+      } finally {
+        props.onChatRequestEnd();
+        submitLock = false;
+      }
       return;
     }
     if (text === "/demo" || text.startsWith("/demo ")) {
@@ -37243,10 +38721,32 @@ function Composer(props) {
         });
         props.onStatus("ERROR");
       } else {
-        if (text.startsWith("/") && response.result?.text) {
+        const thinkResult = parseThinkCommandResult(response.result);
+        const compactResult = parseCompactCommandResult(response.result);
+        if (text.startsWith("/") && response.result?.text && !hasDedicatedCommandRenderer(response.result)) {
+          const budgetInfo = parseContextBudgetInfo(response.result);
+          const budgetLine = formatBudgetSource(budgetInfo.budget_tokens, budgetInfo.budget_source, props.runtime.ui_language);
+          const content = budgetLine ? `${String(response.result.text)}
+${budgetLine}` : String(response.result.text);
           props.onMessage({
             role: "assistant",
-            content: String(response.result.text)
+            content
+          });
+        }
+        if (thinkResult) {
+          const language = props.runtime.ui_language;
+          const body = thinkResult.state === "unsupported" ? formatThinkUnsupported(thinkResult.reason, language) : thinkResult.state === "transparent" ? formatThinkTransparent(thinkResult.level, thinkResult.reason, language) : formatThinkLevel(thinkResult.level, language);
+          props.onMessage({
+            role: "assistant",
+            content: body
+          });
+        }
+        if (compactResult) {
+          const language = props.runtime.ui_language;
+          const body = compactResult.ok === false || compactResult.error ? formatCompactFailure(compactResult.error, language) : formatCompactSummary(compactResult, language);
+          props.onMessage({
+            role: "assistant",
+            content: body
           });
         }
         if (!text.startsWith("/") && response.result?.text && !props.hasRenderedAssistantReply(chatRequestId)) {
@@ -37370,6 +38870,21 @@ function Composer(props) {
       key.stopPropagation?.();
       return;
     }
+    if (props.focused !== false && key.meta === true && key.name === "l") {
+      props.onToggleCodeFold();
+      key.stopPropagation?.();
+      return;
+    }
+    if (props.focused !== false && key.meta === true && key.name === "t") {
+      props.onToggleThinking();
+      key.stopPropagation?.();
+      return;
+    }
+    if (props.focused !== false && key.meta === true && key.name === "s") {
+      props.onOpenSessions();
+      key.stopPropagation?.();
+      return;
+    }
     if (props.focused === false)
       return;
     if (key.name === "tab" && matches().length === 0) {
@@ -37414,74 +38929,74 @@ function Composer(props) {
     }
   });
   return (() => {
-    var _el$9 = createElement("box"), _el$11 = createElement("box"), _el$12 = createElement("textarea"), _el$13 = createElement("box"), _el$14 = createElement("text"), _el$15 = createElement("text"), _el$17 = createElement("text"), _el$18 = createElement("text"), _el$20 = createElement("box"), _el$21 = createElement("text"), _el$22 = createElement("span"), _el$24 = createTextNode(` `), _el$25 = createElement("span"), _el$27 = createElement("text"), _el$28 = createElement("span"), _el$30 = createTextNode(` `), _el$31 = createElement("span"), _el$33 = createElement("text"), _el$34 = createElement("span"), _el$36 = createTextNode(` `), _el$37 = createElement("span"), _el$39 = createElement("text"), _el$40 = createElement("span"), _el$42 = createTextNode(` `), _el$43 = createElement("span"), _el$45 = createElement("text"), _el$46 = createElement("span"), _el$48 = createTextNode(` `), _el$49 = createElement("span");
-    insertNode(_el$9, _el$11);
-    insertNode(_el$9, _el$13);
-    insertNode(_el$9, _el$20);
-    setProp(_el$9, "width", 76);
-    setProp(_el$9, "marginTop", 1);
-    setProp(_el$9, "flexDirection", "column");
-    insert(_el$9, createComponent2(Show, {
+    var _el$33 = createElement("box"), _el$37 = createElement("box"), _el$38 = createElement("textarea"), _el$39 = createElement("box"), _el$40 = createElement("text"), _el$41 = createElement("text"), _el$43 = createElement("text"), _el$44 = createElement("text"), _el$46 = createElement("box"), _el$47 = createElement("text"), _el$48 = createElement("span"), _el$50 = createTextNode(` `), _el$51 = createElement("span"), _el$53 = createElement("text"), _el$54 = createElement("span"), _el$56 = createTextNode(` `), _el$57 = createElement("span"), _el$59 = createElement("text"), _el$60 = createElement("span"), _el$62 = createTextNode(` `), _el$63 = createElement("span"), _el$65 = createElement("text"), _el$66 = createElement("span"), _el$68 = createTextNode(` `), _el$69 = createElement("span"), _el$71 = createElement("text"), _el$72 = createElement("span"), _el$74 = createTextNode(` `), _el$75 = createElement("span"), _el$77 = createElement("text"), _el$78 = createElement("span"), _el$80 = createTextNode(` `), _el$81 = createElement("span");
+    insertNode(_el$33, _el$37);
+    insertNode(_el$33, _el$39);
+    insertNode(_el$33, _el$46);
+    setProp(_el$33, "width", 76);
+    setProp(_el$33, "marginTop", 1);
+    setProp(_el$33, "flexDirection", "column");
+    insert(_el$33, createComponent2(Show, {
       get when() {
         return matches().length > 0;
       },
       get children() {
-        var _el$0 = createElement("box"), _el$1 = createElement("text");
-        insertNode(_el$0, _el$1);
-        setProp(_el$0, "backgroundColor", "#202020");
-        setProp(_el$0, "borderStyle", "single");
-        setProp(_el$0, "borderColor", "#555555");
-        setProp(_el$0, "paddingLeft", 1);
-        setProp(_el$0, "paddingRight", 1);
-        setProp(_el$0, "flexDirection", "column");
-        insert(_el$0, createComponent2(For, {
+        var _el$34 = createElement("box"), _el$35 = createElement("text");
+        insertNode(_el$34, _el$35);
+        setProp(_el$34, "backgroundColor", "#202020");
+        setProp(_el$34, "borderStyle", "single");
+        setProp(_el$34, "borderColor", "#555555");
+        setProp(_el$34, "paddingLeft", 1);
+        setProp(_el$34, "paddingRight", 1);
+        setProp(_el$34, "flexDirection", "column");
+        insert(_el$34, createComponent2(For, {
           get each() {
             return visibleMatches();
           },
           children: (entry) => (() => {
-            var _el$57 = createElement("text"), _el$58 = createElement("span"), _el$59 = createElement("span"), _el$60 = createTextNode(` `);
-            insertNode(_el$57, _el$58);
-            insertNode(_el$57, _el$59);
-            insert(_el$58, () => entry.command.name, null);
-            insert(_el$58, (() => {
-              var _c$ = memo2(() => !!entry.command.argument);
-              return () => _c$() ? ` ${entry.command.argument}` : "";
+            var _el$95 = createElement("text"), _el$96 = createElement("span"), _el$97 = createElement("span"), _el$98 = createTextNode(` `);
+            insertNode(_el$95, _el$96);
+            insertNode(_el$95, _el$97);
+            insert(_el$96, () => entry.command.name, null);
+            insert(_el$96, (() => {
+              var _c$5 = memo2(() => !!commandArgumentLabel(entry.command, props.runtime.ui_language));
+              return () => _c$5() ? ` ${commandArgumentLabel(entry.command, props.runtime.ui_language)}` : "";
             })(), null);
-            insertNode(_el$59, _el$60);
-            setProp(_el$59, "style", {
+            insertNode(_el$97, _el$98);
+            setProp(_el$97, "style", {
               fg: "#808080"
             });
-            insert(_el$59, () => entry.command.description, null);
+            insert(_el$97, () => commandDescription(entry.command, props.runtime.ui_language), null);
             effect((_p$) => {
-              var _v$5 = entry.index === menuIndex() ? "#5a2e1c" : "#202020", _v$6 = {
+              var _v$11 = entry.index === menuIndex() ? "#5a2e1c" : "#202020", _v$12 = {
                 fg: entry.index === menuIndex() ? "#ffffff" : orange
               };
-              _v$5 !== _p$.e && (_p$.e = setProp(_el$57, "bg", _v$5, _p$.e));
-              _v$6 !== _p$.t && (_p$.t = setProp(_el$58, "style", _v$6, _p$.t));
+              _v$11 !== _p$.e && (_p$.e = setProp(_el$95, "bg", _v$11, _p$.e));
+              _v$12 !== _p$.t && (_p$.t = setProp(_el$96, "style", _v$12, _p$.t));
               return _p$;
             }, {
               e: undefined,
               t: undefined
             });
-            return _el$57;
+            return _el$95;
           })()
-        }), _el$1);
-        insertNode(_el$1, createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Tab \u8865\u5168 \xB7 Enter \u6267\u884C\u6216\u8865\u5168 \xB7 Esc \u5173\u95ED`));
-        setProp(_el$1, "fg", "#808080");
-        return _el$0;
+        }), _el$35);
+        insertNode(_el$35, createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Tab \u8865\u5168 \xB7 Enter \u6267\u884C\u6216\u8865\u5168 \xB7 Esc \u5173\u95ED`));
+        setProp(_el$35, "fg", "#808080");
+        return _el$34;
       }
-    }), _el$11);
-    insertNode(_el$11, _el$12);
-    setProp(_el$11, "backgroundColor", "#1e1e1e");
-    setProp(_el$11, "borderStyle", "single");
-    setProp(_el$11, "paddingLeft", 2);
-    setProp(_el$11, "paddingRight", 2);
-    setProp(_el$11, "paddingTop", 1);
-    setProp(_el$11, "paddingBottom", 1);
+    }), _el$37);
+    insertNode(_el$37, _el$38);
+    setProp(_el$37, "backgroundColor", "#1e1e1e");
+    setProp(_el$37, "borderStyle", "single");
+    setProp(_el$37, "paddingLeft", 2);
+    setProp(_el$37, "paddingRight", 2);
+    setProp(_el$37, "paddingTop", 1);
+    setProp(_el$37, "paddingBottom", 1);
     use((node) => {
       textarea = node;
-    }, _el$12);
-    setProp(_el$12, "onContentChange", () => {
+    }, _el$38);
+    setProp(_el$38, "onContentChange", () => {
       const draft = textarea?.plainText ?? "";
       setValue(draft);
       props.onDraftChange(draft);
@@ -37491,133 +39006,165 @@ function Composer(props) {
         setMenuOpen(true);
       }
     });
-    setProp(_el$12, "onKeyDown", onEditorKeyDown);
-    setProp(_el$12, "onSubmit", () => void submit());
-    setProp(_el$12, "keyBindings", bindings);
-    setProp(_el$12, "minHeight", 1);
-    setProp(_el$12, "wrapMode", "word");
-    setProp(_el$12, "flexGrow", 1);
-    insertNode(_el$13, _el$14);
-    insertNode(_el$13, _el$15);
-    insertNode(_el$13, _el$17);
-    insertNode(_el$13, _el$18);
-    setProp(_el$13, "paddingLeft", 2);
-    setProp(_el$13, "marginTop", 1);
-    setProp(_el$13, "gap", 2);
-    setProp(_el$13, "flexDirection", "row");
-    setProp(_el$13, "alignItems", "center");
-    setProp(_el$14, "fg", "#fb8147");
-    insert(_el$14, () => props.mode);
-    insertNode(_el$15, createTextNode(`\xB7`));
-    setProp(_el$15, "fg", "#808080");
-    setProp(_el$17, "fg", "#eeeeee");
-    insert(_el$17, () => props.runtime.model ?? "model");
-    setProp(_el$18, "fg", "#808080");
-    insert(_el$18, () => props.runtime.provider_display ?? props.runtime.provider ?? "provider");
-    insert(_el$9, createComponent2(Show, {
+    setProp(_el$38, "onKeyDown", onEditorKeyDown);
+    setProp(_el$38, "onSubmit", () => void submit());
+    setProp(_el$38, "keyBindings", bindings);
+    setProp(_el$38, "minHeight", 1);
+    setProp(_el$38, "wrapMode", "word");
+    setProp(_el$38, "flexGrow", 1);
+    insertNode(_el$39, _el$40);
+    insertNode(_el$39, _el$41);
+    insertNode(_el$39, _el$43);
+    insertNode(_el$39, _el$44);
+    setProp(_el$39, "paddingLeft", 2);
+    setProp(_el$39, "marginTop", 1);
+    setProp(_el$39, "gap", 2);
+    setProp(_el$39, "flexDirection", "row");
+    setProp(_el$39, "alignItems", "center");
+    setProp(_el$40, "fg", "#fb8147");
+    insert(_el$40, () => props.mode);
+    insertNode(_el$41, createTextNode(`\xB7`));
+    setProp(_el$41, "fg", "#808080");
+    setProp(_el$43, "fg", "#eeeeee");
+    insert(_el$43, () => props.runtime.model ?? "model");
+    setProp(_el$44, "fg", "#808080");
+    insert(_el$44, () => props.runtime.provider_display ?? props.runtime.provider ?? "provider");
+    insert(_el$33, createComponent2(Show, {
       get when() {
         return copyNotice();
       },
       get children() {
-        var _el$19 = createElement("text");
-        setProp(_el$19, "fg", "#f3c742");
-        setProp(_el$19, "paddingLeft", 2);
-        setProp(_el$19, "marginTop", 1);
-        insert(_el$19, copyNotice);
-        return _el$19;
+        var _el$45 = createElement("text");
+        setProp(_el$45, "fg", "#f3c742");
+        setProp(_el$45, "paddingLeft", 2);
+        setProp(_el$45, "marginTop", 1);
+        insert(_el$45, copyNotice);
+        return _el$45;
       }
-    }), _el$20);
-    insertNode(_el$20, _el$21);
-    insertNode(_el$20, _el$27);
-    insertNode(_el$20, _el$33);
-    insertNode(_el$20, _el$39);
-    insertNode(_el$20, _el$45);
-    setProp(_el$20, "flexDirection", "row");
-    setProp(_el$20, "justifyContent", "space-between");
-    setProp(_el$20, "paddingLeft", 1);
-    setProp(_el$20, "paddingRight", 1);
-    setProp(_el$20, "marginTop", 1);
-    insertNode(_el$21, _el$22);
-    insertNode(_el$21, _el$24);
-    insertNode(_el$21, _el$25);
-    insertNode(_el$22, createTextNode(`Enter`));
-    setProp(_el$22, "style", {
+    }), _el$46);
+    insertNode(_el$46, _el$47);
+    insertNode(_el$46, _el$53);
+    insertNode(_el$46, _el$59);
+    insertNode(_el$46, _el$65);
+    insertNode(_el$46, _el$71);
+    insertNode(_el$46, _el$77);
+    setProp(_el$46, "flexDirection", "row");
+    setProp(_el$46, "justifyContent", "space-between");
+    setProp(_el$46, "paddingLeft", 1);
+    setProp(_el$46, "paddingRight", 1);
+    setProp(_el$46, "marginTop", 1);
+    insertNode(_el$47, _el$48);
+    insertNode(_el$47, _el$50);
+    insertNode(_el$47, _el$51);
+    insertNode(_el$48, createTextNode(`Enter`));
+    setProp(_el$48, "style", {
       fg: "#eeeeee"
     });
-    insertNode(_el$25, createTextNode(`\u53D1\u9001`));
-    setProp(_el$25, "style", {
+    insertNode(_el$51, createTextNode(`\u53D1\u9001`));
+    setProp(_el$51, "style", {
       fg: "#808080"
     });
-    insertNode(_el$27, _el$28);
-    insertNode(_el$27, _el$30);
-    insertNode(_el$27, _el$31);
-    insertNode(_el$28, createTextNode(`Shift+Enter`));
-    setProp(_el$28, "style", {
+    insertNode(_el$53, _el$54);
+    insertNode(_el$53, _el$56);
+    insertNode(_el$53, _el$57);
+    insertNode(_el$54, createTextNode(`Shift+Enter`));
+    setProp(_el$54, "style", {
       fg: "#eeeeee"
     });
-    insertNode(_el$31, createTextNode(`\u6362\u884C`));
-    setProp(_el$31, "style", {
+    insertNode(_el$57, createTextNode(`\u6362\u884C`));
+    setProp(_el$57, "style", {
       fg: "#808080"
     });
-    insertNode(_el$33, _el$34);
-    insertNode(_el$33, _el$36);
-    insertNode(_el$33, _el$37);
-    insertNode(_el$34, createTextNode(`Ctrl+P`));
-    setProp(_el$34, "style", {
+    insertNode(_el$59, _el$60);
+    insertNode(_el$59, _el$62);
+    insertNode(_el$59, _el$63);
+    insertNode(_el$60, createTextNode(`Ctrl+P`));
+    setProp(_el$60, "style", {
       fg: "#eeeeee"
     });
-    insertNode(_el$37, createTextNode(`\u8BBE\u7F6E`));
-    setProp(_el$37, "style", {
+    insertNode(_el$63, createTextNode(`\u8BBE\u7F6E`));
+    setProp(_el$63, "style", {
       fg: "#808080"
     });
-    insertNode(_el$39, _el$40);
-    insertNode(_el$39, _el$42);
-    insertNode(_el$39, _el$43);
-    insertNode(_el$40, createTextNode(`Ctrl+L`));
-    setProp(_el$40, "style", {
+    insertNode(_el$65, _el$66);
+    insertNode(_el$65, _el$68);
+    insertNode(_el$65, _el$69);
+    insertNode(_el$66, createTextNode(`Ctrl+L`));
+    setProp(_el$66, "style", {
       fg: "#eeeeee"
     });
-    insertNode(_el$43, createTextNode(`\u5386\u53F2`));
-    setProp(_el$43, "style", {
+    insertNode(_el$69, createTextNode(`\u5386\u53F2`));
+    setProp(_el$69, "style", {
       fg: "#808080"
     });
-    insertNode(_el$45, _el$46);
-    insertNode(_el$45, _el$48);
-    insertNode(_el$45, _el$49);
-    insertNode(_el$46, createTextNode(`Ctrl+K`));
-    setProp(_el$46, "style", {
+    insertNode(_el$71, _el$72);
+    insertNode(_el$71, _el$74);
+    insertNode(_el$71, _el$75);
+    insertNode(_el$72, createTextNode(`Ctrl+K`));
+    setProp(_el$72, "style", {
       fg: "#eeeeee"
     });
-    insertNode(_el$49, createTextNode(`\u6A21\u578B`));
-    setProp(_el$49, "style", {
+    insertNode(_el$75, createTextNode(`\u6A21\u578B`));
+    setProp(_el$75, "style", {
       fg: "#808080"
     });
-    insert(_el$20, createComponent2(Show, {
+    insertNode(_el$77, _el$78);
+    insertNode(_el$77, _el$80);
+    insertNode(_el$77, _el$81);
+    insertNode(_el$78, createTextNode(`Alt+S`));
+    setProp(_el$78, "style", {
+      fg: "#eeeeee"
+    });
+    insertNode(_el$81, createTextNode(`\u4F1A\u8BDD`));
+    setProp(_el$81, "style", {
+      fg: "#808080"
+    });
+    insert(_el$46, createComponent2(Show, {
       get when() {
         return props.workbenchActive;
       },
       get children() {
-        var _el$51 = createElement("text"), _el$52 = createElement("span"), _el$54 = createTextNode(` `), _el$55 = createElement("span");
-        insertNode(_el$51, _el$52);
-        insertNode(_el$51, _el$54);
-        insertNode(_el$51, _el$55);
-        insertNode(_el$52, createTextNode(`Alt+W`));
-        setProp(_el$52, "style", {
+        var _el$83 = createElement("text"), _el$84 = createElement("span"), _el$86 = createTextNode(` `), _el$87 = createElement("span");
+        insertNode(_el$83, _el$84);
+        insertNode(_el$83, _el$86);
+        insertNode(_el$83, _el$87);
+        insertNode(_el$84, createTextNode(`Alt+W`));
+        setProp(_el$84, "style", {
           fg: "#eeeeee"
         });
-        insertNode(_el$55, createTextNode(`\u5DE5\u4F5C\u53F0`));
-        setProp(_el$55, "style", {
+        insertNode(_el$87, createTextNode(`\u5DE5\u4F5C\u53F0`));
+        setProp(_el$87, "style", {
           fg: "#808080"
         });
-        return _el$51;
+        return _el$83;
+      }
+    }), null);
+    insert(_el$46, createComponent2(Show, {
+      get when() {
+        return props.codeFoldActive;
+      },
+      get children() {
+        var _el$89 = createElement("text"), _el$90 = createElement("span"), _el$92 = createTextNode(` `), _el$93 = createElement("span");
+        insertNode(_el$89, _el$90);
+        insertNode(_el$89, _el$92);
+        insertNode(_el$89, _el$93);
+        insertNode(_el$90, createTextNode(`Alt+L`));
+        setProp(_el$90, "style", {
+          fg: "#eeeeee"
+        });
+        insertNode(_el$93, createTextNode(`\u4EE3\u7801\u5757`));
+        setProp(_el$93, "style", {
+          fg: "#808080"
+        });
+        return _el$89;
       }
     }), null);
     effect((_p$) => {
-      var _v$ = props.focused === false ? muted : orange, _v$2 = props.reviewing ? "\u5BA1\u67E5\u8FDB\u884C\u4E2D...(Esc / Ctrl+C \u53D6\u6D88)" : props.busy ? "\u6B63\u5728\u5904\u7406..." : "\u8F93\u5165\u6D88\u606F\u6216\u7C98\u8D34 PR URL\uFF1B\u8F93\u5165 / \u67E5\u770B\u547D\u4EE4", _v$3 = props.focused ?? true, _v$4 = compact() ? 3 : 6;
-      _v$ !== _p$.e && (_p$.e = setProp(_el$11, "borderColor", _v$, _p$.e));
-      _v$2 !== _p$.t && (_p$.t = setProp(_el$12, "placeholder", _v$2, _p$.t));
-      _v$3 !== _p$.a && (_p$.a = setProp(_el$12, "focused", _v$3, _p$.a));
-      _v$4 !== _p$.o && (_p$.o = setProp(_el$12, "maxHeight", _v$4, _p$.o));
+      var _v$9 = props.focused === false ? muted : orange, _v$0 = props.reviewing ? "\u5BA1\u67E5\u8FDB\u884C\u4E2D...(Esc / Ctrl+C \u53D6\u6D88)" : props.busy ? "\u6B63\u5728\u5904\u7406..." : "\u8F93\u5165\u6D88\u606F\u6216\u7C98\u8D34 PR URL\uFF1B\u8F93\u5165 / \u67E5\u770B\u547D\u4EE4", _v$1 = props.focused ?? true, _v$10 = compact() ? 3 : 6;
+      _v$9 !== _p$.e && (_p$.e = setProp(_el$37, "borderColor", _v$9, _p$.e));
+      _v$0 !== _p$.t && (_p$.t = setProp(_el$38, "placeholder", _v$0, _p$.t));
+      _v$1 !== _p$.a && (_p$.a = setProp(_el$38, "focused", _v$1, _p$.a));
+      _v$10 !== _p$.o && (_p$.o = setProp(_el$38, "maxHeight", _v$10, _p$.o));
       return _p$;
     }, {
       e: undefined,
@@ -37625,33 +39172,33 @@ function Composer(props) {
       a: undefined,
       o: undefined
     });
-    return _el$9;
+    return _el$33;
   })();
 }
-var runtimeOptions = [{
-  name: "Cloud",
-  description: "\u7B2C\u4E09\u65B9 API\uFF1A\u9002\u5408\u9AD8\u8D28\u91CF\u5BA1\u67E5\u4E0E\u8FDC\u7A0B\u6A21\u578B",
-  value: "cloud"
+var fallbackRuntimeProfiles = [{
+  value: "cloud",
+  label: "\u4E91\u7AEF"
 }, {
-  name: "Local",
-  description: "Ollama \u672C\u5730\u6A21\u578B\uFF1A\u79BB\u7EBF\u53EF\u7528\uFF0C\u6570\u636E\u7559\u5728\u672C\u673A",
-  value: "local"
+  value: "local",
+  label: "\u672C\u5730"
 }, {
-  name: "Hybrid",
-  description: "\u6DF7\u5408\u7B56\u7565\uFF1A\u6309\u4EFB\u52A1\u5728\u672C\u5730\u4E0E\u4E91\u7AEF\u4E4B\u95F4\u534F\u4F5C",
-  value: "hybrid"
+  value: "hybrid",
+  label: "\u6DF7\u5408"
 }, {
-  name: "Offline",
-  description: "\u79BB\u7EBF\u4F18\u5148\uFF1A\u53EA\u4F7F\u7528\u672C\u5730\u8FD0\u884C\u65F6",
-  value: "offline"
+  value: "custom",
+  label: "\u81EA\u5B9A\u4E49"
 }];
 var screenStages = {
   runtime: 1,
+  route_chat: 1,
+  route_review: 1,
   provider: 2,
   base_url: 2,
   api_format: 2,
   api_key: 3,
   model: 3,
+  model_spec: 3,
+  custom_endpoint: 3,
   local_base_url: 2,
   local_model: 3,
   github: 4,
@@ -37661,6 +39208,8 @@ var screenStages = {
   auto_publish: 5,
   chat_layout: 5,
   workbench: 5,
+  repo_context: 5,
+  review_effort: 5,
   summary: 6
 };
 var stageNames = {
@@ -37673,11 +39222,15 @@ var stageNames = {
 };
 var screenTitles = {
   runtime: "\u9009\u62E9\u8FD0\u884C\u6A21\u5F0F",
+  route_chat: "\u8DEF\u7531\u7EC6\u5316 \xB7 \u5BF9\u8BDD\u6A21\u578B",
+  route_review: "\u8DEF\u7531\u7EC6\u5316 \xB7 \u5BA1\u67E5\u6A21\u578B",
   provider: "\u9009\u62E9\u6A21\u578B\u4F9B\u5E94\u5546",
   base_url: "\u914D\u7F6E API Base URL",
   api_format: "\u9009\u62E9 API \u534F\u8BAE\u683C\u5F0F",
   api_key: "\u914D\u7F6E API Key",
   model: "\u9009\u62E9\u6A21\u578B",
+  model_spec: "\u6A21\u578B\u89C4\u683C",
+  custom_endpoint: "\u4E2D\u8F6C\u7AD9\u914D\u7F6E",
   local_base_url: "\u914D\u7F6E\u672C\u5730 Ollama Endpoint",
   local_model: "\u9009\u62E9\u672C\u5730\u6A21\u578B",
   github: "\u914D\u7F6E GitHub Token",
@@ -37687,8 +39240,34 @@ var screenTitles = {
   auto_publish: "\u662F\u5426\u81EA\u52A8\u53D1\u5E03 GitHub \u8BC4\u8BBA",
   chat_layout: "\u9009\u62E9 Chat \u5E03\u5C40",
   workbench: "\u9009\u62E9\u5BA1\u67E5\u5DE5\u4F5C\u53F0\u6A21\u5F0F",
+  repo_context: "\u9009\u62E9\u4ED3\u5E93\u4E0A\u4E0B\u6587",
+  review_effort: "\u9009\u62E9\u5BA1\u67E5\u601D\u8003\u6863\u4F4D",
   summary: "\u786E\u8BA4\u5E76\u4FDD\u5B58"
 };
+var bilingualScreenTitle = (value, en, fallback) => {
+  if (value === "route_chat")
+    return en ? "Route detail \xB7 chat model" : "\u8DEF\u7531\u7EC6\u5316 \xB7 \u5BF9\u8BDD\u6A21\u578B";
+  if (value === "route_review")
+    return en ? "Route detail \xB7 review model" : "\u8DEF\u7531\u7EC6\u5316 \xB7 \u5BA1\u67E5\u6A21\u578B";
+  if (value === "repo_context") {
+    return en ? "Repository context \xB7 review prefetch" : "\u4ED3\u5E93\u4E0A\u4E0B\u6587 \xB7 \u5BA1\u67E5\u9884\u53D6";
+  }
+  if (value === "review_effort") {
+    return en ? "Review reasoning effort" : "\u5BA1\u67E5\u601D\u8003\u6863\u4F4D";
+  }
+  if (value === "model_spec")
+    return en ? "Model spec" : "\u6A21\u578B\u89C4\u683C";
+  if (value === "custom_endpoint")
+    return en ? "Custom endpoint" : "\u4E2D\u8F6C\u7AD9\u914D\u7F6E";
+  return fallback;
+};
+var routeCopy = (en) => ({
+  hybridHint: en ? "Hybrid review splits files by complexity between local and cloud." : "\u6DF7\u5408\u5BA1\u67E5\u6309\u6587\u4EF6\u590D\u6742\u5EA6\u5728\u672C\u5730\u4E0E\u4E91\u7AEF\u4E4B\u95F4\u81EA\u52A8\u5206\u6D41\u3002",
+  keys: en ? "\u2191\u2193 select \xB7 Tab/\u2190\u2192 switch box \xB7 Enter next \xB7 Esc back" : "\u2191\u2193 \u9009\u62E9 \xB7 Tab/\u2190\u2192 \u5207\u6362\u65B9\u6846 \xB7 Enter \u4E0B\u4E00\u6B65 \xB7 Esc \u8FD4\u56DE"
+});
+var repoContextCopy = (en) => ({
+  hint: en ? "What /review prefetches from the repo as extra model context." : "\u5BA1\u67E5\u65F6\u6309\u6B64\u8303\u56F4\u9884\u53D6\u4ED3\u5E93\u6587\u4EF6\uFF0C\u968F PR \u4E00\u8D77\u9001\u7ED9\u6A21\u578B\u3002"
+});
 function SetupWizardDialog(props) {
   const dimensions = useTerminalDimensions();
   const [screen, setScreen] = createSignal("runtime");
@@ -37700,6 +39279,9 @@ function SetupWizardDialog(props) {
   const [inputFocused, setInputFocused] = createSignal(false);
   let inputRef;
   const [runtimeIndex, setRuntimeIndex] = createSignal(0);
+  const [routeChatIndex, setRouteChatIndex] = createSignal(0);
+  const [routeReviewIndex, setRouteReviewIndex] = createSignal(0);
+  const [routeFocus, setRouteFocus] = createSignal("chat");
   const [providerIndex, setProviderIndex] = createSignal(0);
   const [modelIndex, setModelIndex] = createSignal(0);
   const [localModelIndex, setLocalModelIndex] = createSignal(0);
@@ -37710,10 +39292,26 @@ function SetupWizardDialog(props) {
   const [autoPublishIndex, setAutoPublishIndex] = createSignal(1);
   const [chatLayoutIndex, setChatLayoutIndex] = createSignal(0);
   const [workbenchIndex, setWorkbenchIndex] = createSignal(0);
+  const [repoContextIndex, setRepoContextIndex] = createSignal(0);
+  const [reviewEffortIndex, setReviewEffortIndex] = createSignal(0);
   const [baseUrl, setBaseUrl] = createSignal("");
   const [apiKey, setApiKey] = createSignal("");
   const [localBaseUrl, setLocalBaseUrl] = createSignal("");
   const [githubToken, setGithubToken] = createSignal("");
+  const [specRemoteContext, setSpecRemoteContext] = createSignal("");
+  const [specRemoteOutput, setSpecRemoteOutput] = createSignal("");
+  const [specLocalContext, setSpecLocalContext] = createSignal("");
+  const [specLocalOutput, setSpecLocalOutput] = createSignal("");
+  const [customBaseUrl, setCustomBaseUrl] = createSignal("");
+  const [customApiKey, setCustomApiKey] = createSignal("");
+  const [customModelName, setCustomModelName] = createSignal("");
+  const [customContextWindow, setCustomContextWindow] = createSignal("");
+  const [customMaxOutput, setCustomMaxOutput] = createSignal("");
+  const [customDirty, setCustomDirty] = createSignal(false);
+  const [customFieldIndex, setCustomFieldIndex] = createSignal(0);
+  const [catalogRefresh, setCatalogRefresh] = createSignal("idle");
+  const [catalogRefreshDetail, setCatalogRefreshDetail] = createSignal("");
+  const [specFieldIndex, setSpecFieldIndex] = createSignal(0);
   const providers = () => options()?.providers ?? [];
   const apiFormats = () => options()?.api_formats ?? [{
     value: "openai",
@@ -37756,8 +39354,11 @@ function SetupWizardDialog(props) {
     value: "off",
     label: "\u5173\u95ED / Off\uFF08\u53EA\u7528\u4E00\u884C\u72B6\u6001\u6761\u663E\u793A\u8FDB\u5EA6\uFF09"
   }];
+  const repoContexts = () => repoContextChoices(options()?.repo_context);
+  const reviewEfforts = () => reviewEffortChoices(options()?.review_reasoning_effort);
+  const reviewEffortBlock = () => options()?.review_reasoning_effort;
   const local = () => options()?.local;
-  const selectedRuntime = () => runtimeOptions[runtimeIndex()]?.value ?? "cloud";
+  const selectedRuntime = () => runtimeProfiles()[Math.min(runtimeIndex(), Math.max(0, runtimeProfiles().length - 1))]?.value ?? "cloud";
   const needsCloud = () => selectedRuntime() === "cloud" || selectedRuntime() === "hybrid";
   const selectedProvider = () => providers()[Math.min(providerIndex(), Math.max(0, providers().length - 1))];
   const cloudModels = () => selectedProvider()?.models ?? [];
@@ -37770,17 +39371,116 @@ function SetupWizardDialog(props) {
   const selectedOutputFormat = () => outputFormats()[outputFormatIndex()]?.value ?? "terminal";
   const selectedChatLayout = () => chatLayouts()[chatLayoutIndex()]?.value ?? "compact";
   const selectedWorkbenchMode = () => workbenchModes()[workbenchIndex()]?.value ?? "auto";
+  const selectedRepoContext = () => repoContextValue(repoContexts(), repoContextIndex());
+  const selectedReviewEffort = () => reviewEffortValue(reviewEfforts(), reviewEffortIndex());
+  const reviewSlotOutputLimit = () => reviewSlotMaxOutput(options()?.routing?.review?.slot, modelSpec());
+  const reviewBudgetCapHint = () => formatReviewBudgetCapHint(reviewSlotOutputLimit(), selectedReviewEffort(), uiLanguage());
   const autoPublish = () => autoPublishIndex() === 0;
   const remoteKeyConfigured = () => options()?.current.remote_api_key_configured ?? options()?.current.api_key_configured ?? false;
   const githubConfigured = () => options()?.current.github_token_configured ?? false;
+  const modelSpec = () => parseModelSpecBlock(options()?.model);
+  const activeSpec = () => modelSpec();
+  const remoteSpec = () => modelSpec()?.slots?.remote ?? modelSpec();
+  const localSpec = () => modelSpec()?.slots?.local;
+  const customEndpoint = () => parseCustomEndpointOptions(options()?.custom_endpoint);
+  const primeSpecFields = (spec) => {
+    const remote = spec?.slots?.remote ?? spec;
+    const local = spec?.slots?.local;
+    setSpecRemoteContext(typeof remote?.context_window === "number" ? String(remote.context_window) : "");
+    setSpecRemoteOutput(typeof remote?.max_output === "number" ? String(remote.max_output) : "");
+    setSpecLocalContext(typeof local?.context_window === "number" ? String(local.context_window) : "");
+    setSpecLocalOutput(typeof local?.max_output === "number" ? String(local.max_output) : "");
+  };
+  const primeCustomFields = (endpoint) => {
+    setCustomDirty(false);
+    setCustomBaseUrl(String(endpoint?.base_url ?? ""));
+    setCustomApiKey("");
+    setCustomModelName(String(endpoint?.default_model ?? ""));
+    setCustomContextWindow(typeof endpoint?.context_window === "number" ? String(endpoint.context_window) : "");
+    setCustomMaxOutput(typeof endpoint?.max_output === "number" ? String(endpoint.max_output) : "");
+  };
+  const refreshCatalog = async () => {
+    if (catalogRefresh() === "refreshing")
+      return;
+    setCatalogRefresh("refreshing");
+    setCatalogRefreshDetail("");
+    try {
+      const response = await props.backend.request("config.catalog.refresh", {}, {
+        timeoutMs: PROBE_TIMEOUT_MS
+      });
+      if (!response.ok)
+        throw new Error(response.error?.message ?? "refresh failed");
+      const nextModel = parseCatalogRefreshResult(response.result);
+      if (nextModel) {
+        setOptions((current) => current ? {
+          ...current,
+          model: nextModel
+        } : current);
+        primeSpecFields(nextModel);
+        const field = Math.min(specFieldIndex(), Math.max(0, specFieldCount() - 1));
+        setSpecFieldIndex(field);
+        setInputValue(specFieldValue(field));
+        const source = nextModel.catalog_state?.source ?? nextModel.source ?? "";
+        setCatalogRefresh("success");
+        setCatalogRefreshDetail(source ? formatSourceBadge(source, uiLanguage()) : "");
+      } else {
+        setCatalogRefresh("success");
+      }
+    } catch (cause) {
+      setCatalogRefresh("error");
+      setCatalogRefreshDetail(String(cause));
+    }
+  };
+  const uiLanguage = () => selectedUiLanguage();
+  const runtimeProfiles = () => {
+    const fromBackend = options()?.runtime_profiles ?? [];
+    return fromBackend.length > 0 ? fromBackend : fallbackRuntimeProfiles;
+  };
+  const selectedPreset = () => runtimeProfiles()[Math.min(runtimeIndex(), Math.max(0, runtimeProfiles().length - 1))] ?? {
+    value: "cloud",
+    label: "\u4E91\u7AEF"
+  };
+  const isCustom = () => selectedRuntime() === "custom";
+  const isRouteScreen = (value) => value === "route_chat" || value === "route_review";
+  const slotModels = () => {
+    if (isCustom()) {
+      return {
+        remote: options()?.current.remote_model || "",
+        local: options()?.current.local_model || ""
+      };
+    }
+    return {
+      remote: selectedModel() || options()?.current.remote_model || "",
+      local: selectedLocalModel() || options()?.current.local_model || ""
+    };
+  };
+  const routeBoxViews = createMemo(() => routeBoxes(slotModels(), uiLanguage()));
+  const chatChoices = () => routeBoxViews()[0].choices;
+  const reviewChoices = () => routeBoxViews()[1].choices;
+  const routeChatSlot = () => chatChoices()[Math.min(routeChatIndex(), chatChoices().length - 1)]?.value ?? "remote";
+  const routeReviewSlot = () => reviewChoices()[Math.min(routeReviewIndex(), reviewChoices().length - 1)]?.value ?? "remote";
+  const routeSelection = () => ({
+    chat: routeChatSlot(),
+    review: routeReviewSlot()
+  });
+  const routePreview = () => routeSummary(selectedRuntime(), routeSelection(), slotModels(), uiLanguage());
+  const routeStageCopy = () => routeCopy(isEn(uiLanguage()));
+  const repoContextPreview = () => repoContextSummary(repoContexts(), selectedRepoContext(), uiLanguage());
+  const reviewEffortPreview = () => reviewEffortSummary(reviewEfforts(), selectedReviewEffort(), uiLanguage());
   const indexOfValue = (items, value) => {
     const index = items.findIndex((item) => item.value === value);
     return index >= 0 ? index : 0;
   };
   const isInputScreen = (value) => value === "base_url" || value === "api_key" || value === "local_base_url" || value === "github";
-  const cloudOrder = ["runtime", "provider", "base_url", "api_format", "api_key", "model", "github", "ui_language", "response_language", "output_format", "auto_publish", "chat_layout", "workbench", "summary"];
-  const localOrder = ["runtime", "local_base_url", "local_model", "github", "ui_language", "response_language", "output_format", "auto_publish", "chat_layout", "workbench", "summary"];
-  const order = () => needsCloud() ? cloudOrder : localOrder;
+  const cloudOrder = ["runtime", "provider", "base_url", "api_format", "api_key", "model", "model_spec", "custom_endpoint", "github", "ui_language", "response_language", "output_format", "auto_publish", "chat_layout", "workbench", "repo_context", "review_effort", "summary"];
+  const localOrder = ["runtime", "local_base_url", "local_model", "model_spec", "github", "ui_language", "response_language", "output_format", "auto_publish", "chat_layout", "workbench", "repo_context", "review_effort", "summary"];
+  const customOrder = ["runtime", "route_chat", "route_review", "model_spec", "github", "ui_language", "response_language", "output_format", "auto_publish", "chat_layout", "workbench", "repo_context", "review_effort", "summary"];
+  const order = () => {
+    const base = isCustom() ? customOrder : needsCloud() ? cloudOrder : localOrder;
+    if (!options()?.review_reasoning_effort)
+      return base.filter((s) => s !== "review_effort");
+    return base;
+  };
   const inputDefault = (target) => {
     if (target === "base_url")
       return baseUrl() || selectedProvider()?.base_url || "";
@@ -37792,9 +39492,98 @@ function SetupWizardDialog(props) {
     setInputFocused(false);
     setTimeout(() => setInputFocused(true), 50);
   };
+  const liveInputText = (owner) => {
+    if (screen() !== owner)
+      return;
+    return (inputRef?.value ?? inputValue()).trim();
+  };
+  const commitCustomField = () => {
+    const value = liveInputText("custom_endpoint");
+    if (value === undefined)
+      return;
+    const index = customFieldIndex();
+    const prev = customFieldValue(index);
+    if (index === 0)
+      setCustomBaseUrl(value);
+    else if (index === 1)
+      setCustomApiKey(value);
+    else if (index === 2)
+      setCustomModelName(value);
+    else if (index === 3)
+      setCustomContextWindow(value);
+    else if (index === 4)
+      setCustomMaxOutput(value);
+    if (value !== prev)
+      setCustomDirty(true);
+  };
+  const customFieldValue = (index) => {
+    if (index === 0)
+      return customBaseUrl();
+    if (index === 1)
+      return customApiKey();
+    if (index === 2)
+      return customModelName();
+    if (index === 3)
+      return customContextWindow();
+    return customMaxOutput();
+  };
+  const commitSpecField = () => {
+    const value = liveInputText("model_spec");
+    if (value === undefined)
+      return;
+    const index = specFieldIndex();
+    if (index === 0)
+      setSpecRemoteContext(value);
+    else if (index === 1)
+      setSpecRemoteOutput(value);
+    else if (index === 2)
+      setSpecLocalContext(value);
+    else if (index === 3)
+      setSpecLocalOutput(value);
+  };
+  const specFieldValue = (index) => {
+    if (index === 0)
+      return specRemoteContext();
+    if (index === 1)
+      return specRemoteOutput();
+    if (index === 2)
+      return specLocalContext();
+    return specLocalOutput();
+  };
+  const specFieldCount = () => localSpec() ? 4 : 2;
+  const customApiKeyState = () => interpretApiKeyInput(customApiKey());
+  const specFieldError = () => {
+    const index = specFieldIndex();
+    const bounds = index === 0 ? remoteSpec()?.bounds?.context_window : index === 1 ? remoteSpec()?.bounds?.max_output : index === 2 ? localSpec()?.bounds?.context_window : localSpec()?.bounds?.max_output;
+    return validateSpecInput(inputValue(), bounds, uiLanguage());
+  };
+  const willSubmitCustomEndpoint = () => {
+    if (!customDirty())
+      return false;
+    const hasField = customBaseUrl().trim() || customModelName().trim() || customContextWindow().trim() || customMaxOutput().trim();
+    return Boolean(hasField || customApiKeyState() !== undefined);
+  };
   const goTo = (target) => {
     setError("");
     setInputFocused(false);
+    if (target === "route_chat")
+      setRouteFocus("chat");
+    else if (target === "route_review")
+      setRouteFocus("review");
+    if (target === "custom_endpoint") {
+      setCustomFieldIndex(0);
+      setInputValue(customFieldValue(0));
+      setScreen(target);
+      focusInputSoon();
+      return;
+    }
+    if (target === "model_spec") {
+      setSpecFieldIndex(0);
+      setInputValue(specFieldValue(0));
+      setScreen(target);
+      focusInputSoon();
+      return;
+    }
     if (isInputScreen(target)) {
       setInputValue(inputDefault(target));
       setScreen(target);
@@ -37813,6 +39602,10 @@ function SetupWizardDialog(props) {
       setLocalBaseUrl(value);
     else if (screen() === "github")
       setGithubToken(value);
+    else if (screen() === "custom_endpoint")
+      commitCustomField();
+    else if (screen() === "model_spec")
+      commitSpecField();
   };
   const apply = async () => {
     if (busy())
@@ -37830,9 +39623,13 @@ function SetupWizardDialog(props) {
         output_format: selectedOutputFormat(),
         auto_publish_comment: autoPublish(),
         chat_layout: selectedChatLayout(),
-        workbench_mode: selectedWorkbenchMode()
+        workbench_mode: selectedWorkbenchMode(),
+        ...setupRepoContextField(selectedRepoContext()),
+        ...setupReviewEffortField(selectedReviewEffort())
       };
-      if (needsCloud()) {
+      if (isCustom()) {
+        Object.assign(payload, setupSlotFields(selectedRuntime(), routeSelection()));
+      } else if (needsCloud()) {
         const provider = selectedProvider();
         if (!provider)
           throw new Error("\u6CA1\u6709\u53EF\u7528\u7684\u4E91\u7AEF Provider \u914D\u7F6E\u3002");
@@ -37851,6 +39648,27 @@ function SetupWizardDialog(props) {
         payload.local_base_url = localBaseUrl().trim() || localConfig.base_url;
         payload.local_api_format = localConfig.api_format;
       }
+      const remoteCtx = specRemoteContext().trim();
+      const remoteOut = specRemoteOutput().trim();
+      const localCtx = specLocalContext().trim();
+      const localOut = specLocalOutput().trim();
+      Object.assign(payload, setupModelSpecFields({
+        context_window: remoteCtx ? Number(remoteCtx) : undefined,
+        max_output: remoteOut ? Number(remoteOut) : undefined,
+        local_context_window: localCtx ? Number(localCtx) : undefined,
+        local_max_output: localOut ? Number(localOut) : undefined
+      }));
+      if (willSubmitCustomEndpoint()) {
+        const customCtx = customContextWindow().trim();
+        const customOut = customMaxOutput().trim();
+        Object.assign(payload, setupCustomEndpointFields({
+          base_url: customBaseUrl(),
+          api_key: customApiKeyState(),
+          model_name: customModelName(),
+          context_window: customCtx ? Number(customCtx) : undefined,
+          max_output: customOut ? Number(customOut) : undefined
+        }, selectedApiFormat()));
+      }
       const response = await props.backend.request("config.setup", payload);
       if (!response.ok)
         throw new Error(response.error?.message ?? "\u914D\u7F6E\u4FDD\u5B58\u5931\u8D25");
@@ -37858,20 +39676,25 @@ function SetupWizardDialog(props) {
       props.onClose();
     } catch (cause) {
       const message = String(cause);
-      setError(message);
-      if (needsCloud() && message.includes("API Key"))
+      if (isCustom() && message.includes("\u69FD\u4F4D")) {
+        goTo(message.includes("\u5BF9\u8BDD\u6A21\u578B") ? "route_chat" : "route_review");
+      } else if (message.includes("\u6A21\u578B\u89C4\u683C")) {
+        goTo("model_spec");
+      } else if (needsCloud() && message.includes("API Key"))
         goTo("api_key");
       else if (message.includes("GitHub Token"))
         goTo("github");
-      else if (message.includes("\u6A21\u578B"))
+      else if (!isCustom() && message.includes("\u6A21\u578B"))
         goTo("model");
+      setError(message);
     } finally {
       setBusy(false);
     }
   };
   const next = () => {
-    if (isInputScreen(screen()))
+    if (isInputScreen(screen()) || screen() === "model_spec" || screen() === "custom_endpoint") {
       commitInput();
+    }
     const current = screen();
     if (current === "summary") {
       apply();
@@ -37885,10 +39708,16 @@ function SetupWizardDialog(props) {
   };
   const previous = () => {
     const current = screen();
-    if (current === "runtime")
+    if (current === "runtime") {
+      props.onClose();
       return;
+    }
     const currentOrder = order();
     const index = currentOrder.indexOf(current);
+    if (index < 0) {
+      props.onClose();
+      return;
+    }
     const prevScreen = currentOrder[index - 1];
     if (prevScreen)
       goTo(prevScreen);
@@ -37902,8 +39731,15 @@ function SetupWizardDialog(props) {
         throw new Error(response.error?.message ?? "\u65E0\u6CD5\u8BFB\u53D6\u914D\u7F6E\u9009\u9879");
       const payload = response.result;
       setOptions(payload);
-      const initialRuntime = runtimeOptions.findIndex((option) => option.value === props.runtime.runtime_profile);
-      setRuntimeIndex(initialRuntime >= 0 ? initialRuntime : 0);
+      const presetValues = (payload.runtime_profiles ?? fallbackRuntimeProfiles).map((preset) => preset.value);
+      const routing = payload.routing ?? props.runtime.routing;
+      setRuntimeIndex(presetIndexOf(presetValues, routing?.profile, payload.current.runtime_profile ?? props.runtime.runtime_profile));
+      setRouteChatIndex(slotIndexOf(CHAT_SLOT_VALUES.map((value) => ({
+        value
+      })), routing?.chat?.slot));
+      setRouteReviewIndex(slotIndexOf(REVIEW_SLOT_VALUES.map((value) => ({
+        value
+      })), routing?.review?.slot));
       const currentProvider = payload.providers.findIndex((item) => item.name === (payload.current.remote_provider ?? payload.current.provider));
       const providerIndexValue = currentProvider >= 0 ? currentProvider : 0;
       setProviderIndex(providerIndexValue);
@@ -37921,17 +39757,103 @@ function SetupWizardDialog(props) {
       setOutputFormatIndex(indexOfValue(payload.output_formats ?? [], payload.current.output_format));
       setChatLayoutIndex(indexOfValue(payload.chat_layouts ?? [], payload.current.chat_layout));
       setWorkbenchIndex(indexOfValue(payload.workbench_modes ?? [], payload.current.workbench_mode));
+      setRepoContextIndex(repoContextIndexOf(repoContextChoices(payload.repo_context), repoContextStoredValue(payload.repo_context?.value ?? props.runtime.repo_context)));
+      setReviewEffortIndex(reviewEffortIndexOf(reviewEffortChoices(payload.review_reasoning_effort), reviewEffortStoredValue(payload.review_reasoning_effort?.value ?? props.runtime.review_reasoning_effort)));
       setAutoPublishIndex(payload.current.auto_publish_comment ? 0 : 1);
+      primeSpecFields(parseModelSpecBlock(payload.model));
+      primeCustomFields(parseCustomEndpointOptions(payload.custom_endpoint));
     } catch (cause) {
       setError(String(cause));
+      setRepoContextIndex(repoContextIndexOf(repoContextChoices(options()?.repo_context), repoContextStoredValue(props.runtime.repo_context)));
+      setReviewEffortIndex(reviewEffortIndexOf(reviewEffortChoices(options()?.review_reasoning_effort), reviewEffortStoredValue(props.runtime.review_reasoning_effort)));
     } finally {
       setLoading(false);
     }
   });
+  const moveRouteSelection = (delta) => {
+    const focus = routeFocus();
+    const choices = focus === "chat" ? chatChoices() : reviewChoices();
+    if (choices.length === 0)
+      return;
+    const current = focus === "chat" ? routeChatIndex() : routeReviewIndex();
+    const nextIndex = (current + delta + choices.length) % choices.length;
+    if (focus === "chat")
+      setRouteChatIndex(nextIndex);
+    else
+      setRouteReviewIndex(nextIndex);
+  };
+  const moveRouteFocus = (delta) => {
+    const order = ["chat", "review"];
+    const current = order.indexOf(routeFocus());
+    setRouteFocus(order[(current + delta + order.length) % order.length]);
+  };
   useKeyboard((key) => {
     if (key.name === "escape" && !busy()) {
+      if (isRouteScreen(screen()) || screen() === "model_spec" || screen() === "custom_endpoint") {
+        previous();
+        return;
+      }
       props.onClose();
       return;
+    }
+    if (isRouteScreen(screen()) && !busy()) {
+      if (key.name === "tab") {
+        moveRouteFocus(key.shift === true ? -1 : 1);
+        key.preventDefault?.();
+        key.stopPropagation?.();
+        return;
+      }
+      if ((key.name === "right" || key.name === "left") && key.ctrl !== true && key.meta !== true && key.shift !== true) {
+        moveRouteFocus(key.name === "right" ? 1 : -1);
+        key.preventDefault?.();
+        key.stopPropagation?.();
+        return;
+      }
+      if (key.name === "up" || key.name === "down") {
+        moveRouteSelection(key.name === "down" ? 1 : -1);
+        key.preventDefault?.();
+        key.stopPropagation?.();
+        return;
+      }
+    }
+    if (screen() === "custom_endpoint" && !busy()) {
+      if ((key.name === "d" || key.name === "D") && key.ctrl === true && customFieldIndex() === 1) {
+        setCustomApiKey("-");
+        setInputValue("-");
+        setCustomDirty(true);
+        key.preventDefault?.();
+        key.stopPropagation?.();
+        return;
+      }
+      if (key.name === "up" || key.name === "down") {
+        commitCustomField();
+        const nextIndex = Math.min(4, Math.max(0, customFieldIndex() + (key.name === "down" ? 1 : -1)));
+        setCustomFieldIndex(nextIndex);
+        setInputValue(customFieldValue(nextIndex));
+        focusInputSoon();
+        key.preventDefault?.();
+        key.stopPropagation?.();
+        return;
+      }
+    }
+    if (screen() === "model_spec" && !busy()) {
+      if (key.name === "r" || key.name === "R") {
+        refreshCatalog();
+        key.preventDefault?.();
+        key.stopPropagation?.();
+        return;
+      }
+      if (key.name === "up" || key.name === "down") {
+        commitSpecField();
+        const maxIndex = specFieldCount() - 1;
+        const nextIndex = Math.min(maxIndex, Math.max(0, specFieldIndex() + (key.name === "down" ? 1 : -1)));
+        setSpecFieldIndex(nextIndex);
+        setInputValue(specFieldValue(nextIndex));
+        focusInputSoon();
+        key.preventDefault?.();
+        key.stopPropagation?.();
+        return;
+      }
     }
     if (key.name === "left" && (key.ctrl === true || key.meta === true) && !busy()) {
       previous();
@@ -37942,7 +39864,7 @@ function SetupWizardDialog(props) {
       return;
     }
     if (isEnterKey(key) && !busy()) {
-      if (isInputScreen(screen()))
+      if (isInputScreen(screen()) || screen() === "model_spec" || screen() === "custom_endpoint")
         return;
       if (screen() === "summary")
         apply();
@@ -37951,121 +39873,212 @@ function SetupWizardDialog(props) {
     }
   });
   const dialogWidth = 74;
-  const dialogHeight = screen() === "provider" || screen() === "summary" ? 24 : 22;
-  const left = Math.max(2, Math.floor((dimensions().width - dialogWidth) / 2));
-  const top = Math.max(0, Math.floor((dimensions().height - dialogHeight) / 2));
+  const dialogHeight = () => screen() === "summary" ? 28 : screen() === "provider" || isRouteScreen(screen()) ? 24 : screen() === "model_spec" || screen() === "custom_endpoint" ? 24 : 22;
+  const left = () => Math.max(2, Math.floor((dimensions().width - dialogWidth) / 2));
+  const top = () => Math.max(0, Math.floor((dimensions().height - dialogHeight()) / 2));
+  const renderRouteBox = (boxModel) => {
+    const focused = () => routeFocus() === boxModel.key;
+    const selected = () => boxModel.key === "chat" ? routeChatIndex() : routeReviewIndex();
+    return (() => {
+      var _el$156 = createElement("box"), _el$157 = createElement("text"), _el$158 = createElement("box");
+      insertNode(_el$156, _el$157);
+      insertNode(_el$156, _el$158);
+      setProp(_el$156, "flexDirection", "column");
+      insert(_el$157, () => boxModel.title);
+      setProp(_el$158, "borderStyle", "single");
+      setProp(_el$158, "paddingLeft", 1);
+      setProp(_el$158, "paddingRight", 1);
+      setProp(_el$158, "flexDirection", "column");
+      insert(_el$158, createComponent2(For, {
+        get each() {
+          return boxModel.choices;
+        },
+        children: (choice, choiceIndex) => {
+          const active = () => choiceIndex() === selected();
+          return (() => {
+            var _el$159 = createElement("text"), _el$160 = createElement("span"), _el$161 = createElement("span"), _el$162 = createElement("span");
+            insertNode(_el$159, _el$160);
+            insertNode(_el$159, _el$161);
+            insertNode(_el$159, _el$162);
+            insert(_el$160, () => active() ? "\u25B8 " : "  ");
+            insert(_el$161, () => choice.label);
+            insert(_el$162, () => `  ${choice.detail}`);
+            effect((_p$) => {
+              var _v$26 = active() ? "#5a2e1c" : "#171717", _v$27 = {
+                fg: active() ? orange : muted
+              }, _v$28 = {
+                fg: active() ? "#ffffff" : "#eeeeee"
+              }, _v$29 = {
+                fg: active() ? "#ffd0bb" : muted
+              };
+              _v$26 !== _p$.e && (_p$.e = setProp(_el$159, "bg", _v$26, _p$.e));
+              _v$27 !== _p$.t && (_p$.t = setProp(_el$160, "style", _v$27, _p$.t));
+              _v$28 !== _p$.a && (_p$.a = setProp(_el$161, "style", _v$28, _p$.a));
+              _v$29 !== _p$.o && (_p$.o = setProp(_el$162, "style", _v$29, _p$.o));
+              return _p$;
+            }, {
+              e: undefined,
+              t: undefined,
+              a: undefined,
+              o: undefined
+            });
+            return _el$159;
+          })();
+        }
+      }));
+      effect((_p$) => {
+        var _v$23 = boxModel.key === "chat" ? 1 : 0, _v$24 = focused() ? "#eeeeee" : muted, _v$25 = focused() ? orange : muted;
+        _v$23 !== _p$.e && (_p$.e = setProp(_el$156, "marginBottom", _v$23, _p$.e));
+        _v$24 !== _p$.t && (_p$.t = setProp(_el$157, "fg", _v$24, _p$.t));
+        _v$25 !== _p$.a && (_p$.a = setProp(_el$158, "borderColor", _v$25, _p$.a));
+        return _p$;
+      }, {
+        e: undefined,
+        t: undefined,
+        a: undefined
+      });
+      return _el$156;
+    })();
+  };
   const renderInput = (title, placeholder) => (() => {
-    var _el$118 = createElement("box"), _el$119 = createElement("text"), _el$120 = createElement("box"), _el$121 = createElement("input");
-    insertNode(_el$118, _el$119);
-    insertNode(_el$118, _el$120);
-    setProp(_el$118, "marginTop", 1);
-    setProp(_el$118, "flexDirection", "column");
-    setProp(_el$119, "fg", "#eeeeee");
-    insert(_el$119, title);
-    insertNode(_el$120, _el$121);
-    setProp(_el$120, "marginTop", 1);
-    setProp(_el$120, "backgroundColor", "#202020");
-    setProp(_el$120, "paddingLeft", 1);
-    setProp(_el$120, "paddingRight", 1);
+    var _el$163 = createElement("box"), _el$164 = createElement("text"), _el$165 = createElement("box"), _el$166 = createElement("input");
+    insertNode(_el$163, _el$164);
+    insertNode(_el$163, _el$165);
+    setProp(_el$163, "marginTop", 1);
+    setProp(_el$163, "flexDirection", "column");
+    setProp(_el$164, "fg", "#eeeeee");
+    insert(_el$164, title);
+    insertNode(_el$165, _el$166);
+    setProp(_el$165, "marginTop", 1);
+    setProp(_el$165, "backgroundColor", "#202020");
+    setProp(_el$165, "paddingLeft", 1);
+    setProp(_el$165, "paddingRight", 1);
     use((node) => {
       inputRef = node;
-    }, _el$121);
-    setProp(_el$121, "placeholder", placeholder);
-    setProp(_el$121, "onContentChange", () => setInputValue(inputRef?.value ?? ""));
-    setProp(_el$121, "onSubmit", () => {
+    }, _el$166);
+    setProp(_el$166, "placeholder", placeholder);
+    setProp(_el$166, "onContentChange", () => setInputValue(inputRef?.value ?? ""));
+    setProp(_el$166, "onSubmit", () => {
       commitInput();
       next();
     });
-    setProp(_el$121, "flexGrow", 1);
+    setProp(_el$166, "flexGrow", 1);
     effect((_p$) => {
-      var _v$15 = inputValue(), _v$16 = inputFocused();
-      _v$15 !== _p$.e && (_p$.e = setProp(_el$121, "value", _v$15, _p$.e));
-      _v$16 !== _p$.t && (_p$.t = setProp(_el$121, "focused", _v$16, _p$.t));
+      var _v$30 = inputValue(), _v$31 = inputFocused();
+      _v$30 !== _p$.e && (_p$.e = setProp(_el$166, "value", _v$30, _p$.e));
+      _v$31 !== _p$.t && (_p$.t = setProp(_el$166, "focused", _v$31, _p$.t));
       return _p$;
     }, {
       e: undefined,
       t: undefined
     });
-    return _el$118;
+    return _el$163;
   })();
   return (() => {
-    var _el$122 = createElement("box"), _el$123 = createElement("text"), _el$125 = createElement("text"), _el$126 = createTextNode(`/6 \xB7 `), _el$127 = createTextNode(` \xB7 `), _el$217 = createElement("box"), _el$219 = createElement("text");
-    insertNode(_el$122, _el$123);
-    insertNode(_el$122, _el$125);
-    insertNode(_el$122, _el$217);
-    insertNode(_el$122, _el$219);
-    setProp(_el$122, "position", "absolute");
-    setProp(_el$122, "left", left);
-    setProp(_el$122, "top", top);
-    setProp(_el$122, "width", 74);
-    setProp(_el$122, "height", dialogHeight);
-    setProp(_el$122, "backgroundColor", "#171717");
-    setProp(_el$122, "borderStyle", "single");
-    setProp(_el$122, "borderColor", "#fb8147");
-    setProp(_el$122, "padding", 2);
-    setProp(_el$122, "zIndex", 100);
-    setProp(_el$122, "flexDirection", "column");
-    insertNode(_el$123, createTextNode(`\u914D\u7F6E\u52A9\u624B // SETUP WIZARD`));
-    setProp(_el$123, "fg", "#fb8147");
-    insertNode(_el$125, _el$126);
-    insertNode(_el$125, _el$127);
-    setProp(_el$125, "fg", "#808080");
-    insert(_el$125, () => screenStages[screen()], _el$126);
-    insert(_el$125, () => stageNames[screenStages[screen()]], _el$127);
-    insert(_el$125, () => screenTitles[screen()], null);
-    insert(_el$122, createComponent2(Show, {
+    var _el$167 = createElement("box"), _el$168 = createElement("text"), _el$170 = createElement("text"), _el$171 = createTextNode(`/6 \xB7 `), _el$172 = createTextNode(` \xB7 `), _el$290 = createElement("box"), _el$292 = createElement("text");
+    insertNode(_el$167, _el$168);
+    insertNode(_el$167, _el$170);
+    insertNode(_el$167, _el$290);
+    insertNode(_el$167, _el$292);
+    setProp(_el$167, "position", "absolute");
+    setProp(_el$167, "width", 74);
+    setProp(_el$167, "backgroundColor", "#171717");
+    setProp(_el$167, "borderStyle", "single");
+    setProp(_el$167, "borderColor", "#fb8147");
+    setProp(_el$167, "padding", 2);
+    setProp(_el$167, "zIndex", 100);
+    setProp(_el$167, "flexDirection", "column");
+    insertNode(_el$168, createTextNode(`\u914D\u7F6E\u52A9\u624B // SETUP WIZARD`));
+    setProp(_el$168, "fg", "#fb8147");
+    insertNode(_el$170, _el$171);
+    insertNode(_el$170, _el$172);
+    setProp(_el$170, "fg", "#808080");
+    insert(_el$170, () => screenStages[screen()], _el$171);
+    insert(_el$170, () => stageNames[screenStages[screen()]], _el$172);
+    insert(_el$170, () => bilingualScreenTitle(screen(), isEn(uiLanguage()), screenTitles[screen()]), null);
+    insert(_el$167, createComponent2(Show, {
       get when() {
         return loading();
       },
       get children() {
-        var _el$128 = createElement("text");
-        insertNode(_el$128, createTextNode(`\u8BFB\u53D6\u914D\u7F6E\u9009\u9879\u4E2D...`));
-        setProp(_el$128, "fg", "#808080");
-        return _el$128;
+        var _el$174 = createElement("text");
+        insertNode(_el$174, createTextNode(`\u8BFB\u53D6\u914D\u7F6E\u9009\u9879\u4E2D...`));
+        setProp(_el$174, "fg", "#808080");
+        return _el$174;
       }
-    }), _el$217);
-    insert(_el$122, createComponent2(Show, {
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
       get when() {
         return memo2(() => !!!loading())() && screen() === "runtime";
       },
       get children() {
-        var _el$130 = createElement("box"), _el$131 = createElement("select");
-        insertNode(_el$130, _el$131);
-        setProp(_el$130, "marginTop", 1);
-        setProp(_el$130, "flexGrow", 1);
-        setProp(_el$131, "options", runtimeOptions);
-        setProp(_el$131, "focused", true);
-        setProp(_el$131, "showDescription", true);
-        setProp(_el$131, "width", "100%");
-        setProp(_el$131, "height", 8);
-        setProp(_el$131, "selectedBackgroundColor", "#5a2e1c");
-        setProp(_el$131, "selectedTextColor", "#ffffff");
-        setProp(_el$131, "descriptionColor", "#808080");
-        setProp(_el$131, "selectedDescriptionColor", "#ffd0bb");
-        setProp(_el$131, "onChange", (index) => setRuntimeIndex(index));
-        effect((_$p) => setProp(_el$131, "selectedIndex", runtimeIndex(), _$p));
-        return _el$130;
+        var _el$176 = createElement("box"), _el$177 = createElement("select");
+        insertNode(_el$176, _el$177);
+        setProp(_el$176, "marginTop", 1);
+        setProp(_el$176, "flexGrow", 1);
+        setProp(_el$177, "focused", true);
+        setProp(_el$177, "showDescription", true);
+        setProp(_el$177, "width", "100%");
+        setProp(_el$177, "height", 10);
+        setProp(_el$177, "selectedBackgroundColor", "#5a2e1c");
+        setProp(_el$177, "selectedTextColor", "#ffffff");
+        setProp(_el$177, "descriptionColor", "#808080");
+        setProp(_el$177, "selectedDescriptionColor", "#ffd0bb");
+        setProp(_el$177, "onChange", (index) => setRuntimeIndex(index));
+        effect((_p$) => {
+          var _v$32 = runtimeProfiles().map((preset) => ({
+            name: presetLabel(preset, uiLanguage()),
+            description: presetDescription(preset.value, uiLanguage()),
+            value: preset.value
+          })), _v$33 = runtimeIndex();
+          _v$32 !== _p$.e && (_p$.e = setProp(_el$177, "options", _v$32, _p$.e));
+          _v$33 !== _p$.t && (_p$.t = setProp(_el$177, "selectedIndex", _v$33, _p$.t));
+          return _p$;
+        }, {
+          e: undefined,
+          t: undefined
+        });
+        return _el$176;
       }
-    }), _el$217);
-    insert(_el$122, createComponent2(Show, {
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
+      get when() {
+        return memo2(() => !!!loading())() && isRouteScreen(screen());
+      },
+      get children() {
+        var _el$178 = createElement("box"), _el$179 = createElement("text");
+        insertNode(_el$178, _el$179);
+        setProp(_el$178, "flexDirection", "column");
+        insert(_el$178, createComponent2(For, {
+          get each() {
+            return routeBoxViews();
+          },
+          children: (boxModel) => renderRouteBox(boxModel)
+        }), _el$179);
+        setProp(_el$179, "fg", "#808080");
+        insert(_el$179, () => routeStageCopy().hybridHint);
+        return _el$178;
+      }
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
       get when() {
         return memo2(() => !!!loading())() && screen() === "provider";
       },
       get children() {
-        var _el$132 = createElement("box"), _el$133 = createElement("select"), _el$134 = createElement("text");
-        insertNode(_el$132, _el$133);
-        insertNode(_el$132, _el$134);
-        setProp(_el$132, "marginTop", 1);
-        setProp(_el$132, "flexGrow", 1);
-        setProp(_el$133, "focused", true);
-        setProp(_el$133, "showDescription", true);
-        setProp(_el$133, "width", "100%");
-        setProp(_el$133, "height", 12);
-        setProp(_el$133, "selectedBackgroundColor", "#5a2e1c");
-        setProp(_el$133, "selectedTextColor", "#ffffff");
-        setProp(_el$133, "descriptionColor", "#808080");
-        setProp(_el$133, "selectedDescriptionColor", "#ffd0bb");
-        setProp(_el$133, "onChange", (index) => {
+        var _el$180 = createElement("box"), _el$181 = createElement("select"), _el$182 = createElement("text");
+        insertNode(_el$180, _el$181);
+        insertNode(_el$180, _el$182);
+        setProp(_el$180, "marginTop", 1);
+        setProp(_el$180, "flexGrow", 1);
+        setProp(_el$181, "focused", true);
+        setProp(_el$181, "showDescription", true);
+        setProp(_el$181, "width", "100%");
+        setProp(_el$181, "height", 12);
+        setProp(_el$181, "selectedBackgroundColor", "#5a2e1c");
+        setProp(_el$181, "selectedTextColor", "#ffffff");
+        setProp(_el$181, "descriptionColor", "#808080");
+        setProp(_el$181, "selectedDescriptionColor", "#ffd0bb");
+        setProp(_el$181, "onChange", (index) => {
           setProviderIndex(index);
           const provider = providers()[index];
           if (provider) {
@@ -38075,272 +40088,272 @@ function SetupWizardDialog(props) {
           }
           setApiKey("");
         });
-        insertNode(_el$134, createTextNode(`\u81EA\u5B9A\u4E49 Endpoint / headers \u7B49\u9AD8\u7EA7\u9879\u4ECD\u53EF\u901A\u8FC7 pr-review config --advanced \u914D\u7F6E\u3002`));
-        setProp(_el$134, "fg", "#808080");
+        insertNode(_el$182, createTextNode(`\u81EA\u5B9A\u4E49 Endpoint / headers \u7B49\u9AD8\u7EA7\u9879\u4ECD\u53EF\u901A\u8FC7 pr-review config --advanced \u914D\u7F6E\u3002`));
+        setProp(_el$182, "fg", "#808080");
         effect((_p$) => {
-          var _v$17 = providers().map((provider) => ({
+          var _v$34 = providers().map((provider) => ({
             name: provider.display_name,
             description: `${provider.default_model} \xB7 ${provider.base_url || "\u9700\u8981\u586B\u5199 Endpoint"}`,
             value: provider.name
-          })), _v$18 = providerIndex();
-          _v$17 !== _p$.e && (_p$.e = setProp(_el$133, "options", _v$17, _p$.e));
-          _v$18 !== _p$.t && (_p$.t = setProp(_el$133, "selectedIndex", _v$18, _p$.t));
+          })), _v$35 = providerIndex();
+          _v$34 !== _p$.e && (_p$.e = setProp(_el$181, "options", _v$34, _p$.e));
+          _v$35 !== _p$.t && (_p$.t = setProp(_el$181, "selectedIndex", _v$35, _p$.t));
           return _p$;
         }, {
           e: undefined,
           t: undefined
         });
-        return _el$132;
+        return _el$180;
       }
-    }), _el$217);
-    insert(_el$122, createComponent2(Show, {
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
       get when() {
         return memo2(() => !!!loading())() && screen() === "base_url";
       },
       get children() {
         return renderInput("API Base URL", "https://api.example.com/v1");
       }
-    }), _el$217);
-    insert(_el$122, createComponent2(Show, {
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
       get when() {
         return memo2(() => !!!loading())() && screen() === "api_format";
       },
       get children() {
-        var _el$136 = createElement("box"), _el$137 = createElement("select");
-        insertNode(_el$136, _el$137);
-        setProp(_el$136, "marginTop", 1);
-        setProp(_el$136, "flexGrow", 1);
-        setProp(_el$137, "focused", true);
-        setProp(_el$137, "showDescription", true);
-        setProp(_el$137, "width", "100%");
-        setProp(_el$137, "height", 6);
-        setProp(_el$137, "selectedBackgroundColor", "#5a2e1c");
-        setProp(_el$137, "selectedTextColor", "#ffffff");
-        setProp(_el$137, "descriptionColor", "#808080");
-        setProp(_el$137, "selectedDescriptionColor", "#ffd0bb");
-        setProp(_el$137, "onChange", (index) => setApiFormatIndex(index));
+        var _el$184 = createElement("box"), _el$185 = createElement("select");
+        insertNode(_el$184, _el$185);
+        setProp(_el$184, "marginTop", 1);
+        setProp(_el$184, "flexGrow", 1);
+        setProp(_el$185, "focused", true);
+        setProp(_el$185, "showDescription", true);
+        setProp(_el$185, "width", "100%");
+        setProp(_el$185, "height", 6);
+        setProp(_el$185, "selectedBackgroundColor", "#5a2e1c");
+        setProp(_el$185, "selectedTextColor", "#ffffff");
+        setProp(_el$185, "descriptionColor", "#808080");
+        setProp(_el$185, "selectedDescriptionColor", "#ffd0bb");
+        setProp(_el$185, "onChange", (index) => setApiFormatIndex(index));
         effect((_p$) => {
-          var _v$19 = apiFormats().map((format) => ({
+          var _v$36 = apiFormats().map((format) => ({
             name: format.label,
             description: format.value,
             value: format.value
-          })), _v$20 = apiFormatIndex();
-          _v$19 !== _p$.e && (_p$.e = setProp(_el$137, "options", _v$19, _p$.e));
-          _v$20 !== _p$.t && (_p$.t = setProp(_el$137, "selectedIndex", _v$20, _p$.t));
+          })), _v$37 = apiFormatIndex();
+          _v$36 !== _p$.e && (_p$.e = setProp(_el$185, "options", _v$36, _p$.e));
+          _v$37 !== _p$.t && (_p$.t = setProp(_el$185, "selectedIndex", _v$37, _p$.t));
           return _p$;
         }, {
           e: undefined,
           t: undefined
         });
-        return _el$136;
+        return _el$184;
       }
-    }), _el$217);
-    insert(_el$122, createComponent2(Show, {
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
       get when() {
         return memo2(() => !!!loading())() && screen() === "api_key";
       },
       get children() {
         return renderInput(`${selectedProvider()?.display_name ?? "Provider"} API Key`, remoteKeyConfigured() ? "\u5DF2\u914D\u7F6E\uFF0C\u7559\u7A7A\u4FDD\u7559\u73B0\u6709 Key" : "\u7C98\u8D34 API Key");
       }
-    }), _el$217);
-    insert(_el$122, createComponent2(Show, {
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
       get when() {
         return memo2(() => !!!loading())() && screen() === "model";
       },
       get children() {
-        var _el$138 = createElement("box"), _el$139 = createElement("select");
-        insertNode(_el$138, _el$139);
-        setProp(_el$138, "marginTop", 1);
-        setProp(_el$138, "flexGrow", 1);
-        setProp(_el$139, "focused", true);
-        setProp(_el$139, "showDescription", true);
-        setProp(_el$139, "width", "100%");
-        setProp(_el$139, "selectedBackgroundColor", "#5a2e1c");
-        setProp(_el$139, "selectedTextColor", "#ffffff");
-        setProp(_el$139, "descriptionColor", "#808080");
-        setProp(_el$139, "selectedDescriptionColor", "#ffd0bb");
-        setProp(_el$139, "onChange", (index) => setModelIndex(index));
+        var _el$186 = createElement("box"), _el$187 = createElement("select");
+        insertNode(_el$186, _el$187);
+        setProp(_el$186, "marginTop", 1);
+        setProp(_el$186, "flexGrow", 1);
+        setProp(_el$187, "focused", true);
+        setProp(_el$187, "showDescription", true);
+        setProp(_el$187, "width", "100%");
+        setProp(_el$187, "selectedBackgroundColor", "#5a2e1c");
+        setProp(_el$187, "selectedTextColor", "#ffffff");
+        setProp(_el$187, "descriptionColor", "#808080");
+        setProp(_el$187, "selectedDescriptionColor", "#ffd0bb");
+        setProp(_el$187, "onChange", (index) => setModelIndex(index));
         effect((_p$) => {
-          var _v$21 = cloudModels().map((model) => ({
+          var _v$38 = cloudModels().map((model) => ({
             name: model,
             description: model === selectedProvider()?.default_model ? "Provider \u9ED8\u8BA4\u6A21\u578B" : "\u9884\u8BBE\u6A21\u578B",
             value: model
-          })), _v$22 = modelIndex(), _v$23 = Math.min(12, Math.max(4, cloudModels().length * 2));
-          _v$21 !== _p$.e && (_p$.e = setProp(_el$139, "options", _v$21, _p$.e));
-          _v$22 !== _p$.t && (_p$.t = setProp(_el$139, "selectedIndex", _v$22, _p$.t));
-          _v$23 !== _p$.a && (_p$.a = setProp(_el$139, "height", _v$23, _p$.a));
+          })), _v$39 = modelIndex(), _v$40 = Math.min(12, Math.max(4, cloudModels().length * 2));
+          _v$38 !== _p$.e && (_p$.e = setProp(_el$187, "options", _v$38, _p$.e));
+          _v$39 !== _p$.t && (_p$.t = setProp(_el$187, "selectedIndex", _v$39, _p$.t));
+          _v$40 !== _p$.a && (_p$.a = setProp(_el$187, "height", _v$40, _p$.a));
           return _p$;
         }, {
           e: undefined,
           t: undefined,
           a: undefined
         });
-        return _el$138;
+        return _el$186;
       }
-    }), _el$217);
-    insert(_el$122, createComponent2(Show, {
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
       get when() {
         return memo2(() => !!!loading())() && screen() === "local_base_url";
       },
       get children() {
         return renderInput("\u672C\u5730 Ollama Endpoint", "http://127.0.0.1:11434/v1");
       }
-    }), _el$217);
-    insert(_el$122, createComponent2(Show, {
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
       get when() {
         return memo2(() => !!!loading())() && screen() === "local_model";
       },
       get children() {
-        var _el$140 = createElement("box"), _el$141 = createElement("select");
-        insertNode(_el$140, _el$141);
-        setProp(_el$140, "marginTop", 1);
-        setProp(_el$140, "flexGrow", 1);
-        setProp(_el$141, "focused", true);
-        setProp(_el$141, "showDescription", true);
-        setProp(_el$141, "width", "100%");
-        setProp(_el$141, "selectedBackgroundColor", "#5a2e1c");
-        setProp(_el$141, "selectedTextColor", "#ffffff");
-        setProp(_el$141, "descriptionColor", "#808080");
-        setProp(_el$141, "selectedDescriptionColor", "#ffd0bb");
-        setProp(_el$141, "onChange", (index) => setLocalModelIndex(index));
+        var _el$188 = createElement("box"), _el$189 = createElement("select");
+        insertNode(_el$188, _el$189);
+        setProp(_el$188, "marginTop", 1);
+        setProp(_el$188, "flexGrow", 1);
+        setProp(_el$189, "focused", true);
+        setProp(_el$189, "showDescription", true);
+        setProp(_el$189, "width", "100%");
+        setProp(_el$189, "selectedBackgroundColor", "#5a2e1c");
+        setProp(_el$189, "selectedTextColor", "#ffffff");
+        setProp(_el$189, "descriptionColor", "#808080");
+        setProp(_el$189, "selectedDescriptionColor", "#ffd0bb");
+        setProp(_el$189, "onChange", (index) => setLocalModelIndex(index));
         effect((_p$) => {
-          var _v$24 = localModels().map((model) => ({
+          var _v$41 = localModels().map((model) => ({
             name: model,
             description: model === local()?.default_model ? "\u672C\u5730\u9ED8\u8BA4\u6A21\u578B" : "Ollama \u672C\u5730\u6A21\u578B",
             value: model
-          })), _v$25 = localModelIndex(), _v$26 = Math.min(12, Math.max(4, localModels().length * 2));
-          _v$24 !== _p$.e && (_p$.e = setProp(_el$141, "options", _v$24, _p$.e));
-          _v$25 !== _p$.t && (_p$.t = setProp(_el$141, "selectedIndex", _v$25, _p$.t));
-          _v$26 !== _p$.a && (_p$.a = setProp(_el$141, "height", _v$26, _p$.a));
+          })), _v$42 = localModelIndex(), _v$43 = Math.min(12, Math.max(4, localModels().length * 2));
+          _v$41 !== _p$.e && (_p$.e = setProp(_el$189, "options", _v$41, _p$.e));
+          _v$42 !== _p$.t && (_p$.t = setProp(_el$189, "selectedIndex", _v$42, _p$.t));
+          _v$43 !== _p$.a && (_p$.a = setProp(_el$189, "height", _v$43, _p$.a));
           return _p$;
         }, {
           e: undefined,
           t: undefined,
           a: undefined
         });
-        return _el$140;
+        return _el$188;
       }
-    }), _el$217);
-    insert(_el$122, createComponent2(Show, {
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
       get when() {
         return memo2(() => !!!loading())() && screen() === "github";
       },
       get children() {
         return renderInput("GitHub Token", githubConfigured() ? "\u5DF2\u914D\u7F6E\uFF0C\u7559\u7A7A\u4FDD\u7559\u73B0\u6709 Token" : "\u7C98\u8D34 GitHub Token\uFF08ghp_...\uFF09");
       }
-    }), _el$217);
-    insert(_el$122, createComponent2(Show, {
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
       get when() {
         return memo2(() => !!!loading())() && screen() === "ui_language";
       },
       get children() {
-        var _el$142 = createElement("box"), _el$143 = createElement("select");
-        insertNode(_el$142, _el$143);
-        setProp(_el$142, "marginTop", 1);
-        setProp(_el$142, "flexGrow", 1);
-        setProp(_el$143, "focused", true);
-        setProp(_el$143, "showDescription", true);
-        setProp(_el$143, "width", "100%");
-        setProp(_el$143, "height", 6);
-        setProp(_el$143, "selectedBackgroundColor", "#5a2e1c");
-        setProp(_el$143, "selectedTextColor", "#ffffff");
-        setProp(_el$143, "descriptionColor", "#808080");
-        setProp(_el$143, "selectedDescriptionColor", "#ffd0bb");
-        setProp(_el$143, "onChange", (index) => setUiLanguageIndex(index));
+        var _el$190 = createElement("box"), _el$191 = createElement("select");
+        insertNode(_el$190, _el$191);
+        setProp(_el$190, "marginTop", 1);
+        setProp(_el$190, "flexGrow", 1);
+        setProp(_el$191, "focused", true);
+        setProp(_el$191, "showDescription", true);
+        setProp(_el$191, "width", "100%");
+        setProp(_el$191, "height", 6);
+        setProp(_el$191, "selectedBackgroundColor", "#5a2e1c");
+        setProp(_el$191, "selectedTextColor", "#ffffff");
+        setProp(_el$191, "descriptionColor", "#808080");
+        setProp(_el$191, "selectedDescriptionColor", "#ffd0bb");
+        setProp(_el$191, "onChange", (index) => setUiLanguageIndex(index));
         effect((_p$) => {
-          var _v$27 = uiLanguages().map((item) => ({
+          var _v$44 = uiLanguages().map((item) => ({
             name: item.label,
             description: item.value,
             value: item.value
-          })), _v$28 = uiLanguageIndex();
-          _v$27 !== _p$.e && (_p$.e = setProp(_el$143, "options", _v$27, _p$.e));
-          _v$28 !== _p$.t && (_p$.t = setProp(_el$143, "selectedIndex", _v$28, _p$.t));
+          })), _v$45 = uiLanguageIndex();
+          _v$44 !== _p$.e && (_p$.e = setProp(_el$191, "options", _v$44, _p$.e));
+          _v$45 !== _p$.t && (_p$.t = setProp(_el$191, "selectedIndex", _v$45, _p$.t));
           return _p$;
         }, {
           e: undefined,
           t: undefined
         });
-        return _el$142;
+        return _el$190;
       }
-    }), _el$217);
-    insert(_el$122, createComponent2(Show, {
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
       get when() {
         return memo2(() => !!!loading())() && screen() === "response_language";
       },
       get children() {
-        var _el$144 = createElement("box"), _el$145 = createElement("select");
-        insertNode(_el$144, _el$145);
-        setProp(_el$144, "marginTop", 1);
-        setProp(_el$144, "flexGrow", 1);
-        setProp(_el$145, "focused", true);
-        setProp(_el$145, "showDescription", true);
-        setProp(_el$145, "width", "100%");
-        setProp(_el$145, "height", 6);
-        setProp(_el$145, "selectedBackgroundColor", "#5a2e1c");
-        setProp(_el$145, "selectedTextColor", "#ffffff");
-        setProp(_el$145, "descriptionColor", "#808080");
-        setProp(_el$145, "selectedDescriptionColor", "#ffd0bb");
-        setProp(_el$145, "onChange", (index) => setResponseLanguageIndex(index));
+        var _el$192 = createElement("box"), _el$193 = createElement("select");
+        insertNode(_el$192, _el$193);
+        setProp(_el$192, "marginTop", 1);
+        setProp(_el$192, "flexGrow", 1);
+        setProp(_el$193, "focused", true);
+        setProp(_el$193, "showDescription", true);
+        setProp(_el$193, "width", "100%");
+        setProp(_el$193, "height", 6);
+        setProp(_el$193, "selectedBackgroundColor", "#5a2e1c");
+        setProp(_el$193, "selectedTextColor", "#ffffff");
+        setProp(_el$193, "descriptionColor", "#808080");
+        setProp(_el$193, "selectedDescriptionColor", "#ffd0bb");
+        setProp(_el$193, "onChange", (index) => setResponseLanguageIndex(index));
         effect((_p$) => {
-          var _v$29 = uiLanguages().map((item) => ({
+          var _v$46 = uiLanguages().map((item) => ({
             name: item.label,
             description: item.value,
             value: item.value
-          })), _v$30 = responseLanguageIndex();
-          _v$29 !== _p$.e && (_p$.e = setProp(_el$145, "options", _v$29, _p$.e));
-          _v$30 !== _p$.t && (_p$.t = setProp(_el$145, "selectedIndex", _v$30, _p$.t));
+          })), _v$47 = responseLanguageIndex();
+          _v$46 !== _p$.e && (_p$.e = setProp(_el$193, "options", _v$46, _p$.e));
+          _v$47 !== _p$.t && (_p$.t = setProp(_el$193, "selectedIndex", _v$47, _p$.t));
           return _p$;
         }, {
           e: undefined,
           t: undefined
         });
-        return _el$144;
+        return _el$192;
       }
-    }), _el$217);
-    insert(_el$122, createComponent2(Show, {
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
       get when() {
         return memo2(() => !!!loading())() && screen() === "output_format";
       },
       get children() {
-        var _el$146 = createElement("box"), _el$147 = createElement("select");
-        insertNode(_el$146, _el$147);
-        setProp(_el$146, "marginTop", 1);
-        setProp(_el$146, "flexGrow", 1);
-        setProp(_el$147, "focused", true);
-        setProp(_el$147, "showDescription", true);
-        setProp(_el$147, "width", "100%");
-        setProp(_el$147, "height", 8);
-        setProp(_el$147, "selectedBackgroundColor", "#5a2e1c");
-        setProp(_el$147, "selectedTextColor", "#ffffff");
-        setProp(_el$147, "descriptionColor", "#808080");
-        setProp(_el$147, "selectedDescriptionColor", "#ffd0bb");
-        setProp(_el$147, "onChange", (index) => setOutputFormatIndex(index));
+        var _el$194 = createElement("box"), _el$195 = createElement("select");
+        insertNode(_el$194, _el$195);
+        setProp(_el$194, "marginTop", 1);
+        setProp(_el$194, "flexGrow", 1);
+        setProp(_el$195, "focused", true);
+        setProp(_el$195, "showDescription", true);
+        setProp(_el$195, "width", "100%");
+        setProp(_el$195, "height", 8);
+        setProp(_el$195, "selectedBackgroundColor", "#5a2e1c");
+        setProp(_el$195, "selectedTextColor", "#ffffff");
+        setProp(_el$195, "descriptionColor", "#808080");
+        setProp(_el$195, "selectedDescriptionColor", "#ffd0bb");
+        setProp(_el$195, "onChange", (index) => setOutputFormatIndex(index));
         effect((_p$) => {
-          var _v$31 = outputFormats().map((item) => ({
+          var _v$48 = outputFormats().map((item) => ({
             name: item.label,
             description: item.value,
             value: item.value
-          })), _v$32 = outputFormatIndex();
-          _v$31 !== _p$.e && (_p$.e = setProp(_el$147, "options", _v$31, _p$.e));
-          _v$32 !== _p$.t && (_p$.t = setProp(_el$147, "selectedIndex", _v$32, _p$.t));
+          })), _v$49 = outputFormatIndex();
+          _v$48 !== _p$.e && (_p$.e = setProp(_el$195, "options", _v$48, _p$.e));
+          _v$49 !== _p$.t && (_p$.t = setProp(_el$195, "selectedIndex", _v$49, _p$.t));
           return _p$;
         }, {
           e: undefined,
           t: undefined
         });
-        return _el$146;
+        return _el$194;
       }
-    }), _el$217);
-    insert(_el$122, createComponent2(Show, {
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
       get when() {
         return memo2(() => !!!loading())() && screen() === "auto_publish";
       },
       get children() {
-        var _el$148 = createElement("box"), _el$149 = createElement("select");
-        insertNode(_el$148, _el$149);
-        setProp(_el$148, "marginTop", 1);
-        setProp(_el$148, "flexGrow", 1);
-        setProp(_el$149, "options", [{
+        var _el$196 = createElement("box"), _el$197 = createElement("select");
+        insertNode(_el$196, _el$197);
+        setProp(_el$196, "marginTop", 1);
+        setProp(_el$196, "flexGrow", 1);
+        setProp(_el$197, "options", [{
           name: "\u662F / Yes",
           description: "\u5BA1\u67E5\u5B8C\u6210\u540E\u81EA\u52A8\u53D1\u5E03 GitHub \u8BC4\u8BBA",
           value: "yes"
@@ -38349,322 +40362,865 @@ function SetupWizardDialog(props) {
           description: "\u53EA\u751F\u6210\u672C\u5730\u62A5\u544A\uFF0C\u4E0D\u81EA\u52A8\u53D1\u5E03",
           value: "no"
         }]);
-        setProp(_el$149, "focused", true);
-        setProp(_el$149, "showDescription", true);
-        setProp(_el$149, "width", "100%");
-        setProp(_el$149, "height", 6);
-        setProp(_el$149, "selectedBackgroundColor", "#5a2e1c");
-        setProp(_el$149, "selectedTextColor", "#ffffff");
-        setProp(_el$149, "descriptionColor", "#808080");
-        setProp(_el$149, "selectedDescriptionColor", "#ffd0bb");
-        setProp(_el$149, "onChange", (index) => setAutoPublishIndex(index));
-        effect((_$p) => setProp(_el$149, "selectedIndex", autoPublishIndex(), _$p));
-        return _el$148;
+        setProp(_el$197, "focused", true);
+        setProp(_el$197, "showDescription", true);
+        setProp(_el$197, "width", "100%");
+        setProp(_el$197, "height", 6);
+        setProp(_el$197, "selectedBackgroundColor", "#5a2e1c");
+        setProp(_el$197, "selectedTextColor", "#ffffff");
+        setProp(_el$197, "descriptionColor", "#808080");
+        setProp(_el$197, "selectedDescriptionColor", "#ffd0bb");
+        setProp(_el$197, "onChange", (index) => setAutoPublishIndex(index));
+        effect((_$p) => setProp(_el$197, "selectedIndex", autoPublishIndex(), _$p));
+        return _el$196;
       }
-    }), _el$217);
-    insert(_el$122, createComponent2(Show, {
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
       get when() {
         return memo2(() => !!!loading())() && screen() === "chat_layout";
       },
       get children() {
-        var _el$150 = createElement("box"), _el$151 = createElement("select");
-        insertNode(_el$150, _el$151);
-        setProp(_el$150, "marginTop", 1);
-        setProp(_el$150, "flexGrow", 1);
-        setProp(_el$151, "focused", true);
-        setProp(_el$151, "showDescription", true);
-        setProp(_el$151, "width", "100%");
-        setProp(_el$151, "height", 8);
-        setProp(_el$151, "selectedBackgroundColor", "#5a2e1c");
-        setProp(_el$151, "selectedTextColor", "#ffffff");
-        setProp(_el$151, "descriptionColor", "#808080");
-        setProp(_el$151, "selectedDescriptionColor", "#ffd0bb");
-        setProp(_el$151, "onChange", (index) => setChatLayoutIndex(index));
+        var _el$198 = createElement("box"), _el$199 = createElement("select");
+        insertNode(_el$198, _el$199);
+        setProp(_el$198, "marginTop", 1);
+        setProp(_el$198, "flexGrow", 1);
+        setProp(_el$199, "focused", true);
+        setProp(_el$199, "showDescription", true);
+        setProp(_el$199, "width", "100%");
+        setProp(_el$199, "height", 8);
+        setProp(_el$199, "selectedBackgroundColor", "#5a2e1c");
+        setProp(_el$199, "selectedTextColor", "#ffffff");
+        setProp(_el$199, "descriptionColor", "#808080");
+        setProp(_el$199, "selectedDescriptionColor", "#ffd0bb");
+        setProp(_el$199, "onChange", (index) => setChatLayoutIndex(index));
         effect((_p$) => {
-          var _v$33 = chatLayouts().map((item) => ({
+          var _v$50 = chatLayouts().map((item) => ({
             name: item.label,
             description: item.value,
             value: item.value
-          })), _v$34 = chatLayoutIndex();
-          _v$33 !== _p$.e && (_p$.e = setProp(_el$151, "options", _v$33, _p$.e));
-          _v$34 !== _p$.t && (_p$.t = setProp(_el$151, "selectedIndex", _v$34, _p$.t));
+          })), _v$51 = chatLayoutIndex();
+          _v$50 !== _p$.e && (_p$.e = setProp(_el$199, "options", _v$50, _p$.e));
+          _v$51 !== _p$.t && (_p$.t = setProp(_el$199, "selectedIndex", _v$51, _p$.t));
           return _p$;
         }, {
           e: undefined,
           t: undefined
         });
-        return _el$150;
+        return _el$198;
       }
-    }), _el$217);
-    insert(_el$122, createComponent2(Show, {
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
       get when() {
         return memo2(() => !!!loading())() && screen() === "workbench";
       },
       get children() {
-        var _el$152 = createElement("box"), _el$153 = createElement("select");
-        insertNode(_el$152, _el$153);
-        setProp(_el$152, "marginTop", 1);
-        setProp(_el$152, "flexGrow", 1);
-        setProp(_el$153, "focused", true);
-        setProp(_el$153, "showDescription", true);
-        setProp(_el$153, "width", "100%");
-        setProp(_el$153, "height", 8);
-        setProp(_el$153, "selectedBackgroundColor", "#5a2e1c");
-        setProp(_el$153, "selectedTextColor", "#ffffff");
-        setProp(_el$153, "descriptionColor", "#808080");
-        setProp(_el$153, "selectedDescriptionColor", "#ffd0bb");
-        setProp(_el$153, "onChange", (index) => setWorkbenchIndex(index));
+        var _el$200 = createElement("box"), _el$201 = createElement("select");
+        insertNode(_el$200, _el$201);
+        setProp(_el$200, "marginTop", 1);
+        setProp(_el$200, "flexGrow", 1);
+        setProp(_el$201, "focused", true);
+        setProp(_el$201, "showDescription", true);
+        setProp(_el$201, "width", "100%");
+        setProp(_el$201, "height", 8);
+        setProp(_el$201, "selectedBackgroundColor", "#5a2e1c");
+        setProp(_el$201, "selectedTextColor", "#ffffff");
+        setProp(_el$201, "descriptionColor", "#808080");
+        setProp(_el$201, "selectedDescriptionColor", "#ffd0bb");
+        setProp(_el$201, "onChange", (index) => setWorkbenchIndex(index));
         effect((_p$) => {
-          var _v$35 = workbenchModes().map((item) => ({
+          var _v$52 = workbenchModes().map((item) => ({
             name: item.label,
             description: item.value,
             value: item.value
-          })), _v$36 = workbenchIndex();
-          _v$35 !== _p$.e && (_p$.e = setProp(_el$153, "options", _v$35, _p$.e));
-          _v$36 !== _p$.t && (_p$.t = setProp(_el$153, "selectedIndex", _v$36, _p$.t));
+          })), _v$53 = workbenchIndex();
+          _v$52 !== _p$.e && (_p$.e = setProp(_el$201, "options", _v$52, _p$.e));
+          _v$53 !== _p$.t && (_p$.t = setProp(_el$201, "selectedIndex", _v$53, _p$.t));
           return _p$;
         }, {
           e: undefined,
           t: undefined
         });
-        return _el$152;
+        return _el$200;
       }
-    }), _el$217);
-    insert(_el$122, createComponent2(Show, {
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
+      get when() {
+        return memo2(() => !!!loading())() && screen() === "repo_context";
+      },
+      get children() {
+        var _el$202 = createElement("box"), _el$203 = createElement("select"), _el$204 = createElement("text");
+        insertNode(_el$202, _el$203);
+        insertNode(_el$202, _el$204);
+        setProp(_el$202, "marginTop", 1);
+        setProp(_el$202, "flexGrow", 1);
+        setProp(_el$203, "focused", true);
+        setProp(_el$203, "showDescription", true);
+        setProp(_el$203, "width", "100%");
+        setProp(_el$203, "height", 8);
+        setProp(_el$203, "selectedBackgroundColor", "#5a2e1c");
+        setProp(_el$203, "selectedTextColor", "#ffffff");
+        setProp(_el$203, "descriptionColor", "#808080");
+        setProp(_el$203, "selectedDescriptionColor", "#ffd0bb");
+        setProp(_el$203, "onChange", (index) => setRepoContextIndex(index));
+        setProp(_el$204, "fg", "#808080");
+        insert(_el$204, () => repoContextCopy(isEn(uiLanguage())).hint);
+        effect((_p$) => {
+          var _v$54 = repoContexts().map((item) => ({
+            name: repoContextLabel(item, uiLanguage()),
+            description: repoContextDescription(item, uiLanguage()),
+            value: item.value
+          })), _v$55 = repoContextIndex();
+          _v$54 !== _p$.e && (_p$.e = setProp(_el$203, "options", _v$54, _p$.e));
+          _v$55 !== _p$.t && (_p$.t = setProp(_el$203, "selectedIndex", _v$55, _p$.t));
+          return _p$;
+        }, {
+          e: undefined,
+          t: undefined
+        });
+        return _el$202;
+      }
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
+      get when() {
+        return memo2(() => !!!loading())() && screen() === "review_effort";
+      },
+      get children() {
+        var _el$205 = createElement("box"), _el$207 = createElement("select"), _el$208 = createElement("text");
+        insertNode(_el$205, _el$207);
+        insertNode(_el$205, _el$208);
+        setProp(_el$205, "marginTop", 1);
+        setProp(_el$205, "flexGrow", 1);
+        insert(_el$205, createComponent2(Show, {
+          get when() {
+            return reviewEffortIsDisabled(reviewEffortBlock());
+          },
+          get children() {
+            var _el$206 = createElement("text");
+            setProp(_el$206, "fg", "#ff6b6b");
+            insert(_el$206, () => `\u26A0 ${formatReviewEffortDisabled(reviewEffortBlock()?.reason, uiLanguage())}`);
+            return _el$206;
+          }
+        }), _el$207);
+        setProp(_el$207, "focused", true);
+        setProp(_el$207, "showDescription", true);
+        setProp(_el$207, "width", "100%");
+        setProp(_el$207, "selectedTextColor", "#ffffff");
+        setProp(_el$207, "onChange", (index) => setReviewEffortIndex(index));
+        insert(_el$208, () => formatReviewEffortCost(selectedReviewEffort(), uiLanguage()));
+        insert(_el$205, createComponent2(Show, {
+          get when() {
+            return memo2(() => !!!reviewEffortIsDisabled(reviewEffortBlock()))() && reviewBudgetCapHint();
+          },
+          get children() {
+            var _el$209 = createElement("text");
+            setProp(_el$209, "fg", "#ffd0bb");
+            insert(_el$209, reviewBudgetCapHint);
+            return _el$209;
+          }
+        }), null);
+        effect((_p$) => {
+          var _v$56 = reviewEfforts().map((item) => ({
+            name: reviewEffortBilingualLabel(item.label, uiLanguage()),
+            description: formatReviewEffortCost(item.value, uiLanguage()),
+            value: item.value
+          })), _v$57 = reviewEffortIndex(), _v$58 = reviewEffortIsDisabled(reviewEffortBlock()) ? 9 : 10, _v$59 = reviewEffortIsDisabled(reviewEffortBlock()) ? "#3a3a3a" : "#5a2e1c", _v$60 = reviewEffortIsDisabled(reviewEffortBlock()) ? "#555555" : muted, _v$61 = reviewEffortIsDisabled(reviewEffortBlock()) ? "#777777" : "#ffd0bb", _v$62 = reviewEffortIsDisabled(reviewEffortBlock()) ? "#555555" : selectedReviewEffort() === "off" ? muted : "#ffd0bb";
+          _v$56 !== _p$.e && (_p$.e = setProp(_el$207, "options", _v$56, _p$.e));
+          _v$57 !== _p$.t && (_p$.t = setProp(_el$207, "selectedIndex", _v$57, _p$.t));
+          _v$58 !== _p$.a && (_p$.a = setProp(_el$207, "height", _v$58, _p$.a));
+          _v$59 !== _p$.o && (_p$.o = setProp(_el$207, "selectedBackgroundColor", _v$59, _p$.o));
+          _v$60 !== _p$.i && (_p$.i = setProp(_el$207, "descriptionColor", _v$60, _p$.i));
+          _v$61 !== _p$.n && (_p$.n = setProp(_el$207, "selectedDescriptionColor", _v$61, _p$.n));
+          _v$62 !== _p$.s && (_p$.s = setProp(_el$208, "fg", _v$62, _p$.s));
+          return _p$;
+        }, {
+          e: undefined,
+          t: undefined,
+          a: undefined,
+          o: undefined,
+          i: undefined,
+          n: undefined,
+          s: undefined
+        });
+        return _el$205;
+      }
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
+      get when() {
+        return memo2(() => !!!loading())() && screen() === "model_spec";
+      },
+      get children() {
+        return (() => {
+          const spec = activeSpec();
+          const badge = formatSourceBadge(spec?.source, uiLanguage());
+          const headline = formatModelHeadline(spec ?? {}, uiLanguage());
+          const reasoning = spec?.reasoning ?? "";
+          const verifyText = spec?.needs_verification ? formatNeedsVerification(spec, uiLanguage()) : "";
+          const remoteBounds = remoteSpec()?.bounds?.context_window;
+          const remoteOutBounds = remoteSpec()?.bounds?.max_output;
+          const localBounds = localSpec()?.bounds?.context_window;
+          const localOutBounds = localSpec()?.bounds?.max_output;
+          const refreshText = formatCatalogRefreshStatus(catalogRefresh(), catalogRefreshDetail(), uiLanguage());
+          const en = isEn(uiLanguage());
+          const rows = [{
+            label: en ? "Context window" : "\u4E0A\u4E0B\u6587\u957F\u5EA6",
+            value: specRemoteContext(),
+            bounds: remoteBounds,
+            index: 0
+          }, {
+            label: en ? "Max output" : "\u6700\u5927\u8F93\u51FA",
+            value: specRemoteOutput(),
+            bounds: remoteOutBounds,
+            index: 1
+          }, ...localSpec() ? [{
+            label: en ? "Local context" : "\u672C\u5730\u4E0A\u4E0B\u6587",
+            value: specLocalContext(),
+            bounds: localBounds,
+            index: 2
+          }, {
+            label: en ? "Local max output" : "\u672C\u5730\u6700\u5927\u8F93\u51FA",
+            value: specLocalOutput(),
+            bounds: localOutBounds,
+            index: 3
+          }] : []];
+          return (() => {
+            var _el$293 = createElement("box"), _el$298 = createElement("box"), _el$299 = createElement("input"), _el$307 = createElement("text");
+            insertNode(_el$293, _el$298);
+            insertNode(_el$293, _el$307);
+            setProp(_el$293, "marginTop", 1);
+            setProp(_el$293, "flexDirection", "column");
+            insert(_el$293, createComponent2(Show, {
+              when: headline,
+              get children() {
+                var _el$294 = createElement("text"), _el$295 = createElement("span"), _el$296 = createElement("span");
+                insertNode(_el$294, _el$295);
+                insertNode(_el$294, _el$296);
+                setProp(_el$295, "style", {
+                  fg: "#eeeeee"
+                });
+                insert(_el$295, headline);
+                setProp(_el$296, "style", {
+                  fg: "#fb8147"
+                });
+                insert(_el$296, `  ${badge}`);
+                return _el$294;
+              }
+            }), _el$298);
+            insert(_el$293, createComponent2(Show, {
+              when: !headline,
+              get children() {
+                var _el$297 = createElement("text");
+                setProp(_el$297, "fg", "#808080");
+                insert(_el$297, en ? "No model spec available" : "\u6682\u65E0\u6A21\u578B\u89C4\u683C\u6570\u636E");
+                return _el$297;
+              }
+            }), _el$298);
+            insert(_el$293, createComponent2(For, {
+              each: rows,
+              children: (row) => {
+                const focused = () => specFieldIndex() === row.index;
+                const hint = formatSpecBoundHint(row.bounds, uiLanguage());
+                return (() => {
+                  var _el$308 = createElement("text"), _el$309 = createElement("span"), _el$310 = createElement("span"), _el$311 = createElement("span");
+                  insertNode(_el$308, _el$309);
+                  insertNode(_el$308, _el$310);
+                  insertNode(_el$308, _el$311);
+                  insert(_el$309, () => focused() ? "\u25B8 " : "  ");
+                  setProp(_el$310, "style", {
+                    fg: "#808080"
+                  });
+                  insert(_el$310, () => row.label);
+                  setProp(_el$311, "style", {
+                    fg: "#eeeeee"
+                  });
+                  insert(_el$311, () => `  ${row.value || "\u2014"}`);
+                  insert(_el$308, createComponent2(Show, {
+                    when: hint,
+                    get children() {
+                      var _el$312 = createElement("span");
+                      setProp(_el$312, "style", {
+                        fg: "#808080"
+                      });
+                      insert(_el$312, `  ${hint}`);
+                      return _el$312;
+                    }
+                  }), null);
+                  effect((_p$) => {
+                    var _v$70 = focused() ? "#202020" : undefined, _v$71 = {
+                      fg: focused() ? orange : muted
+                    };
+                    _v$70 !== _p$.e && (_p$.e = setProp(_el$308, "bg", _v$70, _p$.e));
+                    _v$71 !== _p$.t && (_p$.t = setProp(_el$309, "style", _v$71, _p$.t));
+                    return _p$;
+                  }, {
+                    e: undefined,
+                    t: undefined
+                  });
+                  return _el$308;
+                })();
+              }
+            }), _el$298);
+            insertNode(_el$298, _el$299);
+            setProp(_el$298, "marginTop", 1);
+            setProp(_el$298, "backgroundColor", "#202020");
+            setProp(_el$298, "paddingLeft", 1);
+            setProp(_el$298, "paddingRight", 1);
+            use((node) => {
+              inputRef = node;
+            }, _el$299);
+            setProp(_el$299, "onContentChange", () => setInputValue(inputRef?.value ?? ""));
+            setProp(_el$299, "onSubmit", () => {
+              commitSpecField();
+              if (specFieldError())
+                return;
+              next();
+            });
+            setProp(_el$299, "flexGrow", 1);
+            insert(_el$293, createComponent2(Show, {
+              get when() {
+                return specFieldError();
+              },
+              get children() {
+                var _el$300 = createElement("text");
+                setProp(_el$300, "fg", "#ff6b6b");
+                insert(_el$300, specFieldError);
+                return _el$300;
+              }
+            }), _el$307);
+            insert(_el$293, createComponent2(Show, {
+              when: reasoning,
+              get children() {
+                var _el$301 = createElement("text"), _el$302 = createTextNode(` `), _el$303 = createElement("span");
+                insertNode(_el$301, _el$302);
+                insertNode(_el$301, _el$303);
+                setProp(_el$301, "fg", "#808080");
+                insert(_el$301, en ? "Reasoning" : "\u63A8\u7406\u80FD\u529B", _el$302);
+                setProp(_el$303, "style", {
+                  fg: "#eeeeee"
+                });
+                insert(_el$303, reasoning);
+                return _el$301;
+              }
+            }), _el$307);
+            insert(_el$293, createComponent2(Show, {
+              when: verifyText,
+              get children() {
+                var _el$304 = createElement("text");
+                setProp(_el$304, "fg", "#ffd0bb");
+                insert(_el$304, `\u26A0 ${verifyText}`);
+                return _el$304;
+              }
+            }), _el$307);
+            insert(_el$293, createComponent2(Show, {
+              when: refreshText,
+              get children() {
+                var _el$305 = createElement("text");
+                insert(_el$305, refreshText);
+                effect((_$p) => setProp(_el$305, "fg", catalogRefresh() === "error" ? "#ff6b6b" : muted, _$p));
+                return _el$305;
+              }
+            }), _el$307);
+            insert(_el$293, createComponent2(Show, {
+              get when() {
+                return formatBudgetSource(props.runtime.chat_context_budget, props.runtime.chat_context_budget_source, uiLanguage());
+              },
+              get children() {
+                var _el$306 = createElement("text");
+                setProp(_el$306, "fg", "#808080");
+                insert(_el$306, () => formatBudgetSource(props.runtime.chat_context_budget, props.runtime.chat_context_budget_source, uiLanguage()));
+                return _el$306;
+              }
+            }), _el$307);
+            setProp(_el$307, "fg", "#808080");
+            insert(_el$307, en ? "R refresh catalog \xB7 \u2191\u2193 edit fields \xB7 Enter next \xB7 Esc back" : "R \u91CD\u65B0\u83B7\u53D6 \xB7 \u2191\u2193 \u7F16\u8F91\u5B57\u6BB5 \xB7 Enter \u4E0B\u4E00\u6B65 \xB7 Esc \u8FD4\u56DE");
+            effect((_p$) => {
+              var _v$67 = inputValue(), _v$68 = rows[specFieldIndex()]?.label ?? "", _v$69 = inputFocused();
+              _v$67 !== _p$.e && (_p$.e = setProp(_el$299, "value", _v$67, _p$.e));
+              _v$68 !== _p$.t && (_p$.t = setProp(_el$299, "placeholder", _v$68, _p$.t));
+              _v$69 !== _p$.a && (_p$.a = setProp(_el$299, "focused", _v$69, _p$.a));
+              return _p$;
+            }, {
+              e: undefined,
+              t: undefined,
+              a: undefined
+            });
+            return _el$293;
+          })();
+        })();
+      }
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
+      get when() {
+        return memo2(() => !!!loading())() && screen() === "custom_endpoint";
+      },
+      get children() {
+        return (() => {
+          const endpoint = customEndpoint();
+          const fields = customEndpointFieldLabels(uiLanguage());
+          const values = [customBaseUrl(), customApiKey(), customModelName(), customContextWindow(), customMaxOutput()];
+          const apiKeyDisplay = () => {
+            const raw = customApiKey().trim();
+            if (raw === "-")
+              return isEn(uiLanguage()) ? "(will clear)" : "\uFF08\u5C06\u6E05\u7A7A\uFF09";
+            return raw || "\u2022\u2022\u2022\u2022";
+          };
+          return (() => {
+            var _el$313 = createElement("box"), _el$315 = createElement("box"), _el$316 = createElement("input"), _el$318 = createElement("text");
+            insertNode(_el$313, _el$315);
+            insertNode(_el$313, _el$318);
+            setProp(_el$313, "marginTop", 1);
+            setProp(_el$313, "flexDirection", "column");
+            insert(_el$313, createComponent2(Show, {
+              get when() {
+                return endpoint?.display_name || endpoint?.name;
+              },
+              get children() {
+                var _el$314 = createElement("text");
+                setProp(_el$314, "fg", "#808080");
+                insert(_el$314, () => endpoint?.display_name ?? endpoint?.name, null);
+                insert(_el$314, (() => {
+                  var _c$11 = memo2(() => !!endpoint?.api_key_configured);
+                  return () => _c$11() ? (() => {
+                    var _el$319 = createElement("span");
+                    setProp(_el$319, "style", {
+                      fg: "#fb8147"
+                    });
+                    insert(_el$319, () => `  ${isEn(uiLanguage()) ? "key configured" : "Key \u5DF2\u914D\u7F6E"}`);
+                    return _el$319;
+                  })() : null;
+                })(), null);
+                return _el$314;
+              }
+            }), _el$315);
+            insert(_el$313, createComponent2(For, {
+              each: fields,
+              children: (field, index) => {
+                const focused = () => customFieldIndex() === index();
+                return (() => {
+                  var _el$320 = createElement("text"), _el$321 = createElement("span"), _el$322 = createElement("span"), _el$323 = createElement("span");
+                  insertNode(_el$320, _el$321);
+                  insertNode(_el$320, _el$322);
+                  insertNode(_el$320, _el$323);
+                  insert(_el$321, () => focused() ? "\u25B8 " : "  ");
+                  setProp(_el$322, "style", {
+                    fg: "#808080"
+                  });
+                  insert(_el$322, () => field.label);
+                  setProp(_el$323, "style", {
+                    fg: "#eeeeee"
+                  });
+                  insert(_el$323, () => `  ${field.key === "api_key" ? apiKeyDisplay() : values[index()] || "\u2014"}`);
+                  effect((_p$) => {
+                    var _v$75 = focused() ? "#202020" : undefined, _v$76 = {
+                      fg: focused() ? orange : muted
+                    };
+                    _v$75 !== _p$.e && (_p$.e = setProp(_el$320, "bg", _v$75, _p$.e));
+                    _v$76 !== _p$.t && (_p$.t = setProp(_el$321, "style", _v$76, _p$.t));
+                    return _p$;
+                  }, {
+                    e: undefined,
+                    t: undefined
+                  });
+                  return _el$320;
+                })();
+              }
+            }), _el$315);
+            insertNode(_el$315, _el$316);
+            setProp(_el$315, "marginTop", 1);
+            setProp(_el$315, "backgroundColor", "#202020");
+            setProp(_el$315, "paddingLeft", 1);
+            setProp(_el$315, "paddingRight", 1);
+            use((node) => {
+              inputRef = node;
+            }, _el$316);
+            setProp(_el$316, "onContentChange", () => {
+              setInputValue(inputRef?.value ?? "");
+              setCustomDirty(true);
+            });
+            setProp(_el$316, "onSubmit", () => {
+              commitCustomField();
+              next();
+            });
+            setProp(_el$316, "flexGrow", 1);
+            insert(_el$313, createComponent2(Show, {
+              get when() {
+                return customFieldIndex() === 3 || customFieldIndex() === 4;
+              },
+              get children() {
+                var _el$317 = createElement("text");
+                setProp(_el$317, "fg", "#808080");
+                insert(_el$317, () => formatSpecBoundHint(customFieldIndex() === 3 ? remoteSpec()?.bounds?.context_window : remoteSpec()?.bounds?.max_output, uiLanguage()));
+                return _el$317;
+              }
+            }), _el$318);
+            setProp(_el$318, "fg", "#808080");
+            insert(_el$318, () => isEn(uiLanguage()) ? "\u2191\u2193 switch field \xB7 Enter next \xB7 Esc back \xB7 type - in API Key to clear" : "\u2191\u2193 \u5207\u6362\u5B57\u6BB5 \xB7 Enter \u4E0B\u4E00\u6B65 \xB7 Esc \u8FD4\u56DE \xB7 API Key \u8F93\u5165 - \u6E05\u7A7A");
+            effect((_p$) => {
+              var _v$72 = inputValue(), _v$73 = fields[customFieldIndex()]?.label ?? "", _v$74 = inputFocused();
+              _v$72 !== _p$.e && (_p$.e = setProp(_el$316, "value", _v$72, _p$.e));
+              _v$73 !== _p$.t && (_p$.t = setProp(_el$316, "placeholder", _v$73, _p$.t));
+              _v$74 !== _p$.a && (_p$.a = setProp(_el$316, "focused", _v$74, _p$.a));
+              return _p$;
+            }, {
+              e: undefined,
+              t: undefined,
+              a: undefined
+            });
+            return _el$313;
+          })();
+        })();
+      }
+    }), _el$290);
+    insert(_el$167, createComponent2(Show, {
       get when() {
         return memo2(() => !!!loading())() && screen() === "summary";
       },
       get children() {
-        var _el$154 = createElement("box"), _el$155 = createElement("text"), _el$156 = createElement("span"), _el$158 = createElement("span"), _el$191 = createElement("text"), _el$192 = createElement("span"), _el$194 = createElement("span"), _el$195 = createElement("text"), _el$196 = createElement("span"), _el$198 = createElement("span"), _el$199 = createElement("text"), _el$200 = createElement("span"), _el$202 = createElement("span"), _el$203 = createElement("text"), _el$204 = createElement("span"), _el$206 = createElement("span"), _el$207 = createElement("text"), _el$208 = createElement("span"), _el$210 = createElement("span"), _el$211 = createElement("text"), _el$212 = createElement("span"), _el$214 = createElement("span"), _el$215 = createElement("text");
-        insertNode(_el$154, _el$155);
-        insertNode(_el$154, _el$191);
-        insertNode(_el$154, _el$195);
-        insertNode(_el$154, _el$199);
-        insertNode(_el$154, _el$203);
-        insertNode(_el$154, _el$207);
-        insertNode(_el$154, _el$211);
-        insertNode(_el$154, _el$215);
-        setProp(_el$154, "marginTop", 1);
-        setProp(_el$154, "flexDirection", "column");
-        insertNode(_el$155, _el$156);
-        insertNode(_el$155, _el$158);
-        insertNode(_el$156, createTextNode(`\u8FD0\u884C\u6A21\u5F0F `));
-        setProp(_el$156, "style", {
+        var _el$210 = createElement("box"), _el$211 = createElement("text"), _el$212 = createElement("span"), _el$213 = createElement("span"), _el$214 = createElement("text"), _el$215 = createElement("span"), _el$216 = createElement("span"), _el$217 = createElement("text"), _el$218 = createElement("span"), _el$219 = createElement("span"), _el$254 = createElement("text"), _el$255 = createElement("span"), _el$257 = createElement("span"), _el$258 = createElement("text"), _el$259 = createElement("span"), _el$261 = createElement("span"), _el$262 = createElement("text"), _el$263 = createElement("span"), _el$265 = createElement("span"), _el$266 = createElement("text"), _el$267 = createElement("span"), _el$269 = createElement("span"), _el$270 = createElement("text"), _el$271 = createElement("span"), _el$273 = createElement("span"), _el$274 = createElement("text"), _el$275 = createElement("span"), _el$277 = createElement("span"), _el$278 = createElement("text"), _el$279 = createElement("span"), _el$280 = createElement("span"), _el$284 = createElement("text");
+        insertNode(_el$210, _el$211);
+        insertNode(_el$210, _el$214);
+        insertNode(_el$210, _el$217);
+        insertNode(_el$210, _el$254);
+        insertNode(_el$210, _el$258);
+        insertNode(_el$210, _el$262);
+        insertNode(_el$210, _el$266);
+        insertNode(_el$210, _el$270);
+        insertNode(_el$210, _el$274);
+        insertNode(_el$210, _el$278);
+        insertNode(_el$210, _el$284);
+        setProp(_el$210, "marginTop", 1);
+        setProp(_el$210, "flexDirection", "column");
+        insertNode(_el$211, _el$212);
+        insertNode(_el$211, _el$213);
+        setProp(_el$212, "style", {
           fg: "#fb8147"
         });
-        setProp(_el$158, "style", {
+        insert(_el$212, () => isEn(uiLanguage()) ? "Runtime   " : "\u8FD0\u884C\u6A21\u5F0F  ");
+        setProp(_el$213, "style", {
           fg: "#eeeeee"
         });
-        insert(_el$158, () => runtimeOptions[runtimeIndex()]?.name);
-        insert(_el$154, createComponent2(Show, {
+        insert(_el$213, () => presetLabel(selectedPreset(), uiLanguage()));
+        insertNode(_el$214, _el$215);
+        insertNode(_el$214, _el$216);
+        setProp(_el$215, "style", {
+          fg: "#fb8147"
+        });
+        insert(_el$215, () => isEn(uiLanguage()) ? "Chat      " : "\u5BF9\u8BDD\u6A21\u578B  ");
+        setProp(_el$216, "style", {
+          fg: "#eeeeee"
+        });
+        insert(_el$216, () => routePreview().chat);
+        insertNode(_el$217, _el$218);
+        insertNode(_el$217, _el$219);
+        setProp(_el$218, "style", {
+          fg: "#fb8147"
+        });
+        insert(_el$218, () => isEn(uiLanguage()) ? "Review    " : "\u5BA1\u67E5\u6A21\u578B  ");
+        setProp(_el$219, "style", {
+          fg: "#eeeeee"
+        });
+        insert(_el$219, () => routePreview().review);
+        insert(_el$210, createComponent2(Show, {
           get when() {
             return needsCloud();
           },
           get children() {
             return [(() => {
-              var _el$159 = createElement("text"), _el$160 = createElement("span"), _el$162 = createElement("span");
-              insertNode(_el$159, _el$160);
-              insertNode(_el$159, _el$162);
-              insertNode(_el$160, createTextNode(`Provider `));
-              setProp(_el$160, "style", {
+              var _el$220 = createElement("text"), _el$221 = createElement("span"), _el$223 = createElement("span");
+              insertNode(_el$220, _el$221);
+              insertNode(_el$220, _el$223);
+              insertNode(_el$221, createTextNode(`Provider `));
+              setProp(_el$221, "style", {
                 fg: "#fb8147"
               });
-              setProp(_el$162, "style", {
+              setProp(_el$223, "style", {
                 fg: "#eeeeee"
               });
-              insert(_el$162, () => selectedProvider()?.display_name);
-              return _el$159;
-            })(), (() => {
-              var _el$163 = createElement("text"), _el$164 = createElement("span"), _el$166 = createElement("span");
-              insertNode(_el$163, _el$164);
-              insertNode(_el$163, _el$166);
-              insertNode(_el$164, createTextNode(`Endpoint `));
-              setProp(_el$164, "style", {
-                fg: "#fb8147"
-              });
-              setProp(_el$166, "style", {
-                fg: "#eeeeee"
-              });
-              insert(_el$166, () => baseUrl() || selectedProvider()?.base_url);
-              return _el$163;
-            })(), (() => {
-              var _el$167 = createElement("text"), _el$168 = createElement("span"), _el$170 = createElement("span");
-              insertNode(_el$167, _el$168);
-              insertNode(_el$167, _el$170);
-              insertNode(_el$168, createTextNode(`API \u683C\u5F0F `));
-              setProp(_el$168, "style", {
-                fg: "#fb8147"
-              });
-              setProp(_el$170, "style", {
-                fg: "#eeeeee"
-              });
-              insert(_el$170, selectedApiFormat);
-              return _el$167;
-            })(), (() => {
-              var _el$171 = createElement("text"), _el$172 = createElement("span"), _el$174 = createElement("span");
-              insertNode(_el$171, _el$172);
-              insertNode(_el$171, _el$174);
-              insertNode(_el$172, createTextNode(`\u6A21\u578B `));
-              setProp(_el$172, "style", {
-                fg: "#fb8147"
-              });
-              setProp(_el$174, "style", {
-                fg: "#eeeeee"
-              });
-              insert(_el$174, selectedModel);
-              return _el$171;
-            })(), (() => {
-              var _el$175 = createElement("text"), _el$176 = createElement("span"), _el$178 = createElement("span");
-              insertNode(_el$175, _el$176);
-              insertNode(_el$175, _el$178);
-              insertNode(_el$176, createTextNode(`API Key `));
-              setProp(_el$176, "style", {
-                fg: "#fb8147"
-              });
-              setProp(_el$178, "style", {
-                fg: "#eeeeee"
-              });
-              insert(_el$178, (() => {
-                var _c$3 = memo2(() => !!apiKey().trim());
-                return () => _c$3() ? "\u5C06\u66F4\u65B0" : remoteKeyConfigured() ? "\u4FDD\u7559\u73B0\u6709" : "\u672A\u914D\u7F6E";
+              insert(_el$223, (() => {
+                var _c$7 = memo2(() => !!willSubmitCustomEndpoint());
+                return () => _c$7() ? customEndpoint()?.display_name ?? (isEn(uiLanguage()) ? "Custom Endpoint" : "\u4E2D\u8F6C\u7AD9") : selectedProvider()?.display_name;
               })());
-              return _el$175;
+              return _el$220;
+            })(), (() => {
+              var _el$224 = createElement("text"), _el$225 = createElement("span"), _el$227 = createElement("span");
+              insertNode(_el$224, _el$225);
+              insertNode(_el$224, _el$227);
+              insertNode(_el$225, createTextNode(`Endpoint `));
+              setProp(_el$225, "style", {
+                fg: "#fb8147"
+              });
+              setProp(_el$227, "style", {
+                fg: "#eeeeee"
+              });
+              insert(_el$227, (() => {
+                var _c$8 = memo2(() => !!willSubmitCustomEndpoint());
+                return () => _c$8() ? customBaseUrl() || "\u2014" : baseUrl() || selectedProvider()?.base_url;
+              })());
+              return _el$224;
+            })(), (() => {
+              var _el$228 = createElement("text"), _el$229 = createElement("span"), _el$231 = createElement("span");
+              insertNode(_el$228, _el$229);
+              insertNode(_el$228, _el$231);
+              insertNode(_el$229, createTextNode(`API \u683C\u5F0F `));
+              setProp(_el$229, "style", {
+                fg: "#fb8147"
+              });
+              setProp(_el$231, "style", {
+                fg: "#eeeeee"
+              });
+              insert(_el$231, selectedApiFormat);
+              return _el$228;
+            })(), (() => {
+              var _el$232 = createElement("text"), _el$233 = createElement("span"), _el$235 = createElement("span");
+              insertNode(_el$232, _el$233);
+              insertNode(_el$232, _el$235);
+              insertNode(_el$233, createTextNode(`\u6A21\u578B `));
+              setProp(_el$233, "style", {
+                fg: "#fb8147"
+              });
+              setProp(_el$235, "style", {
+                fg: "#eeeeee"
+              });
+              insert(_el$235, (() => {
+                var _c$9 = memo2(() => !!willSubmitCustomEndpoint());
+                return () => _c$9() ? customModelName() || "\u2014" : selectedModel();
+              })());
+              return _el$232;
+            })(), (() => {
+              var _el$236 = createElement("text"), _el$237 = createElement("span"), _el$239 = createElement("span");
+              insertNode(_el$236, _el$237);
+              insertNode(_el$236, _el$239);
+              insertNode(_el$237, createTextNode(`API Key `));
+              setProp(_el$237, "style", {
+                fg: "#fb8147"
+              });
+              setProp(_el$239, "style", {
+                fg: "#eeeeee"
+              });
+              insert(_el$239, (() => {
+                var _c$0 = memo2(() => !!willSubmitCustomEndpoint());
+                return () => _c$0() ? memo2(() => customApiKeyState() === "")() ? "\u5C06\u6E05\u7A7A" : memo2(() => !!customApiKeyState())() ? "\u5C06\u66F4\u65B0" : customEndpoint()?.api_key_configured ? "\u4FDD\u7559\u73B0\u6709" : "\u672A\u914D\u7F6E" : memo2(() => !!apiKey().trim())() ? "\u5C06\u66F4\u65B0" : remoteKeyConfigured() ? "\u4FDD\u7559\u73B0\u6709" : "\u672A\u914D\u7F6E";
+              })());
+              return _el$236;
             })()];
           }
-        }), _el$191);
-        insert(_el$154, createComponent2(Show, {
+        }), _el$254);
+        insert(_el$210, createComponent2(Show, {
           get when() {
-            return !needsCloud();
+            return memo2(() => !!!needsCloud())() && !isCustom();
           },
           get children() {
             return [(() => {
-              var _el$179 = createElement("text"), _el$180 = createElement("span"), _el$182 = createElement("span");
-              insertNode(_el$179, _el$180);
-              insertNode(_el$179, _el$182);
-              insertNode(_el$180, createTextNode(`\u672C\u5730\u5F15\u64CE `));
-              setProp(_el$180, "style", {
+              var _el$240 = createElement("text"), _el$241 = createElement("span"), _el$243 = createElement("span");
+              insertNode(_el$240, _el$241);
+              insertNode(_el$240, _el$243);
+              insertNode(_el$241, createTextNode(`\u672C\u5730\u5F15\u64CE `));
+              setProp(_el$241, "style", {
                 fg: "#fb8147"
               });
-              setProp(_el$182, "style", {
+              setProp(_el$243, "style", {
                 fg: "#eeeeee"
               });
-              insert(_el$182, () => local()?.display_name);
-              return _el$179;
+              insert(_el$243, () => local()?.display_name);
+              return _el$240;
             })(), (() => {
-              var _el$183 = createElement("text"), _el$184 = createElement("span"), _el$186 = createElement("span");
-              insertNode(_el$183, _el$184);
-              insertNode(_el$183, _el$186);
-              insertNode(_el$184, createTextNode(`Endpoint `));
-              setProp(_el$184, "style", {
+              var _el$244 = createElement("text"), _el$245 = createElement("span"), _el$247 = createElement("span");
+              insertNode(_el$244, _el$245);
+              insertNode(_el$244, _el$247);
+              insertNode(_el$245, createTextNode(`Endpoint `));
+              setProp(_el$245, "style", {
                 fg: "#fb8147"
               });
-              setProp(_el$186, "style", {
+              setProp(_el$247, "style", {
                 fg: "#eeeeee"
               });
-              insert(_el$186, () => localBaseUrl() || local()?.base_url);
-              return _el$183;
+              insert(_el$247, () => localBaseUrl() || local()?.base_url);
+              return _el$244;
             })(), (() => {
-              var _el$187 = createElement("text"), _el$188 = createElement("span"), _el$190 = createElement("span");
-              insertNode(_el$187, _el$188);
-              insertNode(_el$187, _el$190);
-              insertNode(_el$188, createTextNode(`\u672C\u5730\u6A21\u578B `));
-              setProp(_el$188, "style", {
+              var _el$248 = createElement("text"), _el$249 = createElement("span"), _el$251 = createElement("span");
+              insertNode(_el$248, _el$249);
+              insertNode(_el$248, _el$251);
+              insertNode(_el$249, createTextNode(`\u672C\u5730\u6A21\u578B `));
+              setProp(_el$249, "style", {
                 fg: "#fb8147"
               });
-              setProp(_el$190, "style", {
+              setProp(_el$251, "style", {
                 fg: "#eeeeee"
               });
-              insert(_el$190, selectedLocalModel);
-              return _el$187;
+              insert(_el$251, selectedLocalModel);
+              return _el$248;
             })()];
           }
-        }), _el$191);
-        insertNode(_el$191, _el$192);
-        insertNode(_el$191, _el$194);
-        insertNode(_el$192, createTextNode(`GitHub `));
-        setProp(_el$192, "style", {
+        }), _el$254);
+        insert(_el$210, createComponent2(Show, {
+          get when() {
+            return isCustom();
+          },
+          get children() {
+            var _el$252 = createElement("text");
+            insertNode(_el$252, createTextNode(`\u81EA\u5B9A\u4E49\u8DEF\u7531\u53EA\u5199\u5165\u4E24\u4E2A\u69FD\u4F4D\uFF1B\u5404\u69FD\u7684 Provider / Key / \u7AEF\u70B9\u6CBF\u7528\u5DF2\u6709\u914D\u7F6E\u3002`));
+            setProp(_el$252, "fg", "#808080");
+            return _el$252;
+          }
+        }), _el$254);
+        insertNode(_el$254, _el$255);
+        insertNode(_el$254, _el$257);
+        insertNode(_el$255, createTextNode(`GitHub `));
+        setProp(_el$255, "style", {
           fg: "#fb8147"
         });
-        setProp(_el$194, "style", {
+        setProp(_el$257, "style", {
           fg: "#eeeeee"
         });
-        insert(_el$194, (() => {
-          var _c$4 = memo2(() => !!githubToken().trim());
-          return () => _c$4() ? "\u5C06\u66F4\u65B0" : githubConfigured() ? "\u4FDD\u7559\u73B0\u6709" : "\u672A\u914D\u7F6E";
+        insert(_el$257, (() => {
+          var _c$1 = memo2(() => !!githubToken().trim());
+          return () => _c$1() ? "\u5C06\u66F4\u65B0" : githubConfigured() ? "\u4FDD\u7559\u73B0\u6709" : "\u672A\u914D\u7F6E";
         })());
-        insertNode(_el$195, _el$196);
-        insertNode(_el$195, _el$198);
-        insertNode(_el$196, createTextNode(`\u754C\u9762\u8BED\u8A00 `));
-        setProp(_el$196, "style", {
+        insertNode(_el$258, _el$259);
+        insertNode(_el$258, _el$261);
+        insertNode(_el$259, createTextNode(`\u754C\u9762\u8BED\u8A00 `));
+        setProp(_el$259, "style", {
           fg: "#fb8147"
         });
-        setProp(_el$198, "style", {
+        setProp(_el$261, "style", {
           fg: "#eeeeee"
         });
-        insert(_el$198, selectedUiLanguage);
-        insertNode(_el$199, _el$200);
-        insertNode(_el$199, _el$202);
-        insertNode(_el$200, createTextNode(`\u56DE\u590D\u8BED\u8A00 `));
-        setProp(_el$200, "style", {
+        insert(_el$261, selectedUiLanguage);
+        insertNode(_el$262, _el$263);
+        insertNode(_el$262, _el$265);
+        insertNode(_el$263, createTextNode(`\u56DE\u590D\u8BED\u8A00 `));
+        setProp(_el$263, "style", {
           fg: "#fb8147"
         });
-        setProp(_el$202, "style", {
+        setProp(_el$265, "style", {
           fg: "#eeeeee"
         });
-        insert(_el$202, selectedResponseLanguage);
-        insertNode(_el$203, _el$204);
-        insertNode(_el$203, _el$206);
-        insertNode(_el$204, createTextNode(`\u8F93\u51FA\u683C\u5F0F `));
-        setProp(_el$204, "style", {
+        insert(_el$265, selectedResponseLanguage);
+        insertNode(_el$266, _el$267);
+        insertNode(_el$266, _el$269);
+        insertNode(_el$267, createTextNode(`\u8F93\u51FA\u683C\u5F0F `));
+        setProp(_el$267, "style", {
           fg: "#fb8147"
         });
-        setProp(_el$206, "style", {
+        setProp(_el$269, "style", {
           fg: "#eeeeee"
         });
-        insert(_el$206, selectedOutputFormat);
-        insertNode(_el$207, _el$208);
-        insertNode(_el$207, _el$210);
-        insertNode(_el$208, createTextNode(`\u81EA\u52A8\u53D1\u5E03 `));
-        setProp(_el$208, "style", {
+        insert(_el$269, selectedOutputFormat);
+        insertNode(_el$270, _el$271);
+        insertNode(_el$270, _el$273);
+        insertNode(_el$271, createTextNode(`\u81EA\u52A8\u53D1\u5E03 `));
+        setProp(_el$271, "style", {
           fg: "#fb8147"
         });
-        setProp(_el$210, "style", {
+        setProp(_el$273, "style", {
           fg: "#eeeeee"
         });
-        insert(_el$210, () => autoPublish() ? "\u662F" : "\u5426");
-        insertNode(_el$211, _el$212);
-        insertNode(_el$211, _el$214);
-        insertNode(_el$212, createTextNode(`Chat \u5E03\u5C40 `));
-        setProp(_el$212, "style", {
+        insert(_el$273, () => autoPublish() ? "\u662F" : "\u5426");
+        insertNode(_el$274, _el$275);
+        insertNode(_el$274, _el$277);
+        insertNode(_el$275, createTextNode(`Chat \u5E03\u5C40 `));
+        setProp(_el$275, "style", {
           fg: "#fb8147"
         });
-        setProp(_el$214, "style", {
+        setProp(_el$277, "style", {
           fg: "#eeeeee"
         });
-        insert(_el$214, selectedChatLayout);
-        insertNode(_el$215, createTextNode(`Enter \u4FDD\u5B58\u5230\u79C1\u6709\u914D\u7F6E\uFF1B\u9AD8\u7EA7 headers / extra params \u53EF\u7A0D\u540E\u7528 pr-review config --advanced \u914D\u7F6E\u3002`));
-        setProp(_el$215, "fg", "#808080");
-        return _el$154;
+        insert(_el$277, selectedChatLayout);
+        insertNode(_el$278, _el$279);
+        insertNode(_el$278, _el$280);
+        setProp(_el$279, "style", {
+          fg: "#fb8147"
+        });
+        insert(_el$279, () => isEn(uiLanguage()) ? "Repo ctx  " : "\u4ED3\u5E93\u4E0A\u4E0B\u6587 ");
+        setProp(_el$280, "style", {
+          fg: "#eeeeee"
+        });
+        insert(_el$280, repoContextPreview);
+        insert(_el$210, createComponent2(Show, {
+          get when() {
+            return options()?.review_reasoning_effort;
+          },
+          get children() {
+            var _el$281 = createElement("text"), _el$282 = createElement("span"), _el$283 = createElement("span");
+            insertNode(_el$281, _el$282);
+            insertNode(_el$281, _el$283);
+            setProp(_el$282, "style", {
+              fg: "#fb8147"
+            });
+            insert(_el$282, () => isEn(uiLanguage()) ? "Review th " : "\u5BA1\u67E5\u601D\u8003  ");
+            setProp(_el$283, "style", {
+              fg: "#eeeeee"
+            });
+            insert(_el$283, reviewEffortPreview);
+            return _el$281;
+          }
+        }), _el$284);
+        insertNode(_el$284, createTextNode(`Enter \u4FDD\u5B58\u5230\u79C1\u6709\u914D\u7F6E\uFF1B\u9AD8\u7EA7\u9879\u7528 pr-review config --advanced\u3002`));
+        setProp(_el$284, "fg", "#808080");
+        insert(_el$210, createComponent2(Show, {
+          get when() {
+            return specRemoteContext() || specRemoteOutput();
+          },
+          get children() {
+            var _el$286 = createElement("text"), _el$287 = createElement("span");
+            insertNode(_el$286, _el$287);
+            setProp(_el$286, "fg", "#808080");
+            insert(_el$286, () => isEn(uiLanguage()) ? "Spec       " : "\u6A21\u578B\u89C4\u683C  ", _el$287);
+            setProp(_el$287, "style", {
+              fg: "#eeeeee"
+            });
+            insert(_el$287, () => [specRemoteContext() ? `ctx ${specRemoteContext()}` : "", specRemoteOutput() ? `out ${specRemoteOutput()}` : ""].filter(Boolean).join(" \xB7 "));
+            return _el$286;
+          }
+        }), null);
+        insert(_el$210, createComponent2(Show, {
+          get when() {
+            return willSubmitCustomEndpoint();
+          },
+          get children() {
+            var _el$288 = createElement("text"), _el$289 = createElement("span");
+            insertNode(_el$288, _el$289);
+            setProp(_el$288, "fg", "#808080");
+            insert(_el$288, () => isEn(uiLanguage()) ? "Custom ep  " : "\u4E2D\u8F6C\u7AD9    ", _el$289);
+            setProp(_el$289, "style", {
+              fg: "#eeeeee"
+            });
+            insert(_el$289, () => [customBaseUrl(), customModelName(), customContextWindow() ? `ctx ${customContextWindow()}` : "", customMaxOutput() ? `out ${customMaxOutput()}` : ""].filter(Boolean).join(" \xB7 "));
+            return _el$288;
+          }
+        }), null);
+        return _el$210;
       }
-    }), _el$217);
-    setProp(_el$217, "flexGrow", 1);
-    insert(_el$122, createComponent2(Show, {
+    }), _el$290);
+    setProp(_el$290, "flexGrow", 1);
+    insert(_el$167, createComponent2(Show, {
       get when() {
         return error();
       },
       get children() {
-        var _el$218 = createElement("text");
-        setProp(_el$218, "fg", "#ff6b6b");
-        insert(_el$218, error);
-        return _el$218;
+        var _el$291 = createElement("text");
+        setProp(_el$291, "fg", "#ff6b6b");
+        insert(_el$291, error);
+        return _el$291;
       }
-    }), _el$219);
-    insert(_el$219, (() => {
-      var _c$5 = memo2(() => !!busy());
-      return () => _c$5() ? "\u4FDD\u5B58\u4E2D..." : memo2(() => screen() === "summary")() ? "Enter \u4FDD\u5B58 \xB7 \u2190 \u8FD4\u56DE\u4FEE\u6539 \xB7 Esc \u53D6\u6D88" : isInputScreen(screen()) ? "Enter \u786E\u8BA4 \xB7 Ctrl/Alt+\u2190 \u8FD4\u56DE \xB7 Esc \u53D6\u6D88" : "\u2191\u2193 \u9009\u62E9 \xB7 Enter \u4E0B\u4E00\u6B65 \xB7 \u2190 \u8FD4\u56DE \xB7 Esc \u53D6\u6D88";
+    }), _el$292);
+    insert(_el$292, (() => {
+      var _c$10 = memo2(() => !!busy());
+      return () => _c$10() ? "\u4FDD\u5B58\u4E2D..." : memo2(() => screen() === "summary")() ? "Enter \u4FDD\u5B58 \xB7 \u2190 \u8FD4\u56DE\u4FEE\u6539 \xB7 Esc \u53D6\u6D88" : memo2(() => !!isRouteScreen(screen()))() ? routeStageCopy().keys : isInputScreen(screen()) ? "Enter \u786E\u8BA4 \xB7 Ctrl/Alt+\u2190 \u8FD4\u56DE \xB7 Esc \u53D6\u6D88" : "\u2191\u2193 \u9009\u62E9 \xB7 Enter \u4E0B\u4E00\u6B65 \xB7 \u2190 \u8FD4\u56DE \xB7 Esc \u53D6\u6D88";
     })());
-    effect((_$p) => setProp(_el$219, "fg", busy() ? orange : muted, _$p));
-    return _el$122;
+    effect((_p$) => {
+      var _v$63 = left(), _v$64 = top(), _v$65 = dialogHeight(), _v$66 = busy() ? orange : muted;
+      _v$63 !== _p$.e && (_p$.e = setProp(_el$167, "left", _v$63, _p$.e));
+      _v$64 !== _p$.t && (_p$.t = setProp(_el$167, "top", _v$64, _p$.t));
+      _v$65 !== _p$.a && (_p$.a = setProp(_el$167, "height", _v$65, _p$.a));
+      _v$66 !== _p$.o && (_p$.o = setProp(_el$292, "fg", _v$66, _p$.o));
+      return _p$;
+    }, {
+      e: undefined,
+      t: undefined,
+      a: undefined,
+      o: undefined
+    });
+    return _el$167;
   })();
 }
 function ReviewConfirmDialog(props) {
@@ -38691,49 +41247,49 @@ function ReviewConfirmDialog(props) {
       choose();
   });
   return (() => {
-    var _el$220 = createElement("box"), _el$221 = createElement("text"), _el$223 = createElement("text"), _el$225 = createElement("text"), _el$226 = createElement("box"), _el$227 = createElement("select"), _el$228 = createElement("text");
-    insertNode(_el$220, _el$221);
-    insertNode(_el$220, _el$223);
-    insertNode(_el$220, _el$225);
-    insertNode(_el$220, _el$226);
-    insertNode(_el$220, _el$228);
-    setProp(_el$220, "position", "absolute");
-    setProp(_el$220, "left", 8);
-    setProp(_el$220, "top", 5);
-    setProp(_el$220, "width", 64);
-    setProp(_el$220, "height", 15);
-    setProp(_el$220, "backgroundColor", "#171717");
-    setProp(_el$220, "borderStyle", "single");
-    setProp(_el$220, "borderColor", "#fb8147");
-    setProp(_el$220, "padding", 2);
-    setProp(_el$220, "zIndex", 120);
-    setProp(_el$220, "flexDirection", "column");
-    insertNode(_el$221, createTextNode(`\u5F00\u59CB PR \u5BA1\u67E5 // CONFIRM`));
-    setProp(_el$221, "fg", "#fb8147");
-    setProp(_el$221, "height", 1);
-    insertNode(_el$223, createTextNode(`\u5DF2\u8BC6\u522B GitHub Pull Request\uFF1A`));
-    setProp(_el$223, "fg", "#808080");
-    setProp(_el$223, "height", 1);
-    setProp(_el$225, "fg", "#eeeeee");
-    insert(_el$225, () => props.url);
-    insertNode(_el$226, _el$227);
-    setProp(_el$226, "marginTop", 1);
-    setProp(_el$226, "flexGrow", 1);
-    setProp(_el$227, "options", options);
-    setProp(_el$227, "focused", true);
-    setProp(_el$227, "showDescription", true);
-    setProp(_el$227, "width", "100%");
-    setProp(_el$227, "height", 4);
-    setProp(_el$227, "selectedBackgroundColor", "#5a2e1c");
-    setProp(_el$227, "selectedTextColor", "#ffffff");
-    setProp(_el$227, "descriptionColor", "#808080");
-    setProp(_el$227, "selectedDescriptionColor", "#ffd0bb");
-    setProp(_el$227, "onChange", (index) => setSelectedIndex(index));
-    insertNode(_el$228, createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Enter \u786E\u8BA4 \xB7 Esc \u8FD4\u56DE`));
-    setProp(_el$228, "fg", "#808080");
-    setProp(_el$228, "height", 1);
-    effect((_$p) => setProp(_el$227, "selectedIndex", selectedIndex(), _$p));
-    return _el$220;
+    var _el$324 = createElement("box"), _el$325 = createElement("text"), _el$327 = createElement("text"), _el$329 = createElement("text"), _el$330 = createElement("box"), _el$331 = createElement("select"), _el$332 = createElement("text");
+    insertNode(_el$324, _el$325);
+    insertNode(_el$324, _el$327);
+    insertNode(_el$324, _el$329);
+    insertNode(_el$324, _el$330);
+    insertNode(_el$324, _el$332);
+    setProp(_el$324, "position", "absolute");
+    setProp(_el$324, "left", 8);
+    setProp(_el$324, "top", 5);
+    setProp(_el$324, "width", 64);
+    setProp(_el$324, "height", 15);
+    setProp(_el$324, "backgroundColor", "#171717");
+    setProp(_el$324, "borderStyle", "single");
+    setProp(_el$324, "borderColor", "#fb8147");
+    setProp(_el$324, "padding", 2);
+    setProp(_el$324, "zIndex", 120);
+    setProp(_el$324, "flexDirection", "column");
+    insertNode(_el$325, createTextNode(`\u5F00\u59CB PR \u5BA1\u67E5 // CONFIRM`));
+    setProp(_el$325, "fg", "#fb8147");
+    setProp(_el$325, "height", 1);
+    insertNode(_el$327, createTextNode(`\u5DF2\u8BC6\u522B GitHub Pull Request\uFF1A`));
+    setProp(_el$327, "fg", "#808080");
+    setProp(_el$327, "height", 1);
+    setProp(_el$329, "fg", "#eeeeee");
+    insert(_el$329, () => props.url);
+    insertNode(_el$330, _el$331);
+    setProp(_el$330, "marginTop", 1);
+    setProp(_el$330, "flexGrow", 1);
+    setProp(_el$331, "options", options);
+    setProp(_el$331, "focused", true);
+    setProp(_el$331, "showDescription", true);
+    setProp(_el$331, "width", "100%");
+    setProp(_el$331, "height", 4);
+    setProp(_el$331, "selectedBackgroundColor", "#5a2e1c");
+    setProp(_el$331, "selectedTextColor", "#ffffff");
+    setProp(_el$331, "descriptionColor", "#808080");
+    setProp(_el$331, "selectedDescriptionColor", "#ffd0bb");
+    setProp(_el$331, "onChange", (index) => setSelectedIndex(index));
+    insertNode(_el$332, createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Enter \u786E\u8BA4 \xB7 Esc \u8FD4\u56DE`));
+    setProp(_el$332, "fg", "#808080");
+    setProp(_el$332, "height", 1);
+    effect((_$p) => setProp(_el$331, "selectedIndex", selectedIndex(), _$p));
+    return _el$324;
   })();
 }
 function FindingsDialog(props) {
@@ -38842,172 +41398,172 @@ function FindingsDialog(props) {
     }
   });
   return (() => {
-    var _el$230 = createElement("box"), _el$231 = createElement("text"), _el$232 = createTextNode(`FINDINGS // DETAIL `), _el$233 = createElement("box"), _el$234 = createElement("select"), _el$235 = createElement("scrollbox"), _el$236 = createElement("text"), _el$237 = createElement("text"), _el$238 = createTextNode(`\u6587\u4EF6\uFF1A`), _el$239 = createTextNode(`:`), _el$240 = createTextNode(`-`), _el$241 = createElement("text"), _el$242 = createTextNode(`\u7C7B\u522B\uFF1A`), _el$243 = createTextNode(` \xB7 \u7F6E\u4FE1\u5EA6\uFF1A`), _el$244 = createElement("text"), _el$245 = createTextNode(`\u95EE\u9898\uFF1A`), _el$246 = createElement("text"), _el$247 = createTextNode(`\u5EFA\u8BAE\uFF1A`), _el$248 = createElement("text"), _el$249 = createTextNode(`\u8BC1\u636E\uFF1A`), _el$250 = createTextNode(` \xB7 \u72B6\u6001\uFF1A`), _el$257 = createElement("text");
-    insertNode(_el$230, _el$231);
-    insertNode(_el$230, _el$233);
-    insertNode(_el$230, _el$235);
-    insertNode(_el$230, _el$257);
-    setProp(_el$230, "position", "absolute");
-    setProp(_el$230, "left", 5);
-    setProp(_el$230, "top", 2);
-    setProp(_el$230, "width", 70);
-    setProp(_el$230, "height", 22);
-    setProp(_el$230, "backgroundColor", "#171717");
-    setProp(_el$230, "borderStyle", "single");
-    setProp(_el$230, "borderColor", "#fb8147");
-    setProp(_el$230, "padding", 2);
-    setProp(_el$230, "zIndex", 130);
-    setProp(_el$230, "flexDirection", "column");
-    insertNode(_el$231, _el$232);
-    setProp(_el$231, "fg", "#fb8147");
-    insert(_el$231, () => detailFocused() ? "\xB7 \u8BE6\u60C5\u6EDA\u52A8" : "\xB7 \u5217\u8868\u9009\u62E9", null);
-    insertNode(_el$233, _el$234);
-    setProp(_el$233, "height", 6);
-    setProp(_el$233, "marginTop", 1);
-    setProp(_el$234, "showDescription", true);
-    setProp(_el$234, "width", "100%");
-    setProp(_el$234, "height", 6);
-    setProp(_el$234, "selectedBackgroundColor", "#5a2e1c");
-    setProp(_el$234, "selectedTextColor", "#ffffff");
-    setProp(_el$234, "descriptionColor", "#808080");
-    setProp(_el$234, "selectedDescriptionColor", "#ffd0bb");
-    setProp(_el$234, "onChange", (index) => {
+    var _el$334 = createElement("box"), _el$335 = createElement("text"), _el$336 = createTextNode(`FINDINGS // DETAIL `), _el$337 = createElement("box"), _el$338 = createElement("select"), _el$339 = createElement("scrollbox"), _el$340 = createElement("text"), _el$341 = createElement("text"), _el$342 = createTextNode(`\u6587\u4EF6\uFF1A`), _el$343 = createTextNode(`:`), _el$344 = createTextNode(`-`), _el$345 = createElement("text"), _el$346 = createTextNode(`\u7C7B\u522B\uFF1A`), _el$347 = createTextNode(` \xB7 \u7F6E\u4FE1\u5EA6\uFF1A`), _el$348 = createElement("text"), _el$349 = createTextNode(`\u95EE\u9898\uFF1A`), _el$350 = createElement("text"), _el$351 = createTextNode(`\u5EFA\u8BAE\uFF1A`), _el$352 = createElement("text"), _el$353 = createTextNode(`\u8BC1\u636E\uFF1A`), _el$354 = createTextNode(` \xB7 \u72B6\u6001\uFF1A`), _el$361 = createElement("text");
+    insertNode(_el$334, _el$335);
+    insertNode(_el$334, _el$337);
+    insertNode(_el$334, _el$339);
+    insertNode(_el$334, _el$361);
+    setProp(_el$334, "position", "absolute");
+    setProp(_el$334, "left", 5);
+    setProp(_el$334, "top", 2);
+    setProp(_el$334, "width", 70);
+    setProp(_el$334, "height", 22);
+    setProp(_el$334, "backgroundColor", "#171717");
+    setProp(_el$334, "borderStyle", "single");
+    setProp(_el$334, "borderColor", "#fb8147");
+    setProp(_el$334, "padding", 2);
+    setProp(_el$334, "zIndex", 130);
+    setProp(_el$334, "flexDirection", "column");
+    insertNode(_el$335, _el$336);
+    setProp(_el$335, "fg", "#fb8147");
+    insert(_el$335, () => detailFocused() ? "\xB7 \u8BE6\u60C5\u6EDA\u52A8" : "\xB7 \u5217\u8868\u9009\u62E9", null);
+    insertNode(_el$337, _el$338);
+    setProp(_el$337, "height", 6);
+    setProp(_el$337, "marginTop", 1);
+    setProp(_el$338, "showDescription", true);
+    setProp(_el$338, "width", "100%");
+    setProp(_el$338, "height", 6);
+    setProp(_el$338, "selectedBackgroundColor", "#5a2e1c");
+    setProp(_el$338, "selectedTextColor", "#ffffff");
+    setProp(_el$338, "descriptionColor", "#808080");
+    setProp(_el$338, "selectedDescriptionColor", "#ffd0bb");
+    setProp(_el$338, "onChange", (index) => {
       const next = page() * pageSize + index;
       setSelectedIndex(next);
       props.onSelect?.(next);
       detailScroll?.scrollTo(0);
     });
-    insertNode(_el$235, _el$236);
-    insertNode(_el$235, _el$237);
-    insertNode(_el$235, _el$241);
-    insertNode(_el$235, _el$244);
-    insertNode(_el$235, _el$246);
-    insertNode(_el$235, _el$248);
+    insertNode(_el$339, _el$340);
+    insertNode(_el$339, _el$341);
+    insertNode(_el$339, _el$345);
+    insertNode(_el$339, _el$348);
+    insertNode(_el$339, _el$350);
+    insertNode(_el$339, _el$352);
     use((node) => {
       detailScroll = node;
-    }, _el$235);
-    setProp(_el$235, "height", 8);
-    setProp(_el$235, "marginTop", 1);
-    setProp(_el$235, "scrollY", true);
-    setProp(_el$235, "scrollbarOptions", {
+    }, _el$339);
+    setProp(_el$339, "height", 8);
+    setProp(_el$339, "marginTop", 1);
+    setProp(_el$339, "scrollY", true);
+    setProp(_el$339, "scrollbarOptions", {
       showArrows: true
     });
-    setProp(_el$235, "flexDirection", "column");
-    setProp(_el$236, "fg", "#f3c742");
-    insert(_el$236, () => String(selected().title ?? selected().message ?? "\u672A\u547D\u540D\u95EE\u9898"));
-    insertNode(_el$237, _el$238);
-    insertNode(_el$237, _el$239);
-    insertNode(_el$237, _el$240);
-    setProp(_el$237, "fg", "#808080");
-    insert(_el$237, () => selected().file ?? "unknown", _el$239);
-    insert(_el$237, () => selected().line_start ?? "?", _el$240);
-    insert(_el$237, () => selected().line_end ?? selected().line_start ?? "?", null);
-    insertNode(_el$241, _el$242);
-    insertNode(_el$241, _el$243);
-    setProp(_el$241, "fg", "#808080");
-    insert(_el$241, () => selected().category ?? "unknown", _el$243);
-    insert(_el$241, (() => {
-      var _c$6 = memo2(() => selected().confidence !== undefined);
-      return () => _c$6() ? `${Math.round((selected().confidence ?? 0) * 100)}%` : "?";
+    setProp(_el$339, "flexDirection", "column");
+    setProp(_el$340, "fg", "#f3c742");
+    insert(_el$340, () => String(selected().title ?? selected().message ?? "\u672A\u547D\u540D\u95EE\u9898"));
+    insertNode(_el$341, _el$342);
+    insertNode(_el$341, _el$343);
+    insertNode(_el$341, _el$344);
+    setProp(_el$341, "fg", "#808080");
+    insert(_el$341, () => selected().file ?? "unknown", _el$343);
+    insert(_el$341, () => selected().line_start ?? "?", _el$344);
+    insert(_el$341, () => selected().line_end ?? selected().line_start ?? "?", null);
+    insertNode(_el$345, _el$346);
+    insertNode(_el$345, _el$347);
+    setProp(_el$345, "fg", "#808080");
+    insert(_el$345, () => selected().category ?? "unknown", _el$347);
+    insert(_el$345, (() => {
+      var _c$12 = memo2(() => selected().confidence !== undefined);
+      return () => _c$12() ? `${Math.round((selected().confidence ?? 0) * 100)}%` : "?";
     })(), null);
-    insertNode(_el$244, _el$245);
-    setProp(_el$244, "fg", "#eeeeee");
-    insert(_el$244, () => String(selected().problem ?? selected().message ?? "\u6682\u65E0\u8BE6\u7EC6\u63CF\u8FF0"), null);
-    insertNode(_el$246, _el$247);
-    setProp(_el$246, "fg", "#7edc92");
-    insert(_el$246, () => String(selected().suggestion ?? "\u6682\u65E0\u4FEE\u590D\u5EFA\u8BAE"), null);
-    insertNode(_el$248, _el$249);
-    insertNode(_el$248, _el$250);
-    setProp(_el$248, "fg", "#808080");
-    insert(_el$248, () => (selected().sources ?? []).join(", ") || "ai_analysis", _el$250);
-    insert(_el$248, () => selected().evidence_status ?? "unverified", null);
-    insert(_el$235, createComponent2(Show, {
+    insertNode(_el$348, _el$349);
+    setProp(_el$348, "fg", "#eeeeee");
+    insert(_el$348, () => String(selected().problem ?? selected().message ?? "\u6682\u65E0\u8BE6\u7EC6\u63CF\u8FF0"), null);
+    insertNode(_el$350, _el$351);
+    setProp(_el$350, "fg", "#7edc92");
+    insert(_el$350, () => String(selected().suggestion ?? "\u6682\u65E0\u4FEE\u590D\u5EFA\u8BAE"), null);
+    insertNode(_el$352, _el$353);
+    insertNode(_el$352, _el$354);
+    setProp(_el$352, "fg", "#808080");
+    insert(_el$352, () => (selected().sources ?? []).join(", ") || "ai_analysis", _el$354);
+    insert(_el$352, () => selected().evidence_status ?? "unverified", null);
+    insert(_el$339, createComponent2(Show, {
       get when() {
         return selected().evidence_issues?.length;
       },
       get children() {
-        var _el$251 = createElement("text"), _el$252 = createTextNode(`\u8BC1\u636E\u63D0\u793A\uFF1A`);
-        insertNode(_el$251, _el$252);
-        setProp(_el$251, "fg", "#f3c742");
-        insert(_el$251, () => selected().evidence_issues?.join("\uFF1B"), null);
-        return _el$251;
+        var _el$355 = createElement("text"), _el$356 = createTextNode(`\u8BC1\u636E\u63D0\u793A\uFF1A`);
+        insertNode(_el$355, _el$356);
+        setProp(_el$355, "fg", "#f3c742");
+        insert(_el$355, () => selected().evidence_issues?.join("\uFF1B"), null);
+        return _el$355;
       }
     }), null);
-    insert(_el$235, createComponent2(Show, {
+    insert(_el$339, createComponent2(Show, {
       get when() {
         return selected().code_snippet;
       },
       get children() {
         return [(() => {
-          var _el$253 = createElement("text");
-          insertNode(_el$253, createTextNode(`\u4EE3\u7801\u7247\u6BB5\uFF1A`));
-          setProp(_el$253, "fg", "#b0b0b0");
-          return _el$253;
+          var _el$357 = createElement("text");
+          insertNode(_el$357, createTextNode(`\u4EE3\u7801\u7247\u6BB5\uFF1A`));
+          setProp(_el$357, "fg", "#b0b0b0");
+          return _el$357;
         })(), createComponent2(For, {
           get each() {
             return String(selected().code_snippet ?? "").split(`
 `);
           },
           children: (line, index) => (() => {
-            var _el$258 = createElement("text");
-            setProp(_el$258, "fg", "#b0b0b0");
-            insert(_el$258, () => `${String((selected().line_start ?? 0) + index())} \u2502 ${line}`);
-            return _el$258;
+            var _el$362 = createElement("text");
+            setProp(_el$362, "fg", "#b0b0b0");
+            insert(_el$362, () => `${String((selected().line_start ?? 0) + index())} \u2502 ${line}`);
+            return _el$362;
           })()
         })];
       }
     }), null);
-    insert(_el$235, createComponent2(Show, {
+    insert(_el$339, createComponent2(Show, {
       get when() {
         return selected().evidence?.length;
       },
       get children() {
         return [(() => {
-          var _el$255 = createElement("text");
-          insertNode(_el$255, createTextNode(`\u8BC1\u636E\u660E\u7EC6\uFF1A`));
-          setProp(_el$255, "fg", "#f3c742");
-          return _el$255;
+          var _el$359 = createElement("text");
+          insertNode(_el$359, createTextNode(`\u8BC1\u636E\u660E\u7EC6\uFF1A`));
+          setProp(_el$359, "fg", "#f3c742");
+          return _el$359;
         })(), createComponent2(For, {
           get each() {
             return selected().evidence ?? [];
           },
           children: (evidence) => (() => {
-            var _el$259 = createElement("text"), _el$260 = createTextNode(`\xB7 `), _el$261 = createTextNode(` / `);
-            insertNode(_el$259, _el$260);
-            insertNode(_el$259, _el$261);
-            setProp(_el$259, "fg", "#808080");
-            insert(_el$259, () => evidence.source ?? "unknown", _el$261);
-            insert(_el$259, () => evidence.validation_status ?? "unknown", null);
-            insert(_el$259, (() => {
-              var _c$8 = memo2(() => !!evidence.validation_messages?.length);
-              return () => _c$8() ? ` \xB7 ${evidence.validation_messages.join("\uFF1B")}` : "";
+            var _el$363 = createElement("text"), _el$364 = createTextNode(`\xB7 `), _el$365 = createTextNode(` / `);
+            insertNode(_el$363, _el$364);
+            insertNode(_el$363, _el$365);
+            setProp(_el$363, "fg", "#808080");
+            insert(_el$363, () => evidence.source ?? "unknown", _el$365);
+            insert(_el$363, () => evidence.validation_status ?? "unknown", null);
+            insert(_el$363, (() => {
+              var _c$14 = memo2(() => !!evidence.validation_messages?.length);
+              return () => _c$14() ? ` \xB7 ${evidence.validation_messages.join("\uFF1B")}` : "";
             })(), null);
-            return _el$259;
+            return _el$363;
           })()
         })];
       }
     }), null);
-    setProp(_el$257, "fg", "#808080");
-    insert(_el$257, (() => {
-      var _c$7 = memo2(() => !!detailFocused());
-      return () => _c$7() ? "\u2191\u2193/Pg\u6EDA\u52A8 \xB7 Home/End \xB7 Tab\u5217\u8868 \xB7 E\u89E3\u91CA \xB7 F\u53CD\u9988 \xB7 X\u5BFC\u51FA \xB7 Esc" : `\u2191\u2193\u9009\u62E9 \xB7 Tab\u8BE6\u60C5 \xB7 Ctrl/Alt+\u2191\u2193\u6EDA\u52A8 \xB7 \u2190\u2192\u7FFB\u9875 (${page() + 1}/${pageCount()}) \xB7 E\u89E3\u91CA \xB7 F\u53CD\u9988 \xB7 X\u5BFC\u51FA \xB7 Esc`;
+    setProp(_el$361, "fg", "#808080");
+    insert(_el$361, (() => {
+      var _c$13 = memo2(() => !!detailFocused());
+      return () => _c$13() ? "\u2191\u2193/Pg\u6EDA\u52A8 \xB7 Home/End \xB7 Tab\u5217\u8868 \xB7 E\u89E3\u91CA \xB7 F\u53CD\u9988 \xB7 X\u5BFC\u51FA \xB7 Esc" : `\u2191\u2193\u9009\u62E9 \xB7 Tab\u8BE6\u60C5 \xB7 Ctrl/Alt+\u2191\u2193\u6EDA\u52A8 \xB7 \u2190\u2192\u7FFB\u9875 (${page() + 1}/${pageCount()}) \xB7 E\u89E3\u91CA \xB7 F\u53CD\u9988 \xB7 X\u5BFC\u51FA \xB7 Esc`;
     })());
     effect((_p$) => {
-      var _v$37 = pageFindings().map((finding, offset) => ({
+      var _v$77 = pageFindings().map((finding, offset) => ({
         name: `[${String(finding.severity ?? "info").toUpperCase()}] ${finding.title ?? finding.message ?? "\u672A\u547D\u540D\u95EE\u9898"}`,
         description: `${finding.file ?? "unknown"}:${finding.line_start ?? "?"}-${finding.line_end ?? finding.line_start ?? "?"}`,
         value: page() * pageSize + offset
-      })), _v$38 = Math.max(0, selectedIndex() - page() * pageSize), _v$39 = !detailFocused();
-      _v$37 !== _p$.e && (_p$.e = setProp(_el$234, "options", _v$37, _p$.e));
-      _v$38 !== _p$.t && (_p$.t = setProp(_el$234, "selectedIndex", _v$38, _p$.t));
-      _v$39 !== _p$.a && (_p$.a = setProp(_el$234, "focused", _v$39, _p$.a));
+      })), _v$78 = Math.max(0, selectedIndex() - page() * pageSize), _v$79 = !detailFocused();
+      _v$77 !== _p$.e && (_p$.e = setProp(_el$338, "options", _v$77, _p$.e));
+      _v$78 !== _p$.t && (_p$.t = setProp(_el$338, "selectedIndex", _v$78, _p$.t));
+      _v$79 !== _p$.a && (_p$.a = setProp(_el$338, "focused", _v$79, _p$.a));
       return _p$;
     }, {
       e: undefined,
       t: undefined,
       a: undefined
     });
-    return _el$230;
+    return _el$334;
   })();
 }
 function FeedbackDialog(props) {
@@ -39041,48 +41597,48 @@ function FeedbackDialog(props) {
     }
   });
   return (() => {
-    var _el$262 = createElement("box"), _el$263 = createElement("text"), _el$265 = createElement("text"), _el$266 = createElement("text"), _el$267 = createTextNode(`:`), _el$268 = createElement("box"), _el$269 = createElement("select"), _el$270 = createElement("text");
-    insertNode(_el$262, _el$263);
-    insertNode(_el$262, _el$265);
-    insertNode(_el$262, _el$266);
-    insertNode(_el$262, _el$268);
-    insertNode(_el$262, _el$270);
-    setProp(_el$262, "position", "absolute");
-    setProp(_el$262, "left", 9);
-    setProp(_el$262, "top", 4);
-    setProp(_el$262, "width", 62);
-    setProp(_el$262, "height", 16);
-    setProp(_el$262, "backgroundColor", "#171717");
-    setProp(_el$262, "borderStyle", "single");
-    setProp(_el$262, "borderColor", "#fb8147");
-    setProp(_el$262, "padding", 2);
-    setProp(_el$262, "zIndex", 150);
-    setProp(_el$262, "flexDirection", "column");
-    insertNode(_el$263, createTextNode(`FINDING FEEDBACK // \u53CD\u9988`));
-    setProp(_el$263, "fg", "#fb8147");
-    setProp(_el$265, "fg", "#eeeeee");
-    insert(_el$265, () => props.finding.title ?? props.finding.message ?? "\u672A\u547D\u540D\u95EE\u9898");
-    insertNode(_el$266, _el$267);
-    setProp(_el$266, "fg", "#808080");
-    insert(_el$266, () => props.finding.file ?? "unknown", _el$267);
-    insert(_el$266, () => props.finding.line_start ?? "?", null);
-    insertNode(_el$268, _el$269);
-    setProp(_el$268, "marginTop", 1);
-    setProp(_el$268, "flexGrow", 1);
-    setProp(_el$269, "options", options);
-    setProp(_el$269, "focused", true);
-    setProp(_el$269, "showDescription", false);
-    setProp(_el$269, "width", "100%");
-    setProp(_el$269, "height", 4);
-    setProp(_el$269, "selectedBackgroundColor", "#5a2e1c");
-    setProp(_el$269, "selectedTextColor", "#ffffff");
-    setProp(_el$269, "descriptionColor", "#808080");
-    setProp(_el$269, "selectedDescriptionColor", "#ffd0bb");
-    setProp(_el$269, "onChange", (index) => setSelectedIndex(index));
-    insertNode(_el$270, createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Enter \u63D0\u4EA4 \xB7 Esc \u53D6\u6D88`));
-    setProp(_el$270, "fg", "#808080");
-    effect((_$p) => setProp(_el$269, "selectedIndex", selectedIndex(), _$p));
-    return _el$262;
+    var _el$366 = createElement("box"), _el$367 = createElement("text"), _el$369 = createElement("text"), _el$370 = createElement("text"), _el$371 = createTextNode(`:`), _el$372 = createElement("box"), _el$373 = createElement("select"), _el$374 = createElement("text");
+    insertNode(_el$366, _el$367);
+    insertNode(_el$366, _el$369);
+    insertNode(_el$366, _el$370);
+    insertNode(_el$366, _el$372);
+    insertNode(_el$366, _el$374);
+    setProp(_el$366, "position", "absolute");
+    setProp(_el$366, "left", 9);
+    setProp(_el$366, "top", 4);
+    setProp(_el$366, "width", 62);
+    setProp(_el$366, "height", 16);
+    setProp(_el$366, "backgroundColor", "#171717");
+    setProp(_el$366, "borderStyle", "single");
+    setProp(_el$366, "borderColor", "#fb8147");
+    setProp(_el$366, "padding", 2);
+    setProp(_el$366, "zIndex", 150);
+    setProp(_el$366, "flexDirection", "column");
+    insertNode(_el$367, createTextNode(`FINDING FEEDBACK // \u53CD\u9988`));
+    setProp(_el$367, "fg", "#fb8147");
+    setProp(_el$369, "fg", "#eeeeee");
+    insert(_el$369, () => props.finding.title ?? props.finding.message ?? "\u672A\u547D\u540D\u95EE\u9898");
+    insertNode(_el$370, _el$371);
+    setProp(_el$370, "fg", "#808080");
+    insert(_el$370, () => props.finding.file ?? "unknown", _el$371);
+    insert(_el$370, () => props.finding.line_start ?? "?", null);
+    insertNode(_el$372, _el$373);
+    setProp(_el$372, "marginTop", 1);
+    setProp(_el$372, "flexGrow", 1);
+    setProp(_el$373, "options", options);
+    setProp(_el$373, "focused", true);
+    setProp(_el$373, "showDescription", false);
+    setProp(_el$373, "width", "100%");
+    setProp(_el$373, "height", 4);
+    setProp(_el$373, "selectedBackgroundColor", "#5a2e1c");
+    setProp(_el$373, "selectedTextColor", "#ffffff");
+    setProp(_el$373, "descriptionColor", "#808080");
+    setProp(_el$373, "selectedDescriptionColor", "#ffd0bb");
+    setProp(_el$373, "onChange", (index) => setSelectedIndex(index));
+    insertNode(_el$374, createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Enter \u63D0\u4EA4 \xB7 Esc \u53D6\u6D88`));
+    setProp(_el$374, "fg", "#808080");
+    effect((_$p) => setProp(_el$373, "selectedIndex", selectedIndex(), _$p));
+    return _el$366;
   })();
 }
 function ReviewFailureDialog(props) {
@@ -39103,46 +41659,46 @@ function ReviewFailureDialog(props) {
       selectedIndex() === 0 ? props.onRetry() : props.onClose();
   });
   return (() => {
-    var _el$272 = createElement("box"), _el$273 = createElement("text"), _el$275 = createElement("text"), _el$276 = createElement("text"), _el$277 = createElement("box"), _el$278 = createElement("select"), _el$279 = createElement("text");
-    insertNode(_el$272, _el$273);
-    insertNode(_el$272, _el$275);
-    insertNode(_el$272, _el$276);
-    insertNode(_el$272, _el$277);
-    insertNode(_el$272, _el$279);
-    setProp(_el$272, "position", "absolute");
-    setProp(_el$272, "left", 10);
-    setProp(_el$272, "top", 5);
-    setProp(_el$272, "width", 60);
-    setProp(_el$272, "height", 15);
-    setProp(_el$272, "backgroundColor", "#171717");
-    setProp(_el$272, "borderStyle", "single");
-    setProp(_el$272, "borderColor", "#ff6b6b");
-    setProp(_el$272, "padding", 2);
-    setProp(_el$272, "zIndex", 125);
-    setProp(_el$272, "flexDirection", "column");
-    insertNode(_el$273, createTextNode(`\u5BA1\u67E5\u5931\u8D25 // RETRY`));
-    setProp(_el$273, "fg", "#ff6b6b");
-    setProp(_el$275, "fg", "#808080");
-    insert(_el$275, () => props.message);
-    setProp(_el$276, "fg", "#eeeeee");
-    insert(_el$276, () => props.url);
-    insertNode(_el$277, _el$278);
-    setProp(_el$277, "marginTop", 1);
-    setProp(_el$277, "flexGrow", 1);
-    setProp(_el$278, "options", options);
-    setProp(_el$278, "focused", true);
-    setProp(_el$278, "showDescription", true);
-    setProp(_el$278, "width", "100%");
-    setProp(_el$278, "height", 4);
-    setProp(_el$278, "selectedBackgroundColor", "#5a2e1c");
-    setProp(_el$278, "selectedTextColor", "#ffffff");
-    setProp(_el$278, "descriptionColor", "#808080");
-    setProp(_el$278, "selectedDescriptionColor", "#ffd0bb");
-    setProp(_el$278, "onChange", (index) => setSelectedIndex(index));
-    insertNode(_el$279, createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Enter \u786E\u8BA4 \xB7 Esc \u5173\u95ED`));
-    setProp(_el$279, "fg", "#808080");
-    effect((_$p) => setProp(_el$278, "selectedIndex", selectedIndex(), _$p));
-    return _el$272;
+    var _el$376 = createElement("box"), _el$377 = createElement("text"), _el$379 = createElement("text"), _el$380 = createElement("text"), _el$381 = createElement("box"), _el$382 = createElement("select"), _el$383 = createElement("text");
+    insertNode(_el$376, _el$377);
+    insertNode(_el$376, _el$379);
+    insertNode(_el$376, _el$380);
+    insertNode(_el$376, _el$381);
+    insertNode(_el$376, _el$383);
+    setProp(_el$376, "position", "absolute");
+    setProp(_el$376, "left", 10);
+    setProp(_el$376, "top", 5);
+    setProp(_el$376, "width", 60);
+    setProp(_el$376, "height", 15);
+    setProp(_el$376, "backgroundColor", "#171717");
+    setProp(_el$376, "borderStyle", "single");
+    setProp(_el$376, "borderColor", "#ff6b6b");
+    setProp(_el$376, "padding", 2);
+    setProp(_el$376, "zIndex", 125);
+    setProp(_el$376, "flexDirection", "column");
+    insertNode(_el$377, createTextNode(`\u5BA1\u67E5\u5931\u8D25 // RETRY`));
+    setProp(_el$377, "fg", "#ff6b6b");
+    setProp(_el$379, "fg", "#808080");
+    insert(_el$379, () => props.message);
+    setProp(_el$380, "fg", "#eeeeee");
+    insert(_el$380, () => props.url);
+    insertNode(_el$381, _el$382);
+    setProp(_el$381, "marginTop", 1);
+    setProp(_el$381, "flexGrow", 1);
+    setProp(_el$382, "options", options);
+    setProp(_el$382, "focused", true);
+    setProp(_el$382, "showDescription", true);
+    setProp(_el$382, "width", "100%");
+    setProp(_el$382, "height", 4);
+    setProp(_el$382, "selectedBackgroundColor", "#5a2e1c");
+    setProp(_el$382, "selectedTextColor", "#ffffff");
+    setProp(_el$382, "descriptionColor", "#808080");
+    setProp(_el$382, "selectedDescriptionColor", "#ffd0bb");
+    setProp(_el$382, "onChange", (index) => setSelectedIndex(index));
+    insertNode(_el$383, createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Enter \u786E\u8BA4 \xB7 Esc \u5173\u95ED`));
+    setProp(_el$383, "fg", "#808080");
+    effect((_$p) => setProp(_el$382, "selectedIndex", selectedIndex(), _$p));
+    return _el$376;
   })();
 }
 function HistoryDialog(props) {
@@ -39155,70 +41711,70 @@ function HistoryDialog(props) {
       props.onOpen(selected());
   });
   return (() => {
-    var _el$281 = createElement("box"), _el$282 = createElement("text"), _el$284 = createElement("text"), _el$285 = createTextNode(`Runs `), _el$286 = createTextNode(` \xB7 PRs `), _el$287 = createTextNode(` \xB7 Findings `), _el$289 = createElement("box"), _el$290 = createElement("select"), _el$291 = createElement("text");
-    insertNode(_el$281, _el$282);
-    insertNode(_el$281, _el$284);
-    insertNode(_el$281, _el$289);
-    insertNode(_el$281, _el$291);
-    setProp(_el$281, "position", "absolute");
-    setProp(_el$281, "left", 6);
-    setProp(_el$281, "top", 2);
-    setProp(_el$281, "width", 72);
-    setProp(_el$281, "height", 22);
-    setProp(_el$281, "backgroundColor", "#171717");
-    setProp(_el$281, "borderStyle", "single");
-    setProp(_el$281, "borderColor", "#fb8147");
-    setProp(_el$281, "padding", 2);
-    setProp(_el$281, "zIndex", 135);
-    setProp(_el$281, "flexDirection", "column");
-    insertNode(_el$282, createTextNode(`REVIEW HISTORY`));
-    setProp(_el$282, "fg", "#fb8147");
-    insertNode(_el$284, _el$285);
-    insertNode(_el$284, _el$286);
-    insertNode(_el$284, _el$287);
-    setProp(_el$284, "fg", "#808080");
-    insert(_el$284, () => props.statistics?.total_runs ?? props.runs.length, _el$286);
-    insert(_el$284, () => props.statistics?.unique_prs ?? "?", _el$287);
-    insert(_el$284, () => props.statistics?.total_findings ?? "?", null);
-    insert(_el$281, createComponent2(Show, {
+    var _el$385 = createElement("box"), _el$386 = createElement("text"), _el$388 = createElement("text"), _el$389 = createTextNode(`Runs `), _el$390 = createTextNode(` \xB7 PRs `), _el$391 = createTextNode(` \xB7 Findings `), _el$393 = createElement("box"), _el$394 = createElement("select"), _el$395 = createElement("text");
+    insertNode(_el$385, _el$386);
+    insertNode(_el$385, _el$388);
+    insertNode(_el$385, _el$393);
+    insertNode(_el$385, _el$395);
+    setProp(_el$385, "position", "absolute");
+    setProp(_el$385, "left", 6);
+    setProp(_el$385, "top", 2);
+    setProp(_el$385, "width", 72);
+    setProp(_el$385, "height", 22);
+    setProp(_el$385, "backgroundColor", "#171717");
+    setProp(_el$385, "borderStyle", "single");
+    setProp(_el$385, "borderColor", "#fb8147");
+    setProp(_el$385, "padding", 2);
+    setProp(_el$385, "zIndex", 135);
+    setProp(_el$385, "flexDirection", "column");
+    insertNode(_el$386, createTextNode(`REVIEW HISTORY`));
+    setProp(_el$386, "fg", "#fb8147");
+    insertNode(_el$388, _el$389);
+    insertNode(_el$388, _el$390);
+    insertNode(_el$388, _el$391);
+    setProp(_el$388, "fg", "#808080");
+    insert(_el$388, () => props.statistics?.total_runs ?? props.runs.length, _el$390);
+    insert(_el$388, () => props.statistics?.unique_prs ?? "?", _el$391);
+    insert(_el$388, () => props.statistics?.total_findings ?? "?", null);
+    insert(_el$385, createComponent2(Show, {
       get when() {
         return props.fallbackNote;
       },
       get children() {
-        var _el$288 = createElement("text");
-        setProp(_el$288, "fg", "#f3c742");
-        insert(_el$288, () => props.fallbackNote);
-        return _el$288;
+        var _el$392 = createElement("text");
+        setProp(_el$392, "fg", "#f3c742");
+        insert(_el$392, () => props.fallbackNote);
+        return _el$392;
       }
-    }), _el$289);
-    insertNode(_el$289, _el$290);
-    setProp(_el$289, "marginTop", 1);
-    setProp(_el$289, "flexGrow", 1);
-    setProp(_el$290, "focused", true);
-    setProp(_el$290, "showDescription", true);
-    setProp(_el$290, "width", "100%");
-    setProp(_el$290, "height", 12);
-    setProp(_el$290, "selectedBackgroundColor", "#5a2e1c");
-    setProp(_el$290, "selectedTextColor", "#ffffff");
-    setProp(_el$290, "descriptionColor", "#808080");
-    setProp(_el$290, "selectedDescriptionColor", "#ffd0bb");
-    setProp(_el$290, "onChange", (index) => setSelectedIndex(index));
-    insertNode(_el$291, createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Enter \u67E5\u770B Run \xB7 Esc \u8FD4\u56DE`));
-    setProp(_el$291, "fg", "#808080");
+    }), _el$393);
+    insertNode(_el$393, _el$394);
+    setProp(_el$393, "marginTop", 1);
+    setProp(_el$393, "flexGrow", 1);
+    setProp(_el$394, "focused", true);
+    setProp(_el$394, "showDescription", true);
+    setProp(_el$394, "width", "100%");
+    setProp(_el$394, "height", 12);
+    setProp(_el$394, "selectedBackgroundColor", "#5a2e1c");
+    setProp(_el$394, "selectedTextColor", "#ffffff");
+    setProp(_el$394, "descriptionColor", "#808080");
+    setProp(_el$394, "selectedDescriptionColor", "#ffd0bb");
+    setProp(_el$394, "onChange", (index) => setSelectedIndex(index));
+    insertNode(_el$395, createTextNode(`\u2191\u2193 \u9009\u62E9 \xB7 Enter \u6253\u5F00\u8BE6\u60C5\uFF08\u8F7D\u5165\u5DE5\u4F5C\u53F0\u5E76\u7ED1\u5B9A\u5BF9\u8BDD\uFF09 \xB7 Esc \u8FD4\u56DE`));
+    setProp(_el$395, "fg", "#808080");
     effect((_p$) => {
-      var _v$40 = props.runs.map((run) => ({
-        name: `${run.id ?? "?"} \xB7 ${run.repo_owner ?? "?"}/${run.repo_name ?? "?"}`,
-        description: `findings=${run.total_findings ?? 0} \xB7 ${run.created_at ?? ""}`,
+      var _v$80 = props.runs.map((run) => ({
+        name: `${typeof run.pr_number === "number" ? `PR #${run.pr_number}` : run.id ?? "?"} \xB7 ${run.repo_owner ?? "?"}/${run.repo_name ?? "?"}`,
+        description: `${run.pr_url ?? "\uFF08\u65E0 PR \u7F51\u5740\uFF09"} \xB7 findings=${run.total_findings ?? 0} \xB7 ${run.created_at ?? ""}`,
         value: run.id
-      })), _v$41 = selectedIndex();
-      _v$40 !== _p$.e && (_p$.e = setProp(_el$290, "options", _v$40, _p$.e));
-      _v$41 !== _p$.t && (_p$.t = setProp(_el$290, "selectedIndex", _v$41, _p$.t));
+      })), _v$81 = selectedIndex();
+      _v$80 !== _p$.e && (_p$.e = setProp(_el$394, "options", _v$80, _p$.e));
+      _v$81 !== _p$.t && (_p$.t = setProp(_el$394, "selectedIndex", _v$81, _p$.t));
       return _p$;
     }, {
       e: undefined,
       t: undefined
     });
-    return _el$281;
+    return _el$385;
   })();
 }
 function ModelDialog(props) {
@@ -39272,81 +41828,81 @@ function ModelDialog(props) {
       apply();
   });
   return (() => {
-    var _el$293 = createElement("box"), _el$294 = createElement("text"), _el$296 = createElement("text"), _el$297 = createTextNode(` \xB7 \u2191\u2193 \u9009\u62E9\u6A21\u578B \xB7 `), _el$298 = createElement("box"), _el$299 = createElement("select"), _el$303 = createElement("text");
-    insertNode(_el$293, _el$294);
-    insertNode(_el$293, _el$296);
-    insertNode(_el$293, _el$298);
-    insertNode(_el$293, _el$303);
-    setProp(_el$293, "position", "absolute");
-    setProp(_el$293, "left", 9);
-    setProp(_el$293, "top", 4);
-    setProp(_el$293, "width", 62);
-    setProp(_el$293, "height", 17);
-    setProp(_el$293, "backgroundColor", "#171717");
-    setProp(_el$293, "borderStyle", "single");
-    setProp(_el$293, "borderColor", "#fb8147");
-    setProp(_el$293, "padding", 2);
-    setProp(_el$293, "zIndex", 140);
-    setProp(_el$293, "flexDirection", "column");
-    insertNode(_el$294, createTextNode(`\u6A21\u578B\u9009\u62E9 // MODEL SELECTOR`));
-    setProp(_el$294, "fg", "#fb8147");
-    insertNode(_el$296, _el$297);
-    setProp(_el$296, "fg", "#808080");
-    insert(_el$296, () => props.runtime.provider_display ?? props.runtime.provider ?? "Provider", _el$297);
-    insert(_el$296, (() => {
-      var _c$9 = memo2(() => availability() === true);
-      return () => _c$9() ? "ONLINE" : availability() === false ? "OFFLINE" : "\u68C0\u6D4B\u4E2D";
+    var _el$397 = createElement("box"), _el$398 = createElement("text"), _el$400 = createElement("text"), _el$401 = createTextNode(` \xB7 \u2191\u2193 \u9009\u62E9\u6A21\u578B \xB7 `), _el$402 = createElement("box"), _el$403 = createElement("select"), _el$407 = createElement("text");
+    insertNode(_el$397, _el$398);
+    insertNode(_el$397, _el$400);
+    insertNode(_el$397, _el$402);
+    insertNode(_el$397, _el$407);
+    setProp(_el$397, "position", "absolute");
+    setProp(_el$397, "left", 9);
+    setProp(_el$397, "top", 4);
+    setProp(_el$397, "width", 62);
+    setProp(_el$397, "height", 17);
+    setProp(_el$397, "backgroundColor", "#171717");
+    setProp(_el$397, "borderStyle", "single");
+    setProp(_el$397, "borderColor", "#fb8147");
+    setProp(_el$397, "padding", 2);
+    setProp(_el$397, "zIndex", 140);
+    setProp(_el$397, "flexDirection", "column");
+    insertNode(_el$398, createTextNode(`\u6A21\u578B\u9009\u62E9 // MODEL SELECTOR`));
+    setProp(_el$398, "fg", "#fb8147");
+    insertNode(_el$400, _el$401);
+    setProp(_el$400, "fg", "#808080");
+    insert(_el$400, () => props.runtime.provider_display ?? props.runtime.provider ?? "Provider", _el$401);
+    insert(_el$400, (() => {
+      var _c$15 = memo2(() => availability() === true);
+      return () => _c$15() ? "ONLINE" : availability() === false ? "OFFLINE" : "\u68C0\u6D4B\u4E2D";
     })(), null);
-    insertNode(_el$298, _el$299);
-    setProp(_el$298, "marginTop", 1);
-    setProp(_el$298, "flexGrow", 1);
-    setProp(_el$299, "focused", true);
-    setProp(_el$299, "showDescription", true);
-    setProp(_el$299, "width", "100%");
-    setProp(_el$299, "height", 6);
-    setProp(_el$299, "selectedBackgroundColor", "#5a2e1c");
-    setProp(_el$299, "selectedTextColor", "#ffffff");
-    setProp(_el$299, "descriptionColor", "#808080");
-    setProp(_el$299, "selectedDescriptionColor", "#ffd0bb");
-    setProp(_el$299, "onChange", (index) => setSelectedIndex(index));
-    insert(_el$293, createComponent2(Show, {
+    insertNode(_el$402, _el$403);
+    setProp(_el$402, "marginTop", 1);
+    setProp(_el$402, "flexGrow", 1);
+    setProp(_el$403, "focused", true);
+    setProp(_el$403, "showDescription", true);
+    setProp(_el$403, "width", "100%");
+    setProp(_el$403, "height", 6);
+    setProp(_el$403, "selectedBackgroundColor", "#5a2e1c");
+    setProp(_el$403, "selectedTextColor", "#ffffff");
+    setProp(_el$403, "descriptionColor", "#808080");
+    setProp(_el$403, "selectedDescriptionColor", "#ffd0bb");
+    setProp(_el$403, "onChange", (index) => setSelectedIndex(index));
+    insert(_el$397, createComponent2(Show, {
       get when() {
         return error();
       },
       get children() {
-        var _el$300 = createElement("text");
-        setProp(_el$300, "fg", "#ff6b6b");
-        insert(_el$300, error);
-        return _el$300;
+        var _el$404 = createElement("text");
+        setProp(_el$404, "fg", "#ff6b6b");
+        insert(_el$404, error);
+        return _el$404;
       }
-    }), _el$303);
-    insert(_el$293, createComponent2(Show, {
+    }), _el$407);
+    insert(_el$397, createComponent2(Show, {
       get when() {
         return availability() === false;
       },
       get children() {
-        var _el$301 = createElement("text");
-        insertNode(_el$301, createTextNode(`\u5EFA\u8BAE\uFF1A/model local \u6216 /model cloud \u5FEB\u901F\u5207\u6362`));
-        setProp(_el$301, "fg", "#f3c742");
-        return _el$301;
+        var _el$405 = createElement("text");
+        insertNode(_el$405, createTextNode(`\u5EFA\u8BAE\uFF1A/model local \u6216 /model cloud \u5FEB\u901F\u5207\u6362`));
+        setProp(_el$405, "fg", "#f3c742");
+        return _el$405;
       }
-    }), _el$303);
-    setProp(_el$303, "fg", "#808080");
-    insert(_el$303, () => busy() ? "\u8BFB\u53D6\u6A21\u578B\u5217\u8868..." : "Enter \u4FDD\u5B58 \xB7 Esc \u53D6\u6D88");
+    }), _el$407);
+    setProp(_el$407, "fg", "#808080");
+    insert(_el$407, () => busy() ? "\u8BFB\u53D6\u6A21\u578B\u5217\u8868..." : "Enter \u4FDD\u5B58 \xB7 Esc \u53D6\u6D88");
     effect((_p$) => {
-      var _v$42 = models().map((model) => ({
+      var _v$82 = models().map((model) => ({
         name: model,
         description: model === props.runtime.model ? "\u5F53\u524D\u6A21\u578B" : "\u53EF\u5207\u6362\u6A21\u578B",
         value: model
-      })), _v$43 = selectedIndex();
-      _v$42 !== _p$.e && (_p$.e = setProp(_el$299, "options", _v$42, _p$.e));
-      _v$43 !== _p$.t && (_p$.t = setProp(_el$299, "selectedIndex", _v$43, _p$.t));
+      })), _v$83 = selectedIndex();
+      _v$82 !== _p$.e && (_p$.e = setProp(_el$403, "options", _v$82, _p$.e));
+      _v$83 !== _p$.t && (_p$.t = setProp(_el$403, "selectedIndex", _v$83, _p$.t));
       return _p$;
     }, {
       e: undefined,
       t: undefined
     });
-    return _el$293;
+    return _el$397;
   })();
 }
 function PublishOverlay(props) {
@@ -39370,15 +41926,15 @@ function PublishOverlay(props) {
     props.onClose();
   });
   return (() => {
-    var _el$304 = createElement("box");
-    setProp(_el$304, "position", "absolute");
-    setProp(_el$304, "left", 8);
-    setProp(_el$304, "top", 2);
-    setProp(_el$304, "width", 64);
-    setProp(_el$304, "height", 19);
-    setProp(_el$304, "zIndex", 170);
-    setProp(_el$304, "flexDirection", "column");
-    insert(_el$304, createComponent2(PublishConfirmDialog, {
+    var _el$408 = createElement("box");
+    setProp(_el$408, "position", "absolute");
+    setProp(_el$408, "left", 8);
+    setProp(_el$408, "top", 2);
+    setProp(_el$408, "width", 64);
+    setProp(_el$408, "height", 19);
+    setProp(_el$408, "zIndex", 170);
+    setProp(_el$408, "flexDirection", "column");
+    insert(_el$408, createComponent2(PublishConfirmDialog, {
       open: true,
       get state() {
         return props.state;
@@ -39393,7 +41949,7 @@ function PublishOverlay(props) {
         return props.language;
       }
     }));
-    return _el$304;
+    return _el$408;
   })();
 }
 function DemoOverlay(props) {
@@ -39404,20 +41960,20 @@ function DemoOverlay(props) {
     }
   });
   return (() => {
-    var _el$305 = createElement("box"), _el$306 = createElement("box"), _el$307 = createElement("text");
-    insertNode(_el$305, _el$306);
-    insertNode(_el$305, _el$307);
-    setProp(_el$305, "position", "absolute");
-    setProp(_el$305, "left", 8);
-    setProp(_el$305, "top", 2);
-    setProp(_el$305, "width", 64);
-    setProp(_el$305, "height", 20);
-    setProp(_el$305, "zIndex", 170);
-    setProp(_el$305, "flexDirection", "column");
-    setProp(_el$306, "flexGrow", 1);
-    setProp(_el$306, "minHeight", 0);
-    setProp(_el$306, "flexDirection", "column");
-    insert(_el$306, createComponent2(DemoResultPanel, {
+    var _el$409 = createElement("box"), _el$410 = createElement("box"), _el$411 = createElement("text");
+    insertNode(_el$409, _el$410);
+    insertNode(_el$409, _el$411);
+    setProp(_el$409, "position", "absolute");
+    setProp(_el$409, "left", 8);
+    setProp(_el$409, "top", 2);
+    setProp(_el$409, "width", 64);
+    setProp(_el$409, "height", 20);
+    setProp(_el$409, "zIndex", 170);
+    setProp(_el$409, "flexDirection", "column");
+    setProp(_el$410, "flexGrow", 1);
+    setProp(_el$410, "minHeight", 0);
+    setProp(_el$410, "flexDirection", "column");
+    insert(_el$410, createComponent2(DemoResultPanel, {
       get caseKey() {
         return props.data?.caseKey;
       },
@@ -39446,10 +42002,10 @@ function DemoOverlay(props) {
         return props.language;
       }
     }));
-    insertNode(_el$307, createTextNode(`Esc / Enter \u5173\u95ED \xB7 \u79BB\u7EBF\u8FD0\u884C\uFF0C\u4E0D\u8C03\u7528\u6A21\u578B\u4E0E GitHub`));
-    setProp(_el$307, "height", 1);
-    setProp(_el$307, "fg", "#808080");
-    return _el$305;
+    insertNode(_el$411, createTextNode(`Esc / Enter \u5173\u95ED \xB7 \u79BB\u7EBF\u8FD0\u884C\uFF0C\u4E0D\u8C03\u7528\u6A21\u578B\u4E0E GitHub`));
+    setProp(_el$411, "height", 1);
+    setProp(_el$411, "fg", "#808080");
+    return _el$409;
   })();
 }
 function ShowcaseOverlay(props) {
@@ -39460,20 +42016,20 @@ function ShowcaseOverlay(props) {
     }
   });
   return (() => {
-    var _el$309 = createElement("box"), _el$310 = createElement("box"), _el$311 = createElement("text");
-    insertNode(_el$309, _el$310);
-    insertNode(_el$309, _el$311);
-    setProp(_el$309, "position", "absolute");
-    setProp(_el$309, "left", 8);
-    setProp(_el$309, "top", 3);
-    setProp(_el$309, "width", 64);
-    setProp(_el$309, "height", 16);
-    setProp(_el$309, "zIndex", 170);
-    setProp(_el$309, "flexDirection", "column");
-    setProp(_el$310, "flexGrow", 1);
-    setProp(_el$310, "minHeight", 0);
-    setProp(_el$310, "flexDirection", "column");
-    insert(_el$310, createComponent2(ShowcasePanel, {
+    var _el$413 = createElement("box"), _el$414 = createElement("box"), _el$415 = createElement("text");
+    insertNode(_el$413, _el$414);
+    insertNode(_el$413, _el$415);
+    setProp(_el$413, "position", "absolute");
+    setProp(_el$413, "left", 8);
+    setProp(_el$413, "top", 3);
+    setProp(_el$413, "width", 64);
+    setProp(_el$413, "height", 16);
+    setProp(_el$413, "zIndex", 170);
+    setProp(_el$413, "flexDirection", "column");
+    setProp(_el$414, "flexGrow", 1);
+    setProp(_el$414, "minHeight", 0);
+    setProp(_el$414, "flexDirection", "column");
+    insert(_el$414, createComponent2(ShowcasePanel, {
       get title() {
         return props.data?.title;
       },
@@ -39490,10 +42046,10 @@ function ShowcaseOverlay(props) {
         return props.language;
       }
     }));
-    insertNode(_el$311, createTextNode(`Esc / Enter \u5173\u95ED \xB7 \u6F14\u793A\u811A\u672C\u4E0D\u4F1A\u6539\u53D8\u9879\u76EE\u72B6\u6001`));
-    setProp(_el$311, "height", 1);
-    setProp(_el$311, "fg", "#808080");
-    return _el$309;
+    insertNode(_el$415, createTextNode(`Esc / Enter \u5173\u95ED \xB7 \u6F14\u793A\u811A\u672C\u4E0D\u4F1A\u6539\u53D8\u9879\u76EE\u72B6\u6001`));
+    setProp(_el$415, "height", 1);
+    setProp(_el$415, "fg", "#808080");
+    return _el$413;
   })();
 }
 function FindingsFilterOverlay(props) {
@@ -39523,43 +42079,43 @@ function FindingsFilterOverlay(props) {
     filterInput?.focus?.();
   });
   return (() => {
-    var _el$313 = createElement("box"), _el$314 = createElement("text"), _el$316 = createElement("text"), _el$318 = createElement("box"), _el$319 = createElement("input"), _el$320 = createElement("box"), _el$321 = createElement("text");
-    insertNode(_el$313, _el$314);
-    insertNode(_el$313, _el$316);
-    insertNode(_el$313, _el$318);
-    insertNode(_el$313, _el$320);
-    insertNode(_el$313, _el$321);
-    setProp(_el$313, "position", "absolute");
-    setProp(_el$313, "left", 9);
-    setProp(_el$313, "top", 3);
-    setProp(_el$313, "width", 62);
-    setProp(_el$313, "height", 14);
-    setProp(_el$313, "backgroundColor", "#171717");
-    setProp(_el$313, "borderStyle", "single");
-    setProp(_el$313, "borderColor", "#fb8147");
-    setProp(_el$313, "paddingLeft", 2);
-    setProp(_el$313, "paddingRight", 2);
-    setProp(_el$313, "zIndex", 170);
-    setProp(_el$313, "flexDirection", "column");
-    insertNode(_el$314, createTextNode(`FINDINGS FILTER // \u7B5B\u9009`));
-    setProp(_el$314, "fg", "#fb8147");
-    insertNode(_el$316, createTextNode(`\u8F93\u5165\u5173\u952E\u8BCD\u5B9E\u65F6\u8FC7\u6EE4\uFF1BTab \u4E25\u91CD\u7EA7\u522B \xB7 Shift+Tab \u8BC1\u636E \xB7 Ctrl+S \u6392\u5E8F`));
-    setProp(_el$316, "fg", "#808080");
-    insertNode(_el$318, _el$319);
-    setProp(_el$318, "marginTop", 1);
-    setProp(_el$318, "backgroundColor", "#202020");
-    setProp(_el$318, "paddingLeft", 1);
-    setProp(_el$318, "paddingRight", 1);
+    var _el$417 = createElement("box"), _el$418 = createElement("text"), _el$420 = createElement("text"), _el$422 = createElement("box"), _el$423 = createElement("input"), _el$424 = createElement("box"), _el$425 = createElement("text");
+    insertNode(_el$417, _el$418);
+    insertNode(_el$417, _el$420);
+    insertNode(_el$417, _el$422);
+    insertNode(_el$417, _el$424);
+    insertNode(_el$417, _el$425);
+    setProp(_el$417, "position", "absolute");
+    setProp(_el$417, "left", 9);
+    setProp(_el$417, "top", 3);
+    setProp(_el$417, "width", 62);
+    setProp(_el$417, "height", 14);
+    setProp(_el$417, "backgroundColor", "#171717");
+    setProp(_el$417, "borderStyle", "single");
+    setProp(_el$417, "borderColor", "#fb8147");
+    setProp(_el$417, "paddingLeft", 2);
+    setProp(_el$417, "paddingRight", 2);
+    setProp(_el$417, "zIndex", 170);
+    setProp(_el$417, "flexDirection", "column");
+    insertNode(_el$418, createTextNode(`FINDINGS FILTER // \u7B5B\u9009`));
+    setProp(_el$418, "fg", "#fb8147");
+    insertNode(_el$420, createTextNode(`\u8F93\u5165\u5173\u952E\u8BCD\u5B9E\u65F6\u8FC7\u6EE4\uFF1BTab \u4E25\u91CD\u7EA7\u522B \xB7 Shift+Tab \u8BC1\u636E \xB7 Ctrl+S \u6392\u5E8F`));
+    setProp(_el$420, "fg", "#808080");
+    insertNode(_el$422, _el$423);
+    setProp(_el$422, "marginTop", 1);
+    setProp(_el$422, "backgroundColor", "#202020");
+    setProp(_el$422, "paddingLeft", 1);
+    setProp(_el$422, "paddingRight", 1);
     use((node) => {
       filterInput = node;
-    }, _el$319);
-    setProp(_el$319, "placeholder", "\u5173\u952E\u8BCD / \u6587\u4EF6 / \u6807\u9898");
-    setProp(_el$319, "focused", true);
-    setProp(_el$319, "onContentChange", () => props.onQuery(filterInput?.value ?? ""));
-    setProp(_el$319, "flexGrow", 1);
-    setProp(_el$320, "marginTop", 1);
-    setProp(_el$320, "flexDirection", "column");
-    insert(_el$320, createComponent2(FindingsFilterBar, {
+    }, _el$423);
+    setProp(_el$423, "placeholder", "\u5173\u952E\u8BCD / \u6587\u4EF6 / \u6807\u9898");
+    setProp(_el$423, "focused", true);
+    setProp(_el$423, "onContentChange", () => props.onQuery(filterInput?.value ?? ""));
+    setProp(_el$423, "flexGrow", 1);
+    setProp(_el$424, "marginTop", 1);
+    setProp(_el$424, "flexDirection", "column");
+    insert(_el$424, createComponent2(FindingsFilterBar, {
       get active() {
         return props.state.active;
       },
@@ -39585,10 +42141,286 @@ function FindingsFilterOverlay(props) {
         return props.language;
       }
     }));
-    insertNode(_el$321, createTextNode(`Enter \u5E94\u7528 \xB7 Esc \u6E05\u9664\u5E76\u5173\u95ED`));
-    setProp(_el$321, "fg", "#808080");
-    setProp(_el$321, "marginTop", 1);
-    return _el$313;
+    insertNode(_el$425, createTextNode(`Enter \u5E94\u7528 \xB7 Esc \u6E05\u9664\u5E76\u5173\u95ED`));
+    setProp(_el$425, "fg", "#808080");
+    setProp(_el$425, "marginTop", 1);
+    return _el$417;
+  })();
+}
+function SessionsDialog(props) {
+  const [mode, setMode] = createSignal("list");
+  const [selectedIndex, setSelectedIndex] = createSignal(0);
+  const [renameDraft, setRenameDraft] = createSignal("");
+  const [notice, setNotice] = createSignal("");
+  let renameInput;
+  const activeIndex = () => Math.min(selectedIndex(), Math.max(0, props.sessions.length - 1));
+  const selected = () => props.sessions[activeIndex()];
+  const listLabel = () => props.sessions.map((session) => formatSessionListItem({
+    title: session.title,
+    updated_at: session.updated_at,
+    message_count: session.message_count,
+    current: props.currentId ? session.id === props.currentId : session.current
+  }, new Date, props.language));
+  const startRename = () => {
+    const session = selected();
+    if (!session)
+      return;
+    setRenameDraft(session.title ?? "");
+    setMode("rename");
+    setNotice("");
+    setTimeout(() => renameInput?.focus?.(), 0);
+  };
+  const commitRename = () => {
+    const session = selected();
+    if (!session)
+      return;
+    const title = renameDraft().trim();
+    setMode("list");
+    if (title)
+      props.onRename(session, title);
+  };
+  const commitDelete = () => {
+    const session = selected();
+    if (!session)
+      return;
+    setMode("list");
+    props.onDelete(session);
+  };
+  useKeyboard((key) => {
+    if (mode() === "rename") {
+      if (key.name === "escape") {
+        key.stopPropagation?.();
+        setMode("list");
+        return;
+      }
+      if (isEnterKey(key)) {
+        key.stopPropagation?.();
+        commitRename();
+      }
+      return;
+    }
+    if (mode() === "confirm-delete") {
+      if (key.name === "escape" || key.name === "n") {
+        key.stopPropagation?.();
+        setMode("list");
+        return;
+      }
+      if (isEnterKey(key) || key.name === "y") {
+        key.stopPropagation?.();
+        commitDelete();
+      }
+      return;
+    }
+    if (key.name === "escape") {
+      key.stopPropagation?.();
+      props.onClose();
+      return;
+    }
+    if (key.name === "up" || key.name === "down") {
+      key.stopPropagation?.();
+      const count = props.sessions.length;
+      if (count === 0)
+        return;
+      setSelectedIndex((index) => (index + (key.name === "down" ? 1 : -1) + count) % count);
+      setNotice("");
+      return;
+    }
+    if (isEnterKey(key)) {
+      key.stopPropagation?.();
+      const session = selected();
+      if (session)
+        props.onSwitch(session);
+      return;
+    }
+    if (key.name === "r") {
+      key.stopPropagation?.();
+      startRename();
+      return;
+    }
+    if (key.name === "d") {
+      key.stopPropagation?.();
+      const session = selected();
+      if (session) {
+        setMode("confirm-delete");
+        setNotice(formatSessionDeleteConfirm(session.title, props.language));
+      }
+    }
+  });
+  const empty = () => !props.supported || props.sessions.length === 0;
+  return (() => {
+    var _el$427 = createElement("box"), _el$428 = createElement("text"), _el$447 = createElement("text");
+    insertNode(_el$427, _el$428);
+    insertNode(_el$427, _el$447);
+    setProp(_el$427, "position", "absolute");
+    setProp(_el$427, "left", 6);
+    setProp(_el$427, "top", 2);
+    setProp(_el$427, "width", 72);
+    setProp(_el$427, "height", 22);
+    setProp(_el$427, "backgroundColor", "#171717");
+    setProp(_el$427, "borderStyle", "single");
+    setProp(_el$427, "borderColor", "#fb8147");
+    setProp(_el$427, "padding", 2);
+    setProp(_el$427, "zIndex", 150);
+    setProp(_el$427, "flexDirection", "column");
+    insertNode(_el$428, createTextNode(`SESSIONS // \u4F1A\u8BDD\u5217\u8868`));
+    setProp(_el$428, "fg", "#fb8147");
+    insert(_el$427, createComponent2(Show, {
+      get when() {
+        return props.supported || props.sessions.length > 0;
+      },
+      get children() {
+        var _el$430 = createElement("text"), _el$431 = createTextNode(`\u5171 `), _el$432 = createTextNode(` \u4E2A\u4F1A\u8BDD`);
+        insertNode(_el$430, _el$431);
+        insertNode(_el$430, _el$432);
+        setProp(_el$430, "fg", "#808080");
+        insert(_el$430, () => props.sessions.length, _el$432);
+        return _el$430;
+      }
+    }), _el$447);
+    insert(_el$427, createComponent2(Show, {
+      get when() {
+        return memo2(() => !!(!props.supported && props.sessions.length === 0))() && !props.error;
+      },
+      get children() {
+        var _el$433 = createElement("text");
+        setProp(_el$433, "fg", "#f3c742");
+        insert(_el$433, () => formatSessionListEmpty(props.language));
+        return _el$433;
+      }
+    }), _el$447);
+    insert(_el$427, createComponent2(Show, {
+      get when() {
+        return Boolean(props.error);
+      },
+      get children() {
+        var _el$434 = createElement("text");
+        setProp(_el$434, "fg", "#f3c742");
+        insert(_el$434, () => formatSessionListError(props.error, props.language));
+        return _el$434;
+      }
+    }), _el$447);
+    insert(_el$427, createComponent2(Show, {
+      get when() {
+        return !empty();
+      },
+      get children() {
+        var _el$435 = createElement("box");
+        setProp(_el$435, "marginTop", 1);
+        setProp(_el$435, "flexDirection", "column");
+        setProp(_el$435, "flexGrow", 1);
+        insert(_el$435, createComponent2(For, {
+          get each() {
+            return listLabel();
+          },
+          children: (line, index) => (() => {
+            var _el$448 = createElement("text");
+            insert(_el$448, line);
+            effect((_p$) => {
+              var _v$84 = index() === activeIndex() && mode() === "list" ? "#5a2e1c" : undefined, _v$85 = props.sessions[index()]?.id === props.currentId ? "#ffd0bb" : "#eeeeee";
+              _v$84 !== _p$.e && (_p$.e = setProp(_el$448, "bg", _v$84, _p$.e));
+              _v$85 !== _p$.t && (_p$.t = setProp(_el$448, "fg", _v$85, _p$.t));
+              return _p$;
+            }, {
+              e: undefined,
+              t: undefined
+            });
+            return _el$448;
+          })()
+        }));
+        return _el$435;
+      }
+    }), _el$447);
+    insert(_el$427, createComponent2(Show, {
+      get when() {
+        return empty();
+      },
+      get children() {
+        var _el$436 = createElement("box"), _el$439 = createElement("text");
+        insertNode(_el$436, _el$439);
+        setProp(_el$436, "marginTop", 1);
+        setProp(_el$436, "flexGrow", 1);
+        setProp(_el$436, "flexDirection", "column");
+        insert(_el$436, createComponent2(Show, {
+          get when() {
+            return memo2(() => !!props.supported)() && props.loading;
+          },
+          get children() {
+            var _el$437 = createElement("text");
+            setProp(_el$437, "fg", "#808080");
+            insert(_el$437, () => formatSessionListLoading(props.language));
+            return _el$437;
+          }
+        }), _el$439);
+        insert(_el$436, createComponent2(Show, {
+          get when() {
+            return memo2(() => !!props.supported)() && !props.loading;
+          },
+          get children() {
+            var _el$438 = createElement("text");
+            setProp(_el$438, "fg", "#f3c742");
+            insert(_el$438, () => formatSessionListNoSessions(props.language));
+            return _el$438;
+          }
+        }), _el$439);
+        setProp(_el$439, "fg", "#808080");
+        insert(_el$439, () => isEn(props.language) ? "Press Esc to close this dialog" : "\u6309 Esc \u5173\u95ED\u672C\u5F39\u7A97");
+        return _el$436;
+      }
+    }), _el$447);
+    insert(_el$427, createComponent2(Show, {
+      get when() {
+        return mode() === "rename";
+      },
+      get children() {
+        var _el$440 = createElement("box"), _el$441 = createElement("text"), _el$442 = createElement("box"), _el$443 = createElement("input"), _el$444 = createElement("text");
+        insertNode(_el$440, _el$441);
+        insertNode(_el$440, _el$442);
+        insertNode(_el$440, _el$444);
+        setProp(_el$440, "marginTop", 1);
+        setProp(_el$440, "flexDirection", "column");
+        setProp(_el$441, "fg", "#f3c742");
+        insert(_el$441, () => isEn(props.language) ? "Rename session:" : "\u91CD\u547D\u540D\u4F1A\u8BDD\uFF1A");
+        insertNode(_el$442, _el$443);
+        setProp(_el$442, "backgroundColor", "#202020");
+        setProp(_el$442, "paddingLeft", 1);
+        setProp(_el$442, "paddingRight", 1);
+        use((node) => {
+          renameInput = node;
+        }, _el$443);
+        setProp(_el$443, "onContentChange", () => setRenameDraft(renameInput?.value ?? ""));
+        setProp(_el$443, "focused", true);
+        setProp(_el$443, "flexGrow", 1);
+        setProp(_el$444, "fg", "#808080");
+        insert(_el$444, () => formatSessionRenamePrompt(props.language));
+        effect((_$p) => setProp(_el$443, "value", renameDraft(), _$p));
+        return _el$440;
+      }
+    }), _el$447);
+    insert(_el$427, createComponent2(Show, {
+      get when() {
+        return mode() === "confirm-delete";
+      },
+      get children() {
+        var _el$445 = createElement("text");
+        setProp(_el$445, "fg", "#ff6b6b");
+        insert(_el$445, notice);
+        return _el$445;
+      }
+    }), _el$447);
+    insert(_el$427, createComponent2(Show, {
+      get when() {
+        return memo2(() => mode() === "list")() && notice();
+      },
+      get children() {
+        var _el$446 = createElement("text");
+        setProp(_el$446, "fg", "#7edc92");
+        insert(_el$446, notice);
+        return _el$446;
+      }
+    }), _el$447);
+    setProp(_el$447, "fg", "#808080");
+    insert(_el$447, () => formatSessionListFooter(props.language));
+    return _el$427;
   })();
 }
 function App() {
@@ -39599,6 +42431,16 @@ function App() {
   const [sessionId, setSessionId] = createSignal();
   const [messages, setMessages] = createSignal([]);
   const [streamingAssistant, setStreamingAssistant] = createSignal("");
+  const [streamingThinking, setStreamingThinking] = createSignal("");
+  const [thinkingExpanded, setThinkingExpanded] = createSignal({});
+  const [animTick, setAnimTick] = createSignal(0);
+  const [assistantContext, setAssistantContext] = createSignal();
+  const [sessionsOpen, setSessionsOpen] = createSignal(false);
+  const [sessionList, setSessionList] = createSignal([]);
+  const [sessionListSupported, setSessionListSupported] = createSignal(true);
+  const [sessionListLoading, setSessionListLoading] = createSignal(false);
+  const [sessionListError, setSessionListError] = createSignal("");
+  const [sessionTitle, setSessionTitle] = createSignal("");
   const [activeChatRequestId, setActiveChatRequestId] = createSignal();
   const renderedAssistantReplies = new Set;
   const hasRenderedAssistantReply = (requestId) => Boolean(requestId && renderedAssistantReplies.has(requestId));
@@ -39651,7 +42493,16 @@ function App() {
   const backend = new BackendClient;
   const dimensions = useTerminalDimensions();
   const compactHome = () => dimensions().height < 28;
-  const appendMessage = (message) => setMessages((current) => [...current, message]);
+  let chatMessageSeq = 0;
+  const localHHMM = () => {
+    const now = new Date;
+    return `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  };
+  const appendMessage = (message) => setMessages((current) => [...current, {
+    ...message,
+    id: message.id ?? `msg-${chatMessageSeq += 1}`,
+    timestamp: message.timestamp ?? localHHMM()
+  }]);
   const workbenchMode = () => {
     const mode = String(runtime().workbench_mode ?? "").trim().toLowerCase();
     return mode === "always" || mode === "off" ? mode : "auto";
@@ -39698,6 +42549,62 @@ function App() {
     }
     return Math.max(56, Math.min(96, dimensions().width - 4));
   };
+  const [codeFoldExpanded, setCodeFoldExpanded] = createSignal({});
+  const [codeFoldCursor, setCodeFoldCursor] = createSignal(0);
+  const [thinkingCursor, setThinkingCursor] = createSignal(0);
+  const isCodeBlockExpanded = (messageKey, blockIndex) => codeFoldExpanded()[codeFoldStateKey(messageKey, blockIndex)] === true;
+  const codeFoldTargets = createMemo(() => {
+    const targets = [];
+    for (const message of messages()) {
+      const messageKey = message.id ?? "unknown";
+      for (const block of foldableCodeBlocks(message.content)) {
+        targets.push({
+          messageKey,
+          blockIndex: block.index
+        });
+      }
+    }
+    for (const block of foldableCodeBlocks(streamingAssistant())) {
+      targets.push({
+        messageKey: "streaming",
+        blockIndex: block.index
+      });
+    }
+    return targets;
+  });
+  const toggleCodeFold = () => {
+    const targets = codeFoldTargets();
+    if (targets.length === 0)
+      return;
+    const cursor = codeFoldCursor() % targets.length;
+    const target = targets[cursor];
+    const key = codeFoldStateKey(target.messageKey, target.blockIndex);
+    setCodeFoldExpanded((prev) => ({
+      ...prev,
+      [key]: prev[key] !== true
+    }));
+    setCodeFoldCursor((cursor + 1) % targets.length);
+  };
+  const toggleCodeFoldAt = (messageKey, blockIndex) => {
+    const key = codeFoldStateKey(messageKey, blockIndex);
+    setCodeFoldExpanded((prev) => ({
+      ...prev,
+      [key]: prev[key] !== true
+    }));
+  };
+  const toggleThinking = () => {
+    const withThinking = messages().filter((message) => message.thinking && message.id);
+    if (withThinking.length === 0)
+      return;
+    const cursor = thinkingCursor() % withThinking.length;
+    const target = withThinking[cursor];
+    setThinkingExpanded((prev) => ({
+      ...prev,
+      [target.id]: !(prev[target.id] ?? false)
+    }));
+    setThinkingCursor((cursor + 1) % withThinking.length);
+  };
+  const chatMarkdownTableOptions = () => chatTableOptions(Math.max(24, chatContentWidth() - 6));
   const toggleWorkbench = () => {
     if (!workbenchVisible()) {
       setWorkbenchManualOpen(true);
@@ -39769,6 +42676,13 @@ function App() {
     }, 1000);
     onCleanup(() => clearInterval(timer));
   });
+  createEffect(() => {
+    const active = Boolean(streamingAssistant() || activeChatRequestId());
+    if (!active)
+      return;
+    const timer = setInterval(() => setAnimTick((tick) => tick + 1), 180);
+    onCleanup(() => clearInterval(timer));
+  });
   const updateStageState = (stageId, patch) => {
     setReviewStages((current) => {
       const index = current.findIndex((stage) => stage.id === stageId);
@@ -39825,18 +42739,44 @@ function App() {
       });
     }
   };
+  const openChatHistory = () => {
+    const lines = formatChatHistoryLines(messages(), {
+      contentWidth: Math.max(24, chatContentWidth() - 10),
+      language: runtime().ui_language
+    });
+    if (lines.length === 0) {
+      appendMessage({
+        role: "assistant",
+        content: isEn(runtime().ui_language) ? "No conversation messages yet." : "\u5F53\u524D\u4F1A\u8BDD\u8FD8\u6CA1\u6709\u5BF9\u8BDD\u6D88\u606F\u3002"
+      });
+      return;
+    }
+    const header = isEn(runtime().ui_language) ? `CHAT HISTORY \xB7 ${lines.length} message(s)` : `\u5BF9\u8BDD\u5386\u53F2 \xB7 ${lines.length} \u6761\u6D88\u606F`;
+    appendMessage({
+      role: "assistant",
+      content: [header, "", ...lines].join(`
+`)
+    });
+  };
   const openHistoryRun = async (run) => {
     if (!run.id)
       return;
     const response = await backend.request("command.execute", {
       name: "history",
-      args: [run.id]
+      args: [run.id],
+      session_id: sessionId()
     });
     if (response.ok && response.result?.report) {
       applyReviewReport(response.result.report);
       setHistoryOpen(false);
       setReviewStage("\u5386\u53F2\u62A5\u544A");
-      setReviewDetail(`Run ${run.id} \xB7 ${run.created_at ?? ""}`);
+      const label = typeof run.pr_number === "number" ? `PR #${run.pr_number}` : `Run ${run.id}`;
+      setReviewDetail(`${label} \xB7 ${run.created_at ?? ""}`);
+      const bound = response.result?.bound === true;
+      appendMessage({
+        role: "assistant",
+        content: bound ? `\u5DF2\u8F7D\u5165 ${label} \u7684\u5BA1\u67E5\u62A5\u544A\uFF0C\u5E76\u7ED1\u5B9A\u4E3A\u63A5\u4E0B\u6765\u7684\u5BF9\u8BDD\u4E0A\u4E0B\u6587\u2014\u2014\u53EF\u4EE5\u76F4\u63A5\u63D0\u95EE\uFF08\u4F8B\u5982"\u7B2C 1 \u6761\u4E3A\u4EC0\u4E48\u5224\u4E2D\u98CE\u9669"\uFF09\u3002\u7528 /context \u53EF\u67E5\u770B\u6216\u89E3\u7ED1\u3002` : `\u5DF2\u8F7D\u5165 ${label} \u7684\u5BA1\u67E5\u62A5\u544A\uFF0C\u4F46**\u672A\u80FD\u7ED1\u5B9A\u5BF9\u8BDD\u4E0A\u4E0B\u6587**\uFF08\u4F1A\u8BDD\u72B6\u6001\u7F3A\u5931\uFF09\u3002\u53EF\u4EE5\u6309 /new \u91CD\u5F00\u4F1A\u8BDD\u540E\u518D\u4ECE\u5386\u53F2\u6253\u5F00\uFF0C\u6216\u76F4\u63A5\u8BF4"PR #31"\u3002`
+      });
     }
   };
   const cancelCurrentTask = () => {
@@ -39909,7 +42849,10 @@ function App() {
     }
   };
   const retryLastReview = () => {
-    const url = reviewUrl();
+    const workspaceReport = reviewReport();
+    const workspacePr = workspaceReport.pr ?? {};
+    const workspaceUrl = typeof workspacePr.url === "string" && workspacePr.url.trim() ? workspacePr.url.trim() : "";
+    const url = reviewUrl() || workspaceUrl;
     if (!url) {
       appendMessage({
         role: "assistant",
@@ -40123,6 +43066,10 @@ function App() {
       setReviewActionMessage("\u5F53\u524D\u6CA1\u6709\u53EF\u53CD\u9988\u7684 Run\u3002\u8BF7\u5148\u5B8C\u6210\u4E00\u6B21\u5BA1\u67E5\uFF0C\u6216\u7528 /history <run_id> \u6253\u5F00\u5386\u53F2\u8BB0\u5F55\u3002");
       return;
     }
+    if (!findingId) {
+      setReviewActionMessage("\u8BE5\u6761 Finding \u6CA1\u6709\u53EF\u7528\u7684 ID\uFF08\u5386\u53F2\u8BB0\u5F55\u53EF\u80FD\u7F3A\u5C11\u6807\u8BC6\uFF09\uFF0C\u65E0\u6CD5\u8BB0\u5F55\u53CD\u9988\u3002");
+      return;
+    }
     const response = await backend.request("command.execute", {
       name: "feedback",
       args: [runId, findingId, status, note],
@@ -40168,6 +43115,7 @@ function App() {
     return {
       repository: reviewWorkspace().repository,
       prNumber: reviewWorkspace().prNumber,
+      url: reviewReport().pr?.url,
       title: reviewWorkspace().title,
       severity: reviewWorkspace().severity,
       evidence: reviewWorkspace().evidence,
@@ -40186,6 +43134,7 @@ function App() {
     setMessages([]);
     setStreamingAssistant("");
     setActiveChatRequestId(undefined);
+    setAssistantContext(undefined);
     setReviewStage("");
     setReviewDetail("");
     setReviewFile("");
@@ -40206,6 +43155,204 @@ function App() {
     setErrorMessage("");
     setBackendStatus("READY");
   };
+  let sessionListRequest = 0;
+  const applySessionList = (list, error = "") => {
+    if (!list) {
+      setSessionListSupported(false);
+      setSessionListError(error);
+      return;
+    }
+    setSessionListSupported(true);
+    setSessionListError("");
+    setSessionList(list.sessions);
+    const current = list.sessions.find((item) => list.current ? item.id === list.current : item.current) ?? list.sessions.find((item) => item.id === sessionId());
+    if (current)
+      setSessionTitle(current.title ?? "");
+  };
+  const refreshSessionList = async () => {
+    const token = sessionListRequest += 1;
+    setSessionListLoading(true);
+    try {
+      const response = await backend.request("session.list", {}, {
+        timeoutMs: PROBE_TIMEOUT_MS
+      });
+      if (token !== sessionListRequest)
+        return;
+      if (!response.ok) {
+        applySessionList(undefined, response.error?.message ?? `\u540E\u7AEF\u9519\u8BEF\uFF08${response.error?.code ?? "unknown"}\uFF09`);
+        return;
+      }
+      applySessionList(parseSessionListResult(response.result));
+    } catch (error) {
+      if (token !== sessionListRequest)
+        return;
+      applySessionList(undefined, String(error));
+    } finally {
+      if (token === sessionListRequest)
+        setSessionListLoading(false);
+    }
+  };
+  const openSessions = () => {
+    setSessionsOpen(true);
+    refreshSessionList();
+  };
+  const switchToSession = async (session) => {
+    try {
+      const response = await backend.request("session.switch", {
+        session_id: session.id
+      }, {
+        timeoutMs: CHAT_TIMEOUT_MS
+      });
+      if (!response.ok) {
+        appendMessage({
+          role: "assistant",
+          content: response.error?.message ?? "\u5207\u6362\u4F1A\u8BDD\u5931\u8D25"
+        });
+        return;
+      }
+      const parsed = parseSessionSwitchResult(response.result);
+      const history = (parsed?.messages ?? []).map((item) => ({
+        role: item.role === "user" ? "user" : "assistant",
+        content: item.content ?? "",
+        thinking: item.thinking,
+        timestamp: item.timestamp
+      }));
+      setMessages(history.map((message, index) => ({
+        ...message,
+        id: `sw-${index + 1}`,
+        timestamp: message.timestamp ?? localHHMM()
+      })));
+      setStreamingAssistant("");
+      setStreamingThinking("");
+      setActiveChatRequestId(undefined);
+      setAssistantContext(undefined);
+      setSessionId(session.id);
+      const title = parsed?.session?.title ?? session.title ?? "";
+      setSessionTitle(title);
+      setSessionsOpen(false);
+      appendMessage({
+        role: "assistant",
+        content: formatSessionSwitched(title, runtime().ui_language)
+      });
+      refreshSessionList();
+    } catch (error) {
+      appendMessage({
+        role: "assistant",
+        content: String(error)
+      });
+    }
+  };
+  const renameSession = async (session, title) => {
+    try {
+      const response = await backend.request("session.rename", {
+        session_id: session.id,
+        title
+      }, {
+        timeoutMs: PROBE_TIMEOUT_MS
+      });
+      if (!response.ok) {
+        appendMessage({
+          role: "assistant",
+          content: response.error?.message ?? "\u91CD\u547D\u540D\u4F1A\u8BDD\u5931\u8D25"
+        });
+        return;
+      }
+      const parsed = parseSessionRenameResult(response.result);
+      const nextTitle = parsed?.title ?? title;
+      setSessionList((current) => current.map((item) => item.id === session.id ? {
+        ...item,
+        title: nextTitle
+      } : item));
+      if (session.id === sessionId())
+        setSessionTitle(nextTitle);
+    } catch (error) {
+      appendMessage({
+        role: "assistant",
+        content: String(error)
+      });
+    }
+  };
+  const renameCurrentSession = async (title) => {
+    const current = sessionId();
+    if (!current) {
+      appendMessage({
+        role: "assistant",
+        content: "\u8FD8\u6CA1\u6709\u4F1A\u8BDD\u53EF\u91CD\u547D\u540D\u2014\u2014\u5148\u53D1\u4E00\u6761\u6D88\u606F\u5EFA\u7ACB\u4F1A\u8BDD\uFF0C\u518D\u7528 /rename \u6539\u6807\u9898\u3002"
+      });
+      return;
+    }
+    try {
+      const response = await backend.request("session.rename", {
+        session_id: current,
+        title
+      }, {
+        timeoutMs: PROBE_TIMEOUT_MS
+      });
+      if (!response.ok) {
+        appendMessage({
+          role: "assistant",
+          content: response.error?.message ?? "\u91CD\u547D\u540D\u4F1A\u8BDD\u5931\u8D25"
+        });
+        return;
+      }
+      const parsed = parseSessionRenameResult(response.result);
+      const nextTitle = parsed?.title ?? title;
+      setSessionTitle(nextTitle);
+      setSessionList((list) => list.map((item) => item.id === current ? {
+        ...item,
+        title: nextTitle
+      } : item));
+      appendMessage({
+        role: "assistant",
+        content: `\u4F1A\u8BDD\u5DF2\u91CD\u547D\u540D\u4E3A\u300C${nextTitle}\u300D\u3002`
+      });
+    } catch (error) {
+      appendMessage({
+        role: "assistant",
+        content: String(error)
+      });
+    }
+  };
+  const deleteSession = async (session) => {
+    try {
+      const response = await backend.request("session.delete", {
+        session_id: session.id
+      }, {
+        timeoutMs: PROBE_TIMEOUT_MS
+      });
+      if (!response.ok) {
+        appendMessage({
+          role: "assistant",
+          content: response.error?.message ?? "\u5220\u9664\u4F1A\u8BDD\u5931\u8D25"
+        });
+        return;
+      }
+      const parsed = parseSessionDeleteResult(response.result);
+      setSessionList((current) => current.filter((item) => item.id !== session.id));
+      if (session.id === sessionId()) {
+        const nextId = parsed?.next;
+        if (nextId) {
+          const next = sessionList().find((item) => item.id === nextId);
+          if (next) {
+            switchToSession(next);
+            return;
+          }
+          setSessionId(nextId);
+          setSessionTitle("");
+          resetSessionUi();
+        } else {
+          setSessionTitle("");
+          resetSessionUi();
+        }
+      }
+      refreshSessionList();
+    } catch (error) {
+      appendMessage({
+        role: "assistant",
+        content: String(error)
+      });
+    }
+  };
   let boundGeneration = 0;
   let recovering;
   const ensureSession = async (force = false) => {
@@ -40222,15 +43369,56 @@ function App() {
       });
       if (!snapshot.ok)
         throw new Error(snapshot.error?.message ?? "\u65E0\u6CD5\u8BFB\u53D6\u540E\u7AEF\u914D\u7F6E");
-      const created = await backend.request("session.create", {}, {
-        timeoutMs: PROBE_TIMEOUT_MS
-      });
-      if (!created.ok)
-        throw new Error(created.error?.message ?? "\u65E0\u6CD5\u6062\u590D Chat \u4F1A\u8BDD");
-      const next = String(created.result.session_id);
+      let next = "";
+      let restored = [];
+      let restoredTitle = "";
+      if (!force) {
+        try {
+          const listed = await backend.request("session.list", {}, {
+            timeoutMs: PROBE_TIMEOUT_MS
+          });
+          if (listed.ok) {
+            const parsedList = parseSessionListResult(listed.result);
+            const latest = parsedList?.sessions[0];
+            const target = latest && (latest.message_count ?? 0) === 0 ? latest.id : "";
+            if (target) {
+              const switched = await backend.request("session.switch", {
+                session_id: target
+              }, {
+                timeoutMs: PROBE_TIMEOUT_MS
+              });
+              if (switched.ok) {
+                const parsedSwitch = parseSessionSwitchResult(switched.result);
+                next = target;
+                restored = parsedSwitch?.messages ?? [];
+                restoredTitle = parsedSwitch?.session?.title ?? "";
+              }
+            }
+          }
+        } catch {}
+      }
+      if (!next) {
+        const created = await backend.request("session.create", {}, {
+          timeoutMs: PROBE_TIMEOUT_MS
+        });
+        if (!created.ok)
+          throw new Error(created.error?.message ?? "\u65E0\u6CD5\u6062\u590D Chat \u4F1A\u8BDD");
+        next = String(created.result.session_id);
+      }
       const configuration = snapshot.result;
       setRuntime(configuration);
       setSessionId(next);
+      if (restoredTitle)
+        setSessionTitle(restoredTitle);
+      if (restored.length > 0) {
+        setMessages(restored.map((message, index) => ({
+          id: `rs-${index + 1}`,
+          role: message.role === "user" ? "user" : "assistant",
+          content: message.content ?? "",
+          thinking: message.thinking,
+          timestamp: message.timestamp ?? localHHMM()
+        })));
+      }
       for (const warning of configuration.configuration_warnings ?? []) {
         appendMessage({
           role: "assistant",
@@ -40265,7 +43453,7 @@ function App() {
         setErrorMessage("");
         appendMessage({
           role: "assistant",
-          content: "\u540E\u7AEF\u5DF2\u91CD\u542F\uFF0C\u65E7\u4F1A\u8BDD\u4E0A\u4E0B\u6587\u548C\u5F53\u524D\u62A5\u544A\u65E0\u6CD5\u81EA\u52A8\u6062\u590D\uFF1B\u5DF2\u5EFA\u7ACB\u65B0\u4F1A\u8BDD\u3002\u5386\u53F2\u5BA1\u67E5\u53EF\u4F7F\u7528 /history \u67E5\u770B\u3002"
+          content: restored.length > 0 ? `\u540E\u7AEF\u5DF2\u91CD\u542F\uFF0C\u5DF2\u6062\u590D\u4F1A\u8BDD\u300C${restoredTitle || "\u672A\u547D\u540D"}\u300D\u7684\u5386\u53F2\u8BB0\u5F55\uFF1B\u5F53\u524D\u62A5\u544A\u5DF2\u91CD\u7F6E\uFF0C\u53EF\u7528 /report \u6216 /history \u91CD\u65B0\u8F7D\u5165\u3002` : "\u540E\u7AEF\u5DF2\u91CD\u542F\uFF0C\u5DF2\u56DE\u5230\u7A7A\u767D\u4F1A\u8BDD\uFF1B\u65E7\u5BF9\u8BDD\u53EF\u7528 /sessions \u5207\u6362\uFF0C\u5386\u53F2\u5BA1\u67E5\u53EF\u7528 /history \u67E5\u770B\u3002"
         });
       }
       return next;
@@ -40292,6 +43480,7 @@ function App() {
           return;
         if (event.event === "assistant.started") {
           setStreamingAssistant("");
+          setStreamingThinking("");
           setBackendStatus("THINKING");
         }
         if (event.event === "review.started") {
@@ -40381,7 +43570,8 @@ function App() {
           setReviewProgress(100);
           setBackendStatus("READY");
           setReviewStage("\u5BA1\u67E5\u5B8C\u6210");
-          setReviewDetail(`\u53D1\u73B0 ${String(event.finding_count ?? 0)} \u4E2A\u95EE\u9898 \xB7 Run ${String(event.run_id ?? "")}`);
+          const completedSummary = typeof event.summary === "string" ? event.summary.trim() : "";
+          setReviewDetail(completedSummary.startsWith("\u5BA1\u67E5\u5931\u8D25") ? completedSummary : `\u53D1\u73B0 ${String(event.finding_count ?? 0)} \u4E2A\u95EE\u9898 \xB7 Run ${String(event.run_id ?? "")}`);
           setReviewFile("");
           if (typeof event.duration_seconds === "number") {
             setReviewElapsedMs(Math.max(0, event.duration_seconds * 1000));
@@ -40437,31 +43627,59 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
         if (event.event === "assistant.delta") {
           setStreamingAssistant((current) => current + String(event.text ?? ""));
         }
+        if (event.event === "assistant.reasoning_delta") {
+          const piece = parseReasoningDelta(event);
+          if (piece !== undefined)
+            setStreamingThinking((current) => current + piece);
+        }
         if (event.event === "assistant.finished") {
+          const meta = parseAssistantFinishMeta(event);
+          const streamedThinking = streamingThinking();
+          const thinking = streamedThinking || (meta.reasoning ?? "");
           const finalText = String(event.text ?? streamingAssistant());
+          const messageKey = `msg-${chatMessageSeq += 1}`;
           appendMessage({
+            id: messageKey,
             role: "assistant",
-            content: finalText
+            content: finalText,
+            durationSeconds: meta.durationSeconds,
+            warning: meta.warning,
+            thinking: thinking || undefined,
+            model: meta.model,
+            completionTokens: meta.usage?.completion_tokens
           });
+          if (thinking)
+            setThinkingExpanded((prev) => ({
+              ...prev,
+              [messageKey]: false
+            }));
+          if (meta.context)
+            setAssistantContext(meta.context);
           if (typeof event.request_id === "string")
             renderedAssistantReplies.add(event.request_id);
           setStreamingAssistant("");
+          setStreamingThinking("");
           setBackendStatus("READY");
         }
         if (event.event === "assistant.cancelled") {
           const partial = streamingAssistant();
-          if (partial)
+          const streamedThinking = streamingThinking();
+          if (partial) {
             appendMessage({
               role: "assistant",
-              content: `${partial} [\u5DF2\u53D6\u6D88]`
+              content: `${partial} [\u5DF2\u53D6\u6D88]`,
+              thinking: streamedThinking || undefined
             });
+          }
           if (typeof event.request_id === "string")
             renderedAssistantReplies.add(event.request_id);
           setStreamingAssistant("");
+          setStreamingThinking("");
           setBackendStatus("READY");
         }
         if (event.event === "assistant.failed") {
           setStreamingAssistant("");
+          setStreamingThinking("");
           setBackendStatus("ERROR");
         }
       });
@@ -40472,34 +43690,47 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
   });
   onCleanup(() => void backend.stop());
   return (() => {
-    var _el$323 = createElement("box"), _el$326 = createElement("box"), _el$327 = createElement("box"), _el$328 = createElement("scrollbox"), _el$329 = createElement("box"), _el$356 = createElement("box"), _el$357 = createElement("text"), _el$358 = createElement("text"), _el$359 = createTextNode(` \xB7 `), _el$360 = createTextNode(` \xB7 `), _el$361 = createTextNode(` \xB7 `), _el$362 = createTextNode(` \xB7 `), _el$363 = createTextNode(`\xD7`);
-    insertNode(_el$323, _el$326);
-    insertNode(_el$323, _el$356);
-    setProp(_el$323, "width", "100%");
-    setProp(_el$323, "height", "100%");
-    setProp(_el$323, "backgroundColor", "#0a0a0a");
-    setProp(_el$323, "alignItems", "center");
-    setProp(_el$323, "flexDirection", "column");
-    insert(_el$323, createComponent2(Show, {
+    var _el$449 = createElement("box"), _el$452 = createElement("box"), _el$453 = createElement("box"), _el$454 = createElement("scrollbox"), _el$455 = createElement("box"), _el$481 = createElement("box"), _el$482 = createElement("text");
+    insertNode(_el$449, _el$452);
+    insertNode(_el$449, _el$481);
+    setProp(_el$449, "width", "100%");
+    setProp(_el$449, "height", "100%");
+    setProp(_el$449, "backgroundColor", "#0a0a0a");
+    setProp(_el$449, "alignItems", "center");
+    setProp(_el$449, "flexDirection", "column");
+    insert(_el$449, createComponent2(Show, {
       get when() {
         return memo2(() => !!(messages().length === 0 && !reviewStage() && !errorMessage()))() && !compactHome();
       },
       get fallback() {
         return (() => {
-          var _el$364 = createElement("box"), _el$365 = createElement("text"), _el$367 = createElement("text"), _el$368 = createTextNode(` \xB7 `);
-          insertNode(_el$364, _el$365);
-          insertNode(_el$364, _el$367);
-          setProp(_el$364, "width", 76);
-          setProp(_el$364, "marginTop", 1);
-          setProp(_el$364, "flexDirection", "row");
-          setProp(_el$364, "justifyContent", "space-between");
-          insertNode(_el$365, createTextNode(`PR REVIEW / CHAT`));
-          setProp(_el$365, "fg", "#fb8147");
-          insertNode(_el$367, _el$368);
-          setProp(_el$367, "fg", "#808080");
-          insert(_el$367, () => runtime().provider_display ?? runtime().provider ?? "", _el$368);
-          insert(_el$367, () => runtime().model ?? "", null);
-          return _el$364;
+          var _el$483 = createElement("box"), _el$484 = createElement("box"), _el$485 = createElement("text"), _el$487 = createElement("text"), _el$488 = createTextNode(` \xB7 `), _el$489 = createElement("box");
+          insertNode(_el$483, _el$484);
+          insertNode(_el$483, _el$489);
+          setProp(_el$483, "width", 76);
+          setProp(_el$483, "marginTop", 1);
+          setProp(_el$483, "flexDirection", "column");
+          insertNode(_el$484, _el$485);
+          insertNode(_el$484, _el$487);
+          setProp(_el$484, "flexDirection", "row");
+          setProp(_el$484, "justifyContent", "space-between");
+          insertNode(_el$485, createTextNode(`PR REVIEW / CHAT`));
+          setProp(_el$485, "fg", "#fb8147");
+          insertNode(_el$487, _el$488);
+          setProp(_el$487, "fg", "#808080");
+          insert(_el$487, () => runtime().provider_display ?? runtime().provider ?? "", _el$488);
+          insert(_el$487, () => runtime().model ?? "", null);
+          setProp(_el$489, "flexDirection", "row");
+          setProp(_el$489, "justifyContent", "flex-end");
+          insert(_el$489, createComponent2(ContextUsageLine, {
+            get context() {
+              return assistantContext();
+            },
+            get language() {
+              return runtime().ui_language;
+            }
+          }));
+          return _el$483;
         })();
       },
       get children() {
@@ -40509,19 +43740,19 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           }
         });
       }
-    }), _el$326);
-    insert(_el$323, createComponent2(Show, {
+    }), _el$452);
+    insert(_el$449, createComponent2(Show, {
       get when() {
         return memo2(() => !!(workbenchVisible() && !workbenchPanelsVisible()))() && (reviewPhase() !== "idle" || workbenchManualOpen());
       },
       get children() {
-        var _el$324 = createElement("box");
-        setProp(_el$324, "width", "100%");
-        setProp(_el$324, "flexShrink", 0);
-        setProp(_el$324, "flexDirection", "column");
-        setProp(_el$324, "paddingLeft", 2);
-        setProp(_el$324, "paddingRight", 2);
-        insert(_el$324, createComponent2(ReviewStatusBar, {
+        var _el$450 = createElement("box");
+        setProp(_el$450, "width", "100%");
+        setProp(_el$450, "flexShrink", 0);
+        setProp(_el$450, "flexDirection", "column");
+        setProp(_el$450, "paddingLeft", 2);
+        setProp(_el$450, "paddingRight", 2);
+        insert(_el$450, createComponent2(ReviewStatusBar, {
           get phase() {
             return reviewPhase();
           },
@@ -40557,46 +43788,46 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
             return Math.max(12, dimensions().width - 4);
           }
         }), null);
-        insert(_el$324, createComponent2(Show, {
+        insert(_el$450, createComponent2(Show, {
           get when() {
             return reviewActionMessage();
           },
           get children() {
-            var _el$325 = createElement("text");
-            setProp(_el$325, "fg", "#7edc92");
-            insert(_el$325, reviewActionMessage);
-            effect((_$p) => setProp(_el$325, "width", Math.max(12, dimensions().width - 4), _$p));
-            return _el$325;
+            var _el$451 = createElement("text");
+            setProp(_el$451, "fg", "#7edc92");
+            insert(_el$451, reviewActionMessage);
+            effect((_$p) => setProp(_el$451, "width", Math.max(12, dimensions().width - 4), _$p));
+            return _el$451;
           }
         }), null);
-        return _el$324;
+        return _el$450;
       }
-    }), _el$326);
-    insertNode(_el$326, _el$327);
-    setProp(_el$326, "width", "100%");
-    setProp(_el$326, "flexGrow", 1);
-    setProp(_el$326, "flexDirection", "row");
-    setProp(_el$326, "minHeight", 0);
-    insertNode(_el$327, _el$328);
-    setProp(_el$327, "flexGrow", 1);
-    setProp(_el$327, "minWidth", 0);
-    setProp(_el$327, "flexDirection", "column");
-    setProp(_el$327, "alignItems", "center");
-    insertNode(_el$328, _el$329);
-    setProp(_el$328, "width", "100%");
-    setProp(_el$328, "flexGrow", 1);
-    setProp(_el$328, "scrollY", true);
-    setProp(_el$328, "stickyScroll", true);
-    setProp(_el$328, "stickyStart", "bottom");
-    setProp(_el$328, "scrollbarOptions", {
+    }), _el$452);
+    insertNode(_el$452, _el$453);
+    setProp(_el$452, "width", "100%");
+    setProp(_el$452, "flexGrow", 1);
+    setProp(_el$452, "flexDirection", "row");
+    setProp(_el$452, "minHeight", 0);
+    insertNode(_el$453, _el$454);
+    setProp(_el$453, "flexGrow", 1);
+    setProp(_el$453, "minWidth", 0);
+    setProp(_el$453, "flexDirection", "column");
+    setProp(_el$453, "alignItems", "center");
+    insertNode(_el$454, _el$455);
+    setProp(_el$454, "width", "100%");
+    setProp(_el$454, "flexGrow", 1);
+    setProp(_el$454, "scrollY", true);
+    setProp(_el$454, "stickyScroll", true);
+    setProp(_el$454, "stickyStart", "bottom");
+    setProp(_el$454, "scrollbarOptions", {
       showArrows: false
     });
-    setProp(_el$329, "width", "100%");
-    setProp(_el$329, "alignItems", "center");
-    setProp(_el$329, "flexDirection", "column");
-    insert(_el$329, createComponent2(Show, {
+    setProp(_el$455, "width", "100%");
+    setProp(_el$455, "alignItems", "center");
+    setProp(_el$455, "flexDirection", "column");
+    insert(_el$455, createComponent2(Show, {
       get when() {
-        return memo2(() => !!(messages().length === 0 && !composerDraft() && !streamingAssistant() && !errorMessage() && !reviewStage()))() && !compactHome();
+        return memo2(() => !!(messages().length === 0 && !composerDraft() && !streamingAssistant() && !streamingThinking() && !activeChatRequestId() && !errorMessage() && !reviewStage()))() && !compactHome();
       },
       get children() {
         return createComponent2(QuickStartPanel, {
@@ -40606,44 +43837,44 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
         });
       }
     }), null);
-    insert(_el$329, createComponent2(Show, {
+    insert(_el$455, createComponent2(Show, {
       get when() {
         return errorMessage();
       },
       get children() {
-        var _el$330 = createElement("box"), _el$331 = createElement("text"), _el$333 = createElement("text"), _el$334 = createElement("text"), _el$336 = createElement("text");
-        insertNode(_el$330, _el$331);
-        insertNode(_el$330, _el$333);
-        insertNode(_el$330, _el$334);
-        insertNode(_el$330, _el$336);
-        setProp(_el$330, "backgroundColor", "#241616");
-        setProp(_el$330, "borderStyle", "single");
-        setProp(_el$330, "borderColor", "#ff6b6b");
-        setProp(_el$330, "paddingLeft", 2);
-        setProp(_el$330, "paddingRight", 2);
-        setProp(_el$330, "marginTop", 2);
-        setProp(_el$330, "flexDirection", "column");
-        insertNode(_el$331, createTextNode(`ERROR // RECOVERY`));
-        setProp(_el$331, "fg", "#ff6b6b");
-        setProp(_el$333, "fg", "#eeeeee");
-        insert(_el$333, errorMessage);
-        insertNode(_el$334, createTextNode(`\u5EFA\u8BAE\uFF1A\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u3001\u914D\u7F6E Endpoint\uFF0C\u6216\u4F7F\u7528 Ctrl+P \u5207\u6362\u8FD0\u884C\u65F6\u3002`));
-        setProp(_el$334, "fg", "#808080");
-        insertNode(_el$336, createTextNode(`\u53EF\u7528\u6062\u590D\uFF1ACtrl+R /retry \xB7 /model status \xB7 /model local \xB7 /model cloud \xB7 /new`));
-        setProp(_el$336, "fg", "#808080");
-        effect((_$p) => setProp(_el$330, "width", chatContentWidth(), _$p));
-        return _el$330;
+        var _el$456 = createElement("box"), _el$457 = createElement("text"), _el$459 = createElement("text"), _el$460 = createElement("text"), _el$462 = createElement("text");
+        insertNode(_el$456, _el$457);
+        insertNode(_el$456, _el$459);
+        insertNode(_el$456, _el$460);
+        insertNode(_el$456, _el$462);
+        setProp(_el$456, "backgroundColor", "#241616");
+        setProp(_el$456, "borderStyle", "single");
+        setProp(_el$456, "borderColor", "#ff6b6b");
+        setProp(_el$456, "paddingLeft", 2);
+        setProp(_el$456, "paddingRight", 2);
+        setProp(_el$456, "marginTop", 2);
+        setProp(_el$456, "flexDirection", "column");
+        insertNode(_el$457, createTextNode(`ERROR // RECOVERY`));
+        setProp(_el$457, "fg", "#ff6b6b");
+        setProp(_el$459, "fg", "#eeeeee");
+        insert(_el$459, errorMessage);
+        insertNode(_el$460, createTextNode(`\u5EFA\u8BAE\uFF1A\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u3001\u914D\u7F6E Endpoint\uFF0C\u6216\u4F7F\u7528 Ctrl+P \u5207\u6362\u8FD0\u884C\u65F6\u3002`));
+        setProp(_el$460, "fg", "#808080");
+        insertNode(_el$462, createTextNode(`\u53EF\u7528\u6062\u590D\uFF1ACtrl+R /retry \xB7 /model status \xB7 /model local \xB7 /model cloud \xB7 /new`));
+        setProp(_el$462, "fg", "#808080");
+        effect((_$p) => setProp(_el$456, "width", chatContentWidth(), _$p));
+        return _el$456;
       }
     }), null);
-    insert(_el$329, createComponent2(Show, {
+    insert(_el$455, createComponent2(Show, {
       get when() {
         return reviewFindings().length > 0;
       },
       get children() {
-        var _el$338 = createElement("box");
-        setProp(_el$338, "marginTop", 1);
-        setProp(_el$338, "flexDirection", "column");
-        insert(_el$338, createComponent2(FindingsFilterBar, {
+        var _el$464 = createElement("box");
+        setProp(_el$464, "marginTop", 1);
+        setProp(_el$464, "flexDirection", "column");
+        insert(_el$464, createComponent2(FindingsFilterBar, {
           get active() {
             return hasActiveCriteria(findingsFilter()) || findingsFilter().sort !== "severity";
           },
@@ -40669,110 +43900,289 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
             return runtime().ui_language;
           }
         }));
-        effect((_$p) => setProp(_el$338, "width", chatContentWidth(), _$p));
-        return _el$338;
+        effect((_$p) => setProp(_el$464, "width", chatContentWidth(), _$p));
+        return _el$464;
       }
     }), null);
-    insert(_el$329, createComponent2(Show, {
+    insert(_el$455, createComponent2(Show, {
       get when() {
         return memo2(() => !!!reviewing())() && (reviewStage() === "\u5BA1\u67E5\u5931\u8D25" || reviewStage() === "\u5BA1\u67E5\u5DF2\u53D6\u6D88");
       },
       get children() {
-        var _el$339 = createElement("box"), _el$340 = createElement("text"), _el$341 = createTextNode(`\u25CF `), _el$342 = createElement("text");
-        insertNode(_el$339, _el$340);
-        insertNode(_el$339, _el$342);
-        setProp(_el$339, "width", 76);
-        setProp(_el$339, "backgroundColor", "#161616");
-        setProp(_el$339, "borderStyle", "single");
-        setProp(_el$339, "paddingLeft", 2);
-        setProp(_el$339, "paddingRight", 2);
-        setProp(_el$339, "marginTop", 2);
-        setProp(_el$339, "flexDirection", "column");
-        insertNode(_el$340, _el$341);
-        insert(_el$340, reviewStage, null);
-        setProp(_el$342, "fg", "#b0b0b0");
-        insert(_el$342, reviewDetail);
-        insert(_el$339, createComponent2(Show, {
+        var _el$465 = createElement("box"), _el$466 = createElement("text"), _el$467 = createTextNode(`\u25CF `), _el$468 = createElement("text");
+        insertNode(_el$465, _el$466);
+        insertNode(_el$465, _el$468);
+        setProp(_el$465, "width", 76);
+        setProp(_el$465, "backgroundColor", "#161616");
+        setProp(_el$465, "borderStyle", "single");
+        setProp(_el$465, "paddingLeft", 2);
+        setProp(_el$465, "paddingRight", 2);
+        setProp(_el$465, "marginTop", 2);
+        setProp(_el$465, "flexDirection", "column");
+        insertNode(_el$466, _el$467);
+        insert(_el$466, reviewStage, null);
+        setProp(_el$468, "fg", "#b0b0b0");
+        insert(_el$468, reviewDetail);
+        insert(_el$465, createComponent2(Show, {
           get when() {
             return reviewUrl();
           },
           get children() {
-            var _el$343 = createElement("text");
-            setProp(_el$343, "fg", "#808080");
-            insert(_el$343, () => truncateMiddle(reviewUrl(), 68));
-            return _el$343;
+            var _el$469 = createElement("text");
+            setProp(_el$469, "fg", "#808080");
+            insert(_el$469, () => truncateMiddle(reviewUrl(), 68));
+            return _el$469;
           }
         }), null);
         effect((_p$) => {
-          var _v$44 = reviewStage() === "\u5BA1\u67E5\u5931\u8D25" ? "#ff6b6b" : orange, _v$45 = reviewStage() === "\u5BA1\u67E5\u5931\u8D25" ? "#ff6b6b" : orange;
-          _v$44 !== _p$.e && (_p$.e = setProp(_el$339, "borderColor", _v$44, _p$.e));
-          _v$45 !== _p$.t && (_p$.t = setProp(_el$340, "fg", _v$45, _p$.t));
+          var _v$86 = reviewStage() === "\u5BA1\u67E5\u5931\u8D25" ? "#ff6b6b" : orange, _v$87 = reviewStage() === "\u5BA1\u67E5\u5931\u8D25" ? "#ff6b6b" : orange;
+          _v$86 !== _p$.e && (_p$.e = setProp(_el$465, "borderColor", _v$86, _p$.e));
+          _v$87 !== _p$.t && (_p$.t = setProp(_el$466, "fg", _v$87, _p$.t));
           return _p$;
         }, {
           e: undefined,
           t: undefined
         });
-        return _el$339;
+        return _el$465;
       }
     }), null);
-    insert(_el$329, createComponent2(Show, {
+    insert(_el$455, createComponent2(Show, {
       get when() {
-        return messages().length > 0 || streamingAssistant();
+        return messages().length > 0 || streamingAssistant() || streamingThinking() || activeChatRequestId();
       },
       get children() {
-        var _el$344 = createElement("box");
-        setProp(_el$344, "marginTop", 2);
-        setProp(_el$344, "flexDirection", "column");
-        insert(_el$344, createComponent2(For, {
+        var _el$470 = createElement("box");
+        setProp(_el$470, "marginTop", 2);
+        setProp(_el$470, "flexDirection", "column");
+        insert(_el$470, createComponent2(For, {
           get each() {
             return messages();
           },
-          children: (message) => (() => {
-            var _el$369 = createElement("box"), _el$370 = createElement("text"), _el$371 = createElement("text");
-            insertNode(_el$369, _el$370);
-            insertNode(_el$369, _el$371);
-            setProp(_el$369, "flexDirection", "row");
-            setProp(_el$369, "gap", 1);
-            setProp(_el$369, "paddingBottom", 1);
-            insert(_el$370, () => message.role === "user" ? ">" : "\u25CF");
-            insert(_el$371, () => message.content);
-            effect((_p$) => {
-              var _v$46 = message.role === "user" ? orange : "#eeeeee", _v$47 = Math.max(24, chatContentWidth() - 6), _v$48 = message.role === "user" ? "#eeeeee" : muted;
-              _v$46 !== _p$.e && (_p$.e = setProp(_el$370, "fg", _v$46, _p$.e));
-              _v$47 !== _p$.t && (_p$.t = setProp(_el$371, "width", _v$47, _p$.t));
-              _v$48 !== _p$.a && (_p$.a = setProp(_el$371, "fg", _v$48, _p$.a));
-              return _p$;
-            }, {
-              e: undefined,
-              t: undefined,
-              a: undefined
-            });
-            return _el$369;
-          })()
+          children: (message) => createComponent2(Show, {
+            get when() {
+              return message.role !== "user";
+            },
+            get fallback() {
+              return (() => {
+                var _el$492 = createElement("box"), _el$493 = createElement("box"), _el$494 = createElement("text"), _el$496 = createElement("text");
+                insertNode(_el$492, _el$493);
+                setProp(_el$492, "flexDirection", "column");
+                setProp(_el$492, "marginBottom", 1);
+                insertNode(_el$493, _el$494);
+                insertNode(_el$493, _el$496);
+                setProp(_el$493, "flexDirection", "row");
+                setProp(_el$493, "paddingLeft", 1);
+                setProp(_el$493, "paddingRight", 1);
+                setProp(_el$493, "backgroundColor", "#1a1a1a");
+                setProp(_el$493, "border", ["left"]);
+                setProp(_el$493, "borderColor", "#fb8147");
+                insertNode(_el$494, createTextNode(`\u203A `));
+                setProp(_el$494, "fg", "#fb8147");
+                setProp(_el$496, "fg", "#eeeeee");
+                insert(_el$496, () => message.content);
+                insert(_el$492, createComponent2(Show, {
+                  get when() {
+                    return message.timestamp;
+                  },
+                  get children() {
+                    var _el$497 = createElement("box"), _el$498 = createElement("text"), _el$499 = createTextNode(`\xB7 `);
+                    insertNode(_el$497, _el$498);
+                    setProp(_el$497, "flexDirection", "row");
+                    setProp(_el$497, "paddingLeft", 2);
+                    insertNode(_el$498, _el$499);
+                    setProp(_el$498, "fg", "#808080");
+                    insert(_el$498, () => message.timestamp, null);
+                    return _el$497;
+                  }
+                }), null);
+                effect((_$p) => setProp(_el$496, "width", Math.max(24, chatContentWidth() - 12), _$p));
+                return _el$492;
+              })();
+            },
+            get children() {
+              return [createComponent2(Show, {
+                get when() {
+                  return message.thinking;
+                },
+                get children() {
+                  return createComponent2(ThinkingBlock, {
+                    get text() {
+                      return message.thinking;
+                    },
+                    get expanded() {
+                      return thinkingExpanded()[message.id ?? ""] === true;
+                    },
+                    onToggle: () => setThinkingExpanded((prev) => ({
+                      ...prev,
+                      [message.id ?? ""]: !(prev[message.id ?? ""] ?? false)
+                    })),
+                    get language() {
+                      return runtime().ui_language;
+                    },
+                    get width() {
+                      return chatContentWidth() - 6;
+                    }
+                  });
+                }
+              }), (() => {
+                var _el$490 = createElement("box");
+                setProp(_el$490, "flexDirection", "column");
+                setProp(_el$490, "paddingBottom", 1);
+                insert(_el$490, createComponent2(FoldableMarkdownBlock, {
+                  get content() {
+                    return message.content;
+                  },
+                  get messageKey() {
+                    return message.id ?? "unknown";
+                  },
+                  isExpanded: (blockIndex) => isCodeBlockExpanded(message.id ?? "unknown", blockIndex),
+                  onToggleAt: toggleCodeFoldAt,
+                  get width() {
+                    return Math.max(24, chatContentWidth() - 6);
+                  },
+                  get syntaxStyle() {
+                    return chatMarkdownStyle();
+                  },
+                  fg: muted,
+                  bulletFg: "#eeeeee",
+                  get tableOptions() {
+                    return chatMarkdownTableOptions();
+                  }
+                }));
+                return _el$490;
+              })(), (() => {
+                var _el$491 = createElement("box");
+                setProp(_el$491, "flexDirection", "row");
+                setProp(_el$491, "paddingLeft", 2);
+                setProp(_el$491, "paddingBottom", 1);
+                insert(_el$491, createComponent2(MessageMetricsLine, {
+                  get model() {
+                    return message.model;
+                  },
+                  get fallbackModel() {
+                    return runtime().model;
+                  },
+                  get seconds() {
+                    return message.durationSeconds;
+                  },
+                  get completionTokens() {
+                    return message.completionTokens;
+                  },
+                  get contentLength() {
+                    return message.content.length;
+                  },
+                  get timestamp() {
+                    return message.timestamp;
+                  },
+                  get language() {
+                    return runtime().ui_language;
+                  }
+                }));
+                return _el$491;
+              })(), createComponent2(Show, {
+                get when() {
+                  return message.warning === "over_budget";
+                },
+                get children() {
+                  return createComponent2(OverBudgetTip, {
+                    get language() {
+                      return runtime().ui_language;
+                    },
+                    get width() {
+                      return chatContentWidth() - 6;
+                    }
+                  });
+                }
+              })];
+            }
+          })
         }), null);
-        insert(_el$344, createComponent2(Show, {
+        insert(_el$470, createComponent2(Show, {
           get when() {
-            return streamingAssistant();
+            return streamingThinking();
           },
           get children() {
-            var _el$345 = createElement("box"), _el$346 = createElement("text"), _el$348 = createElement("text");
-            insertNode(_el$345, _el$346);
-            insertNode(_el$345, _el$348);
-            setProp(_el$345, "flexDirection", "row");
-            setProp(_el$345, "gap", 1);
-            insertNode(_el$346, createTextNode(`\u25CF`));
-            setProp(_el$346, "fg", "#fb8147");
-            setProp(_el$348, "fg", "#eeeeee");
-            insert(_el$348, streamingAssistant);
-            effect((_$p) => setProp(_el$348, "width", Math.max(24, chatContentWidth() - 6), _$p));
-            return _el$345;
+            return createComponent2(ThinkingBlock, {
+              get text() {
+                return streamingThinking();
+              },
+              expanded: true,
+              onToggle: () => {},
+              get language() {
+                return runtime().ui_language;
+              },
+              get width() {
+                return chatContentWidth() - 6;
+              },
+              streaming: true
+            });
           }
         }), null);
-        effect((_$p) => setProp(_el$344, "width", chatContentWidth(), _$p));
-        return _el$344;
+        insert(_el$470, createComponent2(Show, {
+          get when() {
+            return streamingAssistant() || activeChatRequestId();
+          },
+          get children() {
+            var _el$471 = createElement("box");
+            setProp(_el$471, "flexDirection", "column");
+            insert(_el$471, createComponent2(Show, {
+              get when() {
+                return streamingAssistant();
+              },
+              get fallback() {
+                return (() => {
+                  var _el$500 = createElement("box"), _el$501 = createElement("text"), _el$503 = createElement("text");
+                  insertNode(_el$500, _el$501);
+                  insertNode(_el$500, _el$503);
+                  setProp(_el$500, "flexDirection", "row");
+                  setProp(_el$500, "gap", 1);
+                  insertNode(_el$501, createTextNode(`\u25CF`));
+                  setProp(_el$501, "fg", "#fb8147");
+                  setProp(_el$503, "fg", "#808080");
+                  insert(_el$503, () => thinkingPlaceholder(animTick(), runtime().ui_language));
+                  return _el$500;
+                })();
+              },
+              get children() {
+                return [createComponent2(FoldableMarkdownBlock, {
+                  get content() {
+                    return streamingAssistant();
+                  },
+                  messageKey: "streaming",
+                  isExpanded: (blockIndex) => isCodeBlockExpanded("streaming", blockIndex),
+                  onToggleAt: toggleCodeFoldAt,
+                  get width() {
+                    return Math.max(24, chatContentWidth() - 6);
+                  },
+                  get syntaxStyle() {
+                    return chatMarkdownStyle();
+                  },
+                  fg: "#eeeeee",
+                  bulletFg: orange,
+                  streaming: true,
+                  get tableOptions() {
+                    return chatMarkdownTableOptions();
+                  }
+                }), (() => {
+                  var _el$472 = createElement("box"), _el$473 = createElement("text");
+                  insertNode(_el$472, _el$473);
+                  setProp(_el$472, "flexDirection", "row");
+                  setProp(_el$472, "paddingLeft", 2);
+                  setProp(_el$473, "fg", "#fb8147");
+                  setProp(_el$473, "attributes", 1);
+                  insert(_el$473, () => cursorFrame(animTick()));
+                  return _el$472;
+                })()];
+              }
+            }));
+            return _el$471;
+          }
+        }), null);
+        effect((_$p) => setProp(_el$470, "width", chatContentWidth(), _$p));
+        return _el$470;
       }
     }), null);
-    insert(_el$327, createComponent2(Composer, {
+    insert(_el$453, createComponent2(Composer, {
       get mode() {
         return mode();
       },
@@ -40795,6 +44205,7 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
       onReviewRequest: (url) => setPendingReviewUrl(url),
       onOpenFindings: openFindings,
       onOpenHistory: () => void openHistory(),
+      onOpenChatHistory: openChatHistory,
       onOpenModel: () => setModelOpen(true),
       onExplain: () => void explainCurrentRun(),
       onFeedback: () => openFeedback(),
@@ -40809,6 +44220,13 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
       },
       onCancel: cancelCurrentTask,
       onToggleWorkbench: toggleWorkbench,
+      onToggleCodeFold: toggleCodeFold,
+      onToggleThinking: toggleThinking,
+      onOpenSessions: openSessions,
+      onRenameSession: (title) => void renameCurrentSession(title),
+      get codeFoldActive() {
+        return codeFoldTargets().length > 0;
+      },
       get workbenchActive() {
         return workbenchVisible();
       },
@@ -40820,68 +44238,68 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
         return backendStatus() === "THINKING" || backendStatus() === "REVIEWING" || backendStatus() === "CANCELLING";
       },
       get focused() {
-        return memo2(() => !!(!findingsOpen() && !feedbackOpen() && !historyOpen() && !modelOpen() && !setupOpen() && !filterOpen() && !publishOpen() && !demoOpen() && !showcaseOpen() && pendingReviewUrl() === ""))() && reviewStage() !== "\u5BA1\u67E5\u5931\u8D25";
+        return memo2(() => !!(!findingsOpen() && !feedbackOpen() && !historyOpen() && !modelOpen() && !setupOpen() && !filterOpen() && !publishOpen() && !demoOpen() && !showcaseOpen() && !sessionsOpen() && pendingReviewUrl() === ""))() && reviewStage() !== "\u5BA1\u67E5\u5931\u8D25";
       }
     }), null);
-    insert(_el$326, createComponent2(Show, {
+    insert(_el$452, createComponent2(Show, {
       get when() {
         return memo2(() => reviewLayout() !== "bar")() && workbenchVisible();
       },
       get children() {
-        var _el$349 = createElement("box");
-        setProp(_el$349, "flexShrink", 0);
-        setProp(_el$349, "marginLeft", 1);
-        setProp(_el$349, "flexDirection", "column");
-        setProp(_el$349, "minHeight", 0);
-        insert(_el$349, createComponent2(Show, {
+        var _el$474 = createElement("box");
+        setProp(_el$474, "flexShrink", 0);
+        setProp(_el$474, "marginLeft", 1);
+        setProp(_el$474, "flexDirection", "column");
+        setProp(_el$474, "minHeight", 0);
+        insert(_el$474, createComponent2(Show, {
           get when() {
             return memo2(() => reviewLayout() === "two")() && reviewProgressProps();
           },
           get children() {
-            var _el$350 = createElement("box");
-            setProp(_el$350, "flexShrink", 0);
-            setProp(_el$350, "marginBottom", 1);
-            insert(_el$350, createComponent2(ReviewProgressPanel, mergeProps3(() => reviewProgressProps())));
-            return _el$350;
+            var _el$475 = createElement("box");
+            setProp(_el$475, "flexShrink", 0);
+            setProp(_el$475, "marginBottom", 1);
+            insert(_el$475, createComponent2(ReviewProgressPanel, mergeProps3(() => reviewProgressProps())));
+            return _el$475;
           }
         }), null);
-        insert(_el$349, createComponent2(Show, {
+        insert(_el$474, createComponent2(Show, {
           get when() {
             return reviewSummaryProps();
           },
           get children() {
-            var _el$351 = createElement("box");
-            setProp(_el$351, "flexGrow", 1);
-            setProp(_el$351, "minHeight", 0);
-            insert(_el$351, createComponent2(ReviewSummaryPanel, mergeProps3(() => reviewSummaryProps())));
-            return _el$351;
+            var _el$476 = createElement("box");
+            setProp(_el$476, "flexGrow", 1);
+            setProp(_el$476, "minHeight", 0);
+            insert(_el$476, createComponent2(ReviewSummaryPanel, mergeProps3(() => reviewSummaryProps())));
+            return _el$476;
           }
         }), null);
-        insert(_el$349, createComponent2(Show, {
+        insert(_el$474, createComponent2(Show, {
           get when() {
             return reviewActionMessage();
           },
           get children() {
-            var _el$352 = createElement("box"), _el$353 = createElement("text"), _el$355 = createElement("text");
-            insertNode(_el$352, _el$353);
-            insertNode(_el$352, _el$355);
-            setProp(_el$352, "width", "100%");
-            setProp(_el$352, "flexShrink", 0);
-            setProp(_el$352, "backgroundColor", "#141414");
-            setProp(_el$352, "borderStyle", "single");
-            setProp(_el$352, "borderColor", "#7edc92");
-            setProp(_el$352, "paddingLeft", 1);
-            setProp(_el$352, "paddingRight", 1);
-            setProp(_el$352, "flexDirection", "column");
-            insertNode(_el$353, createTextNode(`REVIEW ACTION`));
-            setProp(_el$353, "fg", "#7edc92");
-            setProp(_el$353, "height", 1);
-            setProp(_el$355, "fg", "#eeeeee");
-            insert(_el$355, reviewActionMessage);
-            return _el$352;
+            var _el$477 = createElement("box"), _el$478 = createElement("text"), _el$480 = createElement("text");
+            insertNode(_el$477, _el$478);
+            insertNode(_el$477, _el$480);
+            setProp(_el$477, "width", "100%");
+            setProp(_el$477, "flexShrink", 0);
+            setProp(_el$477, "backgroundColor", "#141414");
+            setProp(_el$477, "borderStyle", "single");
+            setProp(_el$477, "borderColor", "#7edc92");
+            setProp(_el$477, "paddingLeft", 1);
+            setProp(_el$477, "paddingRight", 1);
+            setProp(_el$477, "flexDirection", "column");
+            insertNode(_el$478, createTextNode(`REVIEW ACTION`));
+            setProp(_el$478, "fg", "#7edc92");
+            setProp(_el$478, "height", 1);
+            setProp(_el$480, "fg", "#eeeeee");
+            insert(_el$480, reviewActionMessage);
+            return _el$477;
           }
         }), null);
-        insert(_el$349, createComponent2(ReviewActionBar, {
+        insert(_el$474, createComponent2(ReviewActionBar, {
           onOpenFindings: openFindings,
           onExplain: () => void explainCurrentRun(),
           onFeedback: () => openFeedback(),
@@ -40892,11 +44310,11 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
             return runtime().ui_language;
           }
         }), null);
-        effect((_$p) => setProp(_el$349, "width", rightColumnWidth(), _$p));
-        return _el$349;
+        effect((_$p) => setProp(_el$474, "width", rightColumnWidth(), _$p));
+        return _el$474;
       }
     }), null);
-    insert(_el$323, createComponent2(Show, {
+    insert(_el$449, createComponent2(Show, {
       get when() {
         return modelOpen();
       },
@@ -40916,8 +44334,8 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           }
         });
       }
-    }), _el$356);
-    insert(_el$323, createComponent2(Show, {
+    }), _el$481);
+    insert(_el$449, createComponent2(Show, {
       get when() {
         return historyOpen();
       },
@@ -40936,8 +44354,39 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setHistoryOpen(false)
         });
       }
-    }), _el$356);
-    insert(_el$323, createComponent2(Show, {
+    }), _el$481);
+    insert(_el$449, createComponent2(Show, {
+      get when() {
+        return sessionsOpen();
+      },
+      get children() {
+        return createComponent2(SessionsDialog, {
+          get sessions() {
+            return sessionList();
+          },
+          get currentId() {
+            return sessionId();
+          },
+          get supported() {
+            return sessionListSupported();
+          },
+          get loading() {
+            return sessionListLoading();
+          },
+          get error() {
+            return sessionListError();
+          },
+          get language() {
+            return runtime().ui_language;
+          },
+          onSwitch: (session) => void switchToSession(session),
+          onRename: (session, title) => void renameSession(session, title),
+          onDelete: (session) => void deleteSession(session),
+          onClose: () => setSessionsOpen(false)
+        });
+      }
+    }), _el$481);
+    insert(_el$449, createComponent2(Show, {
       get when() {
         return findingsOpen();
       },
@@ -40961,8 +44410,8 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setFindingsOpen(false)
         });
       }
-    }), _el$356);
-    insert(_el$323, createComponent2(Show, {
+    }), _el$481);
+    insert(_el$449, createComponent2(Show, {
       get when() {
         return memo2(() => !!feedbackOpen())() && reviewFindings()[activeFindingIndex()];
       },
@@ -40976,13 +44425,13 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           },
           onSelect: (status, note) => {
             setFeedbackOpen(false);
-            submitFindingFeedback(String(activeFindingIndex()), status, note);
+            submitFindingFeedback(String(reviewFindings()[activeFindingIndex()]?.finding_id ?? ""), status, note);
           },
           onClose: () => setFeedbackOpen(false)
         });
       }
-    }), _el$356);
-    insert(_el$323, createComponent2(Show, {
+    }), _el$481);
+    insert(_el$449, createComponent2(Show, {
       get when() {
         return memo2(() => reviewStage() === "\u5BA1\u67E5\u5931\u8D25")() && reviewUrl();
       },
@@ -41001,8 +44450,8 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setReviewStage("")
         });
       }
-    }), _el$356);
-    insert(_el$323, createComponent2(Show, {
+    }), _el$481);
+    insert(_el$449, createComponent2(Show, {
       get when() {
         return filterOpen();
       },
@@ -41029,8 +44478,8 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClear: clearFindingsFilter
         });
       }
-    }), _el$356);
-    insert(_el$323, createComponent2(Show, {
+    }), _el$481);
+    insert(_el$449, createComponent2(Show, {
       get when() {
         return publishOpen();
       },
@@ -41056,8 +44505,8 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: dismissPublish
         });
       }
-    }), _el$356);
-    insert(_el$323, createComponent2(Show, {
+    }), _el$481);
+    insert(_el$449, createComponent2(Show, {
       get when() {
         return demoOpen();
       },
@@ -41072,8 +44521,8 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setDemoOpen(false)
         });
       }
-    }), _el$356);
-    insert(_el$323, createComponent2(Show, {
+    }), _el$481);
+    insert(_el$449, createComponent2(Show, {
       get when() {
         return showcaseOpen();
       },
@@ -41088,8 +44537,8 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setShowcaseOpen(false)
         });
       }
-    }), _el$356);
-    insert(_el$323, createComponent2(Show, {
+    }), _el$481);
+    insert(_el$449, createComponent2(Show, {
       get when() {
         return setupOpen();
       },
@@ -41119,8 +44568,8 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           }
         });
       }
-    }), _el$356);
-    insert(_el$323, createComponent2(Show, {
+    }), _el$481);
+    insert(_el$449, createComponent2(Show, {
       get when() {
         return pendingReviewUrl();
       },
@@ -41133,33 +44582,34 @@ ${String(event.recovery ?? "\u68C0\u67E5\u6A21\u578B\u72B6\u6001\u540E\u91CD\u8B
           onClose: () => setPendingReviewUrl("")
         });
       }
-    }), _el$356);
-    insertNode(_el$356, _el$357);
-    insertNode(_el$356, _el$358);
-    setProp(_el$356, "width", "100%");
-    setProp(_el$356, "flexShrink", 0);
-    setProp(_el$356, "justifyContent", "space-between");
-    setProp(_el$356, "paddingLeft", 2);
-    setProp(_el$356, "paddingRight", 2);
-    setProp(_el$356, "paddingBottom", 1);
-    setProp(_el$357, "fg", "#808080");
-    insert(_el$357, workspaceRootLabel);
-    insertNode(_el$358, _el$359);
-    insertNode(_el$358, _el$360);
-    insertNode(_el$358, _el$361);
-    insertNode(_el$358, _el$362);
-    insertNode(_el$358, _el$363);
-    insert(_el$358, () => runtime().runtime_profile ?? "RUNTIME", _el$359);
-    insert(_el$358, () => statusLabels[backendStatus()], _el$360);
-    insert(_el$358, () => runtime().model ?? "model", _el$361);
-    insert(_el$358, (() => {
-      var _c$0 = memo2(() => runtime().available === false);
-      return () => _c$0() ? "OFFLINE" : runtime().available === true ? "ONLINE" : "0.1.0";
-    })(), _el$362);
-    insert(_el$358, () => dimensions().width, _el$363);
-    insert(_el$358, () => dimensions().height, null);
-    effect((_$p) => setProp(_el$358, "fg", statusColors[backendStatus()], _$p));
-    return _el$323;
+    }), _el$481);
+    insertNode(_el$481, _el$482);
+    setProp(_el$481, "width", "100%");
+    setProp(_el$481, "flexShrink", 0);
+    setProp(_el$481, "justifyContent", "space-between");
+    setProp(_el$481, "paddingLeft", 2);
+    setProp(_el$481, "paddingRight", 2);
+    setProp(_el$481, "paddingBottom", 1);
+    setProp(_el$482, "fg", "#808080");
+    insert(_el$482, workspaceRootLabel);
+    insert(_el$481, createComponent2(RuntimeStatusLine, {
+      get runtime() {
+        return runtime();
+      },
+      get status() {
+        return backendStatus();
+      },
+      get width() {
+        return dimensions().width;
+      },
+      get height() {
+        return dimensions().height;
+      },
+      get sessionTitle() {
+        return sessionTitle();
+      }
+    }), null);
+    return _el$449;
   })();
 }
 
