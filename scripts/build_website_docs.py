@@ -9,6 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
 API_DOC = ROOT / "docs" / "API.md"
 WORKFLOW_DOC = ROOT / "docs" / "PR_WORKFLOW.md"
+COMPLIANCE_DOC = ROOT / "docs" / "COMPLIANCE_AND_ORIGINALITY.md"
+NOTICES_DOC = ROOT / "THIRD_PARTY_NOTICES.md"
 OUTPUT = ROOT / "website" / "assets" / "docs-data.js"
 
 DATA_PREFIX = "window.__WEBSITE_DOCS__ = "
@@ -23,6 +25,13 @@ _SECTION_SEPARATORS = {"---", "***", "___"}
 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def require_text(path: Path) -> str:
+    """必读源文档：缺失即失败，避免官网上架"幽灵文档"。"""
+    if not path.exists():
+        raise FileNotFoundError(f"Source document not found: {path}")
+    return read_text(path)
 
 
 def extract_section(markdown: str, heading: str, level: int = 2) -> str:
@@ -224,6 +233,8 @@ def build_docs_data() -> dict:
     readme = read_text(README)
     api_doc = read_text(API_DOC)
     workflow_doc = read_text(WORKFLOW_DOC) if WORKFLOW_DOC.exists() else ""
+    compliance_doc = require_text(COMPLIANCE_DOC)
+    require_text(NOTICES_DOC)
 
     tabs = [
         {
@@ -317,6 +328,27 @@ def build_docs_data() -> dict:
             "source": "docs/PR_WORKFLOW.md",
             "html": markdown_to_html(workflow_doc),
         },
+        {
+            # 合规与许可：只取声明类章节（许可/权属/第三方权利/原创性/免责），
+            # 跳过项目定位与提交前清单等过程性文字。
+            "id": "compliance",
+            "label": "合规与许可",
+            "title": "合规、原创性与第三方许可",
+            "source": "docs/COMPLIANCE_AND_ORIGINALITY.md",
+            "html": markdown_to_html(
+                "\n\n".join(
+                    f"## {title}\n\n{extract_section(compliance_doc, title)}"
+                    for title in (
+                        "二、许可声明",
+                        "三、团队主导与 AI 辅助的边界",
+                        "四、团队权属声明",
+                        "五、第三方权利归属",
+                        "六、参赛作品的原创性口径",
+                        "八、参赛免责条款确认栏",
+                    )
+                )
+            ),
+        },
     ]
 
     references = [
@@ -369,6 +401,16 @@ def build_docs_data() -> dict:
             "title": "CONTRIBUTING.md",
             "description": "贡献规范、协作方式与提交建议。",
             "url": "https://github.com/JiangLai999/AI-PR-Review-Assistant/blob/main/CONTRIBUTING.md",
+        },
+        {
+            "title": "THIRD_PARTY_NOTICES.md",
+            "description": "第三方组件、字体、随包产物与商标声明。",
+            "url": "https://github.com/JiangLai999/AI-PR-Review-Assistant/blob/main/THIRD_PARTY_NOTICES.md",
+        },
+        {
+            "title": "docs/COMPLIANCE_AND_ORIGINALITY.md",
+            "description": "原创性、团队权属、AI 辅助边界、合规自检。",
+            "url": "https://github.com/JiangLai999/AI-PR-Review-Assistant/blob/main/docs/COMPLIANCE_AND_ORIGINALITY.md",
         },
     ]
 
