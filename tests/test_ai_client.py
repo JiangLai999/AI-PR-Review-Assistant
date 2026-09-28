@@ -266,3 +266,27 @@ class TestAIClientHelpers:
         client._usage_history.append(UsageRecord(timestamp=10**10, cost=2.0))
 
         assert client.total_cost_last_24h == pytest.approx(2.0)
+
+
+def test_ai_client_accepts_a_shared_cost_ledger():
+    """`AIClient(cost_ledger=...)` 把外部账本接进去：累计与预算判定都以它为准。
+
+    这是 hybrid 跨槽位预算闭环的接入点（`hybrid_orchestrator` 为 local / remote 传同一个
+    ledger）。不传时保持各客户端独立记账（既有行为，另一条用例覆盖）。
+    """
+    from ai_pr_review.services.cost_controller import CostLedger
+
+    ledger = CostLedger(run_total=1.25)
+    client = AIClient(
+        config=AIClientConfig(api_key="test-key", max_cost_per_run=2.0),
+        client_factory=lambda _: MockClient([]),
+        cost_ledger=ledger,
+    )
+
+    # 读：用的是共享账本里的累计值，而不是自己从 0 开始
+    assert client.total_run_cost == pytest.approx(1.25)
+    assert client._cost_controller.ledger is ledger
+
+    # 预算判定：上限 2.0 − 已有 1.25 ⇒ 0.5 放得下、0.8 放不下
+    assert client._budget_available(0.5) is True
+    assert client._budget_available(0.8) is False

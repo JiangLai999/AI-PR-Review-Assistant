@@ -18,7 +18,7 @@ from ai_pr_review.config import (
     AIClientConfig,
     CostControllerConfig,
 )
-from ai_pr_review.services.cost_controller import CostController, UsageRecord
+from ai_pr_review.services.cost_controller import CostController, CostLedger, UsageRecord
 from ai_pr_review.services.exceptions import (
     AIAuthenticationError,
     AICostLimitError,
@@ -51,6 +51,7 @@ class AIClient:
         self,
         config: AIClientConfig | None = None,
         client_factory: Callable[[str], Any] | None = None,
+        cost_ledger: CostLedger | None = None,
     ) -> None:
         self._config = config or AIClientConfig()
         self._provider_config = self._config.model_provider
@@ -72,7 +73,11 @@ class AIClient:
                 daily_limit=self._config.max_cost_per_24h,
                 input_cost_per_million=self._config.input_cost_per_million,
                 output_cost_per_million=self._config.output_cost_per_million,
-            )
+            ),
+            # 共享账本：hybrid 编排器把 local / remote 两个客户端接到同一个 ledger 上，
+            # run 级与 24h 预算才不会被"每个槽位各算一份"稀释。
+            # 不传则自建（默认行为与改造前一致）。
+            ledger=cost_ledger,
         )
         self._usage_history = self._cost_controller._usage_history
         # Concurrent file reviews share one budget. Reserve estimated capacity

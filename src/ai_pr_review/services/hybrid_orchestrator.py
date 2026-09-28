@@ -14,6 +14,7 @@ from ai_pr_review.services import review_orchestrator as standard_review
 from ai_pr_review.services.analyzers.python_ast_analyzer import PythonAstAnalyzer
 from ai_pr_review.services.analyzers.static_analyzer import StaticAnalyzer
 from ai_pr_review.services.context_builder import FileContext
+from ai_pr_review.services.cost_controller import CostLedger
 from ai_pr_review.services.evidence.finding_validator import FindingValidator
 from ai_pr_review.services.filter_pipeline import FilterPipeline
 from ai_pr_review.services.finding_localizer import localize_deterministic_finding
@@ -342,9 +343,13 @@ class HybridReviewOrchestrator:
         # 此前逐文件新建 ⇒ 每个客户端各持一份计数器，预算被按文件数反复"重置"，
         # run 级上限等于失效。
         clients: dict[tuple[str, str, bool], Any] = {}
-        # 复用客户端后 `total_run_cost` 是**累计值**，必须按差值计入本轮；
+        # 所有客户端共享**同一个账本**：local / remote 各持一份成本计数器时，
+        # `max_cost_per_run` / 24h 预算会被按槽位数稀释（各花一半即可分别绕过）。
+        # 注意只共享账本、不共享 CostController —— 后者会让本地调用按云端价计费。
+        cost_ledger = CostLedger()
+        # 账本是全局累计值，因此按"全局总量的差值"计入本轮：
         # 否则第 2 个文件起会把前面积累的成本再加一遍（成本越算越多）。
-        observed_client_cost: dict[tuple[str, str, bool], float] = {}
+        observed_total_cost = 0.0
         for file_diff, context in file_contexts:
             # 每个文件开始前检查：已请求取消立即抛出，剩余文件不再发起模型调用。
             if cancel_check is not None and cancel_check():
@@ -400,7 +405,9 @@ class HybridReviewOrchestrator:
                 client_key = (selected_config.name, model_name, is_local)
                 selected_client = clients.get(client_key)
                 if selected_client is None:
-                    selected_client = standard_review.AIClient(selected_ai_config)
+                    selected_client = standard_review.AIClient(
+                        selected_ai_config, cost_ledger=cost_ledger
+                    )
                     clients[client_key] = selected_client
                 # 在飞的调用同样要能被取消：否则按了 Esc 还得等这次调用跑完。
                 response = await standard_review.call_with_cancellation(
@@ -443,13 +450,16 @@ class HybridReviewOrchestrator:
                 # "N 个未能审查"，自相矛盾。
                 reviewed_count += 1
 
-            # 成本按"该客户端累计成本的增量"记账：正常返回与失败分支都要结算
+            # 成本按"共享账本总量的增量"记账：正常返回与失败分支都要结算
             # （失败的上游调用同样可能已经计费），取消则由上面的 `raise` 直接跳出。
+            # 所有客户端读到的都是同一个账本 ⇒ 用总量差值即可，天然不会重复计数。
             if selected_client is not None and client_key is not None:
-                observed = float(getattr(selected_client, "total_run_cost", 0.0))
-                previous = observed_client_cost.get(client_key, 0.0)
-                call_cost = max(0.0, observed - previous)
-                observed_client_cost[client_key] = observed
+                observed = max(
+                    (float(getattr(client, "total_run_cost", 0.0)) for client in clients.values()),
+                    default=0.0,
+                )
+                call_cost = max(0.0, observed - observed_total_cost)
+                observed_total_cost = observed
                 total_cost += call_cost
                 self.model_selector.record_cost(call_cost)
 

@@ -1840,17 +1840,40 @@ class CountingAIClient(StubAIClient):
 
 
 class CumulativeCostAIClient(StubAIClient):
-    """像真实 ``AIClient`` 那样把 ``total_run_cost`` 做成**累计值**。"""
+    """像真实 ``AIClient`` 那样把 ``total_run_cost`` 做成**实时累计值**。
+
+    与真实实现对齐的契约：
+
+    * ``total_run_cost`` 是**读时求值**的 property，不是 ``__init__`` 时的快照；
+    * 拿到共享账本时，任一槽位读到的都是**全局累计**，不会各记一份。
+    """
 
     COST_PER_CALL = 0.25
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, cost_ledger=None, **kwargs):
+        # 父类 __init__ 会写 ``self.total_run_cost``（快照式桩值），
+        # 因此先让属性承载就位，再清零，避免 1.25 被当成真实花费。
+        self._own_total = 0.0
+        self._ledger = cost_ledger
         super().__init__(*args, **kwargs)
-        self.total_run_cost = 0.0
+        self._own_total = 0.0
+
+    @property
+    def total_run_cost(self) -> float:
+        if self._ledger is not None:
+            return self._ledger.run_total
+        return self._own_total
+
+    @total_run_cost.setter
+    def total_run_cost(self, value: float) -> None:
+        self._own_total = float(value)
 
     async def review_code(self, system_prompt: str, user_prompt: str) -> ReviewResult:
         result = await super().review_code(system_prompt, user_prompt)
-        self.total_run_cost += self.COST_PER_CALL
+        if self._ledger is not None:
+            self._ledger.run_total += self.COST_PER_CALL
+        else:
+            self._own_total += self.COST_PER_CALL
         return result
 
 
@@ -1943,3 +1966,48 @@ def test_model_selector_treats_zero_budget_as_no_remote_spend(tmp_path):
     selector = ModelSelector(config)
 
     assert selector._should_use_remote({"file_path": "src/auth_service.py"}) is False
+
+
+def test_hybrid_shares_one_ledger_across_slots(monkeypatch, tmp_path):
+    """hybrid 的 local / remote 两个客户端必须共享同一个账本。
+
+    判别方式：一轮里两个客户端都会 `record_usage`，共享账本时**每个**客户端读到的
+    `total_run_cost` 都等于全局总量（= `artifacts.total_cost`）；若各持一份，
+    两个客户端会各自停在 0.5，而 artifacts.total_cost 是 1.0 —— 断言随之失败。
+    """
+
+    class AlternatingModelSelector(StubModelSelector):
+        """奇偶文件交替走 local / remote，确保 hybrid 真的建出两个客户端。"""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.seen = 0
+
+        def select_model_for_task(self, **kwargs):
+            self.seen += 1
+            if self.seen % 2 == 0:
+                return "deepseek", "deepseek-chat", False
+            return "ollama", "qwen3.5:4b", True
+
+    CountingAIClient.instances = 0
+    seen_clients: list[Any] = []
+
+    class RecordingAIClient(CumulativeCostAIClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            seen_clients.append(self)
+
+    _patch_hybrid_orchestrator(monkeypatch, ai_client=RecordingAIClient)
+    monkeypatch.setattr(
+        "ai_pr_review.services.hybrid_orchestrator.ModelSelector",
+        lambda *a, **k: AlternatingModelSelector(),
+    )
+
+    artifacts = asyncio.run(HybridReviewOrchestrator(_standard_config(tmp_path)).review(PR_URL))
+
+    assert len(seen_clients) == 2, "local / remote 应各建一个客户端"
+    assert artifacts.total_cost == pytest.approx(4 * CumulativeCostAIClient.COST_PER_CALL)
+    for client in seen_clients:
+        assert client.total_run_cost == pytest.approx(
+            artifacts.total_cost
+        ), "两个槽位必须共享同一账本"
