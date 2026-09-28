@@ -944,6 +944,7 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
         """
         content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         if content_type != "application/json":
+            self._discard_pending_body()
             self._send_json(
                 415,
                 {"error": "Content-Type must be application/json"},
@@ -952,13 +953,51 @@ class ReviewWebHandler(BaseHTTPRequestHandler):
             return True
         fetch_site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
         if fetch_site and fetch_site not in {"same-origin", "none"}:
+            self._discard_pending_body()
             self._send_json(415, {"error": "cross-site request rejected"}, close=True)
             return True
         origin = (self.headers.get("Origin") or "").strip()
         if origin and not _origin_is_local(origin):
+            self._discard_pending_body()
             self._send_json(415, {"error": "cross-site request rejected"}, close=True)
             return True
         return False
+
+    # 拒绝路径都带 `Connection: close`。若此时请求体一个字节都没读，
+    # 关闭套接字会让内核直接回 RST（Windows 上是 WinError 10053），
+    # 客户端 recv 抛 ConnectionAbortedError —— 本机浏览器看到的是
+    # "Failed to fetch"，而不是我们精心写的 415 JSON。
+    # 因此先把**已经到达**的 body 限长限时丢掉，让四次挥手正常收尾。
+    # 限时 0.25s + 限长 MAX_BODY_BYTES：客户端没真发时绝不长等。
+    _DRAIN_TIMEOUT_SECONDS = 0.25
+
+    def _discard_pending_body(self) -> None:
+        try:
+            declared = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            return
+        remaining = min(max(declared, 0), MAX_BODY_BYTES)
+        if remaining <= 0:
+            return
+        connection = self.connection
+        try:
+            connection.settimeout(self._DRAIN_TIMEOUT_SECONDS)
+        except OSError:
+            return
+        try:
+            while remaining > 0:
+                chunk = connection.recv(min(remaining, 8192))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except (OSError, ValueError):
+            # 对端半途断开 / 已经把连接关掉：丢不下就算了，不影响回包。
+            pass
+        finally:
+            try:
+                connection.settimeout(None)
+            except OSError:
+                pass
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))

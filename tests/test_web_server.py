@@ -837,7 +837,7 @@ class TestCrossSiteGuard:
         assert status == 415
 
     def test_cross_origin_json_post_is_rejected(self, server):
-        status, _, _ = call_raw(
+        status, _, body = call_raw(
             server["base"],
             "POST",
             "/api/config",
@@ -846,6 +846,10 @@ class TestCrossSiteGuard:
         )
 
         assert status == 415
+        # 回包必须能被完整读回。拒绝路径若把未读的请求体留在地上就 close()，
+        # 内核会回 RST，客户端拿到的是 ConnectionAbortedError 而不是这条 JSON
+        # （Windows 上表现为 WinError 10053），测试与真实浏览器都会"莫名失败"。
+        assert json.loads(body)["error"] == "cross-site request rejected"
 
     def test_cross_site_fetch_metadata_is_rejected(self, server):
         status, _, _ = call_raw(
