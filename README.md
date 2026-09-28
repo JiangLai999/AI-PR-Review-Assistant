@@ -285,24 +285,40 @@ pr-review chat --model "gpt-4" --message "你好"
 
 ### 斜杠命令
 
-| 命令 | 说明 |
-|------|------|
-| `/help` | 显示帮助信息 |
-| `/status` | 显示会话状态 |
-| `/usage` | 显示消息统计 |
-| `/model <ID>` | 切换模型 |
-| `/review <URL>` | 执行 PR 审查 |
-| `/history [数量或 Run ID]` | 查看审查历史；带 Run ID 时把它载入为当前报告 |
-| `/explain <run_id>` | 解释该 Run 的问题与证据，不调用模型 |
-| `/feedback <run_id> <finding_id> <status>` | 记录 Finding 反馈 |
-| `/publish [run_id] [--confirm]` | 先预览、确认后再发布审查评论到 GitHub |
-| `/demo [case_key]` | 运行离线演示用例（`/demo list` 列出全部） |
-| `/showcase` | 查看参赛演示路径，不改变项目状态 |
-| `/stats` | 查看统计数据 |
-| `/compact` | 压缩会话历史 |
-| `/restore` | 恢复历史会话 |
-| `/clear` | 清空当前会话 |
-| `/exit` | 退出聊天 |
+`pr-review chat` 默认打开 TUI（OpenTUI 交互界面）；缺少 Bun / OpenTUI 时自动回退到纯文本 CLI。
+两套界面的命令集合并不完全相同，下表按界面标注可用范围（完整说明见 [docs/chat-features.md](docs/chat-features.md)）：
+
+| 命令 | 说明 | 可用界面 |
+|------|------|----------|
+| `/help` | 显示当前界面的帮助信息 | TUI · CLI |
+| `/status` | 显示运行状态 | TUI · CLI |
+| `/model <ID>` | 查看或切换模型（`/model status` 检查连通性） | TUI · CLI |
+| `/review <URL>` | 执行 PR 审查 | TUI · CLI |
+| `/history [数量或 Run ID]` | 查看历史；CLI 列审查 Run，TUI 还支持 `/history --chat` 与 `/history <run_id>` | TUI · CLI |
+| `/compact [指令]` | 压缩会话历史 | TUI · CLI |
+| `/new` | 新建会话（旧会话保留，可在 `/sessions` 切回） | TUI · CLI |
+| `/setup` | 打开配置助手（快捷键 `Ctrl+P`） | 仅 TUI |
+| `/think off/low/high/max/auto` | 设置思考档位（本地端点置灰） | 仅 TUI |
+| `/context [run_id]` | 查看 / 切换 / 解除审查上下文绑定（`/context off` 解绑） | 仅 TUI |
+| `/cancel` | 取消当前对话或审查 | 仅 TUI |
+| `/retry` | 重试上一次审查（快捷键 `Ctrl+R`） | 仅 TUI |
+| `/report` | 查看当前审查报告（Markdown） | 仅 TUI |
+| `/export json/markdown [路径]` | 导出当前报告 | 仅 TUI |
+| `/explain <run_id>` | 解释该 Run 的问题与证据，不调用模型 | 仅 TUI |
+| `/feedback <run_id> <finding_id> <status>` | 记录 Finding 反馈 | 仅 TUI |
+| `/publish [run_id] [--confirm]` | 先预览、确认后再发布审查评论到 GitHub | 仅 TUI |
+| `/demo [case_key]` | 运行离线演示用例（`/demo list` 列出全部） | 仅 TUI |
+| `/showcase` | 查看参赛演示路径，不改变项目状态 | 仅 TUI |
+| `/workbench` | 展开 / 收起审查工作台（快捷键 `Alt+W`） | 仅 TUI |
+| `/sessions` | 打开会话列表（快捷键 `Alt+S`） | 仅 TUI |
+| `/rename <新标题>` | 重命名当前会话 | 仅 TUI |
+| `/usage` | 显示消息 / 字符统计 | 仅 CLI |
+| `/stats` | 查看审查统计（Run 数、PR 数、Findings、成本） | 仅 CLI |
+| `/config` | 显示当前会话配置（JSON） | 仅 CLI |
+| `/session` | 显示当前 chat 会话信息（JSON） | 仅 CLI |
+| `/restore` | 恢复上一次保存的会话记录 | 仅 CLI |
+| `/clear` | 清空当前会话历史（含已保存记录） | 仅 CLI |
+| `/exit` | 退出聊天（也接受 `exit` / `quit` / `q`） | 仅 CLI |
 
 Chat 快捷键：`Ctrl+C` 在存在选区时复制到剪贴板；无选区时第一次提示、1.5 秒内再按一次退出；运行中按 `Ctrl+C` 取消当前任务。输入框内可用 `Ctrl+A` 全选。
 

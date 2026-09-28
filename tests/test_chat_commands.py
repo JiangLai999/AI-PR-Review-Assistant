@@ -27,6 +27,8 @@ JSONL_SERVER_PATH = REPO_ROOT / "src" / "ai_pr_review" / "backend" / "jsonl_serv
 CHAT_COMMANDS_PATH = REPO_ROOT / "src" / "ai_pr_review" / "chat_commands.py"
 CLI_PATH = REPO_ROOT / "src" / "ai_pr_review" / "cli.py"
 CHAT_RUNTIME_PATH = REPO_ROOT / "src" / "ai_pr_review" / "chat_runtime.py"
+README_PATH = REPO_ROOT / "README.md"
+APP_TSX_PATH = REPO_ROOT / "frontend" / "tui" / "src" / "app.tsx"
 
 # TUI 前端本地截获、不进后端分发，但同样是用户可用的现行命令。
 TUI_LOCAL_COMMANDS = frozenset({"retry", "workbench"})
@@ -82,6 +84,33 @@ def cli_implemented_commands() -> set[str]:
     if exit_set is not None:
         found |= {f"/{name}" for name in re.findall(r'"/([a-z]+)"', exit_set.group(1))}
     return {token.lstrip("/") for token in found}
+
+
+def tui_frontend_local_commands() -> set[str]:
+    """grep 出 TUI 前端本地截获（`text === "/x"` / `text.startsWith("/x ")`）的命令。"""
+    source = _read(APP_TSX_PATH)
+    found = set(re.findall(r'text(?:\.toLowerCase\(\))?\s*===\s*"(/[a-z]+)"', source))
+    found |= set(re.findall(r'text(?:\.toLowerCase\(\))?\.startsWith\("(/[a-z]+)', source))
+    return {token.lstrip("/") for token in found}
+
+
+def readme_chat_table() -> dict[str, set[str]]:
+    """README「### 斜杠命令」表的 ``命令 -> 标注的可用界面``（tui / cli）。"""
+    section = _read(README_PATH).split("### 斜杠命令", 1)[1].split("\n## ", 1)[0]
+    table: dict[str, set[str]] = {}
+    for line in section.splitlines():
+        match = re.match(r"\|\s*`(/[a-z]+)", line)
+        if not match:
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        surface = cells[-1]
+        marks: set[str] = set()
+        if "TUI" in surface:
+            marks.add("tui")
+        if "CLI" in surface:
+            marks.add("cli")
+        table[match.group(1).lstrip("/")] = marks
+    return table
 
 
 def commands_in_help_text(text: str) -> set[str]:
@@ -163,3 +192,41 @@ def test_help_texts_cover_the_commands_they_share(tmp_path: Path) -> None:
     for command in sorted(shared):
         assert any(line.strip().startswith(command) for line in backend_lines), command
         assert any(line.strip().startswith(command) for line in cli_lines), command
+
+
+def test_readme_chat_table_is_discovered() -> None:
+    """基线自检：README 斜杠命令表必须能被解析出来，否则后面的对照等于没跑。"""
+    table = readme_chat_table()
+    assert {"help", "review", "usage", "think", "sessions"} <= set(table)
+
+
+def test_readme_chat_table_matches_implementation_surfaces() -> None:
+    """README 斜杠命令表 = 两套界面的实现集合，且逐条标注正确的可用界面。
+
+    回归点（2026-09-28 官网核查）：README 的「斜杠命令」表同时混入了 TUI 与 CLI 的
+    命令，既没有标注「仅 CLI / 仅 TUI」，还漏掉了 `/sessions`、`/rename`、`/think`
+    等 TUI 命令；官网「Chat 工作区」标签页直接渲染这张表，于是把只存在于纯文本
+    CLI 的 `/usage`、`/exit` 等展示成通用命令。这里用源码集合锁住两边。
+    """
+    table = readme_chat_table()
+    tui_available = DISPATCHED | set(TUI_LOCAL_COMMANDS) | tui_frontend_local_commands()
+    cli_available = CLI_IMPLEMENTED
+
+    expected: dict[str, set[str]] = {}
+    for name in tui_available | cli_available:
+        marks: set[str] = set()
+        if name in tui_available:
+            marks.add("tui")
+        if name in cli_available:
+            marks.add("cli")
+        expected[name] = marks
+
+    only_doc = sorted(set(table) - set(expected))
+    only_code = sorted(set(expected) - set(table))
+    wrong_surface = sorted(
+        name for name in set(table) & set(expected) if table[name] != expected[name]
+    )
+    assert table == expected, (
+        "README 斜杠命令表与实现不一致："
+        f"仅文档有 {only_doc}；仅实现有 {only_code}；界面标注错误 {wrong_surface}"
+    )
