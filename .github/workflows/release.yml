@@ -8,7 +8,9 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # tui_static 内含 Windows x64 专用 opentui.dll，wheel 标签固定为 py3-none-win_amd64
+    # （scripts/hatch_build.py），在 ubuntu 上构建必然失败，必须在 Windows x64 上构建。
+    runs-on: windows-latest
 
     steps:
       - name: Checkout repository

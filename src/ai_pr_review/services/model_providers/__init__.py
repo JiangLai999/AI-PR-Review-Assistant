@@ -5,6 +5,7 @@ from ai_pr_review.services.model_providers.api2d import API2DProvider
 from ai_pr_review.services.model_providers.base import BaseModelProvider, ProviderResponse
 from ai_pr_review.services.model_providers.deepseek import DeepSeekProvider
 from ai_pr_review.services.model_providers.factory import create_model_provider
+from ai_pr_review.services.model_providers.ollama import OllamaProvider
 from ai_pr_review.services.model_providers.openai import OpenAICompatibleProvider
 from ai_pr_review.services.model_providers.openrouter import OpenRouterProvider
 
@@ -13,6 +14,7 @@ __all__ = [
     "AnthropicProvider",
     "BaseModelProvider",
     "DeepSeekProvider",
+    "OllamaProvider",
     "OpenAICompatibleProvider",
     "OpenRouterProvider",
     "ProviderResponse",

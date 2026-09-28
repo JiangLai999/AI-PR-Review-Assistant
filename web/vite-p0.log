@@ -1,0 +1,28 @@
+
+> ai-pr-review-web@0.1.0 dev
+> vite --host 127.0.0.1 --port 5173
+
+
+  VITE v6.4.3  ready in 268 ms
+
+  ➜  Local:   http://127.0.0.1:5173/static/
+  ➜  press h + enter to show help
+12:02:20 [vite] (client) hmr update /src/pages/OverviewPage.tsx
+13:34:42 [vite] (client) hmr update /src/pages/OverviewPage.tsx
+13:34:42 [vite] (client) hmr update /src/styles/components.css
+13:54:54 [vite] (client) hmr update /src/pages/ReviewPage.tsx
+13:54:54 [vite] (client) hmr update /src/styles/components.css
+13:58:39 [vite] (client) hmr update /src/pages/ReviewPage.tsx
+13:58:39 [vite] (client) hmr update /src/styles/components.css
+14:03:08 [vite] (client) hmr update /src/pages/ReviewPage.tsx
+14:03:08 [vite] (client) hmr update /src/styles/components.css
+14:07:21 [vite] (client) hmr update /src/App.tsx
+14:07:21 [vite] (client) hmr update /src/pages/HistoryPage.tsx
+14:07:21 [vite] (client) hmr update /src/styles/components.css
+14:11:43 [vite] (client) hmr update /src/App.tsx
+14:16:52 [vite] (client) hmr update /src/App.tsx
+14:16:52 [vite] (client) page reload index.html
+14:16:52 [vite] (client) hmr update /src/styles/components.css
+14:18:34 [vite] (client) hmr update /src/components/HeroKnot.tsx
+14:20:51 [vite] (client) hmr update /src/styles/components.css
+14:29:46 [vite] (client) hmr update /src/styles/components.css

@@ -15,6 +15,7 @@ from ai_pr_review.config import (
     PreferencesConfig,
     ProviderConfig,
     _default_config_path,
+    filter_dataclass_payload,
 )
 from ai_pr_review.config_helpers import (
     append_gitignore_entry,
@@ -116,7 +117,12 @@ def run_config_import(
     config.provider = provider
     config.github_token = str(raw.get("github_token", ""))
     if isinstance(preferences_payload, dict):
-        config.preferences = PreferencesConfig(**preferences_payload)
+        # 导入的文件可能由**更新**的版本导出（`config export` 每次都会写全量键），
+        # 直接展开会让本版本不认识的键抛 TypeError，用户连 `config import` 都用不了。
+        # 过滤规则与 `AppConfig.load` 共用一份（docs/claude-backend-followup.md §3）。
+        config.preferences = PreferencesConfig(
+            **filter_dataclass_payload(PreferencesConfig, preferences_payload)
+        )
     model_provider = provider.to_model_provider()
     config.ai_client = AIClientConfig(
         **{

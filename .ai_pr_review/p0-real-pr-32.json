@@ -1,0 +1,124 @@
+{
+  "pr": {
+    "number": 32,
+    "title": "feat: Premium TUI redesign for chat workspace",
+    "url": "https://github.com/JiangLai999/AI-PR-Review-Assistant/pull/32",
+    "repository": "JiangLai999/AI-PR-Review-Assistant",
+    "author": "JiangLai999",
+    "files_changed": 1,
+    "files_reviewed": 1,
+    "files_skipped": 0
+  },
+  "summary": "src/ai_pr_review/chat_runtime.py: The diff adds a raw ANSI escape write to sys.stdout inside send_once in chat_runtime.py. The only substantive concern is that this sequence is emitted unconditionally, without checking whether stdout is a TTY or matches the Rich Console's target stream, which can corrupt non-interactive/redirected output and desynchronize the cursor from Rich's own rendering.",
+  "findings": [
+    {
+      "severity": "medium",
+      "category": "correctness",
+      "file": "src/ai_pr_review/chat_runtime.py",
+      "line_start": 440,
+      "line_end": 441,
+      "title": "Raw ANSI cursor-control written unconditionally to sys.stdout, bypassing the Rich Console",
+      "problem": "send_once now writes the escape sequence \"\\x1b[1A\\x1b[2K\" (cursor up one line + erase line) directly to sys.stdout on every turn. This is emitted with no check that stdout is an interactive terminal and with no regard for the stream the Rich Console actually writes to. Consequences: (1) when output is redirected or captured (pipes, files, CI logs, non-TTY test harnesses), the escape bytes are injected as literal garbage into the transcript; (2) run_chat_session receives its `console` as a parameter, so if that Console is bound to a different file (e.g. stderr or a custom file= target) the cursor manipulation is applied to the wrong stream, erasing/overwriting a line of unrelated output while the Rich-rendered message goes elsewhere; (3) the blank line printed by `console.print()` at line 437 combined with a non-prompt_toolkit fallback path means the \"move up 1 line\" assumption about the current cursor row may not hold, so a previously rendered line can be cleared instead of the stale input line.",
+      "suggestion": "Guard the write on interactivity/terminal capability and route it through the same stream the console uses, e.g. only emit when `getattr(sys.stdout, 'isatty', lambda: False)()` is true and the prompt session path is active, and prefer `console.file.write(...)` / `console.print(..., end='')` or prompt_toolkit's own cleanup API instead of hard-coding cursor arithmetic against sys.stdout.",
+      "confidence": 0.65,
+      "code_snippet": "sys.stdout.write(\"\\x1b[1A\\x1b[2K\")\nsys.stdout.flush()",
+      "finding_id": "ansi-clear-raw-stdout",
+      "sources": [
+        "changed_line_review",
+        "cross_file_impact_review"
+      ],
+      "evidence": [
+        {
+          "file": "src/ai_pr_review/chat_runtime.py",
+          "line_start": 440,
+          "line_end": 441,
+          "changed_line": true,
+          "code_snippet": "sys.stdout.write(\"\\x1b[1A\\x1b[2K\")\nsys.stdout.flush()",
+          "source": "diff",
+          "validation_status": "valid",
+          "validation_messages": [
+            "Both lines are added lines in the diff.",
+            "No isatty/TTY check present in the surrounding context (lines 430-449)."
+          ]
+        },
+        {
+          "file": "src/ai_pr_review/chat_runtime.py",
+          "line_start": 440,
+          "line_end": 441,
+          "changed_line": true,
+          "code_snippet": "sys.stdout.write(\"\\x1b[1A\\x1b[2K\")\nsys.stdout.flush()",
+          "source": "ai_analysis",
+          "validation_status": "valid",
+          "validation_messages": []
+        }
+      ],
+      "evidence_status": "valid",
+      "evidence_issues": []
+    }
+  ],
+  "counts": {
+    "total_findings": 1,
+    "by_severity": {
+      "critical": 0,
+      "high": 0,
+      "medium": 1,
+      "low": 0,
+      "info": 0
+    }
+  },
+  "filter": {
+    "total_files": 1,
+    "included_count": 1,
+    "excluded_count": 0,
+    "excluded_reason_counts": {},
+    "results": [
+      {
+        "filename": "src/ai_pr_review/chat_runtime.py",
+        "included": true,
+        "reasons": [
+          {
+            "code": "included_by_default",
+            "action": "include",
+            "message": "文件未命中过滤规则，默认纳入审查。",
+            "details": {}
+          }
+        ]
+      }
+    ]
+  },
+  "run": {
+    "id": "6485d5ea-f9ff-4dbc-b385-4f9744e89174",
+    "duration_seconds": 16.49664639995899,
+    "total_cost": 0.041814,
+    "validation": {
+      "valid": 1,
+      "needs_review": 0,
+      "invalid": 0
+    }
+  },
+  "plan": {
+    "intent": "feat: Premium TUI redesign for chat workspace **概述**\n\n重写聊天终端 UI，融合 OpenCode、Claude Code、OpenClaw 的设计语言。\n\n**改动内容：**\n- 像素风品牌横幅（Unicode 方块字符，5 行 PR REVIEW）\n- 双层标题框（外层 SQUARE + 内层 DOUBLE）\n- 状态栏：连接状态 / 提供商 / 模型 / 消息数 / 时间戳\n- 用户消息：ROUNDED 边框 + 时间戳\n- 助手消息：双层框（SQUARE + HEAVY）+ 耗时显示\n- 思考动画：旋转符 + 5 阶段进度条 + 真实计时\n- 仅追加输出（不清屏、不重复旧内容）\n- ANSI 转义序列清除 prompt_toolkit 的输入行，避免重复\n- 斜杠命令 Tab 补全（prompt_toolkit）\n- /new、/restore、/history、/help、/status、/usage、/compact、/clear 等命令\n- prompt_toolkit 可选：缺失时自动回退到 Rich Prompt.ask\n- 会话持久化，保存时间戳和思考耗时\n- sys.stdout.reconfigure(encoding=utf-8) 修复 Windows GBK 控制台编码\n\n**修改文件：**\n- chat_runtime.py — TUI 渲染核心\n- chat_commands.py — 斜杠命令处理\n- chat_session.py — 会话持久化\n- cli.py — 入口编码修复",
+    "risk_level": "medium",
+    "risk_categories": [
+      "correctness",
+      "error_handling"
+    ],
+    "priority_files": [
+      "src/ai_pr_review/chat_runtime.py"
+    ],
+    "skipped_files": [],
+    "strategies": [
+      "changed_line_review",
+      "evidence_validation",
+      "risk_category_review",
+      "cross_file_impact_review"
+    ],
+    "requires_cross_file_analysis": true,
+    "estimated_file_reviews": 1,
+    "rationale": [
+      "Review scope is derived from the PR metadata and included file set.",
+      "Detected risk categories: correctness, error_handling.",
+      "Multiple files or interface-sensitive terms require a cross-file pass."
+    ]
+  }
+}

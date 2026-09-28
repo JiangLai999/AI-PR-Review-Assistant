@@ -20,7 +20,7 @@ def run_config_test(
     missing_api_key_message: Callable[[str], str],
 ) -> dict[str, Any]:
     validate_provider_for_test(config, missing_api_key_message=missing_api_key_message)
-    provider = config.provider.to_model_provider()
+    provider = config.ai_client.model_provider
     return {
         "provider": provider,
         "output_format": config.preferences.output_format,

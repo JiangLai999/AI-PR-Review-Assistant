@@ -394,7 +394,7 @@ website/
 |------|------|
 | `docs/PROJECT_DESIGN.md` | 完整项目设计书 |
 | `docs/INNOVATION.md` | 创新点文档（本文件） |
-| `docs/WEBSITE.md` | 前端展示参考文档 |
+| `website/README.md` | 前端展示参考文档（原写作 docs/WEBSITE.md，该文件不存在） |
 | `docs/API.md` | API 文档 |
 | `website/` | 前端展示页面 |
 

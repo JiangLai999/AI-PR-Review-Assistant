@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import click
 from rich.box import ASCII
 from rich.console import Console
 from rich.panel import Panel
@@ -18,26 +19,32 @@ from ai_pr_review.services.result_store import ResultStore
 
 
 def build_chat_help_text() -> str:
-    """构建帮助文本，使用表格对齐。"""
+    """构建帮助文本，使用表格对齐。
+
+    命令表与 `docs/chat-features.md` §1 一一对应；tests/test_chat_commands.py
+    会用源码里 grep 出来的实现集合做双向对照（多一个、少一个都会失败）。
+    """
     return (
-        "  命令              说明\n"
-        "  ─────────────────────────────────────────\n"
-        "  /help             显示此帮助信息\n"
-        "  /new              开始新会话\n"
-        "  /status           显示当前会话状态\n"
-        "  /usage            显示消息/字符统计\n"
-        "  /compact          压缩会话历史\n"
-        "  /restore          恢复之前的会话记录\n"
-        "  /config           显示当前会话配置\n"
-        "  /session          显示当前 chat 会话信息\n"
-        "  /history [N]      显示最近 N 条审查历史\n"
-        "  /stats            显示审查统计\n"
-        "  /model <ID>       仅本次会话切换模型\n"
-        "  /review <URL>     在当前会话中运行 PR 审查\n"
-        "  /clear            清空当前会话历史\n"
-        "  /exit             退出聊天\n"
+        "  命令                 说明\n"
+        "  ──────────────────────────────────────────────\n"
+        "  /help                显示此帮助信息\n"
+        "  /status              显示当前会话状态\n"
+        "  /usage               显示消息/字符统计\n"
+        "  /new                 保存当前会话并开始新会话\n"
+        "  /clear               清空当前会话历史（含已保存记录）\n"
+        "  /restore             恢复上一次保存的会话记录\n"
+        "  /compact             压缩会话历史（保留首条与最近 4 条）\n"
+        "  /history [N]         显示最近 N 条审查历史\n"
+        "  /stats               显示审查统计\n"
+        "  /config              显示当前会话配置\n"
+        "  /session             显示当前 chat 会话信息\n"
+        "  /model <ID>          仅本次会话切换模型\n"
+        "  /review <PR URL>     在当前会话中运行 PR 审查\n"
+        "  /exit                退出聊天\n"
         "\n"
-        "  提示: 粘贴 GitHub PR URL 可自动触发审查"
+        "  提示: 粘贴 GitHub PR URL 可自动触发审查\n"
+        "  提示: TUI（pr-review chat 交互界面）另有 /think /context /workbench 等命令，\n"
+        "        见 docs/chat-features.md 与 TUI 内的 /help"
     )
 
 
@@ -211,7 +218,11 @@ def handle_basic_chat_slash_command(
         if not argument:
             console.print("[red]用法: /model <模型ID>[/red]")
             return True
-        set_active_model(config, argument)
+        try:
+            set_active_model(config, argument)
+        except click.ClickException as exc:
+            console.print(Panel(str(exc), title="Model Switch Blocked", border_style="yellow"))
+            return True
         console.print(f"[green]✓[/green] 模型已切换为: [bold]{config.ai_client.model}[/bold]")
         return True
     if command == "/status":
@@ -221,7 +232,9 @@ def handle_basic_chat_slash_command(
         table = Table(box=None, expand=True, show_header=False)
         table.add_column("Key", style="bold white", width=14)
         table.add_column("Value", style="grey70")
-        table.add_row("Provider", config.provider.display_name or config.ai_client.provider)
+        table.add_row(
+            "Provider", config._active_provider_config().display_name or config.ai_client.provider
+        )
         table.add_row("Model", config.ai_client.model)
         table.add_row("Base URL", config.ai_client.base_url or "default")
         table.add_row("Language", config.preferences.language)

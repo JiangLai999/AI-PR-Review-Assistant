@@ -1,0 +1,622 @@
+"""混合审查编排器 - 使用双模型协作策略执行审查。"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from collections.abc import Callable
+from typing import Any
+
+from ai_pr_review.config import AIClientConfig, AppConfig, ModelProviderConfig
+from ai_pr_review.models.pr_data import FileDiff
+from ai_pr_review.services import review_orchestrator as standard_review
+from ai_pr_review.services.analyzers.python_ast_analyzer import PythonAstAnalyzer
+from ai_pr_review.services.analyzers.static_analyzer import StaticAnalyzer
+from ai_pr_review.services.context_builder import FileContext
+from ai_pr_review.services.cost_controller import CostLedger
+from ai_pr_review.services.evidence.finding_validator import FindingValidator
+from ai_pr_review.services.filter_pipeline import FilterPipeline
+from ai_pr_review.services.finding_localizer import localize_deterministic_finding
+from ai_pr_review.services.i18n_text import review_summary
+from ai_pr_review.services.model_selector import ModelSelector, TaskComplexity
+from ai_pr_review.services.post_processor import PostProcessor
+from ai_pr_review.services.prompt_assembler import (
+    Finding,
+    PromptAssembler,
+    ReviewResult,
+    related_file_system_rules,
+)
+from ai_pr_review.services.repo_context import FileSystemRepoCache, RepoContextProvider
+from ai_pr_review.services.result_store import ResultStore
+from ai_pr_review.services.review_orchestrator import ReviewArtifacts, ReviewCancelled
+
+logger = logging.getLogger(__name__)
+
+# preferences.repo_context 的取值范围见 config.REPO_CONTEXT_MODES。
+# 字段缺失时按默认 tests+imports / 3 / 4000 处理（与 PreferencesConfig 默认值一致）。
+DEFAULT_REPO_CONTEXT_MODE = "tests+imports"
+DEFAULT_REPO_CONTEXT_MAX_FILES = 3
+DEFAULT_REPO_CONTEXT_BUDGET_TOKENS = 4000
+
+
+class HybridReviewOrchestrator:
+    """混合审查编排器 - 智能选择本地或远程模型"""
+
+    def __init__(self, config: AppConfig):
+        self.config = config
+        self.model_selector = ModelSelector(config)
+        self.pr_fetcher = standard_review.PRFetcher(config=config.pr_fetcher)
+        self.filter_pipeline = standard_review.FilterPipeline(
+            language=getattr(config.preferences, "ui_language", "zh-CN")
+        )
+        self.context_builder = standard_review.ContextBuilder()
+        self.static_analyzer = StaticAnalyzer()
+        self.ast_analyzer = PythonAstAnalyzer()
+        # 与标准编排器同一套 response_language：相关文件段的中/英标题跟随用户语言。
+        self.prompt_assembler = standard_review.PromptAssembler(
+            response_language=getattr(config.preferences, "language", "zh-CN")
+        )
+        self.finding_validator = FindingValidator()
+        # 与标准编排器同一份 `app_config.post_processor`：用户的置信度门槛与
+        # 去重规则对默认（hybrid）路径同样生效。
+        self.post_processor = PostProcessor(config=config.post_processor)
+        self.result_store = ResultStore(config.result_store)
+
+    def _repo_context_mode(self) -> str:
+        """resolve preferences.repo_context；缺失/非法时回退 tests+imports。"""
+        raw = getattr(self.config.preferences, "repo_context", DEFAULT_REPO_CONTEXT_MODE)
+        mode = str(raw or DEFAULT_REPO_CONTEXT_MODE).strip().lower()
+        if mode in {"off", "tests", "tests+imports"}:
+            return mode
+        return DEFAULT_REPO_CONTEXT_MODE
+
+    def _repo_context_limits(self) -> tuple[int, int]:
+        """resolve max_files / budget_tokens；缺失时回退 3 / 4000。"""
+        max_files = getattr(
+            self.config.preferences,
+            "repo_context_max_files",
+            DEFAULT_REPO_CONTEXT_MAX_FILES,
+        )
+        budget = getattr(
+            self.config.preferences,
+            "repo_context_budget_tokens",
+            DEFAULT_REPO_CONTEXT_BUDGET_TOKENS,
+        )
+        try:
+            max_files = int(max_files)
+        except (TypeError, ValueError):
+            max_files = DEFAULT_REPO_CONTEXT_MAX_FILES
+        try:
+            budget = int(budget)
+        except (TypeError, ValueError):
+            budget = DEFAULT_REPO_CONTEXT_BUDGET_TOKENS
+        return max_files, budget
+
+    def _build_repo_provider(self, pr_data) -> RepoContextProvider | None:
+        """按偏好构造预取器；`off` 返回 None（零额外请求）。"""
+        mode = self._repo_context_mode()
+        if mode == "off":
+            return None
+        max_files, budget = self._repo_context_limits()
+        reasons = frozenset({"test"}) if mode == "tests" else None
+
+        def read_file(path: str) -> str | None:
+            return self.pr_fetcher.fetch_file_content(
+                pr_data.owner, pr_data.repo, path, pr_data.head_sha
+            )
+
+        cache = FileSystemRepoCache(pr_data.owner, pr_data.repo, pr_data.head_sha)
+        return RepoContextProvider(
+            read_file=read_file,
+            cache=cache,
+            max_files=max_files,
+            budget_tokens=budget,
+            reasons=reasons,
+        )
+
+    @staticmethod
+    def _related_to_dict(item) -> dict[str, Any]:
+        return {
+            "path": getattr(item, "path", ""),
+            "reason": getattr(item, "reason", ""),
+            "content": getattr(item, "content", ""),
+            "truncated": bool(getattr(item, "truncated", False)),
+            "from_cache": bool(getattr(item, "from_cache", False)),
+        }
+
+    def _client_config_for(
+        self,
+        selected_config: ModelProviderConfig,
+        model_name: str,
+        *,
+        is_local: bool,
+    ) -> AIClientConfig:
+        """Per-file client config.
+
+        The base is the user's AI client config, so budgets and limits carry
+        over — but a **local** Ollama call must not inherit the cloud price
+        table (3.0/15.0 per million). Real evidence: a `local_only` run with zero
+        remote calls reported ≈$0.0311, i.e. it was billed as if DeepSeek had
+        answered every file.
+        """
+        price_overrides: dict[str, float] = (
+            {"input_cost_per_million": 0.0, "output_cost_per_million": 0.0} if is_local else {}
+        )
+        return AIClientConfig(
+            **{
+                **self.config.ai_client.__dict__,
+                "provider": selected_config.name,
+                "api_key": selected_config.api_key,
+                "model": model_name,
+                "base_url": selected_config.base_url,
+                "api_format": selected_config.api_format,
+                "headers": dict(selected_config.headers),
+                "extra_params": dict(selected_config.extra_params),
+                **price_overrides,
+            }
+        )
+
+    async def review(
+        self,
+        pr_url: str,
+        *,
+        model: str | None = None,
+        progress_callback: Callable[[str, str], None] | None = None,
+        file_done_callback: Callable[[str], None] | None = None,
+        stage_callback: Callable[[str, str], None] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
+        file_result_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> ReviewArtifacts:
+        """执行混合模型审查
+
+        使用双模型协作策略：
+        - 低风险文件：本地模型 + 确定性规则
+        - 中风险文件：根据策略决定
+        - 高风险文件：远程模型深度分析
+
+        `file_result_callback(payload)` 与标准编排器同构（契约 §10.2）：被过滤的
+        文件报 `skipped`，逐文件模型调用抛异常时报 `failed`（本编排器按原语义
+        吞掉异常继续跑），其余报 `reviewed`。`findings_count` 只统计该文件模型
+        调用返回的 finding，确定性规则结论在运行级合并。
+
+        每条 finding（模型与确定性规则）都会经 `FindingValidator` 标注证据状态，
+        计数写进 `metadata["validation_summary"]` 与 `ReviewArtifacts.validation_summary`。
+
+        写库前，组装好的结果再经 `PostProcessor.process_with_stats`（与标准编排器
+        同一入口、同一份 `app_config.post_processor`）做置信度门槛、去重与严重程度
+        排序；过滤计数写进 `metadata["filtered_findings"]` 与
+        `ReviewArtifacts.filtered_findings`。
+
+        `cancel_check()` 在每个文件边界被调用，并在模型调用进行中被轮询（见
+        `review_orchestrator.call_with_cancellation`）：返回 True 时抛出
+        `ReviewCancelled`，在飞的调用随取消中止，剩余文件不再发起调用，且不写库、
+        不为没有结论的文件发 `reviewed`/`failed` 回调。
+        """
+        start_time = time.perf_counter()
+
+        def stage(name: str, detail: str = "") -> None:
+            if cancel_check is not None and cancel_check():
+                raise ReviewCancelled()
+            if stage_callback is not None:
+                stage_callback(name, detail)
+
+        # 阶段 1: 获取 PR 数据
+        stage("fetching", "正在读取 PR 元数据与变更内容")
+        pr_data = await asyncio.to_thread(self.pr_fetcher.fetch, pr_url)
+
+        # 阶段 2: 过滤文件
+        stage("filtering", f"共 {pr_data.changed_files_count} 个变更文件，正在过滤")
+        filtered_pr_data, filter_result = self.filter_pipeline.filter_pr_data(pr_data)
+        # 被过滤掉的文件永远不会进入审查循环，只能在这里如实上报。
+        standard_review.emit_skipped_file_results(file_result_callback, filter_result)
+
+        # 阶段 3: 构建上下文
+        stage("context", f"为 {len(filtered_pr_data.files)} 个文件构建代码上下文")
+        file_contexts = []
+        # 仓库感知（L1-b）：预取相关文件，失败一律降级为空，绝不中断审查。
+        repo_files: list[str] = []
+        repo_from_cache = 0
+        repo_truncated: list[str] = []
+        repo_skipped_reason: str | None = None
+        try:
+            repo_provider = self._build_repo_provider(pr_data)
+        except Exception as exc:
+            repo_provider = None
+            repo_skipped_reason = str(exc) or exc.__class__.__name__
+            logger.warning("repo context provider init failed: %s", exc)
+        if repo_provider is None and repo_skipped_reason is None:
+            repo_skipped_reason = "off" if self._repo_context_mode() == "off" else None
+
+        for file_diff in filtered_pr_data.files:
+            full_content = await asyncio.to_thread(
+                self.pr_fetcher.fetch_file_content,
+                pr_data.owner,
+                pr_data.repo,
+                file_diff.filename,
+                pr_data.head_sha,
+            )
+            context = self.context_builder.build_context(
+                file_diff.filename,
+                file_diff.patch or "",
+                full_content or "",
+            )
+            related_payloads: list[dict[str, Any]] = []
+            if repo_provider is not None:
+                try:
+                    collected = await asyncio.to_thread(
+                        repo_provider.collect_for_file, file_diff.filename
+                    )
+                except Exception as exc:
+                    # 预取失败降级为空列表；首个原因写进 metadata.skipped_reason。
+                    if repo_skipped_reason is None:
+                        repo_skipped_reason = str(exc) or exc.__class__.__name__
+                    logger.warning(
+                        "repo context prefetch failed for %s: %s",
+                        file_diff.filename,
+                        exc,
+                    )
+                    collected = []
+                for item in collected:
+                    payload = self._related_to_dict(item)
+                    related_payloads.append(payload)
+                    repo_files.append(payload["path"])
+                    if payload["from_cache"]:
+                        repo_from_cache += 1
+                    if payload["truncated"]:
+                        repo_truncated.append(payload["path"])
+            if related_payloads:
+                context = context.model_copy(update={"related_files": related_payloads})
+            file_contexts.append((file_diff, context))
+
+        repo_context_meta = {
+            "files": repo_files,
+            "from_cache": repo_from_cache,
+            "truncated": repo_truncated,
+            "skipped_reason": repo_skipped_reason,
+        }
+
+        # 阶段 4: 运行确定性规则（所有文件）
+        stage("static_rules", "运行静态安全规则和 AST 分析")
+        all_findings: list[Finding] = []
+        # 路由用的"本文件静态发现"分桶。此前直接把全局 all_findings 当单文件 static_findings
+        # 传给复杂度评估与模型选择，于是「第 2 个文件」起会看到前面所有文件的发现，
+        # 判定随处理顺序放大（前一个文件有高危 → 后续文件全部被判为需要远程）。
+        static_findings_by_file: dict[str, list[Finding]] = {}
+        validation_counts = {"valid": 0, "needs_review": 0, "invalid": 0}
+
+        def record(
+            finding: Finding,
+            file_diff: FileDiff,
+            context: FileContext,
+            *,
+            routing_bucket: dict[str, list[Finding]] | None = None,
+        ) -> None:
+            """本地化 + 证据校验后收录一条 finding。
+
+            与标准编排器同一条路径（`review_orchestrator.py:265-271`）：先按 `rule_id`
+            本地化确定性文案，再用 `FindingValidator` 校验「位置 + 片段」是否与
+            `(file_diff, context)` 自洽，结论写回 `evidence_status`，**绝不因此丢弃
+            finding**。模型产出与确定性规则产出都走这里，所以真实评论不再出现
+            「校验通过 0 / 未校验 N」。
+
+            模型在审查 A 文件时点名 B 文件（跨文件 finding）时，用 B 自己的
+            `(file_diff, context)` 校验；B 不在本次审查范围内则如实记为 invalid。
+            """
+            localized = localize_deterministic_finding(
+                finding, getattr(self.config.preferences, "language", "zh-CN")
+            )
+            if localized.file == file_diff.filename:
+                evidence = self.finding_validator.validate(localized, file_diff, context)
+            else:
+                evidence = self.finding_validator.validate_against_contexts(
+                    localized, file_contexts
+                )
+            all_findings.append(self.finding_validator.annotate(localized, evidence))
+            validation_counts[evidence.validation_status] += 1
+            if routing_bucket is not None:
+                # 只登记"属于该文件"的发现；跨文件 finding 的 file 不是本文件时不入桶，
+                # 否则同一个文件的路由依据会被别的文件污染。
+                if localized.file == file_diff.filename:
+                    routing_bucket.setdefault(file_diff.filename, []).append(all_findings[-1])
+
+        for file_diff, context in file_contexts:
+            # 静态规则
+            for finding in self.static_analyzer.analyze(file_diff, context):
+                record(finding, file_diff, context, routing_bucket=static_findings_by_file)
+
+            # AST 分析
+            if file_diff.filename.endswith(".py"):
+                for finding in self.ast_analyzer.analyze(file_diff, context):
+                    record(finding, file_diff, context, routing_bucket=static_findings_by_file)
+
+        # 阶段 5: 智能分级审查
+        stage("reviewing", f"开始智能分级审查，共 {len(file_contexts)} 个文件")
+
+        reviewed_count = 0
+        # 失败文件也要计数：本编排器会吞掉单文件异常继续跑，如果只看 findings
+        # 数量，一把坏掉的 API Key 会被读成“审查完成，发现 0 个问题”。
+        failed_files: list[dict[str, str]] = []
+        total_cost = 0.0
+        # 同一 (provider, model, local/remote) 只建一个 AIClient 并全程复用：
+        # 它内部的 CostController 才是 run 级预算（max_cost_per_run / 24h）的真正载体。
+        # 此前逐文件新建 ⇒ 每个客户端各持一份计数器，预算被按文件数反复"重置"，
+        # run 级上限等于失效。
+        clients: dict[tuple[str, str, bool], Any] = {}
+        # 所有客户端共享**同一个账本**：local / remote 各持一份成本计数器时，
+        # `max_cost_per_run` / 24h 预算会被按槽位数稀释（各花一半即可分别绕过）。
+        # 注意只共享账本、不共享 CostController —— 后者会让本地调用按云端价计费。
+        cost_ledger = CostLedger()
+        # 账本是全局累计值，因此按"全局总量的差值"计入本轮：
+        # 否则第 2 个文件起会把前面积累的成本再加一遍（成本越算越多）。
+        observed_total_cost = 0.0
+        for file_diff, context in file_contexts:
+            # 每个文件开始前检查：已请求取消立即抛出，剩余文件不再发起模型调用。
+            if cancel_check is not None and cancel_check():
+                raise ReviewCancelled()
+
+            # 评估文件复杂度
+            file_static_findings = static_findings_by_file.get(file_diff.filename, [])
+            complexity = self.model_selector.evaluate_file_complexity(
+                file_path=file_diff.filename,
+                additions=file_diff.additions,
+                deletions=file_diff.deletions,
+                static_findings=file_static_findings,
+            )
+
+            # 选择模型
+            provider, model_name, is_local = self.model_selector.select_model_for_task(
+                task_type="file_review",
+                complexity=complexity,
+                context={
+                    "file_path": file_diff.filename,
+                    "additions": file_diff.additions,
+                    "deletions": file_diff.deletions,
+                    "static_findings": file_static_findings,
+                },
+            )
+
+            # 进度回调
+            if progress_callback:
+                model_label = f"{'本地' if is_local else '远程'}/{model_name}"
+                progress_callback(file_diff.filename, model_label)
+
+            # 使用所选模型执行审查；低复杂度任务也走本地模型，避免静默丢失
+            # 模型发现，并保证本地/远程策略都能产生统一 ReviewResult。
+            system_prompt = self.prompt_assembler.build_system_prompt(context.language)
+            # 相关文件注入时追加诚实约束（模块级函数，不依赖 stub 是否实现新方法）。
+            if getattr(context, "related_files", None):
+                response_language = str(getattr(self.config.preferences, "language", "zh-CN"))
+                system_prompt = f"{system_prompt}\n\n" + related_file_system_rules(
+                    response_language
+                )
+            user_prompt = self.prompt_assembler.build_user_prompt(context)
+
+            call_started_at = time.perf_counter()
+            selected_client: Any = None
+            client_key: tuple[str, str, bool] | None = None
+            try:
+                selected_config = self.config.ai_client.model_provider
+                if is_local:
+                    selected_config = ModelProviderConfig.from_name("ollama", model_name=model_name)
+                selected_ai_config = self._client_config_for(
+                    selected_config, model_name, is_local=is_local
+                )
+                client_key = (selected_config.name, model_name, is_local)
+                selected_client = clients.get(client_key)
+                if selected_client is None:
+                    selected_client = standard_review.AIClient(
+                        selected_ai_config, cost_ledger=cost_ledger
+                    )
+                    clients[client_key] = selected_client
+                # 在飞的调用同样要能被取消：否则按了 Esc 还得等这次调用跑完。
+                response = await standard_review.call_with_cancellation(
+                    lambda: selected_client.review_code(system_prompt, user_prompt),
+                    cancel_check,
+                )
+                result = response
+            except ReviewCancelled:
+                # 取消不是"这个文件审查失败"：不报 failed，也不继续下一个文件。
+                raise
+            except Exception as e:
+                # 该文件的模型调用失败：如实上报 failed（findings_count 未知，
+                # 不是 0），再按本编排器原有语义吞掉异常继续处理下一个文件。
+                failure_message = str(e) or e.__class__.__name__
+                failed_files.append({"filename": file_diff.filename, "error": failure_message})
+                standard_review.emit_file_result(
+                    file_result_callback,
+                    file_diff.filename,
+                    "failed",
+                    findings_count=None,
+                    duration_ms=standard_review.elapsed_ms(call_started_at),
+                    error=failure_message,
+                )
+                result = ReviewResult(
+                    summary=f"审查失败: {e}",
+                    findings=[],
+                )
+            else:
+                findings = getattr(result, "findings", None)
+                standard_review.emit_file_result(
+                    file_result_callback,
+                    file_diff.filename,
+                    "reviewed",
+                    findings_count=len(findings) if isinstance(findings, list) else None,
+                    duration_ms=standard_review.elapsed_ms(call_started_at),
+                    error=None,
+                )
+                # 只统计真正完成的文件：失败文件进 failed_files。此前这个
+                # 计数把失败也算了进去，summary 会同时报"N 个已审查"和
+                # "N 个未能审查"，自相矛盾。
+                reviewed_count += 1
+
+            # 成本按"共享账本总量的增量"记账：正常返回与失败分支都要结算
+            # （失败的上游调用同样可能已经计费），取消则由上面的 `raise` 直接跳出。
+            # 所有客户端读到的都是同一个账本 ⇒ 用总量差值即可，天然不会重复计数。
+            if selected_client is not None and client_key is not None:
+                observed = max(
+                    (float(getattr(client, "total_run_cost", 0.0)) for client in clients.values()),
+                    default=0.0,
+                )
+                call_cost = max(0.0, observed - observed_total_cost)
+                observed_total_cost = observed
+                total_cost += call_cost
+                self.model_selector.record_cost(call_cost)
+
+            # 模型产出与确定性规则产出走同一条校验路径：调用点就在该文件的
+            # (file_diff, context) 旁边，校验必然拿到正确的文件内容。
+            for finding in result.findings:
+                record(finding, file_diff, context)
+
+            # 文件完成回调
+            if file_done_callback:
+                file_done_callback(file_diff.filename)
+
+        # 阶段 6: 保存结果
+        stage("persisting", "保存审查记录到本地数据库")
+        duration = time.perf_counter() - start_time
+
+        # 获取统计信息
+        stats = self.model_selector.get_statistics()
+
+        # 写库前走与标准编排器同一个后处理入口（同一份 app_config.post_processor）：
+        # 置信度门槛、去重、严重程度排序只此一份实现，默认（hybrid）路径不再把
+        # 低于门槛的噪音直接写进报告与 GitHub 评论。
+        review_result, filtered_findings = self.post_processor.process_with_stats(
+            ReviewResult(summary="", findings=all_findings)
+        )
+
+        # 构建最终 summary；空审查范围必须保留过滤原因，便于 CLI / Web 解释。
+        # 非空时报后处理之后的真实条数——被门槛滤掉的 finding 不该留在标题里。
+        if filter_result.included_count == 0:
+            reason_labels = {
+                "excluded_by_pattern": "命中黑名单规则",
+                "excluded_deletion_only": "仅删除改动",
+                "excluded_too_large": "变更量过大",
+                "custom_rule": "自定义规则过滤",
+            }
+            reason_counts = filter_result.excluded_reason_counts()
+            if reason_counts:
+                reasons = "; ".join(
+                    f"{reason_labels.get(code, code)} {count} 个"
+                    for code, count in sorted(reason_counts.items())
+                )
+                summary = (
+                    "No reviewable files remained after filtering. "
+                    f"Excluded {filter_result.excluded_count} files: {reasons}."
+                )
+            else:
+                summary = "No reviewable files remained after filtering."
+        elif failed_files and reviewed_count == 0:
+            # 全部文件都失败时绝不能报"审查完成，发现 0 个问题"：那会把一把
+            # 失效的 API Key 伪装成一次干净的审查（真实事故场景）。
+            # 但确定性静态分析仍可能产出 finding（rule_id 非空）：必须在同一句
+            # 里说清来源，否则用户会看到"审查失败"与"发现 N 个问题"并列却不知
+            # 道 N 从哪来（PR #31 实测：14 个文件模型调用全失败，静态分析给出 4 条）。
+            static_count = sum(
+                1 for finding in review_result.findings if getattr(finding, "rule_id", "")
+            )
+            detail = f"（首个错误：{failed_files[0]['error']}）"
+            if static_count:
+                detail += f"；附带 {static_count} 条确定性静态分析结论（非模型结论，仅供参考）"
+            summary = f"审查失败：{len(failed_files)} 个文件均未能完成模型审查{detail}"
+        elif failed_files:
+            summary = (
+                f"审查完成（部分失败）：{reviewed_count} 个文件已审查，"
+                f"{len(failed_files)} 个文件未能审查，发现 {len(review_result.findings)} 个问题"
+            )
+        else:
+            # 生成时本地化：这条摘要随 run 落库，按当时的 ui_language 冻结。
+            summary = review_summary(
+                getattr(self.config.preferences, "ui_language", "zh-CN"),
+                len(review_result.findings),
+            )
+
+        review_result = review_result.model_copy(update={"summary": summary})
+
+        artifacts = ReviewArtifacts(
+            pr_data=filtered_pr_data,
+            review_result=review_result,
+            filter_result=filter_result,
+            review_plan=None,
+            total_cost=total_cost,
+            duration_seconds=duration,
+            run_id="",  # 将由 ResultStore 生成
+            validation_summary=validation_counts,
+            filtered_findings=filtered_findings,
+        )
+
+        # Re-check right before persisting: cancelling after the last stage
+        # callback used to still write a run into history and report completion.
+        if cancel_check is not None and cancel_check():
+            raise ReviewCancelled()
+
+        # Describe the routing that actually happened (honest metadata).
+        # `getattr` keeps custom/test selectors (which may only implement the
+        # public `select_model_for_task` surface) working.
+        local_model = (
+            getattr(self.model_selector, "local_model", "")
+            or self.config.local_provider.default_model
+        )
+        remote_model = (
+            getattr(self.model_selector, "remote_model", "") or self.config.ai_client.model
+        )
+        if stats["local_calls"] and stats["remote_calls"]:
+            routing_model_used = f"{local_model} + {remote_model}"
+        elif stats["local_calls"]:
+            routing_model_used = local_model
+        elif stats["remote_calls"]:
+            routing_model_used = remote_model
+        else:
+            routing_model_used = local_model
+
+        # 保存到数据库
+        run_id = self.result_store.save_result(
+            pr_url=pr_url,
+            result=review_result,
+            head_sha=filtered_pr_data.head_sha,
+            total_files=pr_data.changed_files_count,
+            included_files=filter_result.included_count,
+            excluded_files=filter_result.excluded_count,
+            total_cost=total_cost,
+            duration_seconds=duration,
+            model=self.config.ai_client.model,
+            metadata={
+                # Kept so `/publish` can render the real PR title later; runs
+                # saved before this field existed have no title at all and are
+                # published with an explicit placeholder instead (§12.2).
+                "pr_title": pr_data.title,
+                # `/publish` 之后只能从库里重建 PRData，作者同样只能靠这里；
+                # 没记录作者的旧 Run 才回退到占位符（§12.2）。
+                "pr_author": pr_data.author or "",
+                # Fork 信息（P6 ③）：同 review_orchestrator，供 `/publish`
+                # 重建评论时决定用 PR files 链接还是 blob 链接。
+                "fork": {
+                    "is_fork": pr_data.is_fork,
+                    "head_repo": pr_data.head_repo_full_name,
+                },
+                # 与标准编排器同名字段：hybrid 也把证据校验计数落在 run metadata 里。
+                "validation_summary": validation_counts,
+                # 后处理丢掉了多少（门槛/去重），与标准编排器同键同义。
+                "filtered_findings": filtered_findings,
+                # 仓库感知（L1-b §4.7）：本次预取了哪些相关文件、几个来自缓存、
+                # 哪些被截断、以及预取是否被跳过/失败。
+                "repo_context": repo_context_meta,
+                "strategy": stats["strategy"],
+                "hybrid": True,
+                "local_calls": stats["local_calls"],
+                "remote_calls": stats["remote_calls"],
+                # 逐文件失败（文件名 + 错误）必须留痕：summary 只说总量，
+                # 这里回答"到底是哪个文件、因为什么没审查"。
+                "failed_files": failed_files,
+                "failed_file_count": len(failed_files),
+                # What actually ran, not just what is configured: a remote_only
+                # run used to record the *local* model here, which made `/history`
+                # and the CLI report read as if Ollama had done the review.
+                "routing_model": routing_model_used,
+            },
+        )
+
+        artifacts.run_id = run_id
+
+        return artifacts

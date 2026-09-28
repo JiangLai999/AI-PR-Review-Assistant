@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 from contextlib import closing
 
+import pytest
+
 from ai_pr_review.config import ResultStoreConfig
 from ai_pr_review.services.prompt_assembler import Finding, ReviewResult
 from ai_pr_review.services.result_store import ResultStore
@@ -164,3 +166,151 @@ def test_database_uses_wal_mode(tmp_path):
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
     assert journal_mode.lower() == "wal"
+
+
+# --------------------------------------------------------------- 追问记录
+
+
+def _store_with_run(tmp_path, *, max_results: int = 10):
+    """建一个带一条 run 的库，返回 (store, run_id)。"""
+    store = ResultStore(
+        ResultStoreConfig(db_path=str(tmp_path / "results.db"), max_results=max_results)
+    )
+    run_id = store.save_result(
+        "https://github.com/test-owner/test-repo/pull/9",
+        build_review_result(summary="chat host"),
+    )
+    return store, run_id
+
+
+def test_chat_turns_round_trip_and_index(tmp_path):
+    store, run_id = _store_with_run(tmp_path)
+
+    question = store.save_chat_turn(run_id, role="user", content="这次审查有几个问题？")
+    answer = store.save_chat_turn(
+        run_id,
+        role="assistant",
+        content="两个：一个中风险，一个低风险。",
+        model="deepseek-flash",
+        usage={"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150},
+        context_meta={"bound_run": run_id, "sections": ["run_summary"]},
+        duration_ms=1820,
+    )
+
+    assert (question["turn_index"], answer["turn_index"]) == (1, 2)
+    assert question["turn_id"] != answer["turn_index"]
+    assert answer["usage"]["total_tokens"] == 150
+    assert answer["context_meta"]["bound_run"] == run_id
+    assert answer["duration_ms"] == 1820
+    assert answer["created_at"]
+
+    turns = store.list_chat_turns(run_id)
+    assert [turn["role"] for turn in turns] == ["user", "assistant"]
+    assert [turn["turn_index"] for turn in turns] == [1, 2]
+    assert turns[1]["content"].startswith("两个")
+
+
+def test_chat_turns_are_scoped_per_run_and_by_limit(tmp_path):
+    store, run_id = _store_with_run(tmp_path)
+    other_id = store.save_result(
+        "https://github.com/test-owner/test-repo/pull/10",
+        build_review_result(summary="other"),
+    )
+    store.save_chat_turn(run_id, role="user", content="A")
+    store.save_chat_turn(other_id, role="user", content="B")
+    store.save_chat_turn(run_id, role="user", content="C")
+
+    assert [turn["content"] for turn in store.list_chat_turns(run_id)] == ["A", "C"]
+    assert [turn["content"] for turn in store.list_chat_turns(other_id)] == ["B"]
+    # limit 取最早的 N 条（顺序契约：turn_index ASC）。
+    assert [turn["content"] for turn in store.list_chat_turns(run_id, limit=1)] == ["A"]
+    assert store.list_chat_turns("no-such-run") == []
+
+
+def test_chat_turn_rejects_unknown_role(tmp_path):
+    store, run_id = _store_with_run(tmp_path)
+
+    with pytest.raises(ValueError, match="Unsupported chat role"):
+        store.save_chat_turn(run_id, role="system", content="nope")
+
+
+def test_chat_turn_payload_tolerates_broken_json(tmp_path):
+    """导入/迁移进来的脏行不能让整页追问炸掉：解不开就当空 dict。"""
+    store, run_id = _store_with_run(tmp_path)
+    store.save_chat_turn(run_id, role="assistant", content="hi", usage={"a": 1})
+
+    with closing(sqlite3.connect(store.db_path)) as connection:
+        connection.execute("UPDATE chat_turns SET usage_json = 'not json'")
+        connection.commit()
+
+    turn = store.list_chat_turns(run_id)[0]
+    assert turn["usage"] == {}
+    assert turn["model"] == ""
+
+
+def test_clear_chat_turns_removes_only_that_run(tmp_path):
+    store, run_id = _store_with_run(tmp_path)
+    other_id = store.save_result(
+        "https://github.com/test-owner/test-repo/pull/11",
+        build_review_result(summary="keep"),
+    )
+    store.save_chat_turn(run_id, role="user", content="A")
+    store.save_chat_turn(run_id, role="user", content="B")
+    store.save_chat_turn(other_id, role="user", content="keep me")
+
+    assert store.clear_chat_turns(run_id) == 2
+    assert store.list_chat_turns(run_id) == []
+    assert len(store.list_chat_turns(other_id)) == 1
+    # 再清一次是幂等的 0，不是抛错。
+    assert store.clear_chat_turns(run_id) == 0
+
+
+def test_pruning_runs_also_prunes_their_chat_turns(tmp_path):
+    """追问记录跟着 run 一起清：删掉的 run 已经没有任何入口能打开它。"""
+    db_path = tmp_path / "results.db"
+    store = ResultStore(ResultStoreConfig(db_path=str(db_path), max_results=1))
+    old_id = store.save_result(
+        "https://github.com/test-owner/test-repo/pull/1",
+        build_review_result(summary="old"),
+    )
+    store.save_chat_turn(old_id, role="user", content="会被清掉的追问")
+
+    new_id = store.save_result(
+        "https://github.com/test-owner/test-repo/pull/2",
+        build_review_result(summary="new"),
+    )
+    store.save_chat_turn(new_id, role="user", content="保留的追问")
+
+    assert store.list_chat_turns(old_id) == []
+    assert len(store.list_chat_turns(new_id)) == 1
+    with closing(sqlite3.connect(db_path)) as connection:
+        orphans = connection.execute(
+            "SELECT COUNT(*) FROM chat_turns WHERE run_id NOT IN (SELECT id FROM runs)"
+        ).fetchone()[0]
+    assert orphans == 0
+
+
+def test_chat_turns_table_is_created_on_legacy_database(tmp_path):
+    """老库（只有 runs/finding_feedback）打开后必须自动补出 chat_turns 表。"""
+    db_path = tmp_path / "legacy.db"
+    with closing(sqlite3.connect(db_path)) as connection:
+        connection.execute(
+            """
+            CREATE TABLE runs (
+                id TEXT PRIMARY KEY, pr_url TEXT NOT NULL, pr_number INTEGER,
+                repo_owner TEXT, repo_name TEXT, head_sha TEXT,
+                total_files INTEGER, included_files INTEGER, excluded_files INTEGER,
+                total_findings INTEGER, critical_findings INTEGER, high_findings INTEGER,
+                medium_findings INTEGER, low_findings INTEGER, info_findings INTEGER,
+                total_cost REAL, duration_seconds REAL, model TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                result_json TEXT, metadata_json TEXT
+            )
+            """
+        )
+        connection.commit()
+
+    store = ResultStore(ResultStoreConfig(db_path=str(db_path)))
+    store.save_chat_turn("legacy-run", role="user", content="hi")
+
+    assert [turn["content"] for turn in store.list_chat_turns("legacy-run")] == ["hi"]

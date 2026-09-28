@@ -42,7 +42,7 @@ def apply_wizard_configuration(
     preferences: PreferencesConfig,
 ) -> AppConfig:
     config = existing
-    config.provider = ProviderConfig(
+    provider_config = ProviderConfig(
         name=final_provider.name,
         display_name=final_provider.display_name,
         api_key=final_provider.api_key,
@@ -51,6 +51,17 @@ def apply_wizard_configuration(
         models={selected_model.name: selected_model},
         default_model=selected_model.name,
     )
+    if final_provider.name.lower() in {"ollama", "local"}:
+        # Choosing the local profile writes the local slot only, so a
+        # previously saved remote provider (endpoint + API key) stays available
+        # for `/model cloud`. Users whose primary provider already is Ollama keep
+        # the primary slot so re-running the wizard actually updates it.
+        if config.provider.name.lower() in {"ollama", "local"}:
+            config.provider = provider_config
+        else:
+            config.local_provider = provider_config
+    else:
+        config.provider = provider_config
     config.github_token = github_token
     config.preferences = preferences
     config.ai_client = AIClientConfig(

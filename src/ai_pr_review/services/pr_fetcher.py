@@ -121,6 +121,7 @@ class PRFetcher:
             merged=pr.merged,
             owner=parsed.owner,
             repo=parsed.repo,
+            head_repo_full_name=self._head_repo_full_name(pr),
         )
 
     def fetch_metadata(self, pr_url: str) -> PRData:
@@ -149,13 +150,41 @@ class PRFetcher:
             merged=pr.merged,
             owner=parsed.owner,
             repo=parsed.repo,
+            head_repo_full_name=self._head_repo_full_name(pr),
         )
 
-    def fetch_diff_only(self, pr_url: str) -> str:
-        """仅获取 PR 的 unified diff 文本。"""
+    def fetch_changed_file_paths(self, pr_url: str) -> list[str]:
+        """仅取本次 PR 的变更文件**路径**清单（不拉 diff）。
+
+        聊天侧"本次 PR 变更文件"段落需要它（docs/claude-repo-structure-context.md
+        §B）；大 PR 上 ``fetch()`` 会把 diff 一并拉下来（几十万字符的浪费），这里
+        只做 URL 解析 → PR → files 分页，复用同一套速率控制与重试。
+        """
         parsed = parse_pr_url(pr_url)
         pr = self._get_pull_request(parsed.owner, parsed.repo, parsed.pr_number)
-        return self._fetch_diff(pr)
+        return [file.filename for file in self._fetch_files(pr)]
+
+    def fetch_repo_tree_paths(self, owner: str, repo: str, ref: str) -> list[str]:
+        """列出 ``ref`` 下全部 blob 路径（git tree, recursive）。
+
+        与审查阶段的符号定位（`ReviewOrchestrator._list_repo_tree_paths`）同一份
+        数据；失败**不在这里吞**：调用方按"注入是增益"决定降级文案。目录项
+        （``type != "blob"``）不返回——注入给模型的是文件清单。
+        """
+        repo_obj = self._get_repo(owner, repo)
+        self._rate_limiter.acquire()
+        tree = self._execute_with_retry(
+            lambda: repo_obj.get_git_tree(ref, recursive=True),
+            error_context=f"获取仓库目录树 {owner}/{repo} @ {ref}",
+        )
+        paths: list[str] = []
+        for entry in getattr(tree, "tree", None) or []:
+            if getattr(entry, "type", "") != "blob":
+                continue
+            path = str(getattr(entry, "path", "") or "")
+            if path:
+                paths.append(path)
+        return paths
 
     # ── 内部方法 ────────────────────────────────────────────────
 
@@ -165,6 +194,23 @@ class PRFetcher:
             lambda: repo_obj.get_pull(pr_number),
             error_context=f"获取 PR {owner}/{repo}#{pr_number}",
         )
+
+    @staticmethod
+    def _head_repo_full_name(pr: PullRequest.PullRequest) -> str | None:
+        """PR head 仓库的 ``owner/repo``，未知时返回 ``None``。
+
+        GitHub 对已删除的 fork 仓库返回 ``None``，因此这里做三重容错：属性缺失、
+        值为 None、值不是字符串（测试替身）都当作「未知」。未知不是「同仓库」这个
+        结论，只是没有数据，调用方（``PRData.is_fork``）按非 fork 处理。
+        """
+        try:
+            head_repo = pr.head.repo
+        except AttributeError:
+            return None
+        full_name = getattr(head_repo, "full_name", None)
+        if not isinstance(full_name, str):
+            return None
+        return full_name.strip() or None
 
     def _get_repo(self, owner: str, repo: str) -> Repository:
         return self._execute_with_retry(

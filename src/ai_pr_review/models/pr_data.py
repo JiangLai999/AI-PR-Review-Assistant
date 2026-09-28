@@ -70,10 +70,24 @@ class PRData(BaseModel):
 
     owner: str = Field(description="仓库所有者")
     repo: str = Field(description="仓库名称")
+    head_repo_full_name: str | None = Field(
+        default=None,
+        description="PR 源分支所在仓库的 full name（fork PR 为 fork 仓库；被删除时为 None）",
+    )
 
     @property
     def repo_full_name(self) -> str:
         return f"{self.owner}/{self.repo}"
+
+    @property
+    def is_fork(self) -> bool:
+        """PR 的 head 仓库是否与 base 仓库不同。
+
+        缺数据（``None`` / 空串，例如被删除的 fork 仓库或字段加入前抓取的数据）时返回
+        ``False``：那时候「是不是 fork」不可知，按同仓库处理才不会把一个未知值当成结论。
+        """
+        head = (self.head_repo_full_name or "").strip()
+        return bool(head) and head.lower() != self.repo_full_name.lower()
 
     @property
     def total_additions(self) -> int:

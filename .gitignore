@@ -1,12 +1,32 @@
 # Local project secrets
 .ai_pr_review/config.json
 .ai_pr_review/config.local.json
+# Local fallback result store (SQLite + WAL) when the per-user path is unwritable
+.ai_pr_review/results.db
+.ai_pr_review/results.db-shm
+.ai_pr_review/results.db-wal
+# 多会话存储的运行时产物（backend.test.ts 等测试会在仓库内写它；
+# 真实用户的数据在配置目录旁，也不会进仓库）。
+.ai_pr_review/sessions/
 
 # Python cache and test artifacts
 __pycache__/
 *.py[cod]
 *.pyo
 .pytest_cache/
+# Sandbox-friendly TEMP dirs used when the default temp path is not writable
+.pytest_x/
+.pytest_codex/
+# Per-agent TEMP dirs used by scripts/agent_dispatch_runner.py
+.pytest_claude/
+.pytest_mimo/
+.pytest_codex/
+.pytest_opencode/
+# 兜底：任何 agent / 人工自建的 TEMP 目录（.pytest_c1/、.pytest_tui/ …）都不入库。
+# 具体名单会随 agent 增删而漂移，所以这里按前缀收口。
+.pytest_*/
+# Agent bus run logs (belt-and-braces: the bus has its own .gitignore too)
+.agent-bus/runs/
 .coverage
 htmlcov/
 
@@ -25,8 +45,42 @@ env/
 *.sqlite
 *.sqlite3
 
+# 工具缓存（mypy / ruff / MiMo CLI 各自会在目录里写 .gitignore 自忽略，
+# 但那份文件一旦被清理，缓存就会变成未跟踪文件，故在仓库层再钉一次）
+.mypy_cache/
+.ruff_cache/
+.mimocode/
+
+# Frontend toolchain (web/)
+# 注意：src/ai_pr_review/web_static/ 是构建产物，但需要提交——
+# 它是随包分发的界面资源，使 `pip install` 之后无需 Node 即可运行 pr-review serve。
+web/node_modules/
+web/.npm-cache/
+web/.vite/
+web/.shots/
+# 截图目录：按目录名兜底，避免再出现 web/web/.shots/ 这类重复路径被提交
+.shots/
+.distcheck/
+
+# OpenTUI frontend build output. The small staged bundle lives in
+# src/ai_pr_review/tui_static/ and is committed so `pip install` can run the
+# TUI with Bun; the ~90 MB compiled single-file binary stays local.
+frontend/tui/dist/
+# Frontend toolchain dependencies. The only payload that ships is the staged
+# copy under src/ai_pr_review/tui_static/, which IS committed.
+frontend/tui/node_modules/
+src/ai_pr_review/tui_static/pr-review-tui
+src/ai_pr_review/tui_static/pr-review-tui.exe
+
 # OS/editor files
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+
+# Local P5 installation and frame captures
+_p5_verify/
+
+# Raw transcripts from delegated agent CLIs
+_agent_out/
+.pytest_workbuddy/

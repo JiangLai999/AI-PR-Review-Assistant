@@ -1,5 +1,8 @@
 """Context Builder 模块单元测试。"""
 
+import pytest
+
+import ai_pr_review.services.context_builder as context_builder_module
 from ai_pr_review.config import ContextBuilderConfig
 from ai_pr_review.services.context_builder import ContextBuilder
 
@@ -54,7 +57,6 @@ class TestContextBuilder:
 
         assert result.file_path == "src/service.py"
         assert result.language == "python"
-        assert result.parse_mode == "regex"
         assert result.imports == ["import os", "from typing import Any"]
         assert [function.name for function in result.functions] == ["__init__", "run", "helper"]
         assert result.functions[1].is_async is True
@@ -71,12 +73,64 @@ class TestContextBuilder:
             in result.diff_with_context
         )
 
+    def test_tree_sitter_extracts_python_symbols(self):
+        pytest.importorskip(
+            "tree_sitter", reason="tree-sitter 属可选 ast extra，未安装时走 regex 降级"
+        )
+        builder = ContextBuilder(ContextBuilderConfig(enable_tree_sitter=True))
+
+        result = builder.extract_ast_context("src/service.py", PYTHON_CONTENT, "python")
+
+        assert result.parse_mode == "tree-sitter"
+        assert result.imports == ["import os", "from typing import Any"]
+        assert [function.name for function in result.functions] == ["__init__", "run", "helper"]
+        assert result.functions[1].is_async is True
+        assert result.functions[1].parameters == ["self", "item: str"]
+        assert result.functions[1].return_type == "dict[str, Any]"
+        assert len(result.classes) == 1
+        assert result.classes[0].name == "Service"
+        assert result.classes[0].methods == ["__init__", "run"]
+        assert result.classes[0].parent_classes == ["BaseService"]
+
+    def test_regex_and_tree_sitter_agree_on_python_symbols(self):
+        content = PYTHON_CONTENT
+        regex_result = ContextBuilder(
+            ContextBuilderConfig(enable_tree_sitter=False)
+        ).extract_ast_context("src/service.py", content, "python")
+        tree_result = ContextBuilder(
+            ContextBuilderConfig(enable_tree_sitter=True)
+        ).extract_ast_context("src/service.py", content, "python")
+
+        assert regex_result.parse_mode == "regex"
+        if tree_result.parse_mode != "tree-sitter":
+            pytest.skip("tree-sitter grammar is not installed in this environment")
+        assert [f.name for f in tree_result.functions] == [f.name for f in regex_result.functions]
+        assert [c.name for c in tree_result.classes] == [c.name for c in regex_result.classes]
+        assert tree_result.classes[0].methods == regex_result.classes[0].methods
+        assert tree_result.classes[0].parent_classes == regex_result.classes[0].parent_classes
+
     def test_extract_ast_context_extracts_typescript_symbols(self):
         builder = ContextBuilder(ContextBuilderConfig(enable_tree_sitter=False))
 
         result = builder.extract_ast_context("src/client.ts", TS_CONTENT, "typescript")
 
         assert result.parse_mode == "regex"
+        assert result.imports == ["import { http } from './http';"]
+        assert [function.name for function in result.functions] == ["request", "loadUser"]
+        assert result.functions[0].is_async is True
+        assert result.functions[1].return_type == "Promise<User>"
+        assert len(result.classes) == 1
+        assert result.classes[0].name == "ApiClient"
+        assert result.classes[0].methods == ["request"]
+        assert result.classes[0].parent_classes == ["BaseClient"]
+
+    def test_tree_sitter_extracts_typescript_symbols(self):
+        builder = ContextBuilder(ContextBuilderConfig(enable_tree_sitter=True))
+
+        result = builder.extract_ast_context("src/client.ts", TS_CONTENT, "typescript")
+
+        if result.parse_mode != "tree-sitter":
+            pytest.skip("tree-sitter typescript grammar is not installed in this environment")
         assert result.imports == ["import { http } from './http';"]
         assert [function.name for function in result.functions] == ["request", "loadUser"]
         assert result.functions[0].is_async is True
@@ -102,7 +156,18 @@ class TestContextBuilder:
         assert result.classes == []
         assert ">   1: new" in result.diff_with_context
 
-    def test_tree_sitter_failure_uses_regex_fallback(self):
+    def test_tree_sitter_disabled_uses_regex_fallback(self):
+        builder = ContextBuilder(ContextBuilderConfig(enable_tree_sitter=True))
+
+        result = builder.extract_ast_context("src/service.py", PYTHON_CONTENT, "python")
+
+        assert result.parse_mode in {"regex", "tree-sitter"}
+        assert [function.name for function in result.functions] == ["__init__", "run", "helper"]
+
+    def test_tree_sitter_unavailable_degrades_to_regex(self, monkeypatch):
+        monkeypatch.setattr(
+            context_builder_module, "_load_tree_sitter_language", lambda language: None
+        )
         builder = ContextBuilder(ContextBuilderConfig(enable_tree_sitter=True))
 
         result = builder.extract_ast_context("src/service.py", PYTHON_CONTENT, "python")

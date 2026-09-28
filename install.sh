@@ -20,6 +20,16 @@ need_command() {
   command -v "$1" >/dev/null 2>&1
 }
 
+ensure_python_version() {
+  PYTHON_BIN="$1"
+  VERSION="$($PYTHON_BIN -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  MAJOR="${VERSION%%.*}"
+  MINOR="${VERSION#*.}"
+  if [ "$MAJOR" -ne 3 ] || [ "$MINOR" -lt 12 ]; then
+    fail "Python 3.12+ is required, but $VERSION was found."
+  fi
+}
+
 python_cmd() {
   if need_command python3; then
     printf 'python3'
@@ -75,6 +85,8 @@ main() {
     log "Repository: $GITHUB_REPOSITORY"
   fi
 
+  PYTHON_BIN="$(python_cmd)"
+  ensure_python_version "$PYTHON_BIN"
   ensure_pipx
 
   SPEC="$(package_spec)"

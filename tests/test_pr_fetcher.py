@@ -257,6 +257,73 @@ class TestPRFetcherFetch:
         assert result.repo_full_name == "owner/repo"
         assert result.total_changes == 7
 
+    @staticmethod
+    def _mock_pull_request(head_repo) -> Mock:
+        """一个不依赖 PyGithub spec 的 PR 替身，head 仓库由调用方指定。"""
+        pr = Mock()
+        pr.number = 42
+        pr.title = "Test PR"
+        pr.body = "PR description"
+        pr.user.login = "test-user"
+        pr.state = "open"
+        pr.head.sha = "abc123"
+        pr.base.sha = "def456"
+        pr.head.ref = "feature"
+        pr.base.ref = "main"
+        pr.head.repo = head_repo
+        pr.base.repo.full_name = "owner/repo"
+        pr.html_url = "https://github.com/owner/repo/pull/42"
+        pr.created_at = None
+        pr.updated_at = None
+        pr.merged = False
+        return pr
+
+    def _fetch_with_head_repo(self, fetcher, head_repo):
+        pull = self._mock_pull_request(head_repo)
+        repo = Mock()
+        repo.get_pull.return_value = pull
+        with patch.object(fetcher, "_github") as mock_gh:
+            mock_gh.get_repo.return_value = repo
+            with patch.object(fetcher, "_fetch_diff", return_value=""):
+                with patch.object(fetcher, "_fetch_files", return_value=[]):
+                    return fetcher.fetch("https://github.com/owner/repo/pull/42")
+
+    def test_fetch_records_a_same_repository_head(self, fetcher):
+        result = self._fetch_with_head_repo(fetcher, Mock(full_name="owner/repo"))
+
+        assert result.head_repo_full_name == "owner/repo"
+        assert result.is_fork is False
+
+    def test_fetch_marks_a_fork_pr(self, fetcher):
+        result = self._fetch_with_head_repo(fetcher, Mock(full_name="contributor/repo"))
+
+        assert result.head_repo_full_name == "contributor/repo"
+        assert result.is_fork is True
+
+    def test_fetch_tolerates_a_deleted_fork_repository(self, fetcher):
+        """被删除的 fork 仓库：GitHub 返回 None，fetch 不能因此崩掉。"""
+        result = self._fetch_with_head_repo(fetcher, None)
+
+        assert result.head_repo_full_name is None
+        assert result.is_fork is False
+
+    def test_fetch_tolerates_a_head_repository_without_a_full_name(self, fetcher):
+        result = self._fetch_with_head_repo(fetcher, Mock(spec=[]))
+
+        assert result.head_repo_full_name is None
+        assert result.is_fork is False
+
+    def test_fetch_metadata_records_the_head_repository(self, fetcher):
+        pull = self._mock_pull_request(Mock(full_name="contributor/repo"))
+        repo = Mock()
+        repo.get_pull.return_value = pull
+        with patch.object(fetcher, "_github") as mock_gh:
+            mock_gh.get_repo.return_value = repo
+            result = fetcher.fetch_metadata("https://github.com/owner/repo/pull/42")
+
+        assert result.head_repo_full_name == "contributor/repo"
+        assert result.is_fork is True
+
     def test_fetch_metadata_only(self, fetcher, mock_repo, mock_pr):
         with patch.object(fetcher, "_github") as mock_gh:
             mock_gh.get_repo.return_value = mock_repo
@@ -454,6 +521,49 @@ class TestPRData:
         assert pr.total_additions == 0
         assert pr.total_deletions == 0
         assert pr.changed_files_count == 0
+
+    def test_head_repo_defaults_to_unknown_and_not_a_fork(self, mock_pr_data_dict):
+        """P6 §4.1：没有 head 仓库数据时 is_fork 必须是 False，而不是真。"""
+        from ai_pr_review.models.pr_data import PRData
+
+        pr = PRData(**mock_pr_data_dict)
+
+        assert pr.head_repo_full_name is None
+        assert pr.is_fork is False
+
+    def test_is_fork_is_false_for_the_same_repository(self, mock_pr_data_dict):
+        from ai_pr_review.models.pr_data import PRData
+
+        mock_pr_data_dict["head_repo_full_name"] = "test-owner/test-repo"
+        pr = PRData(**mock_pr_data_dict)
+
+        assert pr.is_fork is False
+
+    def test_is_fork_compares_the_head_repository_case_insensitively(self, mock_pr_data_dict):
+        """GitHub 的 owner/repo 不区分大小写，大小写差异不是 fork。"""
+        from ai_pr_review.models.pr_data import PRData
+
+        mock_pr_data_dict["head_repo_full_name"] = "  Test-Owner/TEST-Repo  "
+        pr = PRData(**mock_pr_data_dict)
+
+        assert pr.is_fork is False
+
+    def test_is_fork_is_true_for_another_repository(self, mock_pr_data_dict):
+        from ai_pr_review.models.pr_data import PRData
+
+        mock_pr_data_dict["head_repo_full_name"] = "contributor/test-repo"
+        pr = PRData(**mock_pr_data_dict)
+
+        assert pr.is_fork is True
+
+    def test_is_fork_treats_an_empty_head_repository_as_unknown(self, mock_pr_data_dict):
+        """空串与 None 一样是「不知道」，不能据此宣称是 fork。"""
+        from ai_pr_review.models.pr_data import PRData
+
+        mock_pr_data_dict["head_repo_full_name"] = "   "
+        pr = PRData(**mock_pr_data_dict)
+
+        assert pr.is_fork is False
 
 
 class TestFileDiff:

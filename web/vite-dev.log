@@ -1,0 +1,17 @@
+
+> ai-pr-review-web@0.1.0 dev
+> vite --host 127.0.0.1 --port 5173
+
+
+  VITE v6.4.3  ready in 242 ms
+
+  ➜  Local:   http://127.0.0.1:5173/static/
+  ➜  press h + enter to show help
+21:15:27 [vite] (client) hmr update /src/styles/components.css
+21:19:40 [vite] (client) hmr update /src/components/HeroKnot.tsx
+21:36:22 [vite] (client) hmr update /src/components/HeroKnot.tsx
+21:38:22 [vite] (client) hmr update /src/components/HeroKnot.tsx
+21:44:47 [vite] (client) hmr update /src/components/HeroKnot.tsx
+21:49:55 [vite] (client) hmr update /src/components/HeroKnot.tsx
+22:00:46 [vite] (client) hmr update /src/styles/components.css
+22:09:38 [vite] (client) hmr update /src/components/HeroKnot.tsx
