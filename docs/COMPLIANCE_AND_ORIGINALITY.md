@@ -154,11 +154,21 @@ AI 生成的内容必须经团队理解、修改或明确复核后才进入仓�
 | `docs/assets/p2/project-architecture.png` | **AI 生成的架构配图** | 文档与演示中展示系统结构 | **否** |
 | `docs/assets/p2/review-pipeline.png` | **AI 生成的流水线配图** | 文档与演示中展示审查流水线 | **否** |
 | `docs/assets/p2/review-flow-precise.png` | **AI 生成的流程配图** | 文档中展示精确流程 | **否** |
+| `docs/assets/p2/competition-cover.png` | **AI 生成的封面海报** | 应用方案 PDF 封面 | **否** |
+| `docs/assets/p2/trust-three-questions.png` | **AI 生成的说明配图** | 应用方案 PDF「信任三问」章节 | **否** |
+| `docs/assets/p2/evidence-four-state.png` | **AI 生成的说明配图** | 应用方案 PDF「证据四态校验」章节 | **否** |
+| `docs/assets/p2/finding-validation-chain.png` | **AI 生成的说明配图** | 应用方案 PDF「Finding 验证链」章节 | **否** |
+| `docs/assets/p2/routing-cost-ledger.png` | **AI 生成的说明配图** | 应用方案 PDF「混合路由与成本账本」章节 | **否** |
+| `docs/assets/p2/three-entrances-matrix.png` | **AI 生成的说明配图** | 应用方案 PDF「三入口与审查内核」章节 | **否** |
+| `docs/assets/p2/business-model.png` | **AI 生成的说明配图** | 应用方案 PDF「商业模式分层」章节（图内已标注企业能力属于商业规划、不代表已实现） | **否** |
+| `docs/assets/p2/roadmap.png` | **AI 生成的说明配图** | 应用方案 PDF「发展路线」章节 | **否** |
+| `docs/assets/p2/context-fallback-three-levels.png` | **AI 生成的说明配图** | 三级上下文降级（tree-sitter → regex → diff-only）说明，文档/演示备用 | **否** |
+| `docs/assets/p2/video-cover.png` | **AI 生成的封面图** | 演示视频封面 | **否** |
 | `docs/screenshots/` 下的实机截图 | 项目实机截图 | README 与文档的功能展示 | 否（仅展示） |
 
 说明：
 
-- 上述三张配图是**用于展示的生成式配图**，它们是示意图，**核心代码与逻辑不依赖这些图片** ——
+- 上述配图是**用于展示的生成式配图**，它们是示意图，**核心代码与逻辑不依赖这些图片** ——
   删除它们不会影响 `pr-review` 的任何功能、测试或输出；图片与实际实现如有出入，
   **以代码与 `docs/API.md` 为准**。
 - 截图是**项目实机截图**，反映真实运行界面。
