@@ -30,10 +30,11 @@ CHAT_RUNTIME_PATH = REPO_ROOT / "src" / "ai_pr_review" / "chat_runtime.py"
 README_PATH = REPO_ROOT / "README.md"
 APP_TSX_PATH = REPO_ROOT / "frontend" / "tui" / "src" / "app.tsx"
 
-# TUI 前端本地截获、不进后端分发，但同样是用户可用的现行命令。
-TUI_LOCAL_COMMANDS = frozenset({"retry", "workbench"})
+# TUI 前端本地截获、不进后端分发，但同样是用户可用的现行命令（后端 /help 也要列出）。
+TUI_LOCAL_COMMANDS = frozenset({"retry", "workbench", "sessions", "rename"})
 
 # 已删除/从未实现的命令：任何一份帮助文本里都不允许再出现。
+# 注意：`sessions` 已于 A-P2 重新实现（TUI 前端 `/sessions` + `Alt+S`），故不在此列。
 REMOVED_COMMANDS = frozenset(
     {
         "ask",
@@ -48,7 +49,6 @@ REMOVED_COMMANDS = frozenset(
         "reset",
         "run",
         "save",
-        "sessions",
         "stop",
         "theme",
         "token",
