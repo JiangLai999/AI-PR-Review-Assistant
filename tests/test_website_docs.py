@@ -101,6 +101,30 @@ def test_hash_comments_inside_code_fences_stay_code() -> None:
     assert "# 注释" in html
 
 
+def test_blockquote_renders_as_blockquote() -> None:
+    """连续 `>` 行渲染成 blockquote，且不吞掉后面的段落。"""
+    module = _load_generator()
+
+    html = module.markdown_to_html("> 第一行\n> 第二行\n\n正文\n")
+
+    assert "<blockquote><p>第一行 第二行</p></blockquote>" in html
+    assert "<p>正文</p>" in html
+    assert "&gt;" not in html, "引用块被当成普通段落，官网上会露出字面量 '>'"
+
+
+def test_bold_renders_as_strong_outside_code_only() -> None:
+    """`**粗体**` → `<strong>`；但代码段里的 `**` 必须保持字面量。"""
+    module = _load_generator()
+
+    html = module.markdown_to_html("普通 **加粗** 文本\n")
+    assert "<strong>加粗</strong>" in html
+    assert "**加粗**" not in html
+
+    code = module.markdown_to_html("`**x**` 保持字面量\n")
+    assert "<code>**x**</code>" in code
+    assert "<strong>" not in code
+
+
 def test_table_with_delimiter_renders_as_table() -> None:
     """表头行 + `|---|---|` 分隔行 → `<table>`，单元格只做转义与反引号转 <code>。"""
     module = _load_generator()

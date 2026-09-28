@@ -190,6 +190,8 @@ code,pre{font-family:var(--font-mono)}
 .docs-generated-body th{font-family:var(--font-mono);font-size:.78rem;color:var(--accent);background:var(--surface-2);white-space:nowrap}
 .docs-generated-body td{color:var(--ink-soft);word-break:break-word}
 .docs-generated-body tbody tr:last-child td{border-bottom:0}
+.docs-generated-body blockquote{margin:6px 0 12px;padding:10px 14px;border-left:3px solid var(--accent);border-radius:0 12px 12px 0;background:var(--surface-2);color:var(--ink-soft)}
+.docs-generated-body blockquote p{margin:0}
 
 .priority-stack{display:grid;gap:10px}
 .priority-item{display:flex;align-items:center;gap:12px;padding:14px;border-radius:16px;background:var(--surface-2)}

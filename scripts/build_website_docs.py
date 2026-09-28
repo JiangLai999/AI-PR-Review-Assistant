@@ -66,9 +66,19 @@ def extract_section(markdown: str, heading: str, level: int = 2) -> str:
 
 
 def inline_format(text: str) -> str:
+    """行内格式：反引号 → ``<code>``，``**粗体**`` → ``<strong>``。
+
+    代码段优先：先按反引号切分，粗体只在**代码段之外**生效 ——
+    否则 `` `**x**` ``（文档里按字面量写）会被误渲染成强调。
+    """
     text = html.escape(text)
-    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
-    return text
+    rendered: list[str] = []
+    for part in re.split(r"(`[^`]+`)", text):
+        if len(part) > 2 and part.startswith("`") and part.endswith("`"):
+            rendered.append(f"<code>{part[1:-1]}</code>")
+        else:
+            rendered.append(re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", part))
+    return "".join(rendered)
 
 
 def _split_table_row(line: str) -> list[str]:
@@ -142,6 +152,17 @@ def markdown_to_html(markdown: str) -> str:
             i += 1
             continue
 
+        # 引用块：连续的 `>` 行合并成一个 blockquote（README 的「注意」段落
+        # 与 PR_WORKFLOW 都用到）。落进段落分支的话，官网上会显示字面量 ">"。
+        if stripped.startswith(">"):
+            quote_lines: list[str] = []
+            while i < len(lines) and lines[i].strip().startswith(">"):
+                quote_lines.append(lines[i].strip().lstrip(">").strip())
+                i += 1
+            body = " ".join(line for line in quote_lines if line)
+            parts.append(f"<blockquote><p>{inline_format(body)}</p></blockquote>")
+            continue
+
         # 只支持到 ### 的话，`# 标题` / `## 小节` 会落进下面的段落分支，
         # 在官网上渲染成字面量 "<p># 标题</p>"。docs/PR_WORKFLOW.md 整篇
         # 都是这种标题，所以这里补上 h2/h3。
@@ -187,7 +208,7 @@ def markdown_to_html(markdown: str) -> str:
             current = lines[i].strip()
             if (
                 not current
-                or current.startswith(("```", "### ", "## ", "# ", "- "))
+                or current.startswith(("```", "### ", "## ", "# ", "- ", ">"))
                 or re.match(r"^\d+\.\s+", current)
                 or _TABLE_ROW_RE.match(current)
             ):
