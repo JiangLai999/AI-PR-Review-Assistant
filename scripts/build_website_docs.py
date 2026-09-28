@@ -82,6 +82,19 @@ def markdown_to_html(markdown: str) -> str:
             i += 1
             continue
 
+        # 只支持到 ### 的话，`# 标题` / `## 小节` 会落进下面的段落分支，
+        # 在官网上渲染成字面量 "<p># 标题</p>"。docs/PR_WORKFLOW.md 整篇
+        # 都是这种标题，所以这里补上 h2/h3。
+        if stripped.startswith("## "):
+            parts.append(f"<h3>{inline_format(stripped[3:])}</h3>")
+            i += 1
+            continue
+
+        if stripped.startswith("# "):
+            parts.append(f"<h2>{inline_format(stripped[2:])}</h2>")
+            i += 1
+            continue
+
         if re.match(r"^\d+\.\s+", stripped):
             items: list[str] = []
             while i < len(lines):
@@ -114,7 +127,7 @@ def markdown_to_html(markdown: str) -> str:
             current = lines[i].strip()
             if (
                 not current
-                or current.startswith(("```", "### ", "- "))
+                or current.startswith(("```", "### ", "## ", "# ", "- "))
                 or re.match(r"^\d+\.\s+", current)
             ):
                 break
