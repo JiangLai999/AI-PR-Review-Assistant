@@ -58,6 +58,8 @@ web/node_modules/
 web/.npm-cache/
 web/.vite/
 web/.shots/
+# 截图目录：按目录名兜底，避免再出现 web/web/.shots/ 这类重复路径被提交
+.shots/
 .distcheck/
 
 # OpenTUI frontend build output. The small staged bundle lives in
