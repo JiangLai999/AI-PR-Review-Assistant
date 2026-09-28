@@ -27,6 +27,8 @@ __pycache__/
 .pytest_*/
 # AI collaboration bus local state (tasks / reports / prompts / runs stay local)
 .agent-bus/
+# Local Playwright artifacts from website visual checks
+.playwright*/
 # Local image-generation and scratch artifacts
 tmp/
 output/
