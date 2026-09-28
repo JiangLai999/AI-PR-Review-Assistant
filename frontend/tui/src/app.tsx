@@ -203,7 +203,7 @@ export const chatMarkdownStyle = (): SyntaxStyle => {
   return chatMarkdownStyleCache
 }
 // ---------------------------------------------------------------------
-// C1 · 表格按渲染宽度分档（docs/mimo-chat-render-c.md）
+// C1 · 表格按渲染宽度分档（docs/DEV_RECORD.md）
 // 窄（<100 列）贴内容、去内边距，避免小表被撑松；宽（≥100 列）铺满、
 // 留 1 格内边距，避免大表右侧大片留白。分档宽度取 markdown 实际渲染宽度
 // （由 chatContentWidth() 派生），不新增尺寸来源。
@@ -302,7 +302,7 @@ type RuntimeSnapshot = {
    */
   repo_context?: string | RepoContextOptions
   /**
-   * review 思考档位（docs/mimo-review-effort-ui.md）。同名键后端有两种形状：
+   * review 思考档位（docs/DEV_RECORD.md）。同名键后端有两种形状：
    * `config.snapshot` 给纯字符串，`model.status` / `config.options` 给
    * `{value, options, state?, reason?}`。读取方一律走 `reviewEffortValue()` 归一化。
    */
@@ -349,7 +349,7 @@ export function RuntimeStatusLine(props: {
   const routingLabel = () =>
     routingStatusText(props.runtime.routing, props.runtime.ui_language) || (props.runtime.model ?? "model")
   // 思考强度段：缺字段（旧后端）不显示；窄终端（<90 列）优先砍掉这一段，
-  // 保住路由/在线状态这类运维刚需（降级策略见 docs/mimo-message-metrics.md）。
+  // 保住路由/在线状态这类运维刚需（降级策略见 docs/DEV_RECORD.md）。
   const effortBadge = () =>
     props.width >= 90
       ? formatEffortBadge(props.runtime.chat_reasoning_effort, props.runtime.ui_language)
@@ -1784,7 +1784,7 @@ const screenStages: Record<SetupScreen, number> = {
   workbench: 5,
   // 仓库上下文三选一（方案 §4.6）：与 workbench 同属第 5 阶段"界面与输出"。
   repo_context: 5,
-  // review 思考档位（docs/mimo-review-effort-ui.md）：同属第 5 阶段，紧跟仓库上下文。
+  // review 思考档位（docs/DEV_RECORD.md）：同属第 5 阶段，紧跟仓库上下文。
   review_effort: 5,
   summary: 6,
 }
@@ -1903,7 +1903,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
   const [apiKey, setApiKey] = createSignal("")
   const [localBaseUrl, setLocalBaseUrl] = createSignal("")
   const [githubToken, setGithubToken] = createSignal("")
-  // B2/B3 模型规格与中转站（docs/mimo-config-wizard-ui.md）
+  // B2/B3 模型规格与中转站（docs/DEV_RECORD.md）
   const [specRemoteContext, setSpecRemoteContext] = createSignal("")
   const [specRemoteOutput, setSpecRemoteOutput] = createSignal("")
   const [specLocalContext, setSpecLocalContext] = createSignal("")
@@ -2349,7 +2349,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
         // 仓库上下文（方案 §4.6）：显式发送屏幕上这一档；未改动时它就是后端当前值，
         // 全新配置的当前值 = tests+imports（与后端 DEFAULT_REPO_CONTEXT 一致）。
         ...setupRepoContextField(selectedRepoContext()),
-        // review 思考档位（docs/mimo-review-effort-ui.md）：显式发送屏幕上这一档；
+        // review 思考档位（docs/DEV_RECORD.md）：显式发送屏幕上这一档；
         // 未改动时它就是后端当前值，全新配置的当前值 = off（= 现状）。
         ...setupReviewEffortField(selectedReviewEffort()),
       }
@@ -2786,7 +2786,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
       </Show>
       <Show when={!loading() && isRouteScreen(screen())}>
         {/*
-          高度预算（实测，见 docs/claude-tui-route.md）：对话框内容区 =
+          高度预算（实测，见 docs/DEV_RECORD.md）：对话框内容区 =
           height - padding 4 - 边框 2；超出时渲染器**静默**丢掉溢出块的首行并留下
           上一次的字符残影。细化页内容固定 16 行 + 最多 1 行错误 = 17 ≤ 18（24 行）。
         */}
@@ -3040,10 +3040,10 @@ export function SetupWizardDialog(props: SetupDialogProps) {
         </box>
       </Show>
       {/*
-        review 思考档位（docs/mimo-review-effort-ui.md）。选项清单/label 来自后端
+        review 思考档位（docs/DEV_RECORD.md）。选项清单/label 来自后端
         `config.options.review_reasoning_effort`（缺字段用兜底表）；成本提示独立一行，
         用户选哪一档就看到哪一档的代价。后端 state=unsupported 时置灰 + 原因。
-        小 max_output × high/max 时追加封顶提示（docs/mimo-review-budget-hint.md）。
+        小 max_output × high/max 时追加封顶提示（docs/DEV_RECORD.md）。
       */}
       <Show when={!loading() && screen() === "review_effort"}>
         <box marginTop={1} flexGrow={1}>
@@ -3086,7 +3086,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
         </box>
       </Show>
       {/*
-        B2 模型规格屏（docs/mimo-config-wizard-ui.md）。数据来自 config.options.model，
+        B2 模型规格屏（docs/DEV_RECORD.md）。数据来自 config.options.model，
         缺字段不显示（兼容旧后端）。context_window / max_output 可编辑；needs_verification
         时两个数字都摆出来，不覆盖用户值。source 徽标 + R 重新获取按钮。
       */}
@@ -3221,7 +3221,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
         })()}
       </Show>
       {/*
-        B3 中转站五项表单（docs/mimo-config-wizard-ui.md）。base_url / api_key / 模型名 /
+        B3 中转站五项表单（docs/DEV_RECORD.md）。base_url / api_key / 模型名 /
         context_window / max_output 逐项填写，不套用官方预设；保存后回显。
       */}
       <Show when={!loading() && screen() === "custom_endpoint"}>
@@ -3332,7 +3332,7 @@ export function SetupWizardDialog(props: SetupDialogProps) {
             一个（`"Repo ctx  "` 会退成 `"Repo ctx "`），字面量才保得住对齐用的填充。
           */}
           <text><span style={{ fg: orange }}>{isEn(uiLanguage()) ? "Repo ctx  " : "仓库上下文 "}</span><span style={{ fg: "#eeeeee" }}>{repoContextPreview()}</span></text>
-          {/* review 思考档位行（docs/mimo-review-effort-ui.md）：缺字段时不显示（旧后端兼容）。 */}
+          {/* review 思考档位行（docs/DEV_RECORD.md）：缺字段时不显示（旧后端兼容）。 */}
           <Show when={options()?.review_reasoning_effort}>
             <text><span style={{ fg: orange }}>{isEn(uiLanguage()) ? "Review th " : "审查思考  "}</span><span style={{ fg: "#eeeeee" }}>{reviewEffortPreview()}</span></text>
           </Show>
@@ -4010,7 +4010,7 @@ export function FindingsFilterOverlay(props: {
 }
 
 /**
- * `/sessions` · 会话列表弹窗（A-P2，docs/mimo-sessions-ui.md）。
+ * `/sessions` · 会话列表弹窗（A-P2，docs/DEV_RECORD.md）。
  *
  * 状态机：list ⇄ rename（内联输入） / list → confirm-delete（二次确认）。
  * `supported=false` 或 sessions 为空 → 空态文案「当前后端不支持会话列表」，
@@ -4349,7 +4349,7 @@ export function App() {
     ])
 
   // ---------------------------------------------------------------------
-  // Workbench state machine (docs/workbench-phase1-contract.md §1)
+  // Workbench state machine (docs/DEV_RECORD.md §1)
   // idle ──review──▶ running ──done──▶ collapsed ──Alt+W──▶ running/done
   // ---------------------------------------------------------------------
   const workbenchMode = (): "auto" | "always" | "off" => {
@@ -4416,7 +4416,7 @@ export function App() {
     return Math.max(56, Math.min(96, dimensions().width - 4))
   }
   // ---------------------------------------------------------------------
-  // C2 · 长代码块折叠（docs/mimo-chat-render-c.md）
+  // C2 · 长代码块折叠（docs/DEV_RECORD.md）
   // 状态键 = 消息 id + 块序号；Alt+L 切换当前角标并跳到下一个（循环）。
   // ---------------------------------------------------------------------
   const [codeFoldExpanded, setCodeFoldExpanded] = createSignal<Record<string, boolean>>({})

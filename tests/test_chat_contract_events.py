@@ -1,6 +1,6 @@
 """契约 v1 独立端到端验收：真实 JSONL 事件序列 + 结构化断言。
 
-对照 docs/codex-chat-backend-c1.md §2（契约 v1，字段名以此为准）。
+对照 docs/DEV_RECORD.md §2（契约 v1，字段名以此为准）。
 本文件只新增验收测试，不改产品代码。所有 stub 离线运行，不发真实网络请求。
 
 验证维度（prompt 要求）:
@@ -203,10 +203,10 @@ def test_contract_event_sequence_is_legal_and_reasoning_is_isolated(
             "trimmed_messages",
             "compacted",
             # 2026-09-26 契约扩展：预算来源（config|model_spec|fallback）。
-            # 见 docs/codex-chat-backend-c1.md §2 与 docs/chat-contract-verification.md。
+            # 见 docs/DEV_RECORD.md §2 与 docs/DEV_RECORD.md。
             "budget_source",
             # 2026-09-27 契约扩展（会话/压缩改造 C 组）：压力分级
-            # （low|medium|high|critical|null）。见 docs/claude-sessions-compaction.md §3。
+            # （low|medium|high|critical|null）。见 docs/DEV_RECORD.md §3。
             "pressure",
         }
         assert finished["context"]["budget_source"] in {
@@ -356,7 +356,7 @@ def test_contract_think_unsupported_state(tmp_path: Path) -> None:
 def test_contract_compact_success_shape(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """契约 v1：/compact 成功 → {kind, kept_turns, replaced_messages, before/after_tokens,
     summary_chars}；2026-09-27 起保留口径改为 **token + 对话轮**（B 组），并新增
-    trigger / omitted_messages / files 三个字段（见 docs/claude-sessions-compaction.md §2）。
+    trigger / omitted_messages / files 三个字段（见 docs/DEV_RECORD.md §2）。
     """
 
     async def run() -> None:

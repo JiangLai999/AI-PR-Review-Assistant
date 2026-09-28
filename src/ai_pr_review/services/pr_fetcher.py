@@ -156,7 +156,7 @@ class PRFetcher:
     def fetch_changed_file_paths(self, pr_url: str) -> list[str]:
         """仅取本次 PR 的变更文件**路径**清单（不拉 diff）。
 
-        聊天侧"本次 PR 变更文件"段落需要它（docs/claude-repo-structure-context.md
+        聊天侧"本次 PR 变更文件"段落需要它（docs/DEV_RECORD.md
         §B）；大 PR 上 ``fetch()`` 会把 diff 一并拉下来（几十万字符的浪费），这里
         只做 URL 解析 → PR → files 分页，复用同一套速率控制与重试。
         """

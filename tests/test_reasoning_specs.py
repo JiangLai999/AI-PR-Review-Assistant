@@ -1,6 +1,6 @@
 """思考参数规格表（`services/reasoning_specs.py`）的映射断言。
 
-数据源是 `docs/reasoning-specs-research.md`（19 家官方文档调研，2026-09-26）。
+数据源是 `docs/DEV_RECORD.md`（19 家官方文档调研，2026-09-26）。
 这里断言的是**表本身**：四档映射、官方约束、以及"查不到就不编造"的兜底行为；
 `_chat` / `/think` 的落地行为在 `tests/test_jsonl_backend.py` 里验。
 

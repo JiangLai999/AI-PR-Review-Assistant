@@ -596,7 +596,7 @@ async function statusLineCases() {
     }
   }
 
-  // 窄终端降级：width < 90 时思考强度段省略（策略见 docs/mimo-message-metrics.md）。
+  // 窄终端降级：width < 90 时思考强度段省略（策略见 docs/DEV_RECORD.md）。
   {
     const narrowView = await testRender(
       () => (
@@ -666,7 +666,7 @@ async function specFrameForSource(language: string, source?: string) {
 }
 
 /**
- * B2 模型规格屏的帧证据（docs/mimo-config-wizard-ui.md）。
+ * B2 模型规格屏的帧证据（docs/DEV_RECORD.md）。
  *
  * 覆盖：120×30 与 209×51 两个尺寸、source 徽标三态 + unknown、
  * `needs_verification` 的双数字提示、`bounds` 边界提示、本地槽行。
@@ -777,7 +777,7 @@ async function specScreenFrames() {
 }
 
 /**
- * B3 中转站五项表单的帧证据（docs/mimo-config-wizard-ui.md）。
+ * B3 中转站五项表单的帧证据（docs/DEV_RECORD.md）。
  *
  * 这一屏只在 cloud/local 顺序里（custom 顺序没有它）：runtime → provider → base_url →
  * api_format → api_key → model → model_spec → custom_endpoint，7 次 Enter。
@@ -830,7 +830,7 @@ async function customEndpointForm() {
 
     // 观测（不判定）：带 custom_endpoint 预填值时，云端流程保存的载荷长什么样。
     // 它会带上 provider_name:"custom"（把远端槽切到中转站），而确认页仍显示预设的
-    // Provider——这个不对称是 docs/mimo-config-wizard-ui.md §6.1 的未决项，
+    // Provider——这个不对称是 docs/DEV_RECORD.md §6.1 的未决项，
     // 由实现者/用户决定收口方式，这里只留证据、不锁死语义。
     const githubFrame = await advance(view, /GitHub Token/, 4)
     check(/GitHub Token/.test(githubFrame), "中转站屏之后进入 GitHub Token 屏")
@@ -869,7 +869,7 @@ function reviewEffortFixture(overrides: Record<string, unknown> = {}) {
 }
 
 /**
- * review 思考档位屏的帧证据（docs/mimo-review-effort-ui.md）。
+ * review 思考档位屏的帧证据（docs/DEV_RECORD.md）。
  * 120×30 + 209×51 双尺寸；成本提示、默认 off 高亮、置灰态。
  */
 async function reviewEffortScreen() {

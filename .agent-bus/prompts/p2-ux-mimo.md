@@ -22,7 +22,7 @@
    - 1440×900 视口：Tab 遍历 `/api` 页或 `/settings` 页的前 6 个可聚焦元素，每个都命中
      `:focus-visible`（用 `element.matches(':focus-visible')`）且 `outline-width >= 2px`。
    脚本要以 `process.exitCode = 1` 报失败，并打印每条断言的 PASS/FAIL。
-3. `docs/mimo-web-ux-focus-mobile.md`：改动点、两条断言的实测数字、未决项。
+3. `docs/DEV_RECORD.md`：改动点、两条断言的实测数字、未决项。
 
 ## 纪律（避免再卡死）
 - 不要读 `src/ai_pr_review/**`，不要读 `web/src/pages/**`；只看 `web/src/styles/components.css` 与 `web/src/App.tsx` 的**局部**（最多各读一次）。
@@ -31,7 +31,7 @@
   不要反复重试超过 2 次。
 
 ## 约束
-- 只写：`web/src/styles/components.css`、`web/tools/focus-mobile-check.mjs`、`docs/mimo-web-ux-focus-mobile.md`；
+- 只写：`web/src/styles/components.css`、`web/tools/focus-mobile-check.mjs`、`docs/DEV_RECORD.md`；
 - 禁止改 TSX/TS、禁止改 `src/ai_pr_review/**`、禁止 git；禁止 `npm run build`；禁止读取/输出凭据。
 
 完成后按总线报告：

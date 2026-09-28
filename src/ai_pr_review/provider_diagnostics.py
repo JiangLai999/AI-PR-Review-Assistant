@@ -32,7 +32,7 @@ def build_provider_health_payload(
         "api_format": provider.api_format,
         "api_key_present": bool(provider.api_key),
     }
-    # 模型规格（docs/b2b3-wiring-design.md §3.4）：与配置助手**同源判定**
+    # 模型规格（docs/DEV_RECORD.md §3.4）：与配置助手**同源判定**
     # （config.resolve_model_spec），但这里**不联网**——目录不可用时如实报
     # builtin/unknown，绝不替用户宣称"已与 models.dev 核对"。
     spec = resolve_model_spec(config._active_provider_config())

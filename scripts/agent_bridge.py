@@ -5,7 +5,7 @@ claim a task by atomically creating a lock, read the immutable task JSON, and wr
 structured report to the matching reports directory. Codex remains the integration
 owner.
 
-Hardening notes (see docs/claude-tui-audit.md F5/F6/F12):
+Hardening notes (see docs/DEV_RECORD.md F5/F6/F12):
 
 * every state file is written with ``tempfile`` + ``os.replace`` + ``fsync``;
 * locks carry ``claimed_at`` and are reclaimable after ``LOCK_TTL_SECONDS``;

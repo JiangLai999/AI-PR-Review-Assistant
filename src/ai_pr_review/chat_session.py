@@ -1,6 +1,6 @@
 """Chat 会话持久化辅助函数。
 
-两种存储并存（docs/session-and-compaction-plan.md §A2）：
+两种存储并存（docs/DEV_RECORD.md §A2）：
 
 - **多会话（新，TUI 后端）**：``<config 同目录>/sessions/index.json``（索引）+
   ``sessions/<id>.json``（每个会话的完整消息），由下面的 ``ChatSessionStore`` 拥有；
@@ -9,7 +9,7 @@
 
 旧文件在 TUI 后端首次启动时**迁移**为 legacy 会话（见 ``ChatSessionStore.migrate_legacy``），
 迁移只读不改：CLI 仍按原样使用它。代价是迁移之后两边各写各的（CLI 写旧文件、TUI 写
-``sessions/``），互相看不到对方的**新**对话——见 docs/claude-sessions-compaction.md §5.8。
+``sessions/``），互相看不到对方的**新**对话——见 docs/DEV_RECORD.md §5.8。
 """
 
 from __future__ import annotations
@@ -240,7 +240,7 @@ def _warn(message: str) -> None:
 class ChatSessionStore:
     """`sessions/index.json` + `sessions/<id>.json` 的读写。
 
-    设计要点（docs/claude-sessions-compaction.md §1）：
+    设计要点（docs/DEV_RECORD.md §1）：
 
     - **单一真源**：会话文件是真相，索引只是缓存。写入顺序永远是"先会话文件、后索引"，
       因此索引**可能落后**；落后的部分由下一轮 `_load_records` 按目录扫描补齐（自愈）。

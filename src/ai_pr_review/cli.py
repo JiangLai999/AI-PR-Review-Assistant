@@ -1130,7 +1130,7 @@ def _prompt_interface_preferences(
         # 本阶段不提问，但必须原样带回：PreferencesConfig 是整体重建的，
         # 漏掉一个字段就等于每次跑向导都把它悄悄重置成默认值。
         workbench_mode=getattr(current, "workbench_mode", DEFAULT_WORKBENCH_MODE),
-        # review 思考档位同理（docs/review-reasoning-assessment.md §4.3 第二步）：向导
+        # review 思考档位同理（docs/DEV_RECORD.md §4.3 第二步）：向导
         # 不提问，但跑一次向导不得把用户设过的档位打回 off。
         review_reasoning_effort=getattr(
             current, "review_reasoning_effort", DEFAULT_REVIEW_REASONING_EFFORT
@@ -3633,19 +3633,19 @@ def preferences_command(
         config.preferences.workbench_mode = workbench
         config.save(config_path, save_key=_active_config_has_saved_api_key(config_path))
     payload["workbench_mode"] = config.preferences.workbench_mode
-    # 仓库上下文同理（docs/repo-aware-review-plan.md §4.6）：`--repo-context` 一条命令
+    # 仓库上下文同理（docs/DEV_RECORD.md §4.6）：`--repo-context` 一条命令
     # 即可脚本化，取值由 config.REPO_CONTEXT_MODES 校验，非法值由 click 直接拒绝。
     if repo_context is not None:
         config.preferences.repo_context = repo_context
         config.save(config_path, save_key=_active_config_has_saved_api_key(config_path))
     payload["repo_context"] = config.preferences.repo_context
-    # L2 符号定位开关（docs/mimo-l2-symbol-locator.md）同理：`--symbol-locate` /
+    # L2 符号定位开关（docs/DEV_RECORD.md）同理：`--symbol-locate` /
     # `--no-symbol-locate` 一条命令即可脚本化，两个都不传时只回显当前值、不落盘。
     if symbol_locate is not None:
         config.preferences.symbol_locate = symbol_locate
         config.save(config_path, save_key=_active_config_has_saved_api_key(config_path))
     payload["symbol_locate"] = config.preferences.symbol_locate
-    # review 思考档位（docs/review-reasoning-assessment.md §4.3 第二步）同理：一条命令即可
+    # review 思考档位（docs/DEV_RECORD.md §4.3 第二步）同理：一条命令即可
     # 脚本化，取值由 config.REVIEW_REASONING_EFFORTS 校验，非法值由 click 直接拒绝。
     # 档位落在 `preferences`（用户可见的唯一入口），`config.save` 会把它同步进
     # `ai_client.review_reasoning_effort`，审查请求读的是后者。

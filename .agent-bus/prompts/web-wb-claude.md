@@ -41,7 +41,7 @@
 4. 测试点：`tests/test_web_server.py` 需要新增哪些用例（列到用例名级别）。
 
 ## 交付物（只写这一个文件；其它文件一律只读）
-`docs/web-workbench-proposal-claude.md`，包含：
+`docs/DEV_RECORD.md`，包含：
 1. **现状核对**：你实际读到的关键位置（file:line）＋你对现状的判断＋**主控审计遗漏项**（若有）
 2. **实现方案**：上述重点方向的接口契约 / 数据结构 / 组件与函数级改动 / 错误与降级 / 安全 / 测试点
 3. **风险与坑**：必须来自代码证据（例如 `web_server.py` 的 SSE/线程模型、`publish_service` 的哪些假设在 Web 下不成立）
@@ -49,7 +49,7 @@
 5. **验收方式**：可执行的命令与断言
 
 ## 约束
-- 只写 `docs/web-workbench-proposal-claude.md`；**禁止修改任何源码、配置、其它文档**；禁止 git 操作；
+- 只写 `docs/DEV_RECORD.md`；**禁止修改任何源码、配置、其它文档**；禁止 git 操作；
 - 禁止读取/输出任何凭据（token / API key / 会话日志）；
 - 所有结论必须给 `文件:行号` 证据；不确定就写"未确认"。
 

@@ -19,7 +19,7 @@ import { t, tn } from '../i18n'          // 非组件代码
    数值项 label/hint、按钮（校验后保存 / 直接保存 / 重新探测）、保存成功/失败提示、凭证面板）
 3. `web/src/pages/ApiPage.tsx`（55 条；端点描述的**中文说明**也要翻：`desc`/`errors` 是展示文案，
    `method`/`path`/`curl`/`body`/`response` 保持英文原样）
-4. `docs/opencode-i18n-settings.md`：key 命名、改动点、前后字面量数字、验证、未决项。
+4. `docs/DEV_RECORD.md`：key 命名、改动点、前后字面量数字、验证、未决项。
 
 ## 约定
 - key 命名：`settings.<区域>.<名称>` / `api.<区域>.<名称>`；复数用 `tn(...)` + `.one/.other`；

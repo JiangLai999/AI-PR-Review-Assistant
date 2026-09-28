@@ -14,7 +14,7 @@ L1-b 接入 `PRFetcher` / 磁盘缓存。
 
 文件末尾另有一组**纯渲染**函数（``render_pr_file_list`` / ``render_repo_tree``），
 供聊天侧注入"本次 PR 变更文件清单"与"仓库目录树"（见
-docs/claude-repo-structure-context.md）：同样不碰网络，路径由调用方取好传进来。
+docs/DEV_RECORD.md）：同样不碰网络，路径由调用方取好传进来。
 """
 
 from __future__ import annotations
@@ -363,7 +363,7 @@ class FileSystemRepoCache:
                     pass
 
 
-# ── 聊天侧注入：PR 变更清单 / 仓库目录树（docs/claude-repo-structure-context.md）──
+# ── 聊天侧注入：PR 变更清单 / 仓库目录树（docs/DEV_RECORD.md）──
 #
 # 与上面的预取不同，这里只有**纯渲染**：路径从哪来（`PRFetcher` 的变更分页 /
 # git tree）、失败怎么降级、什么时候注入，全部由调用方（`backend/jsonl_server.py`）

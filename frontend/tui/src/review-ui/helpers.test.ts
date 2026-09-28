@@ -28,7 +28,7 @@ test("severityColor maps known severities and never throws on junk", () => {
 })
 
 test("evidenceBadge is text-first and accepts alternate spellings", () => {
-  // Vocabulary contract: docs/P6_PLAN_2026-09-25.md §1.
+  // Vocabulary contract: docs/DEV_RECORD.md §1.
   expect(evidenceBadge("valid", "en")).toBe("✓ validated")
   expect(evidenceBadge("needs_review", "en")).toBe("⚠ needs review")
   expect(evidenceBadge("needs-review", "en")).toBe("⚠ needs review")

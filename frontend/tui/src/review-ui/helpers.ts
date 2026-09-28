@@ -51,7 +51,7 @@ export function evidenceBadge(status: string, language?: string): string {
   const en = isEnLanguage(language)
   switch (normalizeToken(status)) {
     case "valid":
-      // Vocabulary contract (docs/P6_PLAN_2026-09-25.md §1): the badge names
+      // Vocabulary contract (docs/DEV_RECORD.md §1): the badge names
       // what the validator checked (location + snippet self-consistency),
       // never "the finding is true". The four terms must match the terminal
       // renderer and the GitHub comment.

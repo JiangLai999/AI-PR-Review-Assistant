@@ -15,7 +15,7 @@ const t = useT()                   // t('review.plan.title')
 2. `web/src/pages/ReviewPage.tsx`（56 条汉字字面量：标题、两种模式卡、进度控制台、证据摘要、
    筛选器、结果区分组、按钮与提示）
 3. `web/src/pages/HistoryPage.tsx`（12 条：表头、统计、按钮、空态）
-4. `docs/mimo-i18n-review-pages.md`：key 清单（按页面分组）、改动点 file:line、前后字面量数字、验证、未决项
+4. `docs/DEV_RECORD.md`：key 清单（按页面分组）、改动点 file:line、前后字面量数字、验证、未决项
 
 ## 纪律（避免卡死）
 - 顺序：**先写 `review.ts`（可以边看页面边补 key）→ 再改两个页面 → 再跑命令 → 最后写文档与报告**。

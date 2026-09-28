@@ -63,12 +63,12 @@ def filter_included_by_default(language: object) -> str         # zh: 文件未�
 - 既有 `tests/test_web_server.py` / `tests/test_credentials_and_jobs.py` **不得回归**（断言 `!ok → HTTP 400` 等既有契约不变）。
 
 ## 交付
-1. 上述源码改动；2. 测试；3. `docs/opencode-backend-i18n.md`：四类文案的改法（结构化键 vs 生成时本地化，说明为什么分开）、
+1. 上述源码改动；2. 测试；3. `docs/DEV_RECORD.md`：四类文案的改法（结构化键 vs 生成时本地化，说明为什么分开）、
 key 清单、验证数字、未决项（例如 CLI 侧文案、已落库的历史 run 不会回溯翻译）。
 
 ## 约束
 - 只写：`src/ai_pr_review/{web_config.py,credentials.py}`、`src/ai_pr_review/services/{i18n_text.py,filter_pipeline.py,hybrid_orchestrator.py}`、
-  `tests/test_i18n_text.py`、`docs/opencode-backend-i18n.md`（以及必要时既有测试文件的**新增**用例）；禁止改 `web/**`、禁止 git；
+  `tests/test_i18n_text.py`、`docs/DEV_RECORD.md`（以及必要时既有测试文件的**新增**用例）；禁止改 `web/**`、禁止 git；
 - 不动 `cli.py`；不改已落库数据；禁止读取/输出凭据。
 
 ## 验证（必须真跑，报数字）

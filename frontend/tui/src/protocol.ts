@@ -221,7 +221,7 @@ export function parseCompactCommandResult(result: unknown): CompactCommandResult
 }
 
 /**
- * `/context` 与 `config.snapshot` 的预算字段（docs/claude-backend-followup.md §4）。
+ * `/context` 与 `config.snapshot` 的预算字段（docs/DEV_RECORD.md §4）。
  * 缺字段时对应键为 undefined（兼容旧后端），调用方直接不显示。
  */
 export type ContextBudgetInfo = {
@@ -266,7 +266,7 @@ export function isForeignSessionEvent(event: BackendEvent, sessionId: string | u
   return Boolean(eventSession && eventSession !== sessionId)
 }
 // ---------------------------------------------------------------------
-// B2/B3 模型规格契约（docs/b2b3-wiring-design.md §2.2/§2.6/§2.8）
+// B2/B3 模型规格契约（docs/DEV_RECORD.md §2.2/§2.6/§2.8）
 // 后端可能未落地或部分落地，所有字段允许缺失；解析器负责兜底，不抛错。
 // ---------------------------------------------------------------------
 
@@ -459,7 +459,7 @@ export function parseCatalogRefreshResult(raw: unknown): ModelSpecOptions | unde
 }
 
 // ---------------------------------------------------------------------
-// review 思考档位（docs/mimo-review-effort-ui.md）
+// review 思考档位（docs/DEV_RECORD.md）
 // `config.options.review_reasoning_effort` / `config.setup` / `model.status` 三出口同键同形。
 // ---------------------------------------------------------------------
 
@@ -512,7 +512,7 @@ export function parseReviewReasoningOptions(raw: unknown): ReviewReasoningOption
 }
 
 // ---------------------------------------------------------------------
-// 会话协议 v1（docs/session-and-compaction-plan.md A 组 · 契约 v1）
+// 会话协议 v1（docs/DEV_RECORD.md A 组 · 契约 v1）
 // 与后端/验收/手册三线共用，字段名不可改。后端可能尚未落地：
 // 解析器必须容忍缺字段/方法不存在，不抛错、不编造。
 // ---------------------------------------------------------------------

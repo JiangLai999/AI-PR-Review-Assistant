@@ -6,11 +6,11 @@
 >
 > 本文按**契约 v1** 描述对外行为；契约未规定的细节一律标注"见实现文档"，
 > 不做额外承诺。速查表见 `docs/chat-features.md`，方案与取舍见
-> `docs/session-and-compaction-plan.md`。
+> `docs/DEV_RECORD.md`。
 >
 > This guide describes the **contract v1** behaviour. Anything the contract does not fix is marked
 > "see the implementation doc". For a quick reference see `docs/chat-features.md`; for design
-> rationale see `docs/session-and-compaction-plan.md`.
+> rationale see `docs/DEV_RECORD.md`.
 
 ---
 
@@ -124,7 +124,7 @@ file list.
 - **迁移**：升级后首次启动会把旧的 `chat_session.json` **自动迁移**为名为 `"legacy"` 的会话，
   无需手工操作；迁移完成后旧文件只读保留。
 - **索引与文件**：`sessions/index.json` 是索引，`sessions/<id>.json` 存该会话的完整消息；
-  字段级细节（索引修复、原子写）见 `docs/session-and-compaction-plan.md` §A2 与实现文档。
+  字段级细节（索引修复、原子写）见 `docs/DEV_RECORD.md` §A2 与实现文档。
 - **隔离性**：每个会话独立保存消息与审查上下文绑定（`/context` 的绑定随会话走）。
 - 本文不涉及任何凭据；存储目录中不写入密钥。
 
@@ -145,7 +145,7 @@ Multi-session data lives next to the config file:
   read-only.
 - **Index vs files**: `sessions/index.json` is the index, `sessions/<id>.json` holds that session's
   full messages; field-level details (index repair, atomic writes) are in
-  `docs/session-and-compaction-plan.md` §A2 and the implementation doc.
+  `docs/DEV_RECORD.md` §A2 and the implementation doc.
 - **Isolation**: every session stores its messages and review-context binding independently (the
   `/context` binding follows the session).
 - This guide never touches credentials; no keys are written to the storage directory.
@@ -170,7 +170,7 @@ Multi-session data lives next to the config file:
 **Q3：自动压缩为什么默认关闭？**
 契约规定 `compaction_auto` 默认 `false`——默认**只提示不静默压缩**：状态栏在 `pressure = high`
 起提示「上下文接近上限：可用 /compact 压缩」，由你决定何时压缩。设计取舍（自动压缩会额外消耗
-一次模型调用；本地小模型的摘要质量不稳定）见 `docs/session-and-compaction-plan.md` §B4/§B7。
+一次模型调用；本地小模型的摘要质量不稳定）见 `docs/DEV_RECORD.md` §B4/§B7。
 想开启：在配置中设置 `compaction_auto`，同时可调 `compaction_tail_tokens`（默认 40000）与
 `compaction_trigger_ratio`（默认 0.9）。
 
@@ -199,7 +199,7 @@ Two cases:
 Contract v1 sets `compaction_auto` to `false` — the default is **hint only, never silent**: once
 `pressure = high` the status line shows 「上下文接近上限：可用 /compact 压缩」 and you decide when to
 compact. Rationale (an auto-compaction costs an extra model call; local small models summarise
-unreliably) is in `docs/session-and-compaction-plan.md` §B4/§B7. To enable it set
+unreliably) is in `docs/DEV_RECORD.md` §B4/§B7. To enable it set
 `compaction_auto`, and optionally `compaction_tail_tokens` (default 40000) and
 `compaction_trigger_ratio` (default 0.9).
 

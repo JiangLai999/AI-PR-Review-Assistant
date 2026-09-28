@@ -328,7 +328,7 @@ def test_review_orchestrator_explains_empty_filtered_summary(monkeypatch, tmp_pa
 
 
 # ---------------------------------------------------------------------------
-# file_result_callback（docs/review-workspace-contract.md §10.2）
+# file_result_callback（docs/DEV_RECORD.md §10.2）
 # ---------------------------------------------------------------------------
 
 
@@ -673,7 +673,7 @@ def test_hybrid_file_result_callback_reports_filtered_files_as_skipped(monkeypat
 
 
 # ---------------------------------------------------------------------------
-# fork 元数据（docs/P6_PLAN_2026-09-25.md §4.3）
+# fork 元数据（docs/DEV_RECORD.md §4.3）
 # ---------------------------------------------------------------------------
 
 
@@ -754,7 +754,7 @@ def test_hybrid_orchestrator_records_fork_metadata(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# hybrid 证据校验 + pr_author 元数据（docs/P6_PLAN_2026-09-25.md §1）
+# hybrid 证据校验 + pr_author 元数据（docs/DEV_RECORD.md §1）
 # ---------------------------------------------------------------------------
 
 #: 校验器要判定「位置 + 片段」，所以桩上下文必须给出非空的 full_content：
@@ -981,7 +981,7 @@ def test_orchestrators_record_a_missing_author_as_an_empty_string(monkeypatch, t
 
 # ---------------------------------------------------------------------------
 # hybrid 后处理：置信度门槛 / 去重 / 严重度排序
-# （docs/claude-p6-hybrid-postprocess.md）
+# （docs/DEV_RECORD.md）
 # ---------------------------------------------------------------------------
 
 PR_URL = "https://github.com/owner/repo/pull/42"

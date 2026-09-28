@@ -39,7 +39,11 @@ EXEMPTION_MARKERS: tuple[str, ...] = (
 
 # 绊线：正则一旦失效/文档被搬走，扫到的引用数会塌下来，测试必须红，
 # 而不是变成一个永远绿的空壳。
-MIN_REFERENCES = 200
+#
+# 2026-09-28 调整：docs/ 从 106 份精简为 12 份（96 份过程文档合并进
+# `docs/DEV_RECORD.md`），引用数由 963 降到 180。下限设在 120：既留出余量，
+# 又能在"正则失配 → 近似 0"时立刻报警。
+MIN_REFERENCES = 120
 
 
 def _iter_references() -> list[tuple[str, int, str, str]]:
@@ -127,7 +131,7 @@ def _gitignored_paths(paths: list[str]) -> set[str]:
     probes = sorted({p for path in paths for p in (path.rstrip("/"), path.rstrip("/") + "/")})
     try:
         proc = subprocess.run(
-            ["git", "check-ignore", "--stdin"],
+            ["git", "check-ignore", "-v", "--stdin"],
             input="\n".join(probes).encode("utf-8"),
             capture_output=True,
             cwd=ROOT,
@@ -137,7 +141,16 @@ def _gitignored_paths(paths: list[str]) -> set[str]:
         return set()
     ignored: set[str] = set()
     for raw in proc.stdout.decode("utf-8", "replace").splitlines():
-        candidate = raw.strip()
+        # -v 的输出格式：<来源>:<行号>:<模式>\t<路径>
+        if "\t" not in raw:
+            continue
+        rule, path = raw.split("\t", 1)
+        pattern = rule.split(":", 2)[2] if rule.count(":") >= 2 else ""
+        if not pattern.strip():
+            # 空/空白模式不算命中 —— `.gitignore` 行尾混入 \r 时 git 会造出这种假模式，
+            # 它曾把**所有带斜杠的路径**判成 ignored，直接把本守卫架空。
+            continue
+        candidate = path.strip()
         if len(candidate) >= 2 and candidate.startswith('"') and candidate.endswith('"'):
             candidate = candidate[1:-1].replace("\\\\", "\\").replace('\\"', '"')
         ignored.add(candidate.replace("\\r", "").replace("\r", "").rstrip("/"))

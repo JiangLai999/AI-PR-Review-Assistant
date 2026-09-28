@@ -4,7 +4,7 @@
 
 ## 协作与修复
 
-- MiMo 的真实终端只读审计见 `docs/mimo-p5-terminal.md`：它没有物理 HID/IME 候选窗控制能力，**没有声称**真实 Windows Terminal 的 Shift+Down 或中文 IME 已通过。
+- MiMo 的真实终端只读审计见 `docs/DEV_RECORD.md`：它没有物理 HID/IME 候选窗控制能力，**没有声称**真实 Windows Terminal 的 Shift+Down 或中文 IME 已通过。
 - MiMo 对三尺寸和 Finding 模拟测试的独立复核指出首版断言过弱；Codex 修复 PixelLogo 的宽屏文字重叠，将 Finding 断言改成“首行移出视口 + 第一条专属内容仍在 + 第二条详情不出现”。
 - Claude 的独立打包审计发现 `py3-none-any` 错误包装 Windows DLL，且旧“干净安装”借用 PYTHONPATH，均已修复并重新实测。Claude 本次未运行测试，它的报告是只读推理。
 

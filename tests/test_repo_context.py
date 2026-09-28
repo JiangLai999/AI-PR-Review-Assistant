@@ -414,7 +414,7 @@ class TestRelatedFileShape:
 
 
 class TestRenderPrFileList:
-    """B（docs/claude-repo-structure-context.md）：PR 变更清单的注入格式。"""
+    """B（docs/DEV_RECORD.md）：PR 变更清单的注入格式。"""
 
     def test_header_counts_paths_and_review_skips(self):
         text = render_pr_file_list(["src/a.py", "src/b.ts"], skipped=4)
@@ -452,7 +452,7 @@ class TestRenderPrFileList:
 
 
 class TestRenderRepoTree:
-    """C（docs/claude-repo-structure-context.md）：目录树的注入格式与三种折叠。"""
+    """C（docs/DEV_RECORD.md）：目录树的注入格式与三种折叠。"""
 
     def test_renders_directories_first_then_files(self):
         text = render_repo_tree(["src/app.py", "src/pkg/mod.py", "README.md"])

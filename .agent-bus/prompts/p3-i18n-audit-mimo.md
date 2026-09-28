@@ -16,7 +16,7 @@
      a) 人类可读汇总（总文件数、含汉字的文件数、字面量总数、Top 10 文件 + 计数）；
      b) 一条 `I18N_AUDIT {json}` 行（便于机器消费）：`{files, filesWithCjk, literals, top: [{file,count}], generatedAt}`；
    - 退出码：始终 0（这是审计工具，不是门禁）；不修改任何源码。
-2. `docs/mimo-i18n-audit.md`：把你实跑出来的数字写进去（总量、Top 10、你判断"可以先翻哪 3 个文件"）、
+2. `docs/DEV_RECORD.md`：把你实跑出来的数字写进去（总量、Top 10、你判断"可以先翻哪 3 个文件"）、
    噪音排除规则说明、以及"全站 i18n 建议的落地顺序（词典 → hook → 按页面分批）"。
 
 ## 纪律（避免再卡死）
@@ -25,7 +25,7 @@
 - 若脚本跑不通，最多修 2 次；仍不行就如实写未确认并照常交付文件。
 
 ## 约束
-- 只写：`web/tools/i18n-coverage.mjs`、`docs/mimo-i18n-audit.md`；禁止改任何源码/其它文件；禁止 git；
+- 只写：`web/tools/i18n-coverage.mjs`、`docs/DEV_RECORD.md`；禁止改任何源码/其它文件；禁止 git；
 - 禁止 `npm run build`；禁止读取/输出凭据。
 
 完成后按总线报告：

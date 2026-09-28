@@ -20,7 +20,7 @@ export function setLang(value: unknown): void
 2. `web/src/pages/OverviewPage.tsx`（审计：61 条汉字字面量）
 3. `web/src/pages/BenchmarkPage.tsx`（21 条）
 4. `web/src/components/DemoPanel.tsx`（少量）
-5. `docs/claude-i18n-overview.md`：key 命名规则、改动点 file:line、前后字面量数字、验证、未决项。
+5. `docs/DEV_RECORD.md`：key 命名规则、改动点 file:line、前后字面量数字、验证、未决项。
 
 ## 约定
 - key 命名：`overview.<区域>.<名称>` / `benchmark.<区域>.<名称>`（小写点分，禁止中文 key）。

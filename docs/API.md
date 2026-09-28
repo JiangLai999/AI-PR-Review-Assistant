@@ -395,7 +395,7 @@ curl -X POST http://127.0.0.1:8787/api/config \
 ### POST `/api/config/import-cli`
 
 用 **CLI 侧配置**覆盖 Web 工作台的独立配置（`*.web.json`）。两者的边界与派生规则见
-[`docs/config-isolation.md`](config-isolation.md)。
+[`docs/DEV_RECORD.md`](DEV_RECORD.md)。
 
 请求体：
 

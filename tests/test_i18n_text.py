@@ -8,7 +8,7 @@
 3. ``CredentialStatus`` 携带 ``label_key`` / ``detail_key`` / ``fix_hint_key`` / ``params``，
    且 ``label`` / ``detail`` / ``fix_hint`` 原文不变。
 
-契约与 key 清单见 docs/opencode-backend-i18n.md。
+契约与 key 清单见 docs/DEV_RECORD.md。
 """
 
 from __future__ import annotations

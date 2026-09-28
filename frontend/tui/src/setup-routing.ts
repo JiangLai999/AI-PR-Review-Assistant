@@ -1,5 +1,5 @@
 /**
- * CHAT/REVIEW 双槽路由在配置助手里的前端投影（docs/dual-model-roles-plan.md §4/§5.4）。
+ * CHAT/REVIEW 双槽路由在配置助手里的前端投影（docs/DEV_RECORD.md §4/§5.4）。
  *
  * 槽位的唯一推导点是后端 `jsonl_server.JsonlBackend._routing_snapshot()`；前端不得由
  * `hybrid_strategy` 反推。这里只做三件事：
@@ -250,7 +250,7 @@ export function routingStatusText(routing: RoutingSnapshot | undefined, language
   return parts.join(" · ")
 }
 // ---------------------------------------------------------------------
-// B2/B3 模型规格与中转站的 config.setup 载荷（docs/b2b3-wiring-design.md §2.5/§2.6）
+// B2/B3 模型规格与中转站的 config.setup 载荷（docs/DEV_RECORD.md §2.5/§2.6）
 // ---------------------------------------------------------------------
 
 /** 规格编辑值：undefined = 不提交（保持落盘值，后端 `_coerce_spec_int` 的 null 语义）。 */
@@ -309,7 +309,7 @@ export type CustomEndpointSetupValues = {
  * `base_url`/`api_format`；规格走 §2.5 的 `context_window`/`max_output`。
  * **不套用官方预设**：base_url 为空时也发（后端允许 custom 无预设端点）。
  *
- * `api_key` 三态语义（docs/mimo-config-wizard-fix2.md §2）：
+ * `api_key` 三态语义（docs/DEV_RECORD.md §2）：
  *   undefined → 不发（"未填写"，后端缺失 = 不动）；
  *   ""        → 发空串（"显式清空"，与未填写区分）；
  *   非空      → 发该值（写入）。
@@ -377,7 +377,7 @@ export function validateSpecInput(
 }
 
 // ---------------------------------------------------------------------
-// review 思考档位（docs/mimo-review-effort-ui.md）
+// review 思考档位（docs/DEV_RECORD.md）
 // 与 repo_context 同惯例：取值清单 owner 是后端，这里只做投影 / 预选 / 载荷。
 // ---------------------------------------------------------------------
 

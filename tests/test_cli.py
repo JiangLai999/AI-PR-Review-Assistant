@@ -2697,7 +2697,7 @@ def test_config_import_ignores_unknown_preference_keys(tmp_path: Path) -> None:
 
     `config export` 每次都写全量 preferences，所以新版本导出的文件里一定有旧版本没有的
     键；不过滤的话 `PreferencesConfig(**payload)` 直接 `TypeError`，用户连导入都做不了
-    （既有缺陷，见 docs/claude-backend-followup.md §3）。
+    （既有缺陷，见 docs/DEV_RECORD.md §3）。
     """
     config_path = tmp_path / "config.json"
     import_payload = {

@@ -56,7 +56,7 @@ class CredentialStatus:
     """单项凭证的健康状态。
 
     ``label`` / ``detail`` / ``fix_hint`` 是**原文**（中文），供 CLI 与旧前端使用；
-    ``*_key`` + ``params`` 是结构化键（契约见 docs/opencode-backend-i18n.md），
+    ``*_key`` + ``params`` 是结构化键（契约见 docs/DEV_RECORD.md），
     前端按当前语言渲染，``to_dict()`` 一并输出；key 为空串时前端回落原文。
     """
 

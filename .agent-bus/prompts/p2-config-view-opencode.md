@@ -56,10 +56,10 @@
    - `test_config_view_exposes_preferences_and_options`
    - `test_options_values_match_config_constants`（词表与 config.py 常量逐项对齐，防漂移）
    - `test_numeric_ranges_are_exposed_and_enforced`（越界 → ok=False）
-3. `docs/opencode-web-config-view.md`：字段来源（file:line）、与 CLI 6 阶段的对应关系、校验单一真相源说明、验证数字、未决项。
+3. `docs/DEV_RECORD.md`：字段来源（file:line）、与 CLI 6 阶段的对应关系、校验单一真相源说明、验证数字、未决项。
 
 ## 约束
-- 只写：`src/ai_pr_review/web_config.py`、`tests/test_web_config_writes.py`、`docs/opencode-web-config-view.md`；
+- 只写：`src/ai_pr_review/web_config.py`、`tests/test_web_config_writes.py`、`docs/DEV_RECORD.md`；
 - 禁止改 `web_server.py`（主控的）、`web/src/**`（claude/mimo 的）、禁止 git；禁止读取/输出凭据。
 
 ## 验证（必须真跑，报数字）

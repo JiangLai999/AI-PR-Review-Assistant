@@ -291,7 +291,7 @@ export function formatCompactFailure(
 }
 
 // ---------------------------------------------------------------------
-// C2 · 长代码块折叠（docs/mimo-chat-render-c.md / mimo-chat-render-c3.md）
+// C2 · 长代码块折叠（docs/DEV_RECORD.md / docs/DEV_RECORD.md）
 // 纯函数，便于单测；app.tsx 负责状态与 JSX 接线。
 // ---------------------------------------------------------------------
 
@@ -481,7 +481,7 @@ export function formatChatHistoryLines(
   })
 }
 // ---------------------------------------------------------------------
-// B2/B3 模型规格展示（docs/mimo-config-wizard-ui.md）
+// B2/B3 模型规格展示（docs/DEV_RECORD.md）
 // 纯函数，便于单测；app.tsx 只负责取数与排版。
 // ---------------------------------------------------------------------
 
@@ -571,7 +571,7 @@ export function formatCatalogRefreshStatus(
 }
 
 // ---------------------------------------------------------------------
-// chat 上下文预算来源展示（docs/mimo-config-wizard-fix2.md §4）
+// chat 上下文预算来源展示（docs/DEV_RECORD.md §4）
 // ---------------------------------------------------------------------
 
 /** 预算来源标签（config / model_spec / fallback 三态）。 */
@@ -628,7 +628,7 @@ export function customEndpointFieldLabels(language?: string): Array<{
 }
 
 // ---------------------------------------------------------------------
-// review 思考档位展示（docs/mimo-review-effort-ui.md）
+// review 思考档位展示（docs/DEV_RECORD.md）
 // 纯函数；app.tsx 只负责取数与排版。
 // ---------------------------------------------------------------------
 
@@ -646,7 +646,7 @@ export function reviewEffortBilingualLabel(label: string, language?: string): st
 }
 
 /**
- * 档位的成本提示（docs/review-reasoning-assessment.md §0.3 真机实测，max 档）。
+ * 档位的成本提示（docs/DEV_RECORD.md §0.3 真机实测，max 档）。
  *
  * `off` = 与现状相同（基线）；`low/high/max` = 思考会放大输出 tokens 与耗时；
  * `auto` = 不干预，由供应商默认决定。数字取 max 档实测（约 3.6× 输出 tokens、
@@ -696,13 +696,13 @@ export function formatReviewEffortSummary(level: string | undefined, language?: 
 }
 
 // ---------------------------------------------------------------------
-// 小 max_output 模型上高档位思考预算被封顶的提示（docs/mimo-review-budget-hint.md）
+// 小 max_output 模型上高档位思考预算被封顶的提示（docs/DEV_RECORD.md）
 // ---------------------------------------------------------------------
 
 /**
  * 「高档位思考预算被封顶」提示的 `max_output` 阈值（**含**）。
  *
- * 理由（docs/review-reasoning-assessment.md §10.7 #3）：max 档预留 +12000、high +8000，
+ * 理由（docs/DEV_RECORD.md §10.7 #3）：max 档预留 +12000、high +8000，
  * 加上答案基础额度（4096–8192），总需求约 16k–20k。16384 是业界常见的小输出上限档
  * （anthropic claude-sonnet 8192、glm 系 4096、gpt-4o-mini 16384），落在这个区间内
  * high/max 的预留几乎必然被 `max_output` 封顶吃掉。比 8192 更保守：8192 以下 high
@@ -711,7 +711,7 @@ export function formatReviewEffortSummary(level: string | undefined, language?: 
 export const REVIEW_BUDGET_CAP_MAX_OUTPUT = 16384
 
 /**
- * 小 `max_output` 模型上 high/max 档思考预算被封顶的提示（docs/mimo-review-budget-hint.md）。
+ * 小 `max_output` 模型上 high/max 档思考预算被封顶的提示（docs/DEV_RECORD.md）。
  *
  * 只在**同时**满足两条时返回非空文案：
  * 1. `max_output` 是有限数字且 ≤ `REVIEW_BUDGET_CAP_MAX_OUTPUT`；
@@ -758,7 +758,7 @@ export function reviewSlotMaxOutput(
 }
 
 // ---------------------------------------------------------------------
-// 会话 UI（docs/mimo-sessions-ui.md）：列表行 / 相对时间 / 标题截断 / 压力提示
+// 会话 UI（docs/DEV_RECORD.md）：列表行 / 相对时间 / 标题截断 / 压力提示
 // 纯函数，便于单测；app.tsx 只负责取数与排版。
 // ---------------------------------------------------------------------
 

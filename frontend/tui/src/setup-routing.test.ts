@@ -155,7 +155,7 @@ test("slot aliases and preset copy are bilingual", () => {
 })
 
 // ---------------------------------------------------------------------
-// B3 中转站载荷三态 + api_key 清空语义（docs/mimo-config-wizard-fix2.md §1/§2）
+// B3 中转站载荷三态 + api_key 清空语义（docs/DEV_RECORD.md §1/§2）
 // ---------------------------------------------------------------------
 
 test("setupCustomEndpointFields api_key three states: omit / clear / write", () => {
@@ -253,7 +253,7 @@ test("setupModelSpecFields only sends provided numeric fields", () => {
 })
 
 // ---------------------------------------------------------------------
-// review 思考档位（docs/mimo-review-effort-ui.md）
+// review 思考档位（docs/DEV_RECORD.md）
 // ---------------------------------------------------------------------
 
 test("review effort choices prefer the backend list and fall back when absent", () => {

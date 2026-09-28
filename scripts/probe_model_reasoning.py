@@ -24,7 +24,7 @@
     3. 每次调用的 completion tokens 与答案字符数（暴露"思考吃掉预算导致答案为空"）
     4. 结论行 SUPPORTED / NOT-SUPPORTED / INCONCLUSIVE
 
-判定规则与解读方式见 ``docs/model-reasoning-probe.md``。
+判定规则与解读方式见 ``docs/DEV_RECORD.md``。
 """
 
 from __future__ import annotations
@@ -546,7 +546,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  python scripts/probe_model_reasoning.py --provider ollama --model qwen3.5:4b\n"
             "  python scripts/probe_model_reasoning.py --provider ollama --model qwen3.5:4b "
             "--also-native\n\n"
-            "判定规则见 docs/model-reasoning-probe.md"
+            "判定规则见 docs/DEV_RECORD.md"
         ),
     )
     parser.add_argument("--provider", required=True, choices=sorted(PROVIDERS))

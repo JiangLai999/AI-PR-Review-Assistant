@@ -119,7 +119,7 @@ def run_config_import(
     if isinstance(preferences_payload, dict):
         # 导入的文件可能由**更新**的版本导出（`config export` 每次都会写全量键），
         # 直接展开会让本版本不认识的键抛 TypeError，用户连 `config import` 都用不了。
-        # 过滤规则与 `AppConfig.load` 共用一份（docs/claude-backend-followup.md §3）。
+        # 过滤规则与 `AppConfig.load` 共用一份（docs/DEV_RECORD.md §3）。
         config.preferences = PreferencesConfig(
             **filter_dataclass_payload(PreferencesConfig, preferences_payload)
         )
