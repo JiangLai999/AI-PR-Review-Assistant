@@ -132,7 +132,7 @@ Chat 不是孤立聊天：`/review` 触发审查后会**把该 Run 绑定为对�
   （`scripts/build_website_docs.py` + `tests/test_website_docs.py`）；README 的斜杠命令表必须等于
   两套界面的实现集合；首页命令卡数量必须等于标题数字；提交包走密钥卫生守卫；
 - **CI**：build / frontend / tui / test-and-quality（Python 3.12 与 3.13）五个 job，
-  当前全量 **1545** 项 Python 测试通过（2026-09-29 全量复跑）；
+  当前全量 **1544 passed + 4 skipped**（2026-09-29 CI；本机含可选 AST 依赖时 1545）；
 - **合规**：MIT 授权边界、第三方许可与商标总表、AI 生成素材逐条登记、
   "不使用来源不明组件"的口径，见 `docs/COMPLIANCE_AND_ORIGINALITY.md`；
 - **能力边界**：README 与报告都明确区分"已实现 / 需额外配置 / 规划中"，benchmark 成绩不当作泛化准确率宣传。
