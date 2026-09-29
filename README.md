@@ -9,7 +9,7 @@
 
 🌐 **[项目官网（静态展示）](https://jianglai999.github.io/AI-PR-Review-Assistant-web/)** | 📖 **[完整文档](docs/PROJECT_DESIGN.md)** | 💡 **[创新点](docs/INNOVATION.md)**
 
-🎬 **视频演示：** [抖音](https://v.douyin.com/wBSy8yxLcEg/) | [哔哩哔哩](https://www.bilibili.com/video/BV1v9VZ6bE2G/?share_source=copy_web&vd_source=96df5919ae9bf8f3dc432bc3085a328f)
+🎬 **视频演示：** [【AI pr review 代码审查智能体】 · 哔哩哔哩](https://www.bilibili.com/video/BV1v9VZ6bE2G/?share_source=copy_web&vd_source=96df5919ae9bf8f3dc432bc3085a328f)
 
 ---
 
