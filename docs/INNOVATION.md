@@ -1,403 +1,179 @@
 # AI PR Review Assistant — 项目创新点
 
-> 最后更新：2026-05-31 · 状态：对外文档
-> 🏆 项目特色：AI 多模型协作决策 + 透明开发流程
+> 最后更新：2026-09-29 · 状态：对外文档
+> 🏆 差异化：证据优先的审查闭环 + 可解释计划 + 双槽路由账本；CLI / Chat / Web 三入口共用同一内核
 
 ---
 
-## 一、核心创新：三方会谈决策模式
+## 一、定位：不是"一次模型调用"，而是一条可验证的审查流水线
 
-### 1.1 模式概述
-
-在项目架构设计阶段，采用 **Claude Code + DeepSeek V4 Pro + 用户** 的三方会谈模式，通过多轮质疑-回应-修订循环，达成技术共识。
-
-### 1.2 参与角色
-
-| 角色 | 模型 | 职责 |
-|------|------|------|
-| **主持人 & 架构师** | Claude Code | 提出方案、协调讨论、把控方向 |
-| **技术审查官** | DeepSeek V4 Pro | 质疑方案、提供技术细节、识别风险 |
-| **决策者** | 用户 | 最终决策、业务需求确认 |
-
-### 1.3 会谈流程
+真实 PR 的完整链路：
 
 ```text
-第一轮：架构质疑
-  Claude Code 提出初步方案 → DeepSeek 提出 4 个质疑 → 用户反馈
-
-第二轮：技术辩论
-  Claude Code 追问 → DeepSeek 详细回答 → 用户进一步质疑
-
-第三轮：争议解决
-  Claude Code 质疑 → DeepSeek 撤回建议 → 用户确认
-
-第四轮：方案确认
-  Claude Code 请求确认 → DeepSeek 补充风险 → 用户最终确认
+GitHub PR URL
+  → 获取变更 → 文件过滤 → 构建上下文 → 生成审查计划
+  → 静态规则 / AST / 跨文件分析  ┐
+  → AI 模型审查（本地 / 云端、成本预算）┘ → 汇总 Findings
+  → 文件 / 行号 / 代码片段证据校验 → 后处理
+  → 终端、Markdown、JSON 或 GitHub 评论；SQLite 历史与人工反馈
 ```
 
-### 1.4 关键成果
-
-| 决策点 | 初始方案 | 最终方案 | 改进原因 |
-|--------|----------|----------|----------|
-| 架构 | FastAPI + Celery | 真单体 (BackgroundTasks) | Celery 引入 3 个运行时组件，过度设计 |
-| 异步 | 同步分析 | BackgroundTasks 异步 | GitHub Webhook 10 秒限制 |
-| 模型 | Haiku 分类 + Sonnet 深度 | 规则过滤 + 全量 Sonnet | Haiku 无 benchmark 数据，漏判风险高 |
-| Prompt | 2000 tokens | 650 tokens (双层结构) | 减少 65%，平衡成本和效果 |
-| 上下文 | diff + 前后 10 行 | tree-sitter + 三级 fallback | 10 行连完整函数签名都看不到 |
-
-### 1.5 创新价值
-
-- **避免单一视角局限**：不同 AI 模型有不同的知识和偏见
-- **质疑精神**：DeepSeek 的 4 个质疑直接改变了架构方案
-- **风险前置**：在开发前识别出 10 个关键风险
-- **透明决策**：所有决策都有明确的理由和讨论过程
+- 三个入口共用同一套 Python 审查内核：CLI（`pr-review`）、OpenTUI Chat（`pr-review chat`）、Web 工作台（`pr-review serve`）；
+- 离线 Demo（`pr-review demo`）只走内置样例 + 规则 + 证据校验：不调用 GitHub、不调用模型、不写正式审查历史；
+- 与"贴一段 diff 让模型点评"的差别在于：**每一步都有输入、输出与可回溯的状态**。
 
 ---
 
-## 二、双模型并行商讨模式
+## 二、证据优先：Finding 四态校验
 
-### 2.1 模式概述
+每条 Finding 在进入报告前都要对齐 PR 的真实变更（`src/ai_pr_review/services/evidence/finding_validator.py`）：
+文件是否在本次变更中、行号是否合法、是否命中变更行、代码片段是否与文件内容一致。
 
-在模块开发阶段，采用 **DeepSeek V4 Pro + GPT 5.4** 双模型并行开发模式，两个模型各有所长，互补协作。
+校验结果映射为四态，在终端、Markdown、GitHub 评论与 Web 界面统一展示
+（`src/ai_pr_review/services/report_renderer.py`）：
 
-### 2.2 分工策略
+| 状态 | 含义 |
+|---|---|
+| `valid` | 位置与片段自洽 |
+| `needs_review` | 待人工确认 |
+| `invalid` | 证据不成立 |
+| `unverified` | 未校验（未知 / 缺失状态的兜底） |
 
-| 模型 | 擅长领域 | 负责模块 |
-|------|----------|----------|
-| **DeepSeek V4 Pro** | 快速实现、代码生成 | PR Fetcher |
-| **GPT 5.4** | 详细设计、方案审查 | Filter Pipeline、Context Builder |
+Finding 同时携带**置信度**与**来源**（规则 / AST / AI）。价值：把"模型说了什么"变成"能核对到 diff 的结论"，
+误报可以被显式标注，而不是被当真。
 
-### 2.3 协作流程
+---
+
+## 三、可解释的审查计划：先规划，再决定要不要花钱
+
+规划阶段**不调用模型**（`pr-review plan`、`pr-review <PR_URL> --dry-run`），先产出结构化 `ReviewPlan`
+（`src/ai_pr_review/models/review_plan.py`）：
+
+| 字段 | 含义 |
+|---|---|
+| `intent` | 本次审查意图 |
+| `risk_level` / `risk_categories` | 风险等级与风险类别 |
+| `priority_files` / `skipped_files` | 优先审查与跳过的文件 |
+| `strategies` | 采用的审查策略 |
+| `requires_cross_file_analysis` | 是否需要跨文件分析 |
+| `estimated_file_reviews` | 预计审查文件数 |
+| `rationale` | 规划依据（逐条可读） |
+
+价值：审查范围与成本在调用模型**之前**就是确定的，用户可以据此决定继续、调整，或只跑计划。
+
+---
+
+## 四、双槽路由 + 成本账本：让取舍显式可审计
+
+- **槽位**：`local`（Ollama 等本地端点）/ `remote`（云端）/ `hybrid`（本地→远端回退）；
+  Chat 与审查可以分别指定模型，第三方中转站可单独配置 base URL / key / 模型名与上下文长度；
+- **账本**：`CostLedger`（`src/ai_pr_review/services/cost_controller.py`）让 local / remote 两槽共享同一本预算账，
+  但各自按自己的价目计算——刻意不共用 controller，避免本地模型被误按云端价计费；
+- **闸门**：单次运行与 24 小时滑动窗口双重上限（默认 `$5 / run`、`$50 / 24h`，可配置），超预算显式拦截；
+- **路由**：按任务复杂度（`TaskComplexity`，`src/ai_pr_review/services/model_selector.py`）与用户配置选择模型，
+  混合编排见 `src/ai_pr_review/services/hybrid_orchestrator.py`。
+
+价值：隐私、成本、质量之间的取舍是**显式且可审计**的，而不是藏在代码注释里。
+
+---
+
+## 五、三级上下文降级：不因环境缺失而崩溃
 
 ```text
-DeepSeek V4 Pro                    GPT 5.4
-    │                                  │
-    ▼                                  ▼
-快速实现 PR Fetcher              详细设计 Filter Pipeline
-    │                                  │
-    ▼                                  ▼
-Claude Code 审查 ◄─────────────────► Claude Code 审查
-    │                                  │
-    ▼                                  ▼
-  测试验证                            测试验证
+Level 1  tree-sitter 语法树：函数 / 类 / import 结构（最准确）
+Level 2  正则结构提取：语法包不可用时的降级路径
+Level 3  diff-only 兜底：仍给出可审查的最小上下文
 ```
 
-### 2.4 创新价值
+解析模式（`parse_mode`）随结果一起返回，报告里能看出这一轮用的是哪一级
+（`src/ai_pr_review/services/context_builder.py`）。相关文件预取
+（`src/ai_pr_review/services/repo_context.py`）按 test → import → init 顺序工作，
+带行数截断、缓存与预算裁剪，任一步失败即降级。
 
-- **效率提升**：两个模型并行开发，缩短开发周期
-- **质量保证**：不同模型互相审查，减少盲点
-- **方案整合**：取长补短，形成最优方案
+价值：少装一个语法包不会让审查崩溃，也不会静默给出更差的上下文而不自知。
 
 ---
 
-## 三、透明决策过程
+## 六、确定性分析与 AI 协同：两层的分工是明确的
 
-### 3.1 决策记录
+- **确定性层**：静态安全规则、Python AST 分析、跨文件接口影响分析——可复现、可进 CI；
+- **模型层**：结构化 JSON 输出，双层 prompt 结构（`src/ai_pr_review/services/prompt_assembler.py`：
+  基础 system prompt 定义角色与输出格式，语言特定段补充各语言的检查维度），
+  另有一段"相关文件诚实约束"，要求模型只引用真实提供的文件；
+- **合并**：确定性结果与模型结果统一进入 Finding 列表，去重后由
+  `src/ai_pr_review/services/finding_localizer.py` 对齐文件与行号；
+  文件级过滤与跳过规则见 `src/ai_pr_review/services/filter_pipeline.py`。
 
-每个决策都记录以下信息：
-
-```markdown
-### 决策 X：[决策名称]
-
-**时间**：[时间]
-**决策**：[最终决定]
-**理由**：[决策理由]
-**讨论过程**：[关键讨论点]
-```
-
-### 3.2 决策追溯
-
-| 决策 | 时间 | 参与方 | 关键质疑 |
-|------|------|--------|----------|
-| 架构选择 | 00:30 | 全体 | DeepSeek 质疑 Celery 的必要性 |
-| 模型策略 | 01:00 | 全体 | 用户质疑 Haiku 的可靠性 |
-| Prompt 设计 | 01:30 | 全体 | 用户质疑 2000 tokens 太长 |
-| 上下文构建 | 02:00 | 全体 | DeepSeek 指出 10 行上下文不足 |
-| 协作模式 | 02:30 | 全体 | 用户希望与 GPT 5.4 协作 |
-
-### 3.3 创新价值
-
-- **可追溯**：每个决策都有完整的讨论记录
-- **可复用**：其他项目可以参考决策过程
-- **可改进**：团队可以回顾和优化决策流程
+价值：CI 级的确定性和模型的语义理解是互补关系，而不是互相替代。
 
 ---
 
-## 四、技术方案创新
+## 七、三入口 + 审查上下文闭环
 
-### 4.1 真单体架构
+| 入口 | 启动方式 | 特点 |
+|---|---|---|
+| CLI | `pr-review <PR_URL>` | 16 个顶层命令 + 默认审查入口；终端 / Markdown / JSON / GitHub 评论四种输出 |
+| Chat | `pr-review chat` | OpenTUI 交互界面；缺少 Bun / OpenTUI 时自动回退纯文本 CLI |
+| Web 工作台 | `pr-review serve` | 标准库 `ThreadingHTTPServer` + 已提交的静态前端，运行不需要 Node |
 
-**问题**：初始方案选择 FastAPI + Celery，但 Celery 需要 Redis/RabbitMQ，引入过多运维复杂度。
+Chat 不是孤立聊天：`/review` 触发审查后会**把该 Run 绑定为对话上下文**，之后可以继续追问 Finding、
+证据与修复建议；`/context` 查看或解绑，`/think` 调整思考档位，`/sessions` 切换 / 重命名会话，
+`/compact` 压缩上下文，`Ctrl+O` 打开 Findings 详情。完整命令与界面差异见 `docs/chat-features.md`。
 
-**解决方案**：采用真单体架构
-- FastAPI + BackgroundTasks + SQLite
-- 最小化运维复杂度
-- MVP 阶段足够使用
-
-**创新点**：质疑了"单体 + Celery"的矛盾，指出真正的单体应该是一个进程搞定。
-
-### 4.2 双层 Prompt 结构
-
-**问题**：初始 Prompt 约 2000 tokens，成本高且稀释注意力。
-
-**解决方案**：双层 Prompt 结构
-- 基础层（~400 tokens）：角色、输出格式、通用规则
-- 语言层（~250 tokens）：语言特定检查维度
-- 总开销：650 tokens，减少 65%
-
-**创新点**：将 Prompt 分层，既保留了核心检查维度，又大幅降低成本。
-
-### 4.3 tree-sitter 三级 fallback
-
-**问题**：diff + 前后 10 行的上下文不足，AI 会瞎猜。
-
-**解决方案**：三级 fallback 策略
-```text
-Level 1: tree-sitter 全量解析（最准确）
-Level 2: 正则表达式提取关键 pattern（次准确）
-Level 3: 仅提供 diff context（前后 30 行，保底）
-```
-
-**创新点**：保证在任何情况下都能提供有意义的上下文，不会因为 tree-sitter 编译失败而崩溃。
-
-### 4.4 规则过滤 + 全量审查
-
-**问题**：Haiku 分类没有 benchmark 数据，漏判风险高。
-
-**解决方案**：规则预过滤 + 全量 Sonnet 审查
-```text
-始终审查: src/auth/, src/middleware/, migrations/, **/config/**, **/*.sql
-直接跳过: test/**, __test__/**, *.test.*, *.spec.*, docs/**, *.md
-所有剩余文件 → 全部送 Sonnet
-```
-
-**创新点**：用规则替代 AI 分类，避免漏判风险，同时保证成本可控。
-
-### 4.5 三级成本控制
-
-**问题**：如何防止意外高消费？
-
-**解决方案**：三级成本控制
-- 单次运行硬上限：$5/run
-- 24 小时滑动窗口：$50/24h
-- 文件级路由：大文件用便宜模型
-
-**创新点**：多层级成本控制，既保证审查质量，又防止意外高消费。
+**复盘闭环**：每次 Run 写入 SQLite，`history` / `stats` / `explain` / `export-run` / `feedback`
+支持回看、统计、导出与人工结论记录；`benchmark` 用内置样例集做规则回归
+（**精选样例成绩，不代表真实世界的泛化准确率**）。
 
 ---
 
-## 五、开发流程创新
+## 八、把"诚实"做成机制：工程可信度
 
-### 5.1 渐进式开发
-
-**模式**：每个模块独立开发，测试驱动，持续集成验证
-
-**流程**：
-```text
-设计文档 → 代码实现 → 测试验证 → 代码审查 → 合并
-```
-
-**成果**：
-- 175 个测试全部通过
-- 12 个核心模块完整实现
-- 88% 代码覆盖率
-
-### 5.2 多模型协作开发
-
-**模式**：不同模型负责不同模块，互相审查
-
-**分工**：
-- Claude Code：架构设计、代码审查、质量把控
-- DeepSeek V4 Pro：PR Fetcher 实现
-- GPT 5.4：Filter Pipeline、Context Builder 实现
-
-**创新点**：展示了多模型协作的潜力，不同模型互补，提高整体质量。
-
-### 5.3 持续交付
-
-**模式**：全周期持续交付，严禁拖尾突击提交
-
-**要求**：
-- 从议题发布之日起，保持持续的 PR 记录和 commit 提交
-- 所有 commit 时间戳必须落在开发周期内
-- PR 描述与实际代码变更相符
-
-**成果**：
-- 30+ 个 PR 持续提交
-- CI/CD 流水线完整
-- 代码质量持续验证
+- **防漂移守卫**：`docs/API.md` 必须覆盖全部可见命令；官网文档产物必须与生成器逐字一致
+  （`scripts/build_website_docs.py` + `tests/test_website_docs.py`）；README 的斜杠命令表必须等于
+  两套界面的实现集合；首页命令卡数量必须等于标题数字；提交包走密钥卫生守卫；
+- **CI**：build / frontend / tui / test-and-quality（Python 3.12 与 3.13）五个 job，
+  当前全量 **1545** 项 Python 测试通过（2026-09-29 全量复跑）；
+- **合规**：MIT 授权边界、第三方许可与商标总表、AI 生成素材逐条登记、
+  "不使用来源不明组件"的口径，见 `docs/COMPLIANCE_AND_ORIGINALITY.md`；
+- **能力边界**：README 与报告都明确区分"已实现 / 需额外配置 / 规划中"，benchmark 成绩不当作泛化准确率宣传。
 
 ---
 
-## 六、前端产品展示创新
+## 九、方法论：多 agent 协作 + 透明开发记录
 
-### 6.1 设计理念
+项目开发采用**一个主控 + 多个子代理**的协作方式：主控负责拆解任务、定义写入范围（write_scope）、
+集成与验收；子代理（Claude Code、MiMo Code、OpenCode、WorkBuddy 等，配合 DeepSeek / GLM / MiMo 等模型）
+按任务单执行并以报告回报。协作总线、任务单与各 agent 的临时目录都只留在本地，不入库。
 
-为 CLI 工具创建现代化的前端展示页面，参考 OpenCode / Claude Code 官网风格，让用户通过网页快速了解产品功能、安装方式和使用方法。
-
-### 6.2 技术选型
-
-| 技术 | 用途 | 说明 |
-|------|------|------|
-| HTML5 | 结构 | 语义化标签，无障碍访问 |
-| CSS3 | 样式 | CSS 变量、Grid、Flexbox |
-| GSAP 3.x | 动画 | ScrollTrigger、Timeline、Tween |
-| 无框架 | 轻量 | 纯原生 JS，CDN 加载 GSAP |
-
-### 6.3 页面结构
-
-| 区域 | 内容 | GSAP 动画 |
-|------|------|-----------|
-| **Hero** | 标题 + 终端预览 + 安装命令 | Timeline 序列入场 |
-| **Stats** | 测试/模块/供应商/覆盖率 | 数字滚动计数 |
-| **Pipeline** | 8 步审查流水线 | ScrollTrigger 逐步展现 |
-| **Features** | 6 个核心功能卡片 | 批量入场动画 |
-| **Docs** | 完整参考文档（可折叠） | 淡入动画 |
-| **Install** | 6 种安装方式 | 卡片入场 |
-| **FAQ** | 5 个常见问题 | 手风琴展开 |
-
-### 6.4 GSAP 动画清单
-
-```javascript
-// 1. Hero Timeline - 序列入场
-const heroTl = gsap.timeline();
-heroTl.from('.hero-badge', { opacity: 0, y: 15 })
-      .from('.hero-title', { opacity: 0, y: 25 }, '-=0.2')
-      .from('.terminal', { opacity: 0, x: 30 }, '-=0.4');
-
-// 2. Stats Counter - 数字滚动
-gsap.to(el, {
-  duration: 1.5,
-  onUpdate() { el.textContent = Math.round(this.progress() * target); }
-});
-
-// 3. Pipeline - 逐步展现
-ScrollTrigger.create({
-  trigger: step, start: 'top 85%', once: true,
-  onEnter: () => gsap.to(step, { opacity: 1, y: 0 })
-});
-
-// 4. Features - 批量入场
-featureCards.forEach((card, i) => {
-  gsap.to(card, { opacity: 1, y: 0, delay: i * 0.08 });
-});
-
-// 5. Terminal - 打字效果
-codeLines.forEach((line, i) => {
-  gsap.from(line, { opacity: 0, x: -10, delay: i * 0.06 });
-});
-
-// 6. Terminal Shadow - 鼠标跟随
-term.style.boxShadow = `${10+dx}px ${20+dy}px 40px rgba(0,0,0,0.08)`;
-```
-
-### 6.5 文档集成
-
-网页内嵌完整参考文档，用户无需离开即可了解：
-
-| 文档 | 内容 |
-|------|------|
-| **快速开始** | 4 步图文指引 |
-| **CLI 参考** | 11 个命令参数 |
-| **配置命令** | 10 个配置子命令 |
-| **聊天命令** | 3 个启动 + 9 个斜杠命令 |
-| **配置文件** | JSON 示例 + 5 级优先级 |
-| **项目结构** | 目录树 + 模块说明 |
-| **模型供应商** | 18 个标签展示 |
-
-### 6.6 创新价值
-
-- **产品化思维**：CLI 工具也需要专业的展示页面
-- **文档即产品**：将文档嵌入网页，降低用户学习成本
-- **动画增强体验**：GSAP 动画让静态页面更生动
-- **零依赖部署**：纯静态文件，GitHub Pages 直接托管
-
-### 6.7 文件结构
-
-```text
-website/
-├── index.html          # 主页面 (437 行)
-├── css/
-│   └── style.css       # 样式 (238 行)
-├── js/
-│   └── main.js         # GSAP 动画 (172 行)
-└── README.md           # 网站说明
-```
+- 每个子任务都有明确的**写入范围**与验证要求，产物必须通过 CI 与守卫才能合并；
+- 完整时间线、决策、踩坑与质量数据汇总在 `docs/DEV_RECORD.md`；
+- 早期设计阶段的讨论结论（Celery → 真单体、AI 分类 → 规则过滤、Prompt 精简、上下文从"diff + 10 行"
+  升级为三级降级等）作为**历史决策**保留在 `docs/DEV_RECORD.md`；
+  **产品现状以本文、README 与 `docs/API.md` 为准**。
 
 ---
 
-## 七、项目亮点总结
+## 十、行业价值
 
-### 7.1 方法论创新
-
-| 创新点 | 描述 | 价值 |
-|--------|------|------|
-| 三方会谈决策 | Claude Code + DeepSeek + 用户 | 多视角决策，避免单一局限 |
-| 双模型并行商讨 | DeepSeek + GPT 5.4 | 效率提升，质量保证 |
-| 透明决策过程 | 所有决策有完整记录 | 可追溯、可复用、可改进 |
-| 风险前置识别 | 开发前识别 10 个风险 | 提前应对，降低风险 |
-
-### 7.2 技术创新
-
-| 创新点 | 描述 | 价值 |
-|--------|------|------|
-| 真单体架构 | FastAPI + BackgroundTasks + SQLite | 最小化运维复杂度 |
-| 双层 Prompt | 基础层 400 + 语言层 250 = 650 tokens | 减少 65%，平衡成本效果 |
-| 三级 fallback | tree-sitter → 正则 → diff context | 保证鲁棒性 |
-| 规则过滤 | 替代 AI 分类，避免漏判 | 保证审查质量 |
-| 三级成本控制 | 单次 + 24h + 文件级 | 防止意外高消费 |
-| 多供应商适配 | 18+ 模型供应商统一接口 | 灵活选择，自由切换 |
-
-### 7.3 产品创新
-
-| 创新点 | 描述 | 价值 |
-|--------|------|------|
-| 前端展示页面 | GSAP 动画 + 完整文档嵌入 | 产品化展示，降低学习成本 |
-| 终端聊天工作区 | ASCII UI + 斜杠命令 + 会话管理 | 交互式体验，提升效率 |
-| Rich 配置向导 | 图形化终端配置界面 | 降低配置门槛 |
-
-### 7.4 流程创新
-
-| 创新点 | 描述 | 价值 |
-|--------|------|------|
-| 渐进式开发 | 模块独立，测试驱动 | 快速迭代，质量保证 |
-| 多模型协作 | 不同模型负责不同模块 | 互补协作，提高质量 |
-| 持续交付 | 全周期持续提交 | 避免突击，保证质量 |
+- **可复核**：把 AI 审查从"黑箱结论"推进到"带证据状态与置信度的结论"；
+- **可落地**：本地可跑、成本可控、离线可演示——面向真实工程，而不是演示稿；
+- **可复用**：双槽成本账本、三级上下文降级、证据四态校验、防漂移文档守卫，都与具体模型无关；
+- **可追溯**：透明开发记录让"这些功能是怎么做出来的"有据可查。
 
 ---
 
-## 八、行业价值
-
-### 8.1 对 AI 辅助软件工程的贡献
-
-- **证明了 AI 可以参与复杂的技术决策**：通过三方会谈，AI 不仅能写代码，还能参与架构设计
-- **展示了多模型协作的潜力**：不同 AI 模型可以互补，提高整体质量
-- **提供了透明、可追溯的决策过程**：所有决策都有完整记录，便于学习和复用
-
-### 8.2 对开发流程的启示
-
-- **质疑精神的重要性**：DeepSeek 的质疑直接改变了架构方案
-- **风险前置的价值**：在开发前识别风险，避免后期返工
-- **务实优先的原则**：避免过度设计，聚焦核心价值验证
-
-### 8.3 对产品展示的参考
-
-- **CLI 工具也需要产品化展示**：专业网页降低用户学习成本
-- **文档嵌入网页**：用户无需离开即可了解完整用法
-- **动画增强体验**：GSAP 让静态页面更生动有趣
-
----
-
-## 九、相关文档
+## 十一、相关文档
 
 | 文档 | 说明 |
-|------|------|
-| `docs/PROJECT_DESIGN.md` | 完整项目设计书 |
-| `docs/INNOVATION.md` | 创新点文档（本文件） |
-| `website/README.md` | 前端展示参考文档（原写作 docs/WEBSITE.md，该文件不存在） |
-| `docs/API.md` | API 文档 |
-| `website/` | 前端展示页面 |
+|---|---|
+| [`docs/PROJECT_DESIGN.md`](PROJECT_DESIGN.md) | 项目设计书：架构、模块划分与关键取舍 |
+| [`docs/API.md`](API.md) | CLI 命令、参数、输出格式与 Web 工作台接口 |
+| [`docs/chat-features.md`](chat-features.md) | Chat 工作区命令手册（TUI / 纯文本 CLI 差异） |
+| [`docs/COMPLIANCE_AND_ORIGINALITY.md`](COMPLIANCE_AND_ORIGINALITY.md) | 合规、原创性与团队权属声明 |
+| [`docs/DEV_RECORD.md`](DEV_RECORD.md) | 开发过程记录（时间线、决策、验收数据） |
+| `website/` | 官网：文档中心、命令速查与合规入口 |
 
 ---
 
-*本文档整理了 AI PR Review Assistant 项目的核心创新点，展示了 AI 多模型协作决策和产品化展示的最佳实践。*
+*本文档由团队依据**当前源码与文档**整理：文中字段名、路径与默认值均可在仓库中核对；
+早期设计阶段的讨论记录见 `docs/DEV_RECORD.md`。*
