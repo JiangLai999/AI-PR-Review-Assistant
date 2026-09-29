@@ -1,6 +1,6 @@
 # AI PR Review Assistant — 项目设计书
 
-> 最后更新：2026-05-31 · 版本：v1.0 · 状态：对外文档
+> 最后更新：2026-09-29 · 版本：v1.1 · 状态：对外文档
 
 ---
 
@@ -28,60 +28,70 @@ AI PR Review Assistant 是一个基于 AI 的 GitHub Pull Request 代码审查�
 
 | 功能 | 说明 |
 |------|------|
-| **PR 获取** | 解析 GitHub PR URL，获取元数据、Diff、文件内容 |
-| **智能过滤** | 自动跳过测试文件、文档、配置文件等不相关文件 |
-| **上下文构建** | 基于 tree-sitter 提取函数/类结构，三级 fallback |
-| **Prompt 组装** | 双层结构（基础层 + 语言层），650 tokens 精简指令 |
-| **AI 审查** | 支持 18+ 模型供应商，结构化 JSON 输出 |
-| **后处理** | 置信度过滤、去重、按严重度排序 |
-| **结果存储** | SQLite 持久化，支持历史查询和统计 |
+| **PR 获取** | 解析 GitHub PR URL，获取元数据、Diff 与文件内容 |
+| **智能过滤** | 规则预过滤（跳过测试 / 文档 / 纯删除 / 超大文件），支持 `force_include` 白名单 |
+| **上下文构建** | tree-sitter → 正则 → diff-only 三级降级；相关文件预取（test→import→init）与预算裁剪 |
+| **审查计划** | 调用模型**之前**产出 `ReviewPlan`：风险等级与类别、优先文件、策略、规划依据 |
+| **确定性分析** | 静态安全规则、Python AST、符号索引与跨文件接口影响（可复现、可进 CI） |
+| **AI 审查** | 19 个 provider 预设（含本地 Ollama），本地/云端双槽路由，结构化 JSON 输出 |
+| **证据校验** | 文件 / 行号 / 变更行 / 代码片段四项校验 → `valid` / `needs_review` / `invalid` / `unverified` |
+| **成本与预算** | local / remote 共享账本、各自价目；单次运行与 24h 滑动窗口双重上限 |
+| **后处理** | 置信度过滤、去重、按严重度排序、Finding 行号本地化 |
+| **结果存储** | SQLite 持久化 Run、统计与人工反馈（`feedback`） |
 | **报告渲染** | 终端彩色、Markdown、JSON、GitHub PR 评论 |
+| **三入口交互** | CLI（`pr-review`）、OpenTUI Chat（`pr-review chat`）、Web 工作台（`pr-review serve`），共用同一内核 |
+| **离线可演示** | `pr-review demo` / `showcase`：不调用 GitHub 与模型，可零密钥演示 |
 
 ### 1.3 技术栈
 
 | 技术 | 用途 |
 |------|------|
-| Python 3.12 | 主语言 |
-| Click | CLI 框架 |
-| Rich | 终端 UI |
-| Pydantic | 数据验证 |
+| Python 3.12 / 3.13 | 主语言（CI 双版本矩阵） |
+| Click | CLI 框架（16 个顶层命令 + 默认审查入口） |
+| Rich | 终端 UI 与表格 |
+| Pydantic | 数据模型与校验 |
 | PyGithub | GitHub API |
-| Anthropic SDK | AI 模型调用 |
-| tree-sitter | AST 解析 |
-| SQLite | 本地存储 |
+| Anthropic SDK + OpenAI 兼容 HTTP | 模型调用（19 个 provider 预设） |
+| tree-sitter（可选 extra） | AST 级上下文；未安装时自动降级 |
+| SQLite | 审查历史、统计与 Chat 会话 |
+| asyncio | 审查编排与并发控制 |
+| 标准库 `ThreadingHTTPServer` | Web 工作台 HTTP 接口（运行不需要 Node） |
+| OpenTUI + Bun（SolidJS） | 交互式 Chat 界面；缺少 Bun 时回退纯文本或预编译二进制 |
+| 原生 HTML/CSS/JS + GSAP | 官网（文档中心与动画），GitHub Pages 托管 |
 
 ### 1.4 项目结构
 
 ```text
 AI-PR-Review-Assistant/
 ├── src/ai_pr_review/
-│   ├── cli.py                    # CLI 入口
-│   ├── config.py                 # 配置管理
-│   ├── config_wizard.py          # 配置向导
-│   ├── chat_commands.py          # 聊天命令
-│   ├── chat_runtime.py           # 聊天引擎
-│   ├── models/
-│   │   └── pr_data.py            # 数据模型
+│   ├── cli.py                    # CLI 入口（16 个顶层命令 + 默认审查）
+│   ├── config.py                 # 配置模型、加载优先级与 provider 预设
+│   ├── config_wizard.py          # 交互式配置向导
+│   ├── chat_commands.py          # 纯文本 Chat 的斜杠命令
+│   ├── chat_runtime.py           # Chat 主循环（TUI / 纯文本共用）
+│   ├── web_server.py             # Web 工作台 HTTP 服务（标准库）
+│   ├── demo_runner.py / demo_fixtures.py     # 离线 Demo
+│   ├── backend/jsonl_server.py   # TUI 后端（JSONL 协议 + command.execute 分发）
+│   ├── models/                   # PRData / ReviewPlan / Evidence 等数据模型
 │   ├── services/
-│   │   ├── pr_fetcher.py         # PR 获取
-│   │   ├── filter_pipeline.py    # 文件过滤
-│   │   ├── context_builder.py    # 上下文构建
-│   │   ├── prompt_assembler.py   # Prompt 组装
-│   │   ├── ai_client.py          # AI 调用
-│   │   ├── post_processor.py     # 后处理
-│   │   ├── report_renderer.py    # 报告渲染
-│   │   ├── result_store.py       # 结果存储
-│   │   ├── review_orchestrator.py# 编排层
-│   │   ├── cost_controller.py    # 成本控制
-│   │   ├── token_bucket.py       # 限流器
+│   │   ├── review_orchestrator.py / hybrid_orchestrator.py   # 编排与混合路由
+│   │   ├── pr_fetcher.py / filter_pipeline.py / context_builder.py
+│   │   ├── repo_context.py       # 相关文件预取（test→import→init）
+│   │   ├── prompt_assembler.py / ai_client.py / post_processor.py
+│   │   ├── finding_localizer.py / publish_service.py
+│   │   ├── result_store.py / report_renderer.py / cost_controller.py
+│   │   ├── analyzers/            # 静态规则、Python AST、符号索引、跨文件
+│   │   ├── evidence/             # Finding 证据校验
 │   │   └── model_providers/      # 多供应商适配
-│   └── utils/
-│       └── github_url_parser.py  # URL 解析
-├── tests/                        # 测试套件
-├── docs/                         # 文档
-├── website/                      # 前端展示
-├── pyproject.toml                # 包配置
-└── README.md                     # 项目说明
+│   ├── web_static/               # Web 工作台静态资源（随包分发）
+│   └── tui_static/               # 已提交的 TUI bundle（无 Bun 时可回退）
+├── frontend/tui/                 # OpenTUI 源码与前端测试
+├── web/                          # Web 工作台前端源码与构建
+├── scripts/                      # 官网文档生成、提交包卫生守卫、协作调度
+├── tests/                        # Python 测试（1545 项）
+├── docs/                         # 文档（设计 / API / 合规 / 开发记录）
+├── website/                      # 官网（文档中心 + 命令速查）
+└── pyproject.toml / install.sh / install.ps1
 ```
 
 ---
@@ -93,40 +103,28 @@ AI-PR-Review-Assistant/
 采用**真单体架构**，所有模块运行在单一进程中，通过函数调用进行模块间通信。
 
 ```text
-┌─────────────────────────────────────────────────────────────────┐
-│                        CLI Entry (Click)                        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐    │
-│  │PR Fetcher│──▶│  Filter  │──▶│ Context  │──▶│ Prompt   │    │
-│  │(PyGithub)│   │ Pipeline │   │ Builder  │   │Assembler │    │
-│  └──────────┘   └──────────┘   └──────────┘   └──────────┘    │
-│       │                             │               │           │
-│       │         ┌──────────┐        │               │           │
-│       │         │  Token   │        │               │           │
-│       │         │  Bucket  │        │               │           │
-│       │         └──────────┘        │               │           │
-│       │                             │               ▼           │
-│       │                             │         ┌──────────┐      │
-│       │                             │         │AI Client │      │
-│       │                             │         │(Multi-   │      │
-│       │                             │         │ Provider)│      │
-│       │                             │         └──────────┘      │
-│       │                             │               │           │
-│       │                             │               ▼           │
-│       │                             │         ┌──────────┐      │
-│       │                             │         │  Post    │      │
-│       │                             │         │Processor │      │
-│       │                             │         └──────────┘      │
-│       │                             │               │           │
-│       ▼                             ▼               ▼           │
-│  ┌──────────┐                 ┌──────────┐   ┌──────────┐      │
-│  │  Result  │                 │  Report  │   │  Cost    │      │
-│  │  Store   │                 │ Renderer │   │Controller│      │
-│  │(SQLite)  │                 │ (Rich)   │   │          │      │
-│  └──────────┘                 └──────────┘   └──────────┘      │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+┌────────────────────────── 入口层 ──────────────────────────┐
+│  CLI (Click)   │   Chat (OpenTUI / 纯文本)   │   Web 工作台  │
+│  pr-review …   │   pr-review chat            │ pr-review serve│
+└────────┬───────┴──────────────┬──────────────┴───────┬──────┘
+         └──────────────────────┼──────────────────────┘
+                                ▼
+              ReviewOrchestrator / HybridOrchestrator (asyncio)
+                                │
+   PR Fetcher → Filter Pipeline → Context Builder (+ Repo Context) → ReviewPlan
+                                │
+        ┌───────────────────────┼────────────────────────┐
+        ▼                       ▼                        ▼
+  确定性分析层              模型层                    证据层
+  · 静态安全规则            · ModelSelector           · FindingValidator
+  · Python AST              · AI Client / 多供应商     · 文件 / 行号 /
+  · 符号索引 + 跨文件        · 本地 / 云端双槽         · 变更行 / 片段
+  · CostLedger 预算闸门      · 结构化 JSON 输出         · 四态结论
+        └───────────────────────┼────────────────────────┘
+                                ▼
+        PostProcessor → ReportRenderer（终端 / Markdown / JSON / GitHub）
+                                ▼
+        ResultStore（SQLite：Run / 统计 / 反馈）→ history / explain / export-run
 ```
 
 ### 2.2 数据流
@@ -135,32 +133,34 @@ AI-PR-Review-Assistant/
 GitHub PR URL
     │
     ▼
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│ PR Fetcher  │────▶│   Filter    │────▶│  Context    │
-│             │     │  Pipeline   │     │  Builder    │
-│ - 获取元数据 │     │ - 跳过测试  │     │ - AST 提取  │
-│ - 获取 Diff  │     │ - 跳过文档  │     │ - 三级降级  │
-│ - 获取文件   │     │ - 跳过大文件│     │ - 多语言    │
-└─────────────┘     └─────────────┘     └─────────────┘
-                                               │
-                                               ▼
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  Post       │◀────│  AI Client  │◀────│  Prompt     │
-│  Processor  │     │             │     │  Assembler  │
-│ - 置信度过滤 │     │ - 多供应商  │     │ - 双层结构  │
-│ - 去重      │     │ - 重试机制  │     │ - JSON Schema│
-│ - 排序      │     │ - 成本控制  │     │ - 自定义规则 │
-└─────────────┘     └─────────────┘     └─────────────┘
-       │
-       ▼
-┌─────────────┐     ┌─────────────┐
-│  Result     │     │  Report     │
-│  Store      │     │  Renderer   │
-│ - SQLite    │     │ - Terminal  │
-│ - 历史查询  │     │ - Markdown  │
-│ - 统计分析  │     │ - JSON      │
-└─────────────┘     │ - GitHub    │
-                    └─────────────┘
+┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
+│ PR Fetcher  │──▶│   Filter    │──▶│  Context    │──▶│  Review     │
+│ 元数据/Diff │   │ 规则/白名单 │   │ 三级降级    │   │  Planner    │
+│ 文件内容    │   │ 纯删除/超大 │   │ 相关文件    │   │ 风险与策略  │
+└─────────────┘   └─────────────┘   └─────────────┘   └──────┬──────┘
+                                                             │
+                            ┌────────────────────────────────┤
+                            ▼                                ▼
+                   ┌─────────────┐                  ┌─────────────┐
+                   │ 确定性分析  │                  │ AI 审查     │
+                   │ 规则/AST/   │                  │ 双槽路由 +  │
+                   │ 跨文件影响  │                  │ 成本账本    │
+                   └──────┬──────┘                  └──────┬──────┘
+                          └────────────┬───────────────────┘
+                                       ▼
+                              ┌─────────────────┐
+                              │ FindingValidator│  ← 文件/行号/变更行/片段
+                              │ 四态证据结论    │
+                              └────────┬────────┘
+                                       ▼
+                    ┌──────────────────┴──────────────────┐
+                    ▼                                     ▼
+            ┌─────────────┐                       ┌─────────────┐
+            │ PostProcess │                       │ ResultStore │
+            │ 去重/排序   │                       │ SQLite 历史 │
+            └──────┬──────┘                       └──────┬──────┘
+                   ▼                                     ▼
+        终端 / Markdown / JSON / GitHub 评论     history / stats / feedback
 ```
 
 ### 2.3 模块职责
@@ -184,6 +184,12 @@ GitHub PR URL
 | Cost Controller | 成本控制 | UsageRecord | BudgetStatus |
 | Benchmark | 量化分析策略效果 | BenchmarkCase[] | BenchmarkReport |
 | Web Server | 本地工作台 HTTP 接口 | HTTP 请求 | JSON |
+| Repo Context Provider | 预取相关文件（test→import→init，带缓存与截断） | FileDiff + 仓库根 | RelatedFile[] |
+| Hybrid Orchestrator / Model Selector | 按复杂度与配置路由模型，组织本地/云端协作 | ReviewPlan + 配置 | 槽位选择 + ReviewResult |
+| Publish Service | 预览并发布 GitHub PR 评论 | Run + Finding[] | 评论 URL |
+| Demo Runner | 离线 Demo（不联网、不调用模型） | case_key | Demo 结果 |
+| Chat Runtime / JSONL Backend | Chat 会话、斜杠命令与审查上下文绑定 | 用户输入 | 会话消息 / 绑定状态 |
+| Web Config | Web 工作台独立配置（`*.web.json`）读写 | 设置页输入 | 配置视图 |
 
 ---
 
@@ -444,7 +450,7 @@ class ContextBuilder:
 
 ```text
 ┌─────────────────────────────────────────┐
-│           System Prompt (~400 tokens)   │
+│   System Prompt · 基础层（727 字符）     │
 │  ┌─────────────────────────────────────┐│
 │  │ - 角色定义（代码审查专家）            ││
 │  │ - 输出格式（JSON Schema）            ││
@@ -452,14 +458,18 @@ class ContextBuilder:
 │  │ - 严重度定义（critical/high/medium） ││
 │  └─────────────────────────────────────┘│
 ├─────────────────────────────────────────┤
-│       Language Layer (~250 tokens)      │
+│   Language Layer · 语言层（≈280 字符）   │
 │  ┌─────────────────────────────────────┐│
 │  │ - 语言特定检查维度                   ││
 │  │ - 常见陷阱和反模式                   ││
-│  │ - 最佳实践提示                       ││
 │  └─────────────────────────────────────┘│
 ├─────────────────────────────────────────┤
-│           User Prompt (动态)            │
+│   Related-file rules（相关文件诚实约束） │
+│  ┌─────────────────────────────────────┐│
+│  │ - 只引用真实提供的相关文件（73 字符）││
+│  └─────────────────────────────────────┘│
+├─────────────────────────────────────────┤
+│           User Prompt（动态）           │
 │  ┌─────────────────────────────────────┐│
 │  │ - 文件路径和语言                     ││
 │  │ - Diff 内容                         ││
@@ -467,19 +477,18 @@ class ContextBuilder:
 │  └─────────────────────────────────────┘│
 └─────────────────────────────────────────┘
 
-总计：~650 tokens（相比原始 2000 tokens 减少 65%）
+实测（2026-09-29，`services/prompt_assembler.py`）：Python 的 system prompt ≈ 1,084 字符
+（基础层 727 + 语言层 284 + 相关文件约束 73），量级约 300–350 tokens；
+user prompt 随 diff、上下文与相关文件动态变化，不写死总量。
 ```
 
 #### 核心数据结构
 
 ```python
 class Finding(BaseModel):
-    severity: Literal["critical", "high", "medium", "low", "info"]
-    category: Literal[
-        "correctness", "security", "resource",
-        "error_handling", "performance",
-        "concurrency", "architecture"
-    ]
+    severity: str          # critical | high | medium | low | info
+    category: str          # correctness | security | resource | error_handling |
+                           # performance | concurrency | architecture
     file: str
     line_start: int
     line_end: int
@@ -487,7 +496,14 @@ class Finding(BaseModel):
     problem: str
     suggestion: str
     confidence: float  # 0.0 ~ 1.0
-    code_snippet: str | None
+    code_snippet: str
+    finding_id: str = ""
+    sources: list[str] = ["ai_analysis"]   # rule / ast / cross_file / ai_analysis
+    evidence: list[Evidence] = []
+    evidence_status: str = "unverified"     # valid | needs_review | invalid | unverified
+    evidence_issues: list[str] = []
+    rule_id: str = ""
+    suggested_patch: str = ""
 
 class ReviewResult(BaseModel):
     summary: str
@@ -559,16 +575,26 @@ def get_json_schema(self) -> dict:
 
 | 供应商 | API 格式 | 说明 |
 |--------|----------|------|
-| Anthropic | anthropic | Claude 系列模型 |
+| Ollama（本地） | openai | 本机模型，隐私优先；也是"仅本地"槽位的实现 |
+| Anthropic | anthropic | Claude 系列模型（原生协议） |
 | OpenAI | openai | GPT 系列模型 |
 | DeepSeek | openai | DeepSeek 系列模型 |
 | Qwen | openai | 通义千问系列 |
 | SiliconFlow | openai | 硅基流动 |
 | Moonshot | openai | 月之暗面 |
 | Zhipu | openai | 智谱 AI |
+| Baichuan | openai | 百川智能 |
+| Minimax | openai | MiniMax |
+| Stepfun | openai | 阶跃星辰 |
+| Doubao | openai | 豆包（火山方舟） |
+| Hunyuan | openai | 腾讯混元 |
+| Yi | openai | 零一万物 |
 | OpenRouter | openai | 多模型代理 |
-| API2D | openai | 第三方代理 |
-| Custom | openai | 自定义端点 |
+| API2D / CloseAI / OhMyGPT | openai | 第三方代理 |
+| Custom | openai | 自定义端点（base URL + key + 模型名 + 上下文长度均可单独配置） |
+
+> 预设共 **19 个**（含本地 Ollama）；第三方中转站按 Custom 处理，不共享官方价目表，
+> 成本估算以配置的价目为准（见 `services/cost_controller.py`）。
 
 #### 核心类
 
@@ -887,31 +913,23 @@ class ReportRenderer:
 
 | 功能 | 说明 |
 |------|------|
-| **品牌横幅** | ASCII 风格的品牌展示 |
-| **状态栏** | 显示 Provider、Model、消息数 |
-| **欢迎消息** | 启动时显示使用提示 |
-| **消息渲染** | 支持 Markdown 和代码高亮 |
-| **斜杠命令** | /help, /status, /model, /review 等 |
-| **会话管理** | 新会话、恢复历史、压缩 |
-| **输入增强** | prompt-toolkit 历史记录和补全 |
+| **两种形态** | OpenTUI 交互界面（默认）与纯文本 CLI（缺少 Bun / OpenTUI 时自动回退） |
+| **审查上下文** | `/review` 完成后绑定该 Run，可继续追问 Finding 与证据；`/context` 查看或解绑 |
+| **思考档位** | `/think off\|low\|high\|max\|auto`；本地端点会置灰并说明原因 |
+| **会话管理** | `/sessions` 切换 / 重命名 / 删除，`/new`、`/rename`、`/compact` 压缩 |
+| **Findings 交互** | `Ctrl+O` 打开详情、`Ctrl+F` 筛选、`Alt+P` 发布预览（需再确认） |
+| **状态栏** | Provider / 模型 / 思考档位 / 会话名 / 消息数 |
+| **输入增强** | TUI 命令菜单与补全；纯文本 CLI 使用 prompt-toolkit 历史与补全 |
 
-#### 斜杠命令列表
+#### 斜杠命令（按界面区分）
 
-| 命令 | 说明 |
+完整清单、参数与注意事项见 `docs/chat-features.md`：
+
+| 界面 | 命令 |
 |------|------|
-| `/help` | 显示帮助信息 |
-| `/status` | 显示会话状态 |
-| `/usage` | 显示消息/字符统计 |
-| `/compact` | 压缩会话历史 |
-| `/restore` | 恢复之前的会话 |
-| `/config` | 显示当前配置 |
-| `/session` | 显示会话信息 |
-| `/history [N]` | 显示最近 N 条审查历史 |
-| `/stats` | 显示审查统计 |
-| `/model <ID>` | 切换模型 |
-| `/review <URL>` | 执行 PR 审查 |
-| `/clear` | 清空会话 |
-| `/exit` | 退出聊天 |
+| TUI · CLI 通用 | `/help` `/status` `/model` `/review` `/history` `/compact` `/new` |
+| 仅 TUI | `/setup` `/think` `/context` `/cancel` `/retry` `/report` `/export` `/explain` `/feedback` `/publish` `/demo` `/showcase` `/workbench` `/sessions` `/rename` |
+| 仅 CLI | `/usage` `/stats` `/config` `/session` `/restore` `/clear` `/exit` |
 
 ---
 
@@ -934,6 +952,12 @@ class ReportRenderer:
         "max_output": 4096
       }
     },
+    "default_model": "model-name"
+  },
+  "local_provider": {
+    "name": "ollama",
+    "base_url": "http://127.0.0.1:11434/v1",
+    "api_format": "openai",
     "default_model": "model-name"
   },
   "github_token": "ghp_xxx",
@@ -1042,30 +1066,30 @@ pr-review config model --name <model>
 
 ```text
 pr-review
-├── <PR_URL>              # 审查 PR
-│   ├── --model           # 覆盖模型
-│   ├── --format          # 输出格式
-│   ├── --output          # 输出文件
-│   ├── --publish-comment # 发布评论
-│   ├── --verbose         # 详细输出
-│   ├── --dry-run         # 干运行
-│   ├── --only-fetch      # 仅获取
-│   ├── --only-filter     # 仅过滤
-│   └── --config          # 配置文件
-├── config                # 配置命令
-│   ├── (wizard)          # 配置向导
-│   ├── show              # 查看配置
-│   ├── test              # 测试配置
-│   ├── health            # 健康检查
-│   ├── models            # 发现模型
-│   └── model             # 切换模型
-├── chat                  # 聊天命令
-│   ├── --message         # 发送消息
-│   ├── --model           # 指定模型
-│   └── --layout          # 布局模式
-├── history               # 查看历史
-├── stats                 # 查看统计
-└── preferences           # 偏好设置
+├── <PR_URL>              # 默认审查入口（等价 `pr-review review <PR_URL>`）
+│   ├── --model / --mode / --max-cost            # 模型、路由模式、单次预算
+│   ├── --format terminal|markdown|json / --output
+│   ├── --publish-comment / --verbose / --dry-run
+│   └── --only-fetch / --only-filter / --show-filter-reasons
+├── plan <PR_URL>         # 只输出审查计划（不调用模型）
+├── trace <PR_URL>        # 规划流水线各阶段耗时
+├── explain <RUN_ID>      # 解释历史 Run 的 Finding 与证据
+├── export-run <RUN_ID>   # 导出历史 Run（--format markdown|json）
+├── feedback <RUN_ID> <FINDING_ID> --status accepted|rejected|fixed|needs_review [--note]
+├── history               # 历史 Run（--pr-url / --limit / --json / --table）
+├── stats                 # 聚合统计（JSON）
+├── doctor                # 环境体检（--json-output）
+├── demo                  # 离线 Demo（--case / --list-cases / --json-output）
+├── benchmark             # 规则回归（--strategy static|ast|combined|all）
+├── showcase              # 参赛演示路径（--json-output / --interactive）
+├── serve                 # Web 工作台（--host / --port，默认 127.0.0.1:8787）
+├── chat                  # Chat 工作区（--message / --model / --layout / --tui / --plain）
+├── preferences           # 个人偏好（语言、布局、输出格式、思考档位…）
+├── local-model check     # 本地 Ollama 可用性诊断
+└── config                # 配置命令
+    ├── (wizard) / --quick / --advanced / --save-key
+    ├── show / init / test / health / model / models
+    └── export / import / preferences
 ```
 
 ### 5.2 审查流程
@@ -1085,6 +1109,18 @@ pr-review https://github.com/owner/repo/pull/123 --publish-comment
 
 # 干运行（不调用 AI）
 pr-review https://github.com/owner/repo/pull/123 --dry-run
+
+# 只看审查计划与过滤原因（不消耗模型成本）
+pr-review plan https://github.com/owner/repo/pull/123
+pr-review https://github.com/owner/repo/pull/123 --only-filter --show-filter-reasons
+
+# 零密钥离线演示 + 体检
+pr-review doctor
+pr-review demo --case sql-injection
+
+# 启动工作台 / Chat
+pr-review serve
+pr-review chat
 ```
 
 ---
@@ -1168,36 +1204,48 @@ class AppConfig(BaseModel):
 
 ## 七、技术创新点
 
-### 7.1 三方会谈决策模式
+### 7.1 证据优先：Finding 四态校验
 
-采用 Claude Code + DeepSeek V4 Pro + 用户的三方会谈模式，通过多轮质疑-回应-修订循环，达成技术共识。
+每条 Finding 都要对齐 PR 的真实变更（文件、行号、变更行、代码片段），结论落到四态：
+`valid` / `needs_review` / `invalid` / `unverified`，并携带置信度与来源（规则 / AST / AI）。
 
-**关键成果**：
-- 撤回 Haiku 分类（避免漏判风险）
-- 精简 Prompt（从 2000 tokens 降到 650 tokens）
-- 完善 tree-sitter 三级 fallback
+实现见 `src/ai_pr_review/services/evidence/finding_validator.py`。
 
-### 7.2 双层 Prompt 结构
+### 7.2 可解释的审查计划（ReviewPlan）
 
-将 Prompt 分为基础层（~400 tokens）和语言层（~250 tokens），总计 650 tokens，相比原始 2000 tokens 减少 65%。
+调用模型之前先产出结构化计划：风险等级与类别、优先文件、策略、是否需要跨文件分析、规划依据。
+`pr-review plan` 与 `--dry-run` 都停在这一步，成本与范围因此是**先确定、后消耗**。
 
-### 7.3 tree-sitter 三级 Fallback
+### 7.3 双层 Prompt 结构
+
+基础层（727 字符）定义角色、JSON 输出格式与通用规则；语言层（约 280 字符）补充该语言的检查维度；
+另有相关文件"诚实约束"段（73 字符），要求模型只引用真实提供的文件。
+实测 Python 的 system prompt ≈ 1,084 字符（约 300–350 tokens），user prompt 随上下文动态变化。
+
+### 7.4 tree-sitter 三级 Fallback
 
 ```text
 Level 1: tree-sitter 全量解析（最准确）
 Level 2: 正则表达式提取（次准确）
-Level 3: 仅提供 diff context（保底）
+Level 3: 仅提供 diff context（保底；`parse_mode` 随结果返回）
 ```
 
-### 7.4 多供应商适配层
+### 7.5 多供应商适配层
 
-统一的 `BaseModelProvider` 抽象接口，支持 OpenAI 兼容格式和 Anthropic 原生格式，覆盖 18+ 供应商。
+统一的 provider 抽象接口，支持 OpenAI 兼容格式与 Anthropic 原生格式，内置 **19 个预设**（含本地 Ollama）；
+第三方中转站走 Custom 预设，base URL / key / 模型名 / 上下文长度均可单独配置。
 
-### 7.5 三级成本控制
+### 7.6 双槽成本账本
 
-- 单次运行硬上限：$5/run
-- 24 小时滑动窗口：$50/24h
-- 预警机制：80% 阈值
+- 槽位：`local` / `remote` / `hybrid`，Chat 与审查可分别指定模型；
+- 账本：两槽共享同一本预算账，但各自按自己的价目计算（避免本地模型被按云端价计费）；
+- 闸门：单次运行硬上限 `$5/run`、24 小时滑动窗口 `$50/24h`（可配置），另有 80% 预警；
+- 路由：按任务复杂度与用户配置选择模型（`services/model_selector.py`、`services/hybrid_orchestrator.py`）。
+
+### 7.7 三入口同内核 + 审查上下文闭环
+
+CLI / OpenTUI Chat / Web 工作台共用同一套审查编排；Chat 中 `/review` 完成后会把该 Run
+绑定为对话上下文（`/context` 查看或解绑），因此"审查结论"可以被继续追问，而不是一次性输出。
 
 ---
 
@@ -1205,27 +1253,22 @@ Level 3: 仅提供 diff context（保底）
 
 ### 8.1 测试覆盖
 
-| 模块 | 测试数 | 覆盖率 |
-|------|--------|--------|
-| CLI | 54 | 85% |
-| PR Fetcher | 48 | 87% |
-| Filter Pipeline | 14 | 96% |
-| Context Builder | 5 | 94% |
-| Prompt Assembler | 6 | 95% |
-| AI Client | 12 | 77% |
-| Post Processor | 5 | 100% |
-| Cost Controller | 6 | 93% |
-| Result Store | 6 | 91% |
-| Report Renderer | 6 | 97% |
-| Model Providers | 8 | 82% |
-| Review Orchestrator | 1 | 97% |
-| **总计** | **175** | **88%** |
+| 层次 | 内容 | 现状（2026-09-29） |
+|------|------|--------|
+| Python 测试 | `tests/` 全量：CLI、服务、编排、JSONL 后端、Web API、文档守卫 | **1545 项通过** |
+| 前端 / TUI 测试 | OpenTUI 组件、命令菜单、格式化与协议（bun test） | CI `frontend` 与 `tui` 两个 job |
+| 构建与类型 | `bun run typecheck`、Web 前端构建、Windows wheel 构建 | CI `build` job |
+| 文档防漂移 | API 文档覆盖全部可见命令、官网产物与生成器逐字一致、README 命令表 = 实现集合 | `tests/test_cli_docs.py`、`tests/test_website_docs.py` |
+| 提交包卫生 | 凭据扫描、必检路径、`.gitignore` 覆盖检查 | `scripts/check_submission_hygiene.py` |
+
+> 覆盖率由 pytest-cov 在 CI 输出，本文不写死百分比，避免文档与代码漂移。
 
 ### 8.2 测试类型
 
-- **单元测试**：每个模块独立测试
-- **集成测试**：模块间交互测试
-- **端到端测试**：完整流程测试
+- **单元测试**：模块级行为与边界，含负样例（例如"危险协议不得进入 href"）；
+- **集成测试**：编排层、JSONL 后端协议、Web API、Chat 会话与压缩；
+- **守卫测试**：文档 / 命令 / 官网产物 / 提交包的一致性，防止"代码改了、文档没改"；
+- **端到端测试**：真实 PR 链路按需手工复跑（不在 CI 里消耗真实模型额度）。
 
 ---
 
@@ -1233,11 +1276,10 @@ Level 3: 仅提供 diff context（保底）
 
 ### 9.1 安装方式
 
-```bash
-# PyPI 安装（推荐）
-pipx install ai-pr-review
+> ⚠️ PyPI 上的 `ai-pr-review` 是**同名的其他项目**，请从下面任一 GitHub 方式安装本仓库。
 
-# GitHub 安装
+```bash
+# GitHub 安装（推荐）
 pipx install "git+https://github.com/JiangLai999/AI-PR-Review-Assistant.git"
 
 # 一行命令安装（Linux/macOS）
@@ -1245,13 +1287,18 @@ curl -fsSL https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-Assistant/
 
 # 一行命令安装（Windows PowerShell）
 irm https://raw.githubusercontent.com/JiangLai999/AI-PR-Review-Assistant/main/install.ps1 | iex
+
+# 源码安装（开发，含可选 AST 依赖）
+git clone https://github.com/JiangLai999/AI-PR-Review-Assistant.git
+cd AI-PR-Review-Assistant && pip install -e ".[ast]"
 ```
 
 ### 9.2 CI/CD
 
-- GitHub Actions 自动测试（Python 3.12/3.13）
-- black + isort + mypy 代码质量检查
-- 自动发布到 PyPI
+- GitHub Actions **五个 job**：`build`（Windows wheel）、`frontend`、`tui`、`test-and-quality`（Python 3.12 / 3.13）；
+- 质量检查：black（pin 24.10.0）+ isort + mypy；
+- 产物：wheel 由 `build` job 产出；PyPI 发布需先确认包名归属（见 `docs/RELEASE.md`），当前以 GitHub 安装为准；
+- 官网：站点仓（AI-PR-Review-Assistant-web）push 到 `main` 后由 GitHub Pages 自动构建部署。
 
 ---
 
