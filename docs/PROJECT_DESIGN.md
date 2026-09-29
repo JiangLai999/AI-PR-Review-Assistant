@@ -33,7 +33,7 @@ AI PR Review Assistant 是一个基于 AI 的 GitHub Pull Request 代码审查�
 | **上下文构建** | tree-sitter → 正则 → diff-only 三级降级；相关文件预取（test→import→init）与预算裁剪 |
 | **审查计划** | 调用模型**之前**产出 `ReviewPlan`：风险等级与类别、优先文件、策略、规划依据 |
 | **确定性分析** | 静态安全规则、Python AST、符号索引与跨文件接口影响（可复现、可进 CI） |
-| **AI 审查** | 19 个 provider 预设（含本地 Ollama），本地/云端双槽路由，结构化 JSON 输出 |
+| **AI 审查** | 19 个 provider 预设（含本地 Ollama）（`PROVIDER_KEY_MAP` 共 22 键，含别名与内部项），本地/云端双槽路由，结构化 JSON 输出 |
 | **证据校验** | 文件 / 行号 / 变更行 / 代码片段四项校验 → `valid` / `needs_review` / `invalid` / `unverified` |
 | **成本与预算** | local / remote 共享账本、各自价目；单次运行与 24h 滑动窗口双重上限 |
 | **后处理** | 置信度过滤、去重、按严重度排序、Finding 行号本地化 |
@@ -51,7 +51,7 @@ AI PR Review Assistant 是一个基于 AI 的 GitHub Pull Request 代码审查�
 | Rich | 终端 UI 与表格 |
 | Pydantic | 数据模型与校验 |
 | PyGithub | GitHub API |
-| Anthropic SDK + OpenAI 兼容 HTTP | 模型调用（19 个 provider 预设） |
+| Anthropic SDK + OpenAI 兼容 HTTP | 模型调用（19 个 provider 预设，`PROVIDER_KEY_MAP` 共 22 键） |
 | tree-sitter（可选 extra） | AST 级上下文；未安装时自动降级 |
 | SQLite | 审查历史、统计与 Chat 会话 |
 | asyncio | 审查编排与并发控制 |
@@ -593,7 +593,7 @@ def get_json_schema(self) -> dict:
 | API2D / CloseAI / OhMyGPT | openai | 第三方代理 |
 | Custom | openai | 自定义端点（base URL + key + 模型名 + 上下文长度均可单独配置） |
 
-> 预设共 **19 个**（含本地 Ollama）；第三方中转站按 Custom 处理，不共享官方价目表，
+> 预设共 **19 个**（含本地 Ollama）（`PROVIDER_KEY_MAP` 共 22 键，含别名与内部项）；第三方中转站按 Custom 处理，不共享官方价目表，
 > 成本估算以配置的价目为准（见 `services/cost_controller.py`）。
 
 #### 核心类
@@ -1232,7 +1232,7 @@ Level 3: 仅提供 diff context（保底；`parse_mode` 随结果返回）
 
 ### 7.5 多供应商适配层
 
-统一的 provider 抽象接口，支持 OpenAI 兼容格式与 Anthropic 原生格式，内置 **19 个预设**（含本地 Ollama）；
+统一的 provider 抽象接口，支持 OpenAI 兼容格式与 Anthropic 原生格式，内置 **19 个预设**（含本地 Ollama）（`PROVIDER_KEY_MAP` 共 22 键，含别名与内部项）；
 第三方中转站走 Custom 预设，base URL / key / 模型名 / 上下文长度均可单独配置。
 
 ### 7.6 双槽成本账本

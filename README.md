@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/JiangLai999/AI-PR-Review-Assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/JiangLai999/AI-PR-Review-Assistant/actions/workflows/ci.yml)
-[![Coverage](https://img.shields.io/badge/Coverage-87%25-green.svg)]()
+[![Coverage](https://img.shields.io/badge/Coverage-86%25-green.svg)]()
 
 🌐 **[项目官网（静态展示）](https://jianglai999.github.io/AI-PR-Review-Assistant-web/)** | 📖 **[完整文档](docs/PROJECT_DESIGN.md)** | 💡 **[创新点](docs/INNOVATION.md)**
 
@@ -19,7 +19,7 @@ AI PR Review Assistant 是一个基于 AI 的代码审查工具，通过智能�
 
 ### 核心特性
 
-- 🤖 **多模型支持** — 支持 18+ 模型供应商（OpenAI、Anthropic、DeepSeek、Qwen 等）
+- 🤖 **多模型支持** — 支持 19 个供应商预设（含本地 Ollama）（`PROVIDER_KEY_MAP` 共 22 键，含别名与内部项）
 - 🧭 **智能审查规划** — 根据 PR 意图、风险关键词和文件变更动态生成审查计划
 - ✅ **证据验证** — 校验 finding 的文件、行号、Diff 关联和代码片段，标记可信度状态
 - 🔍 **规则 + AI 分析** — 将确定性安全规则与 AI 推理结果合并，支持跨文件影响信号
@@ -583,12 +583,12 @@ mypy src
 
 | 层 | 命令 | 实测结果 |
 |----|------|----------|
-| Python 全量 | `pytest`（默认带 `--cov`） | **1514 passed + 1 xfailed**（1515 collected），语句覆盖率 **87%**（12,947 statements / 1,677 miss） |
+| Python 全量 | `pytest`（默认带 `--cov`） | **1544 passed + 4 skipped**（2026-09-29 CI，Python 3.12 job），语句覆盖率 **86%**（12,947 statements / 1,677 miss） |
 | 类型检查 | `mypy src` | clean（89 source files） |
 | 格式门禁 | `black --check src tests` / `isort --check-only src tests`（pin `24.10.0` / `5.13.2`） | 138 files clean |
 | TUI（OpenTUI） | `bun test src` | 222 pass / 0 fail（13 files / 1101 断言） |
 | Web 自测门禁 | `node tools/markdown-lite-check.mjs` 等三道 | 118 断言 ALL PASS（53 + 45 + 20） |
-| 文档 / 官网守卫 | `pytest tests/test_doc_links.py tests/test_website_docs.py` | 6 passed + 1 xfailed |
+| 文档 / 官网守卫 | `pytest tests/test_doc_links.py tests/test_website_docs.py` | 18 passed |
 
 > 历史上这里有一张按模块手写的用例数表（合计 270），它早已与实际套件脱节、容易误导，已删除；
 > 需要更细的口径请直接看 CI 里 `pytest` 的输出与 `pytest --cov` 的逐文件表。
